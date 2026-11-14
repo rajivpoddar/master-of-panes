@@ -35,6 +35,17 @@ explore_issue_sha256() {
   fi
 }
 
+# Permit binding digest: sha256 of the EXACT bytes of the body file (or stdin when no
+# argument is given). No command substitution, so trailing newlines and NUL bytes are
+# part of the digest. This is the only digest a permit may be minted with.
+explore_issue_file_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    if [ "$#" -gt 0 ]; then sha256sum < "$1" | awk '{print $1}'; else sha256sum | awk '{print $1}'; fi
+  else
+    if [ "$#" -gt 0 ]; then shasum -a 256 < "$1" | awk '{print $1}'; else shasum -a 256 | awk '{print $1}'; fi
+  fi
+}
+
 explore_issue_invalidate_false_positive_latch() {
   local latch_file="$1"
   local invalidated_dir="$2"
@@ -89,12 +100,15 @@ EXPLORE_ISSUE_PERMIT_DIR="${EXPLORE_ISSUE_PERMIT_DIR:-/tmp/heydonna-explore-issu
 EXPLORE_ISSUE_CONSUMED_PERMIT_DIR="${EXPLORE_ISSUE_CONSUMED_PERMIT_DIR:-/tmp/heydonna-explore-issue-permit-consumed}"
 EXPLORE_ISSUE_RECONCILED_PERMIT_DIR="${EXPLORE_ISSUE_RECONCILED_PERMIT_DIR:-/tmp/heydonna-explore-issue-permit-reconciled}"
 EXPLORE_ISSUE_VERDICT_DIR="${EXPLORE_ISSUE_VERDICT_DIR:-/tmp/heydonna-explore-issue-verdict}"
-EXPLORE_ISSUE_PERMIT_PENDING_DIR="${EXPLORE_ISSUE_PERMIT_PENDING_DIR:-/tmp/heydonna-explore-issue-permit-pending}"
+# Durable in-flight records written by issue-create-owner.py BEFORE gh is spawned.
+# An in-flight record makes the source reconciliation-only exactly like a consumed
+# permit does (permit_status 3, no re-mint).
+EXPLORE_ISSUE_INFLIGHT_DIR="${EXPLORE_ISSUE_INFLIGHT_DIR:-/tmp/heydonna-explore-issue-inflight}"
 EXPLORE_ISSUE_PM_OPS_CLI="${EXPLORE_ISSUE_PM_OPS_CLI:-/Users/rajiv/.claude/scripts/pm-ops.py}"
 export EXPLORE_ISSUE_CONSUMED_PERMIT_DIR
 export EXPLORE_ISSUE_RECONCILED_PERMIT_DIR
 export EXPLORE_ISSUE_VERDICT_DIR
-export EXPLORE_ISSUE_PERMIT_PENDING_DIR
+export EXPLORE_ISSUE_INFLIGHT_DIR
 EXPLORE_ISSUE_KIND="explore_issue_required"
 EXPLORE_ISSUE_TARGET_TYPE="slack_thread"
 
@@ -235,6 +249,9 @@ with open(path + ".lock", "a") as lock:
         consumed = os.environ.get("EXPLORE_ISSUE_CONSUMED_PERMIT_DIR", "/tmp/heydonna-explore-issue-permit-consumed")
         if glob.glob(os.path.join(consumed, key + ".permit.consumed.*.json")):
             sys.exit(1)  # Consumed/UNKNOWN creates are reconciliation-only.
+        inflight = os.environ.get("EXPLORE_ISSUE_INFLIGHT_DIR", "/tmp/heydonna-explore-issue-inflight")
+        if os.path.exists(os.path.join(inflight, key + ".inflight.json")):
+            sys.exit(1)  # An in-flight create (gh may have started) is reconciliation-only too.
     if os.path.exists(path):
         with open(path) as f:
             previous = json.load(f)
@@ -332,6 +349,8 @@ explore_issue_permit_status() {
   for consumed in "$EXPLORE_ISSUE_CONSUMED_PERMIT_DIR/${EXPLORE_ISSUE_SELECTED_KEY}.permit.consumed."*.json; do
     [ ! -f "$consumed" ] || return 3
   done
+  # A durable in-flight record means gh may have started: reconciliation-only.
+  [ ! -f "$EXPLORE_ISSUE_INFLIGHT_DIR/${EXPLORE_ISSUE_SELECTED_KEY}.inflight.json" ] || return 3
   [ -f "$file" ] || return 1
   p_channel="$(jq -r '.channel // ""' "$file" 2>/dev/null || true)"
   p_thread="$(jq -r '.thread_ts // ""' "$file" 2>/dev/null || true)"
@@ -381,29 +400,37 @@ with open(path + ".lock", "a") as lock:
 }
 
 explore_issue_restore_permit() {
-  # channel thread_ts absence_proof -> 0 cleared, 1 not found or wrong state, 2 already reconciled
+  # channel thread_ts absence_proof -> 0 cleared, 1 not found or wrong state, 2 already reconciled,
+  #                                    4 refused: an in-flight create exists (gh may have started),
+  #                                    5 refused: the consumed record is a verified owner create
   #
-  # Moves a consumed permit to the reconciled dir when the caller has proven that
-  # the guarded gh issue create never landed in GitHub (searched by title, keywords,
-  # channel, and both source permalinks; no match found). After this returns 0, the
-  # agent MUST re-prepare the body with the correct source_message_ts, compute fresh
-  # body_sha256 and title_digest, call explore_issue_mint_permit, set state
-  # READY_TO_FILE, and run gh issue create. This function never re-mints the permit
-  # itself; minting is the agent's responsibility so the body content is correct.
+  # Moves a LEGACY consumed permit (UNKNOWN create from the retired finalizer) to the reconciled
+  # dir when the caller has proven that the guarded create never landed in GitHub (searched by
+  # title, keywords, channel, and both source permalinks; no match found). After this returns 0,
+  # the agent MUST re-prepare the body with the correct source_message_ts, compute a fresh exact
+  # body digest (explore_issue_file_sha256) and title_digest, call explore_issue_mint_permit, set
+  # state READY_TO_FILE, and run the create owner. This function never re-mints the permit itself.
+  #
+  # Hard refusals (no absence proof, however strong, overrides them):
+  #   - an `<key>.inflight.json` record exists: issue-create-owner.py wrote it BEFORE gh was
+  #     spawned, so gh may have started. It is released ONLY by the owner itself, and only on a
+  #     definite spawn failure. Restore never touches it.
+  #   - the consumed record carries consumed_by=issue-create-owner / issue_url: the owner verified
+  #     that the issue exists; "absence" is a contradiction, not a recovery.
   #
   # Safety invariants:
   #   - Only succeeds when state is READY_TO_FILE (not any terminal state).
   #   - Exactly one reconcile per key: a second call returns 2.
-  #   - The consumed permit is preserved in the reconciled dir with absence_proof
-  #     annotation for audit. EXPLORE_ISSUE_CONSUMED_PERMIT_DIR still passes the
-  #     atomic_write_json and permit_status guards after the consumed file is moved.
+  #   - All checks and the move run under the SAME permit lock the mint (atomic write) and the
+  #     owner use: `<permit file>.lock`.
   local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
   EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}")" || return $?
   local channel="$1" thread_ts="$2" absence_proof="${3:-}"
-  local consumed_dir reconciled_dir key state_file state
+  local consumed_dir reconciled_dir key state_file state permit_file
   key="$EXPLORE_ISSUE_SELECTED_KEY"
   consumed_dir="${EXPLORE_ISSUE_CONSUMED_PERMIT_DIR:-/tmp/heydonna-explore-issue-permit-consumed}"
   reconciled_dir="${EXPLORE_ISSUE_RECONCILED_PERMIT_DIR:-/tmp/heydonna-explore-issue-permit-reconciled}"
+  permit_file="$(explore_issue_permit_file "$channel" "$thread_ts")" || return $?
 
   # State must be READY_TO_FILE (not terminal, not unstarted).
   state_file="$EXPLORE_ISSUE_STATE_DIR/$key.json"
@@ -411,36 +438,38 @@ explore_issue_restore_permit() {
   state="$(jq -er .state "$state_file" 2>/dev/null)" || return 1
   [ "$state" = "READY_TO_FILE" ] || return 1
 
-  # Find the consumed permit for this key.
-  local consumed_file found_consumed=""
-  for consumed_file in "$consumed_dir/${key}.permit.consumed."*.json; do
-    [ -f "$consumed_file" ] && found_consumed="$consumed_file" && break
-  done
-  [ -n "$found_consumed" ] || return 1
-
-  # Atomically archive consumed → reconciled. Blocks a second reconcile.
+  local inflight_file="${EXPLORE_ISSUE_INFLIGHT_DIR:-/tmp/heydonna-explore-issue-inflight}/${key}.inflight.json"
   local now
   now="$(date -u +%Y%m%dT%H%M%SZ)"
   mkdir -p "$reconciled_dir"
   python3 -c '
 import fcntl, glob, json, os, sys
-key_prefix, found_consumed, reconciled_dir, now, absence_proof = sys.argv[1:]
-with open(found_consumed + ".lock", "a") as lock:
+key, permit_file, consumed_dir, inflight_file, reconciled_dir, now, absence_proof = sys.argv[1:]
+os.makedirs(os.path.dirname(permit_file), exist_ok=True)
+with open(permit_file + ".lock", "a") as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
-    if glob.glob(os.path.join(reconciled_dir, key_prefix + ".permit.reconciled.*.json")):
-        sys.exit(2)  # Already reconciled once; preserve UNKNOWN safety.
-    if not os.path.exists(found_consumed):
+    if os.path.exists(inflight_file):
+        sys.exit(4)  # gh may have started: never released by restore.
+    found = ""
+    for candidate in sorted(glob.glob(os.path.join(consumed_dir, key + ".permit.consumed.*.json"))):
+        found = candidate
+        break
+    if not found:
         sys.exit(1)
-    with open(found_consumed) as f:
+    if glob.glob(os.path.join(reconciled_dir, key + ".permit.reconciled.*.json")):
+        sys.exit(2)  # Already reconciled once; preserve UNKNOWN safety.
+    with open(found) as f:
         permit = json.load(f)
+    if permit.get("consumed_by") == "issue-create-owner" or permit.get("issue_url"):
+        sys.exit(5)  # A verified create exists; absence cannot be claimed.
     permit["reconciled_at"] = now
     permit["absence_proof"] = absence_proof
-    reconciled = os.path.join(reconciled_dir, key_prefix + ".permit.reconciled." + now + ".json")
+    reconciled = os.path.join(reconciled_dir, key + ".permit.reconciled." + now + ".json")
     with open(reconciled + ".tmp", "w") as f:
         json.dump(permit, f)
     os.replace(reconciled + ".tmp", reconciled)
-    os.remove(found_consumed)
-' "$key" "$found_consumed" "$reconciled_dir" "$now" "$absence_proof" || return $?
+    os.remove(found)
+' "$key" "$permit_file" "$consumed_dir" "$inflight_file" "$reconciled_dir" "$now" "$absence_proof" || return $?
 }
 
 explore_issue_verdict_path() {
@@ -457,100 +486,33 @@ explore_issue_verdict_path() {
 }
 
 # ---------------------------------------------------------------------------
-# Deferred permit consumption — pending state
+# Single-chain create protocol (issue-create-owner.py)
 #
-# The permit is NOT consumed in pre-issue-create-audit.sh (hook #9). Instead
-# a pending file is written there. The actual atomic consumption (persist-
-# UNKNOWN-first) happens in explore-issue-permit-consume-gate.sh, which runs
-# AFTER all other blocking hooks (including block-invalid-issue-contract-ledger,
-# hook #19). This ensures that if any hook between #9 and the finalizer blocks
-# the tool call, the permit file remains intact for the next attempt.
+# There is NO pending file and NO separate finalizer any more. The old deferred
+# protocol (pre-audit wrote `<key>.permit.pending.json`, a parallel finalizer
+# hook consumed the permit before gh) is gone: Claude Code runs matching hooks in
+# parallel, so "last hook" was never guaranteed, every hook re-read the body at its
+# own moment, and the permit was consumed before gh had run.
 #
-# If the finalizer runs and gh then fails: permit is consumed/UNKNOWN — the
-# existing manual explore_issue_restore_permit path (with proven GitHub absence)
-# is the only recovery. No unsafe auto-restore is wired here.
+# One owner process (issue-create-owner.py create ...) now does, in order:
+#   capture the exact bytes once -> pre-issue-create-audit.sh stage `audit` and the
+#   ledger/tracker hook on those bytes (neither writes a permit record) -> per-source
+#   flock bound to source/invocation/digest -> durable `<key>.inflight.json` BEFORE
+#   gh -> gh fed the identical bytes on stdin -> permit consumed ONLY on a verified
+#   issue URL (consumed record carries the URL).
+#
+# States, per source key:
+#   permit file only          READY_TO_FILE, create allowed through the owner
+#   inflight file             gh may have started: reconciliation-only (status 3)
+#   consumed file             verified create (or legacy consume): reconciliation-only
+#   The in-flight record is released ONLY by the owner itself, and only when gh
+#   definitely never started (spawn failure). explore_issue_restore_permit refuses an
+#   in-flight record outright, whatever absence is claimed.
+#
+# One lock: `<permit file>.lock`. Mint (explore_issue_atomic_write_json), the legacy
+# consume, restore and the owner's check + binding + in-flight write + consume all take
+# that same lock; none of them nests it or holds it across gh.
 # ---------------------------------------------------------------------------
-
-explore_issue_write_permit_pending() {
-  # channel thread_ts body_sha title_digest -> 0 pending written, 1 consumed guard hit, 2 error
-  #
-  # Writes $EXPLORE_ISSUE_PERMIT_PENDING_DIR/<key>.permit.pending.json bound to
-  # the exact body SHA and title digest. The finalizer hook reads and consumes it.
-  # Overwrites any stale pending from a previous aborted attempt (safe: the actual
-  # permit file is untouched until explore_issue_consume_pending_permit runs).
-  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
-  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}")" || return $?
-  local channel="$1" thread_ts="$2" body_sha="$3" title_digest="$4"
-  local key pending_dir pending_file now
-  key="$EXPLORE_ISSUE_SELECTED_KEY"
-  pending_dir="${EXPLORE_ISSUE_PERMIT_PENDING_DIR:-/tmp/heydonna-explore-issue-permit-pending}"
-  # Consumed guard: if the permit was already consumed/UNKNOWN, refuse pending.
-  local _consumed
-  for _consumed in "$EXPLORE_ISSUE_CONSUMED_PERMIT_DIR/${key}.permit.consumed."*.json; do
-    [ ! -f "$_consumed" ] || return 1
-  done
-  mkdir -p "$pending_dir"
-  pending_file="$pending_dir/${key}.permit.pending.json"
-  now="$(date -u +%Y%m%dT%H%M%SZ)"
-  python3 -c '
-import json, os, sys, tempfile
-path, channel, thread_ts, body_sha, title_digest, message, now, pid = sys.argv[1:]
-os.makedirs(os.path.dirname(path), exist_ok=True)
-data = {
-    "channel": channel,
-    "thread_ts": thread_ts,
-    "source_message_ts": message,
-    "body_sha256": body_sha,
-    "title_digest": title_digest,
-    "pending_at": now,
-    "pid": int(pid),
-}
-fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".tmp.", dir=os.path.dirname(path))
-with os.fdopen(fd, "w") as f:
-    json.dump(data, f)
-os.replace(tmp, path)
-' "$pending_file" "$channel" "$thread_ts" "$body_sha" "$title_digest" \
-  "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-$thread_ts}" "$now" "$$" || return 2
-  return 0
-}
-
-explore_issue_consume_pending_permit() {
-  # channel thread_ts body_sha title_digest -> 0 consumed, 1 no matching pending, 2 consume failed
-  #
-  # Called by explore-issue-permit-consume-gate.sh (the finalizer hook). Checks
-  # for a pending file matching the exact body SHA and title digest, then
-  # atomically moves the actual permit to consumed (persist-UNKNOWN-first).
-  # Clears the pending file on any outcome to avoid stale state.
-  # Safety: if gh then fails, the permit is in consumed/UNKNOWN — manual
-  # explore_issue_restore_permit with proven GitHub absence is the recovery path.
-  local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
-  EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}")" || return $?
-  local channel="$1" thread_ts="$2" body_sha="$3" title_digest="$4"
-  local key pending_dir pending_file p_body p_title p_message
-  key="$EXPLORE_ISSUE_SELECTED_KEY"
-  pending_dir="${EXPLORE_ISSUE_PERMIT_PENDING_DIR:-/tmp/heydonna-explore-issue-permit-pending}"
-  pending_file="$pending_dir/${key}.permit.pending.json"
-  [ -f "$pending_file" ] || return 1
-  p_body="$(jq -r '.body_sha256 // ""' "$pending_file" 2>/dev/null || true)"
-  p_title="$(jq -r '.title_digest // ""' "$pending_file" 2>/dev/null || true)"
-  p_message="$(jq -r '.source_message_ts // ""' "$pending_file" 2>/dev/null || true)"
-  if [ "$p_body" != "$body_sha" ] || [ "$p_title" != "$title_digest" ]; then
-    # Stale pending (body/title changed between pre-audit and finalizer). Clear it.
-    rm -f "$pending_file" 2>/dev/null || true
-    return 1
-  fi
-  # Restore source_message_ts from the pending file if not already exported.
-  [ -n "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}" ] || export EXPLORE_ISSUE_SOURCE_MESSAGE_TS="$p_message"
-  # Atomically consume the actual permit (persist-UNKNOWN-first).
-  local _rc=0
-  if explore_issue_consume_permit "$channel" "$thread_ts" "$body_sha" "$title_digest"; then
-    _rc=0
-  else
-    _rc=$?
-  fi
-  rm -f "$pending_file" 2>/dev/null || true
-  return $_rc
-}
 
 explore_issue_resolve_obligation() {
   # channel thread_ts external_state reason

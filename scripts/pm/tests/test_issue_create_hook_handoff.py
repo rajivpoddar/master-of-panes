@@ -22,6 +22,7 @@ ledger, GitHub, Slack and the installed hooks are never touched.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -35,6 +36,8 @@ ROOT = Path(__file__).parents[3]
 SHARED = ROOT / "scripts" / "pm" / "shared-assets" / "claude" / "hooks"
 AUDIT_HOOK = Path(os.environ.get("AUDIT_HOOK_PATH", SHARED / "pre-issue-create-audit.sh"))
 LEDGER_HOOK = SHARED / "block-invalid-issue-contract-ledger.sh"
+PROJECT_LEDGER_HOOK = SHARED / "heydonna-app-block-invalid-issue-contract-ledger.sh"
+SCRIPTS = ROOT / "scripts" / "pm" / "shared-assets" / "claude" / "scripts"
 REPO = "Scribie/heydonna-app"
 
 VALID_BODY = """<!-- ready-pool:
@@ -122,6 +125,7 @@ def _env(tmp_path: Path) -> dict[str, str]:
         EXPLORE_ISSUE_STATE_DIR=str(tmp_path / "state"),
         EXPLORE_ISSUE_PERMIT_DIR=str(tmp_path / "permit"),
         EXPLORE_ISSUE_CONSUMED_PERMIT_DIR=str(tmp_path / "consumed"),
+        EXPLORE_ISSUE_INFLIGHT_DIR=str(tmp_path / "inflight"),
         EXPLORE_ISSUE_SLACK_CACHE_DIR=str(tmp_path / "slack"),
         EXPLORE_ISSUE_FALLBACK_LOG=str(tmp_path / "fallback.log"),
         EXPLORE_ISSUE_PM_OPS_CLI="/usr/bin/true",
@@ -139,6 +143,34 @@ def _run(hook: Path, command: str, env: dict[str, str], *, unprivileged: bool = 
 def _decision(stdout: str) -> dict:
     assert stdout, "hook must always emit a decision when it refuses"
     return json.loads(stdout)
+
+
+def _run_audit_stage(env: dict[str, str], body_path: Path, title: str) -> tuple[int, str]:
+    """The owner's `audit` stage: the EXACT body buffer (base64) and title arrive on the hook's stdin."""
+    import base64
+
+    command = " ".join(["gh", "issue", "create", "--title", json.dumps(title), "--body-file", "-"])
+    payload = json.dumps({
+        "tool_name": "Bash",
+        "cwd": "/tmp",
+        "tool_input": {"command": command},
+        "mop_issue_create": {
+            "title": title,
+            "body_b64": base64.b64encode(body_path.read_bytes()).decode("ascii"),
+            "body_display": str(body_path),
+        },
+    })
+    proc = subprocess.run(
+        ["bash", str(AUDIT_HOOK)], input=payload, capture_output=True, text=True,
+        env=dict(env, MOP_ISSUE_CREATE_STAGE="audit"), timeout=60,
+    )
+    return proc.returncode, proc.stdout.strip()
+
+
+def _audit_marker(stdout: str) -> dict:
+    lines = [line for line in stdout.splitlines() if line.strip().startswith("{")]
+    assert lines, f"no audit marker in {stdout!r}"
+    return json.loads(lines[-1])["mop_issue_create_audit"]
 
 
 def _body(tmp_path: Path, name: str, text: str) -> Path:
@@ -285,6 +317,100 @@ def test_control_plane_draft_keeps_the_existing_control_plane_refusal(tmp_path):
     assert "obligation-upsert" in (tmp_path / "pm-ops-calls.log").read_text()
 
 
+# ---------------------------------------------------------------------------
+# Create owner stage: the ledger/tracker hooks read the owner's buffer IN MEMORY
+# (MOP_ISSUE_CREATE_STAGE=audit, MOP_ISSUE_CREATE_BODY_B64, `--body-file -`). Every decision must be
+# the one made for the same bytes in a named body file, and a rejection must write nothing.
+# ---------------------------------------------------------------------------
+
+def _repo_validators(env: dict[str, str]) -> dict[str, str]:
+    return dict(
+        env,
+        ISSUE_CONTRACT_LEDGER_HOOK_PARSER=str(SCRIPTS / "issue-contract-ledger-hook.py"),
+        ISSUE_CONTRACT_LEDGER_VALIDATOR=str(SCRIPTS / "validate-issue-contract-ledger.py"),
+    )
+
+
+def _owner_buffer_run(hook: Path, command: str, body: str, env: dict[str, str]) -> tuple[int, str]:
+    """Run a ledger hook the way the create owner does: the exact body in memory, no file."""
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "cwd": "/tmp"})
+    run_env = dict(
+        env,
+        MOP_ISSUE_CREATE_STAGE="audit",
+        MOP_ISSUE_CREATE_BODY_B64=base64.b64encode(body.encode("utf-8")).decode("ascii"),
+    )
+    proc = subprocess.run(["bash", str(hook)], input=payload, capture_output=True, text=True, env=run_env, timeout=60)
+    return proc.returncode, proc.stdout.strip()
+
+
+CONTROL_PLANE_BODY = VALID_BODY.replace("ci-summary-line", "cp-cli-parity").replace(
+    "Internal engineering follow-up: the CI helper prints a stale summary line.",
+    "Internal control-plane follow-up: the MoP release CLI prints a stale control-plane summary line.",
+).replace("lane: ci", "lane: control-plane") + "\n<!-- audit-bypass: internal-followup -->\n"
+
+PARITY_BODIES = {
+    "valid": VALID_BODY,
+    "invalid": "no issue contract ledger here\n",
+    "crlf": VALID_BODY.replace("\n", "\r\n"),
+    "trailing_blank_lines": VALID_BODY + "\n\n\n",
+}
+
+
+@pytest.mark.parametrize("hook", [LEDGER_HOOK, PROJECT_LEDGER_HOOK], ids=["user", "project"])
+@pytest.mark.parametrize("name", sorted(PARITY_BODIES))
+def test_ledger_hooks_decide_the_same_for_the_in_memory_buffer_as_for_a_named_file(tmp_path, hook, name):
+    env = _repo_validators(_env(tmp_path))
+    body = PARITY_BODIES[name]
+    named = _body(tmp_path, f"{name}.md", body)
+    title = "internal follow-up: stale CI summary line"
+    from_file = _run(hook, _create_cmd(str(named), title), env)
+    from_buffer = _owner_buffer_run(hook, _create_cmd("-", title), body, env)
+    assert from_buffer == from_file, (from_buffer, from_file)
+
+
+def test_the_raw_path_still_refuses_an_unnamed_stdin_body_file(tmp_path):
+    """Outside the owner stage `--body-file -` keeps its refusal; the buffer is not a general stdin feature."""
+    env = _repo_validators(_env(tmp_path))
+    rc, out = _run(LEDGER_HOOK, _create_cmd("-", "internal follow-up: stale CI summary line"), env)
+    assert rc == 0
+    assert "stdin_body_file_requires_named_file" in _decision(out)["message"]
+
+
+def test_owner_stage_without_a_buffer_fails_closed_in_the_parser(tmp_path):
+    env = dict(_repo_validators(_env(tmp_path)), MOP_ISSUE_CREATE_STAGE="audit")
+    payload = json.dumps({"tool_name": "Bash", "cwd": "/tmp",
+                          "tool_input": {"command": _create_cmd("-", "internal follow-up: stale CI summary line")}})
+    proc = subprocess.run(["bash", str(LEDGER_HOOK)], input=payload, capture_output=True, text=True, env=env, timeout=60)
+    assert "body_file_unreadable_at_hook_time" in _decision(proc.stdout.strip())["message"]
+
+
+def test_a_control_plane_refusal_in_the_owner_stage_keeps_its_decision_and_writes_nothing(tmp_path):
+    env = _repo_validators(_env(tmp_path))
+    title = "fix control-plane release CLI summary"
+    rc, out = _owner_buffer_run(LEDGER_HOOK, _create_cmd("-", title), CONTROL_PLANE_BODY, env)
+    assert rc == 0
+    message = _decision(out)["message"]
+    assert "control-plane" in message.lower(), "the BLOCK decision and its reason are unchanged"
+    assert "Preserved draft" not in message and "High-priority PM obligation" not in message
+    assert not (tmp_path / "cp-artifacts").exists(), "no blocked-issue draft copy"
+    assert not (tmp_path / "pm-ops-calls.log").exists(), "no obligation upsert"
+    # Control: the same refusal outside the owner stage still preserves the draft and upserts.
+    named = _body(tmp_path, "cp-draft.md", CONTROL_PLANE_BODY)
+    rc, out = _run(LEDGER_HOOK, _create_cmd(str(named), title), env)
+    assert rc == 0 and "control-plane" in _decision(out)["message"].lower()
+    assert list((tmp_path / "cp-artifacts").glob("*.md"))
+    assert "obligation-upsert" in (tmp_path / "pm-ops-calls.log").read_text()
+
+
+def test_the_project_hook_exempts_an_internal_control_plane_draft_the_same_in_both_modes(tmp_path):
+    env = _repo_validators(_env(tmp_path))
+    title = "fix control-plane release CLI summary"
+    named = _body(tmp_path, "cp-draft.md", CONTROL_PLANE_BODY)
+    from_file = _run(PROJECT_LEDGER_HOOK, _create_cmd(str(named), title), env)
+    from_buffer = _owner_buffer_run(PROJECT_LEDGER_HOOK, _create_cmd("-", title), CONTROL_PLANE_BODY, env)
+    assert from_buffer == from_file, (from_buffer, from_file)
+
+
 LEDGER_BOILERPLATE_BODY = VALID_BODY + """
 ## Customer / integration impact
 
@@ -345,16 +471,17 @@ def test_reply_timestamp_uses_root_permit_not_unrelated_root(tmp_path, source_ro
     digest = lambda value: hashlib.sha256(value.encode()).hexdigest()
     (permit_dir / "C0AGWPQFKHA__1794207884_242379.permit.json").write_text(json.dumps({
         "channel": "C0AGWPQFKHA", "thread_ts": "1794207884.242379",
-        "body_sha256": digest(text.rstrip("\n")), "title_digest": digest(title),
+        "body_sha256": digest(text), "title_digest": digest(title),
     }))
-    rc, out = _run(AUDIT_HOOK, _create_cmd(str(body), title=title), env)
+    # The permit is released ONLY through the owner's audit stage on its captured bytes. The audit
+    # hook never consumes or rewrites it; a raw create is denied (see the deferred-permit tests).
+    rc, out = _run_audit_stage(env, body, title)
     assert rc == 0
     if allowed:
-        assert out == ""
-        assert not list(permit_dir.glob("*.json"))
+        assert _audit_marker(out)["permit"] == "valid"
     else:
         assert "Customer-origin" in _decision(out)["message"]
-        assert list(permit_dir.glob("*.json"))
+    assert list(permit_dir.glob("*.json")), "the audit hook must never consume the permit"
 
 
 def test_explicit_source_wins_over_unrelated_quoted_permalink(tmp_path):
@@ -368,10 +495,14 @@ def test_explicit_source_wins_over_unrelated_quoted_permalink(tmp_path):
     digest = lambda value: hashlib.sha256(value.encode()).hexdigest()
     (permits / "C0AGWPQFKHA__1794207884_242379.permit.json").write_text(json.dumps({
         "channel": "C0AGWPQFKHA", "thread_ts": "1794207884.242379",
-        "body_sha256": digest(text.rstrip("\n")), "title_digest": digest(title),
+        "body_sha256": digest(text), "title_digest": digest(title),
     }))
-    assert _run(AUDIT_HOOK, _create_cmd(str(body), title=title), env) == (0, "")
-    assert not list(permits.glob("*.json"))
+    rc, out = _run_audit_stage(env, body, title)
+    assert rc == 0
+    marker = _audit_marker(out)
+    assert marker["permit"] == "valid"
+    assert (marker["channel"], marker["thread_ts"]) == ("C0AGWPQFKHA", "1794207884.242379")
+    assert list(permits.glob("*.json")), "the audit hook must never consume the permit"
     assert not (tmp_path / "pm-ops-calls.log").exists()
 
 

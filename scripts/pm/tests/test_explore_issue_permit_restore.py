@@ -61,6 +61,7 @@ def _env(tmp_path: Path) -> dict[str, str]:
         EXPLORE_ISSUE_PERMIT_DIR=str(tmp_path / "permits"),
         EXPLORE_ISSUE_CONSUMED_PERMIT_DIR=str(tmp_path / "consumed"),
         EXPLORE_ISSUE_RECONCILED_PERMIT_DIR=str(tmp_path / "reconciled"),
+        EXPLORE_ISSUE_INFLIGHT_DIR=str(tmp_path / "inflight"),
         EXPLORE_ISSUE_PM_OPS_CLI="/usr/bin/true",
         EXPLORE_ISSUE_SOURCE_MESSAGE_TS=SOURCE_MSG,
     )

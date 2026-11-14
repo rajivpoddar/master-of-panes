@@ -43,7 +43,10 @@ for command in parser.shell_commands(os.environ['CMD_TEXT']):
     files = parser.values(parts, {'--body-file', '-F'})
     inline = parser.values(parts, {'--body', '-b'})
     body = inline[-1] if inline else ''
-    if files and not inline:
+    if files and not inline and files[-1] == '-' and os.environ.get('MOP_ISSUE_CREATE_STAGE') == 'audit':
+        # Create owner stage: the single buffer arrives in memory (no file is read or written).
+        body = parser.owner_buffer() if 'MOP_ISSUE_CREATE_BODY_B64' in os.environ else ''
+    elif files and not inline:
         file = os.path.expanduser(files[-1])
         if not os.path.isabs(file):
             file = os.path.join(os.environ.get('HOOK_CWD') or os.getcwd(), file)
@@ -103,7 +106,10 @@ if printf '%s' "$ERRORS" | grep -q 'internal_control_plane_issue_forbidden'; the
   DURABLE_BODY=""
   COPY_OK=0
   OBLIGATION_LINE=""
-  if [ -n "$BODY_FILE" ] && [ -f "$BODY_FILE" ]; then
+  # Create owner stage (MOP_ISSUE_CREATE_STAGE=audit): the body is an in-memory buffer and a
+  # rejected gate must write nothing, so no draft copy and no obligation. The BLOCK decision
+  # and its reason are unchanged.
+  if [ -z "${MOP_ISSUE_CREATE_STAGE:-}" ] && [ -n "$BODY_FILE" ] && [ -f "$BODY_FILE" ]; then
     mkdir -p "$CP_ISSUE_ARTIFACTS" 2>/dev/null || true
     SLUG=$(printf '%s' "$TARGET" | tr -cs '[:alnum:]' '-' | cut -c1-60)
     BODY_HASH=$(printf '%s' "$BODY_FILE" | shasum -a 256 2>/dev/null | awk '{print substr($1,1,16)}')
