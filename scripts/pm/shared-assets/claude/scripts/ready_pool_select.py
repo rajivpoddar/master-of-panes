@@ -312,7 +312,7 @@ def dispatch_content_refusals(issue: dict[str, Any]) -> list[str]:
         reasons.append("claimable_slot_type_not_dev")
     for field in ("owner", "lane"):
         value = ready_pool_value(body, field)
-        if re.match(r"(?i)^\s*(?:pm-hotfix|pm|cto)(?![a-z0-9])", value):
+        if re.match(r"(?i)^\s*(?:pm-hotfix|hd-(?:planner|builder|proof-qa)|pm|cto)(?![a-z0-9])", value):  # hd-* added 2026-11-14 (hd split)
             reasons.append(f"{field}_reserved_lane")
     disposition = ready_pool_value(body, "disposition")
     if re.search(r"(?i)(?<![a-z0-9])(?:blocked|parked|deferred)[a-z0-9_]*", disposition):
