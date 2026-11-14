@@ -19,9 +19,12 @@ Contract proven here (one owner, one process):
   6. gh gets the identical bytes on stdin; only a verified issue URL (gh output AND a GitHub readback
      of repo/number/title/body) consumes the permit; everything else stays reconciliation-only;
   7. the in-flight record is released only on a definite spawn failure, never by restore;
-  8. raw permit-required and compound/wrapped creates are denied before any permit write;
-  9. the guard dry-runs every unmanaged live command rewriter on the owner invocation and lets it
-     through only if all are no-ops (no live hook is modified or overwritten);
+  8. ALL compound/wrapped raw creates are denied upfront; a simple raw create is parsed by a
+     byte-preserving parser (every gh flag spelling, any quoting) that fails closed on anything
+     ambiguous or unreadable; a simple raw create holding a permit is denied before any permit write;
+  9. the guard DISCOVERS every PreToolUse Bash rewrite handler in the settings in force (not a fixed
+     list) and dry-runs each on the owner invocation, letting it through only if none would rewrite,
+     deny or block it (no live hook is modified or overwritten);
  10. existing consumed/state records (source 33762) are never touched.
 Not covered by design: a hostile process running as the same user.
 
@@ -836,6 +839,212 @@ def test_the_guard_blocks_an_owner_invocation_a_rewriter_would_change_and_passes
                              env=dict(os.environ, ISSUE_CREATE_OWNER_REWRITER_HOOKS=loud))
     assert blocked.returncode == 0
     assert json.loads(blocked.stdout)["decision"] == "block" and "loud.sh" in blocked.stdout
+
+
+# ---- discovery: the handler set comes from the settings in force, never from a fixed list ----------------
+
+REWRITER_WITH_UPDATED_INPUT = """#!/bin/sh
+# emits updatedInput
+cat > /dev/null
+echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"command":"rtk changed"}}}'
+"""
+
+NOOP_THAT_CAN_REWRITE = """#!/bin/sh
+# may emit updatedInput for other commands, but not for this one
+cat > /dev/null
+exit 0
+"""
+
+BLOCKER_WITHOUT_REWRITES = """#!/bin/sh
+cat > /dev/null
+touch "$BLOCKER_RAN"
+exit 2
+"""
+
+
+def _script(directory: Path, name: str, text: str) -> Path:
+    target = directory / name
+    target.write_text(text)
+    target.chmod(0o755)
+    return target
+
+
+def _settings(directory: Path, name: str, matchers: dict, **extra) -> Path:
+    document = {"hooks": {"PreToolUse": [
+        {"matcher": matcher, "hooks": [{"type": "command", "command": command} for command in commands]}
+        for matcher, commands in matchers.items()
+    ]}, **extra}
+    target = directory / name
+    target.write_text(json.dumps(document))
+    return target
+
+
+def _preserve_with(command: str, **env: str) -> subprocess.CompletedProcess:
+    payload = json.dumps({"tool_name": "Bash", "cwd": env.pop("PAYLOAD_CWD", "/tmp"), "tool_input": {"command": command}})
+    return subprocess.run([sys.executable, str(OWNER), "preserve"], input=payload, capture_output=True,
+                          text=True, env=dict(os.environ, **env), timeout=120)
+
+
+def test_preserve_discovers_registered_bash_handlers_and_runs_nothing_else(tmp_path):
+    rewriter = _script(tmp_path, "direct-rewriter.sh", REWRITER_WITH_UPDATED_INPUT)
+    inner = _script(tmp_path, "inner-rewriter.sh", REWRITER_WITH_UPDATED_INPUT)
+    wrapper = _script(tmp_path, "wrapper.sh", f"#!/bin/sh\nexec bash {inner}\n")  # reached only through the wrapper
+    noop = _script(tmp_path, "noop.sh", NOOP_THAT_CAN_REWRITE)
+    blocker = _script(tmp_path, "blocker.sh", BLOCKER_WITHOUT_REWRITES)
+    other_tool = _script(tmp_path, "write-tool-rewriter.sh", REWRITER_WITH_UPDATED_INPUT)
+    settings = _settings(tmp_path, "settings.json", {
+        "Bash": [f"bash {rewriter}", f"bash {wrapper}", f"bash {noop}", f"bash {blocker}"],
+        "Write": [f"bash {other_tool}"],
+    })
+    ran = tmp_path / "blocker-ran"
+    result = _preserve_with(OWNER_COMMAND, ISSUE_CREATE_OWNER_SETTINGS_FILES=str(settings), BLOCKER_RAN=str(ran))
+    decision = json.loads(result.stdout)
+    assert decision["decision"] == "block"
+    message = decision["message"]
+    assert "direct-rewriter.sh" in message and "wrapper.sh" in message, message
+    assert "noop.sh" not in message and "blocker.sh" not in message and "write-tool-rewriter.sh" not in message
+    assert not ran.exists(), "a hook that cannot emit updatedInput is not a rewrite handler and must not be run"
+
+
+def test_preserve_is_silent_when_every_discovered_handler_is_a_noop(tmp_path):
+    noop = _script(tmp_path, "noop.sh", NOOP_THAT_CAN_REWRITE)
+    settings = _settings(tmp_path, "settings.json", {"Bash": [f"bash {noop}"], "*": [f"bash {noop}"]})
+    result = _preserve_with(OWNER_COMMAND, ISSUE_CREATE_OWNER_SETTINGS_FILES=str(settings))
+    assert (result.returncode, result.stdout) == (0, "")
+
+
+def test_preserve_fails_closed_when_a_settings_file_cannot_be_read(tmp_path):
+    broken = tmp_path / "settings.json"
+    broken.write_text("{not json")
+    result = _preserve_with(OWNER_COMMAND, ISSUE_CREATE_OWNER_SETTINGS_FILES=str(broken))
+    assert json.loads(result.stdout)["decision"] == "block"
+    assert "could not be read" in result.stdout
+
+
+def test_preserve_never_dry_runs_the_guard_itself(tmp_path):
+    audit = HOOKS / "pre-issue-create-audit.sh"
+    settings = _settings(tmp_path, "settings.json", {"Bash": [f"bash {audit}", f"bash {OWNER}"]})
+    result = _preserve_with(OWNER_COMMAND, ISSUE_CREATE_OWNER_SETTINGS_FILES=str(settings))
+    assert (result.returncode, result.stdout) == (0, "")
+
+
+def test_preserve_discovers_project_level_and_plugin_handlers(tmp_path):
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    project = tmp_path / "proj"
+    (project / "sub").mkdir(parents=True)
+    (project / ".claude").mkdir()
+    project_rewriter = _script(project, "project-rewriter.sh", REWRITER_WITH_UPDATED_INPUT)
+    _settings(project / ".claude", "settings.json", {"Bash": [f"bash {project_rewriter}"]})
+    plugin_root = home / ".claude" / "plugins" / "cache" / "mkt" / "plug" / "1.0.0"
+    (plugin_root / "hooks").mkdir(parents=True)
+    _script(plugin_root, "plugin-rewriter.sh", REWRITER_WITH_UPDATED_INPUT)
+    _settings(plugin_root / "hooks", "hooks.json", {"Bash": ["bash ${CLAUDE_PLUGIN_ROOT}/plugin-rewriter.sh"]})
+    (home / ".claude" / "settings.json").write_text(json.dumps({"enabledPlugins": {"plug@mkt": True}}))
+    result = _preserve_with(OWNER_COMMAND, HOME=str(home), PAYLOAD_CWD=str(project / "sub"))
+    decision = json.loads(result.stdout)
+    assert "project-rewriter.sh" in decision["message"], decision["message"]
+    assert "plugin-rewriter.sh" in decision["message"], decision["message"]
+
+
+@pytest.mark.skipif(not (Path.home() / ".claude" / "hooks" / "rewrite-github-priority-label.py").is_file(),
+                    reason="live settings absent")
+def test_discovery_on_the_live_settings_finds_every_live_handler_not_a_fixed_subset():
+    handlers, problems = owner.discover_rewrite_handlers("/tmp")
+    labels = {label for label, _ in handlers}
+    assert not problems, problems
+    for known in ("rewrite-github-priority-label.py", "rewrite-agent-browser-session.py",
+                  "rewrite-convex-dev-cmd.sh", "rewrite-modal-app-list-cmd.sh",
+                  "rewrite-send-to-slot-file.py", "rtk-rewrite-worktree-aware.sh"):
+        assert known in labels, (known, sorted(labels))
+    # Anything else registered that can emit updatedInput is covered too (e.g. the rescue sandbox).
+    assert len(labels) >= 6
+
+
+# ---- the byte-preserving raw parser -----------------------------------------------------------------------
+
+def _extract(command: str, cwd: str = "/tmp") -> dict:
+    return owner.extract_raw_create(command, cwd)
+
+
+def _body_of(result: dict) -> bytes:
+    import base64
+
+    return base64.b64decode(result["body_b64"])
+
+
+@pytest.mark.parametrize("command,title,body", [
+    ("gh issue create -t T -b B", "T", b"B"),
+    ("gh issue create --title=T --body=B", "T", b"B"),
+    ("gh issue create -tT -bB", "T", b"B"),
+    ("gh issue create -t=T -b=B", "T", b"B"),
+    ("gh issue create --title 'a b' --body 'c d'", "a b", b"c d"),
+    ('gh issue create --title "a b" -b "c d"', "a b", b"c d"),
+    ("gh issue create -t T -b 'multi\nline\n'", "T", b"multi\nline\n"),
+    ("gh issue create -t T -b B -l x -a y -m z -p w -R o/r -T tpl --recover r -w -e", "T", b"B"),
+    ("/opt/homebrew/bin/gh issue create -t T -b B", "T", b"B"),
+])
+def test_extract_reads_every_gh_spelling_exactly(command, title, body):
+    result = _extract(command)
+    assert result["ok"] is True, result
+    assert result["title"] == title and _body_of(result) == body and result["has_body"] is True
+
+
+def test_extract_reads_body_file_bytes_exactly_through_every_flag_spelling(tmp_path):
+    exact = b"Source: x\n\nbody with NUL \x00 inside\n\n\n"
+    (tmp_path / "b.md").write_bytes(exact)
+    for flag in ("-F b.md", "-Fb.md", "-F=b.md", "--body-file b.md", "--body-file=b.md", "-F 'b.md'", f"-F {tmp_path / 'b.md'}"):
+        result = _extract(f"gh issue create -t T {flag}", cwd=str(tmp_path))
+        assert result["ok"] is True, (flag, result)
+        assert _body_of(result) == exact, flag
+        assert result["has_body"] is True
+
+
+def test_extract_without_a_body_flag_reports_no_body():
+    result = _extract("gh issue create -t T")
+    assert result["ok"] is True and result["has_body"] is False and result["body_b64"] == ""
+
+
+@pytest.mark.parametrize("command,klass", [
+    ("gh issue create -t x -b y --frobnicate", "ambiguous"),
+    ("gh issue create -t x -t y -b z", "ambiguous"),
+    ("gh issue create -t x -b y -b z", "ambiguous"),
+    ("gh issue create -t x -F /tmp/a -F /tmp/b", "ambiguous"),
+    ("gh issue create -t x -b y -F /tmp/b.md", "ambiguous"),
+    ("gh issue create -t x -b y stray", "ambiguous"),
+    ("gh issue create -t x -b y --", "ambiguous"),
+    ("gh issue create -t", "ambiguous"),
+    ("gh issue create --web=1", "ambiguous"),
+    ('gh issue create -t "$T" -b y', "expansion"),
+    ("gh issue create -t x -b \"${B}\"", "expansion"),
+    ('gh issue create -t x -b "$(cat /tmp/b.md)"', "expansion"),
+    ('gh issue create -t x -b "`cat /tmp/b.md`"', "expansion"),
+    ("gh issue create -t x -F /tmp/b*.md", "expansion"),
+    ("gh issue create -t x -F /tmp/b?.md", "expansion"),
+    ("gh issue create -t x -F /tmp/[ab].md", "expansion"),
+    ("gh issue create -t x -b {a,b}", "expansion"),
+    ("gh issue create -t x -b {1..3}", "expansion"),
+    ("gh issue create -t x -b $'a\\nb'", "expansion"),
+    ("gh issue create -t x -F -", "unreadable"),
+    ("gh issue create -t x -F /nonexistent/never.md", "unreadable"),
+    ("cd /tmp && gh issue create -t x -b y", "shape"),
+    ("gh issue create -t x -b y; echo", "shape"),
+    ("env A=1 gh issue create -t x -b y", "shape"),
+    ("gh issue create -t 'unterminated", "shape"),
+])
+def test_extract_fails_closed_on_anything_ambiguous_or_unreadable(command, klass):
+    result = _extract(command)
+    assert result["ok"] is False and result["error_class"] == klass, result
+
+
+@pytest.mark.parametrize("text,expanded", [
+    ("echo $X", True), ('echo "${X}"', True), ('echo "$(x)"', True), ("echo `x`", True), ("echo *.md", True),
+    ("echo file?", True), ("echo [abc]", True), ("echo {a,b}", True), ("echo {1..3}", True), ("echo $'x'", True),
+    ("echo '$X'", False), ('echo "price 5$"', False), ("echo a\\$b", False), ('echo "a b"', False),
+    ("echo '*'", False), ('echo "*"', False), ("echo {a}", False), ("echo plain words", False),
+])
+def test_unquoted_expansion_scanner(text, expanded):
+    assert owner.has_unquoted_expansion(text) is expanded
 
 
 LIVE_HOOKS = Path.home() / ".claude" / "hooks"

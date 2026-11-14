@@ -29,14 +29,21 @@
 #    the ledger/tracker hook on those same bytes, then locks, records durable
 #    in-flight state, feeds gh the identical bytes on stdin and consumes the
 #    permit only on a verified issue URL. This hook therefore:
-#      - lets a single simple owner command through (the owner runs every gate),
+#      - lets a single simple owner command through (the owner runs every gate)
+#        once every discovered PreToolUse rewrite handler is proven a no-op on it,
 #      - denies an owner command that is compound or wrapped,
-#      - denies a RAW `gh issue create` (simple, compound or wrapped) whose
-#        source holds a valid permit, BEFORE any permit write.
+#      - denies EVERY compound or wrapped raw `gh issue create` upfront (permit
+#        or not), before any parsing, classification or write,
+#      - parses a SIMPLE raw create with a byte-preserving parser (`extract`:
+#        every gh spelling -t/-b/-F/--body-file=..., attached values, any
+#        quoting) and fails closed on anything ambiguous or unreadable,
+#      - denies a simple raw create whose source holds a valid permit, BEFORE any
+#        permit write; a valid non-permit simple create is unchanged.
 #    It never writes a permit pending file and never consumes a permit.
 # 1. Only fire on `gh issue create` (not list/view/edit/close/comment).
-# 2. Extract issue body (from --body or --body-file) and --title. In stage
-#    `audit` the owner hands them over verbatim; they are never re-parsed.
+# 2. Extract the exact issue body bytes (--body/-b or --body-file/-F) and the
+#    title (--title/-t) through `extract`. In stage `audit` the owner hands them
+#    over verbatim; they are never re-parsed.
 # 3. Extract Slack thread refs from the body; derive CHANNEL/THREAD_TS.
 # 4. PERMIT GATE: a valid READY_TO_FILE permit for this source
 #    (channel/thread_ts/body SHA/title digest all bound) releases the create
@@ -85,11 +92,13 @@ case "$SHAPE" in
     # ledger/tracker hook, the shared permit lock, the in-flight record, gh and
     # the permit consumption itself. No permit decision and no write happen
     # here. The one thing this guard proves is that the command reaches the
-    # shell unchanged: the command rewriters (rtk, priority-label, agent-browser,
-    # convex, modal, send-to-slot) run in parallel with this hook on the same
-    # payload and are pure functions of it, so `preserve` dry-runs each of them.
-    # The invocation is let through only if every one is a no-op; otherwise it is
-    # blocked BEFORE anything runs, naming the rewriter. No live hook is modified.
+    # shell unchanged: every PreToolUse Bash rewrite handler registered in the
+    # settings in force runs in parallel with this hook on the same payload and is
+    # a pure function of it, so `preserve` DISCOVERS them (user, local, managed,
+    # every project level from the payload cwd up, enabled plugins; no fixed list)
+    # and dry-runs each one. The invocation is let through only if none would
+    # rewrite, deny or block it; otherwise it is blocked BEFORE anything runs,
+    # naming the handler. No live hook is modified.
     PRESERVE_BLOCK="$(printf '%s' "$INPUT" | python3 "$ISSUE_CREATE_OWNER_PY" preserve 2>/dev/null)" \
       || PRESERVE_BLOCK='{"decision":"block","message":"BLOCKED: the guard could not prove that the command rewriters pass this create-owner invocation through unchanged (the preserve check failed). Nothing ran and nothing was written."}'
     if [ -n "$PRESERVE_BLOCK" ]; then
@@ -99,6 +108,13 @@ case "$SHAPE" in
     ;;
   owner_unsafe)
     printf '%s\n' '{"decision":"block","message":"BLOCKED: the single create owner must be the ONLY command in the Bash call: exactly `python3 <owner> create <flags>` (or the owner path directly). Compound forms (; && || | &, subshell, redirection, heredoc, newline), wrapped forms (env, bash -c, xargs, time, rtk, ...), other subcommands and mixing it with a raw gh issue create are refused before any permit is written. No permit was written or consumed."}'
+    exit 0
+    ;;
+  raw_compound|raw_wrapped)
+    # ALL compound or wrapped creates are denied upfront, permit or not: their real title/body
+    # cannot be parsed reliably, so none of the Source/verdict/permit gates could be trusted for
+    # them. Nothing is read, classified or written.
+    printf '%s\n' '{"decision":"block","message":"BLOCKED: a gh issue create must be the ONLY command in the Bash call. Compound forms (; && || | &, subshell, redirection, heredoc, newline, cd ... &&) and wrapped forms (env, VAR=value, bash -c, eval, xargs, time, rtk, sudo, ...) are refused upfront, before any source, verdict or permit check. Nothing was run and nothing was written. Remedy: run exactly one simple gh issue create (a literal --body-file path, no wrapper, no operators); a create that needs a READY_TO_FILE permit runs through the single create owner instead."}'
     exit 0
     ;;
 esac
@@ -118,13 +134,14 @@ while IFS= read -r seg; do
   fi
 done <<< "$(echo "$CMD" | tr ';' '\n' | tr '|' '\n' | tr '&' '\n')"
 
-if [ -z "$MATCH_GH_ISSUE_CREATE" ]; then
-  # The legacy segment scan misses wrapped forms (bash -c, env, xargs, rtk, ...).
-  # The classifier proved a create is in there, so it follows the same gates.
-  case "$SHAPE" in
-    raw_compound|raw_wrapped) ;;
-    *) exit 0 ;;
-  esac
+if [ -z "$MATCH_GH_ISSUE_CREATE" ] && [ "$SHAPE" != "raw_simple" ]; then
+  exit 0
+fi
+if [ -n "$MATCH_GH_ISSUE_CREATE" ] && [ "$SHAPE" != "raw_simple" ]; then
+  # The classifier did not see a single simple create but the legacy scan did: ambiguous, so
+  # fail closed before anything is read or written.
+  printf '%s\n' '{"decision":"block","message":"BLOCKED: this command looks like a gh issue create but could not be classified as one single simple command (the shape check failed or disagreed). Refused before any source, verdict or permit check; nothing was run and nothing was written. Run exactly one simple gh issue create."}'
+  exit 0
 fi
 
 # ---------------------------------------------------------------------------
@@ -133,90 +150,63 @@ fi
 FALLBACK_LOG=${EXPLORE_ISSUE_FALLBACK_LOG:-/tmp/pre-issue-audit-fallback.log}
 [ -z "$OWNER_STAGE" ] || FALLBACK_LOG=/dev/null
 SLACK_CACHE_DIR=${EXPLORE_ISSUE_SLACK_CACHE_DIR:-/tmp/slack-thread-cache}
-[ -n "$OWNER_STAGE" ] || mkdir -p "$SLACK_CACHE_DIR" 2>/dev/null || true
 
-extract_body() {
-  local cmd="$1"
-  local body=""
-
-  # --body-file <path>
-  local body_file
-  body_file=$(echo "$cmd" | perl -ne 'if (/--body-file[\s=]+(?:"([^"]+)"|'\''([^'\'']+)'\''|(\S+))/) { print $1 || $2 || $3; exit }' 2>/dev/null || true)
-  if [ -n "$body_file" ] && [ -f "$body_file" ]; then
-    body=$(cat "$body_file" 2>/dev/null || true)
-  fi
-
-  # --body "..." (only if body still empty)
-  if [ -z "$body" ]; then
-    body=$(echo "$cmd" | perl -ne 'BEGIN{$/=undef} if (/--body[\s=]+"((?:[^"\\]|\\.)*)"/s) { my $v=$1; $v =~ s/\\"/"/g; print $v; exit }' 2>/dev/null || true)
-  fi
-  if [ -z "$body" ]; then
-    body=$(echo "$cmd" | perl -ne "BEGIN{\$/=undef} if (/--body[\s=]+'((?:[^'\\\\]|\\\\.)*)'/s) { print \$1; exit }" 2>/dev/null || true)
-  fi
-
-  printf '%s' "$body"
-}
-
-extract_body_file() {
-  local cmd="$1"
-  echo "$cmd" | perl -ne 'if (/--body-file[\s=]+(?:"([^"]+)"|'\''([^'\'']+)'\''|(\S+))/) { print $1 || $2 || $3; exit }' 2>/dev/null || true
-}
-
-extract_title() {
-  local cmd="$1"
-  echo "$cmd" | perl -ne 'BEGIN{$/=undef} if (/--title[\s=]+"((?:[^"\\]|\\.)*)"/s) { my $v=$1; $v =~ s/\\"/"/g; print $v; exit }' 2>/dev/null || true
-}
-
-BODY=$(extract_body "$CMD")
-BODY_FILE_PATH=$(extract_body_file "$CMD")
-TITLE=$(extract_title "$CMD")
-# Fall back to whole command string if extraction yielded nothing — preserves
-# old behavior where the marker grep ran against the raw command.
-BODY_OR_CMD="${BODY:-$CMD}"
-
-# body_stream: every consumer of the issue body reads the body through this ONE function.
-#   raw stage    the body text this hook extracted from the command (legacy behaviour)
-#   stage audit  the EXACT captured buffer the owner put on this hook's stdin, base64 encoded
-#                (.mop_issue_create.body_b64). It is decoded on every read, never held in a
-#                shell variable, never passed through command substitution, so trailing
-#                newlines and NUL bytes are preserved. No file is read or written for it.
-OWNER_BODY_B64=""
+# body_stream: every consumer of the issue body reads the body through this ONE function. The
+# bytes are held base64 encoded (BODY_B64) and decoded on every read, never kept in a shell variable
+# and never passed through command substitution, so trailing newlines and NUL bytes are preserved.
+#   stage audit  the EXACT buffer the owner put on this hook's stdin (.mop_issue_create.body_b64)
+#   raw stage    the exact bytes the byte-preserving parser (`extract`) read from --body/-b or from the
+#                --body-file/-F named in the one simple raw create; without a body flag, the command text
+BODY_B64=""
+TITLE=""
+BODY_FILE_PATH=""
 if [ -n "$OWNER_STAGE" ]; then
-  OWNER_BODY_B64="$(printf '%s' "$INPUT" | jq -j '.mop_issue_create.body_b64 // empty' 2>/dev/null || true)"
-  if [ "$OWNER_STAGE" != "audit" ] || [ -z "$OWNER_BODY_B64" ]; then
+  BODY_B64="$(printf '%s' "$INPUT" | jq -j '.mop_issue_create.body_b64 // empty' 2>/dev/null || true)"
+  if [ "$OWNER_STAGE" != "audit" ] || [ -z "$BODY_B64" ]; then
     printf '%s\n' '{"decision":"block","message":"BLOCKED: the owner stage was invoked without the captured body buffer. Nothing was written."}'
     exit 0
   fi
   BODY_FILE_PATH="$(printf '%s' "$INPUT" | jq -j '.mop_issue_create.body_display // empty' 2>/dev/null || true)"
   TITLE="$(printf '%s' "$INPUT" | jq -j '.mop_issue_create.title // empty' 2>/dev/null || true)"
-  body_stream() {
-    printf '%s' "$OWNER_BODY_B64" | python3 -c 'import base64, sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))'
-  }
 else
-  body_stream() {
-    printf '%s' "$BODY_OR_CMD"
-  }
-fi
-
-# ---------------------------------------------------------------------------
-# Body-file hand-off contract (CP repair 2026-09-20, Rajiv directive
-# 1789902323.668159 "repair the issue create trap").
-#
-# The audit-bypass marker lives INSIDE the issue body. When --body-file names a
-# path this hook cannot read (a file that does not exist yet, or a path still
-# written as an unresolved shell variable), BODY is empty and the old fallback
-# to the raw command produced the WRONG remedy ("requires prior Codex
-# architecture review") while the ledger hook independently refused the same
-# command for the unreadable body file - a contradictory double block whose
-# combined advice was unsatisfiable. Refuse once, with the one remedy that
-# satisfies both hooks.
-# ---------------------------------------------------------------------------
-if [ -z "$OWNER_STAGE" ] && [ -n "$BODY_FILE_PATH" ] && { [ ! -f "$BODY_FILE_PATH" ] || [ ! -r "$BODY_FILE_PATH" ]; }; then
-  cat <<BLOCK
+  EXTRACTED="$(printf '%s' "$INPUT" | python3 "$ISSUE_CREATE_OWNER_PY" extract 2>/dev/null || true)"
+  if [ -z "$EXTRACTED" ] || [ "$(printf '%s' "$EXTRACTED" | jq -r '.ok // false' 2>/dev/null || echo false)" != "true" ]; then
+    EXTRACT_CLASS="$(printf '%s' "$EXTRACTED" | jq -j '.error_class // empty' 2>/dev/null || true)"
+    EXTRACT_ERROR="$(printf '%s' "$EXTRACTED" | jq -j '.error // empty' 2>/dev/null || true)"
+    BODY_FILE_PATH="$(printf '%s' "$EXTRACTED" | jq -j '.body_display // empty' 2>/dev/null || true)"
+    # ---------------------------------------------------------------------
+    # Body-file hand-off contract (CP repair 2026-09-20, Rajiv directive
+    # 1789902323.668159 "repair the issue create trap").
+    #
+    # The audit-bypass marker lives INSIDE the issue body. When --body-file names a
+    # path this hook cannot read (a file that does not exist yet, or a path still
+    # written as an unresolved shell variable), the body - including any marker -
+    # cannot be classified. Refuse once, with the one remedy that satisfies both
+    # this hook and the ledger hook.
+    # ---------------------------------------------------------------------
+    if [ "$EXTRACT_CLASS" = "unreadable" ]; then
+      cat <<BLOCK
 {"decision": "block", "message": "BLOCKED: --body-file '${BODY_FILE_PATH}' cannot be read when this hook runs (missing file, an existing file the hook may not read, or a path that is still an unresolved shell variable), so the issue body - including any <!-- audit-bypass: internal-followup --> marker - cannot be classified. Remedy: write the completed body to a LITERAL path in a previous Write/Edit step, validate it, then run exactly one gh issue create with that literal --body-file path. Do not compute the path with a shell variable and do not create the body file inside the same Bash call."}
 BLOCK
-  exit 0
+      exit 0
+    fi
+    # Anything else is ambiguous: fail closed before any source, verdict or permit check.
+    BLOCK_MESSAGE="BLOCKED: this gh issue create cannot be parsed unambiguously at hook time (${EXTRACT_CLASS:-parser failure}: ${EXTRACT_ERROR:-no parser output}). Refused before any source, verdict or permit check; nothing was run and nothing was written. Remedy: one simple gh issue create with literal arguments only (single-quote values; no \$VAR, backticks, globs or brace lists) and the body in a literal --body-file path."
+    jq -nc --arg message "$BLOCK_MESSAGE" '{decision: "block", message: $message}'
+    exit 0
+  fi
+  TITLE="$(printf '%s' "$EXTRACTED" | jq -j '.title // empty' 2>/dev/null || true)"
+  BODY_FILE_PATH="$(printf '%s' "$EXTRACTED" | jq -j '.body_display // empty' 2>/dev/null || true)"
+  if [ "$(printf '%s' "$EXTRACTED" | jq -r '.has_body // false' 2>/dev/null)" = "true" ]; then
+    BODY_B64="$(printf '%s' "$EXTRACTED" | jq -j '.body_b64 // empty' 2>/dev/null || true)"
+  else
+    # No body flag: keep the legacy behaviour of classifying the command text itself.
+    BODY_B64="$(printf '%s' "$CMD" | python3 -c 'import base64, sys; sys.stdout.write(base64.b64encode(sys.stdin.buffer.read()).decode("ascii"))')"
+  fi
 fi
+body_stream() {
+  printf '%s' "$BODY_B64" | python3 -c 'import base64, sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))'
+}
 
 # sha256 helper (portable mac+linux)
 sha256_of() {
@@ -239,15 +229,12 @@ sha256_stream() {
     shasum -a 256 | awk '{print $1}'
   fi
 }
-if [ -n "$OWNER_STAGE" ]; then
-  BODY_SHA=$(body_stream | sha256_stream)
-elif [ -n "$BODY_FILE_PATH" ] && [ -f "$BODY_FILE_PATH" ] && [ -r "$BODY_FILE_PATH" ]; then
-  BODY_SHA=$(sha256_stream < "$BODY_FILE_PATH")
-else
-  BODY_SHA=$(body_stream | sha256_stream)
-fi
+BODY_SHA=$(body_stream | sha256_stream)
 CMD_SHA=$(sha256_of "$CMD")
 TITLE_DIGEST=$(sha256_of "${TITLE:-}")
+# The Slack cache directory is only created once the create parsed unambiguously (a refused
+# command must not touch the disk) and never in stage audit.
+[ -n "$OWNER_STAGE" ] || mkdir -p "$SLACK_CACHE_DIR" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Slack thread / channel extraction

@@ -341,12 +341,15 @@ PHASE 3 — READY_TO_FILE + File GitHub Issue:
   through the single create owner. It is the ONLY command in the Bash call: a plain
   script path, no env prefix, no wrapper (bash -c, xargs, time, rtk), no `&&` `;` `|`,
   no redirection. Use `--body-file` with a literal path written in a previous step.
-  The command rewriters (rtk, priority-label, agent-browser, convex, modal, send-to-slot)
-  run in parallel with the guard, so the guard dry-runs each of them on your exact command
-  and lets it through only if every one is a no-op: what you write is what runs. If one
-  would rewrite or deny it, the guard blocks before anything runs or is written and names
-  the rewriter; remove the text it keys on (put long or special body text in the
-  `--body-file`, never inline) and run it again.
+  The PreToolUse rewrite handlers registered in the settings in force (rtk, priority-label,
+  agent-browser, convex, modal, send-to-slot, the rescue sandbox, and any other that can emit
+  updatedInput) run in parallel with the guard, so the guard DISCOVERS them (not a fixed list)
+  and dry-runs each on your exact command, letting it through only if none would rewrite, deny
+  or block it: what you write is what runs. If one would, the guard blocks before anything
+  runs or is written and names the handler; remove the text it keys on (put long or special
+  body text in the `--body-file`, never inline) and run it again. Any compound or wrapped
+  `gh issue create` is denied upfront, and a simple raw create is parsed byte-exactly (every
+  -t/-b/-F spelling) and refused when anything about it is ambiguous or unreadable.
   The flags are the issue-create flags (--title/-t, --body/-b, --body-file/-F,
   --label/-l, --assignee/-a, --milestone/-m, --project/-p, --repo/-R); only the
   leading gh command words are replaced by the owner path:

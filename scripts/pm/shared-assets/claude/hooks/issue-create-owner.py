@@ -56,15 +56,19 @@ NUL bytes included (mint it with explore_issue_file_sha256 <body file>).
 
 Raw `gh issue create` for a source that holds a permit, and compound or wrapped
 forms of either command, are denied by the PreToolUse hook before any permit write
-(see `classify`). The owner command is a plain script path with no `gh issue` text,
-and the owner applies the priority-label canonicalisation itself. The command
-rewriters (rtk wrapper, priority-label, agent-browser, convex, modal, send-to-slot)
-are unmanaged live hooks that run in parallel with the guard on the SAME payload and
-are pure functions of it, so the guard DRY-RUNS each of them on the owner invocation
-(`preserve`): the owner command is let through only when every one of them is a
-no-op on it. If any would rewrite or deny it, the guard blocks BEFORE anything runs
-or is written and names the rewriter, so what reaches the shell is exactly what the
-agent wrote. No live hook is modified or overwritten for this.
+(see `classify`). ALL compound and wrapped creates are denied upfront, permit or not;
+a simple raw create is parsed by `extract` (a byte-preserving parser that knows every
+gh flag spelling, -t/-b/-F/--body-file=..., attached values, any quoting) and fails
+closed on anything ambiguous or unreadable. The owner command is a plain script path
+with no `gh issue` text, and the owner applies the priority-label canonicalisation
+itself. The command rewrite handlers are live hooks that run in parallel with the guard
+on the SAME payload and are pure functions of it, so the guard DISCOVERS every
+PreToolUse Bash handler that can emit updatedInput from the settings files in force
+(user, local, managed, every project level from the payload cwd up, enabled plugins) and
+DRY-RUNS each one on the owner invocation (`preserve`): the owner command is let through
+only when none of them would rewrite, deny or block it. If any would, the guard blocks
+BEFORE anything runs or is written and names the handler, so what reaches the shell is
+exactly what the agent wrote. No live hook is modified or overwritten for this.
 
 Not covered, on purpose: a hostile process running as the same user. This guards
 against accidents, drift and races, not against someone who can edit the state
@@ -76,9 +80,13 @@ Subcommands
   classify                         read a PreToolUse JSON payload on stdin and print
                                    {"kind": none|raw_simple|raw_compound|raw_wrapped|
                                             owner_simple|owner_unsafe}
-  preserve                         (PreToolUse guard only) dry-run every command rewriter on
-                                   the payload on stdin; print a block decision unless every
-                                   one of them is a no-op
+  extract                          (PreToolUse guard only) parse a SIMPLE raw gh issue create from
+                                   the payload on stdin: {"ok": true, "title", "has_body",
+                                   "body_b64", "body_display"} or {"ok": false, "error_class",
+                                   "error"}; ambiguous or unreadable input fails closed
+  preserve                         (PreToolUse guard only) discover and dry-run every PreToolUse
+                                   Bash handler that can emit updatedInput; print a block
+                                   decision unless every one is a no-op on the payload on stdin
 
 Exit codes of `create`
 ----------------------
@@ -95,8 +103,10 @@ Environment (all optional; tests point these at temp roots)
 -----------------------------------------------------------
   ISSUE_CREATE_OWNER_AUDIT_HOOK      pre-issue-create-audit.sh path
   ISSUE_CREATE_OWNER_LEDGER_HOOKS    os.pathsep list of ledger hook paths (all required)
-  ISSUE_CREATE_OWNER_REWRITER_HOOKS  os.pathsep list of rewriter hooks `preserve` dry-runs
-                                     (default: the known ~/.claude/hooks rewriters that exist)
+  ISSUE_CREATE_OWNER_REWRITER_HOOKS  os.pathsep list of hook scripts `preserve` dry-runs INSTEAD of
+                                     discovery (test seam)
+  ISSUE_CREATE_OWNER_SETTINGS_FILES  os.pathsep list of settings files discovery reads INSTEAD of
+                                     the real ones (test seam; plugins are skipped)
   ISSUE_CREATE_OWNER_GH_BIN          gh executable (default: gh)
   ISSUE_CREATE_OWNER_WORK_DIR        post-create hook log directory (written only after a filed create)
   ISSUE_CREATE_OWNER_REPO_RE         allowed `owner/repo` regex for the verified URL
@@ -327,50 +337,372 @@ def classify(command: str) -> str:
     return "none"
 
 
-DEFAULT_REWRITERS = (
-    "rewrite-github-priority-label.py",
-    "rewrite-agent-browser-session.py",
-    "rewrite-convex-dev-cmd.py",
-    "rewrite-modal-app-list-cmd.py",
-    "rewrite-send-to-slot-file.py",
-    "rtk-rewrite-worktree-aware.sh",
-)
+# ---------------------------------------------------------------------------
+# raw simple create: a byte-preserving parser (used by the PreToolUse guard)
+# ---------------------------------------------------------------------------
+
+_GH_VALUE_LONG = {
+    "--title": "title", "--body": "body", "--body-file": "body_file", "--label": None, "--assignee": None,
+    "--milestone": None, "--project": None, "--repo": None, "--template": None, "--recover": None,
+}
+_GH_BOOL_LONG = {"--web", "--editor", "--help"}
+_GH_VALUE_SHORT = {"t": "title", "b": "body", "F": "body_file", "l": None, "a": None, "m": None,
+                   "p": None, "R": None, "T": None}
+_GH_BOOL_SHORT = {"w", "e", "h"}
 
 
-def rewriter_hooks() -> List[str]:
-    configured = os.environ.get("ISSUE_CREATE_OWNER_REWRITER_HOOKS")
-    if configured is not None:
-        return [item for item in configured.split(os.pathsep) if item]
-    base = Path.home() / ".claude" / "hooks"
-    return [str(base / name) for name in DEFAULT_REWRITERS if (base / name).is_file()]
+def has_unquoted_expansion(text: str) -> bool:
+    """True if the shell would expand something we cannot see (so the real argument is unknowable).
+
+    Quote-aware: single quotes hide everything; inside double quotes only `$...` and backticks expand;
+    unquoted text also expands globs and brace lists. Any hit means the hook-time text is not what gh
+    will receive, so the caller must fail closed.
+    """
+    quote = ""
+    index, length = 0, len(text)
+    while index < length:
+        char = text[index]
+        if quote == "'":
+            if char == "'":
+                quote = ""
+            index += 1
+            continue
+        if char == "\\":
+            index += 2
+            continue
+        following = text[index + 1] if index + 1 < length else ""
+        if quote == '"':
+            if char == '"':
+                quote = ""
+            elif char == "`":
+                return True
+            elif char == "$" and following and (following.isalnum() or following in "_{(?!@*#$-"):
+                return True
+            index += 1
+            continue
+        if char in "'\"":
+            quote = char
+        elif char == "`":
+            return True
+        elif char == "$" and following and (following.isalnum() or following in "_{(?!@*#$-'\""):
+            return True
+        elif char in "*?[":
+            return True
+        elif char == "{" and re.match(r"\{[^{}\s]*(?:,|\.\.)[^{}\s]*\}", text[index:]):
+            return True
+        index += 1
+    return False
+
+
+def _extract_failure(error_class: str, error: str, display: str = "") -> Dict[str, Any]:
+    return {"ok": False, "error_class": error_class, "error": error, "body_display": display}
+
+
+def extract_raw_create(command: str, cwd: str) -> Dict[str, Any]:
+    """Parse ONE simple raw `gh issue create` into title + exact body bytes, or fail closed."""
+    if classify(command) != "raw_simple":
+        return _extract_failure("shape", "not a single simple gh issue create")
+    text = command.replace("\\\n", " ")
+    if has_unquoted_expansion(text):
+        return _extract_failure(
+            "expansion",
+            "the command contains a shell expansion ($VAR, $(...), backticks, glob or brace list) that makes the real "
+            "title/body unknowable at hook time",
+        )
+    tokens = tokenize(text)
+    if tokens is None or len(tokens) < 3:
+        return _extract_failure("unparseable", "the command could not be tokenized")
+    args = tokens[3:]
+    title: Optional[str] = None
+    body_inline: Optional[str] = None
+    body_file: Optional[str] = None
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        index += 1
+        field: Optional[str] = None
+        value: Optional[str] = None
+        if arg == "--":
+            return _extract_failure("ambiguous", "positional arguments are not accepted by gh issue create")
+        if arg.startswith("--"):
+            flag, has_inline, inline_value = arg, False, ""
+            if "=" in arg:
+                flag, inline_value = arg.split("=", 1)
+                has_inline = True
+            if flag in _GH_BOOL_LONG:
+                if has_inline:
+                    return _extract_failure("ambiguous", f"{flag} takes no value")
+                continue
+            if flag not in _GH_VALUE_LONG:
+                return _extract_failure("ambiguous", f"unknown flag {flag}")
+            field = _GH_VALUE_LONG[flag]
+            if has_inline:
+                value = inline_value
+            elif index < len(args):
+                value = args[index]
+                index += 1
+            else:
+                return _extract_failure("ambiguous", f"{flag} needs a value")
+        elif arg.startswith("-") and len(arg) > 1:
+            letter = arg[1]
+            if letter in _GH_VALUE_SHORT:
+                field = _GH_VALUE_SHORT[letter]
+                rest = arg[2:]
+                if rest:
+                    value = rest[1:] if rest.startswith("=") else rest
+                elif index < len(args):
+                    value = args[index]
+                    index += 1
+                else:
+                    return _extract_failure("ambiguous", f"-{letter} needs a value")
+            elif all(char in _GH_BOOL_SHORT for char in arg[1:]):
+                continue
+            else:
+                return _extract_failure("ambiguous", f"unknown flag {arg}")
+        else:
+            return _extract_failure("ambiguous", f"unexpected positional argument {arg!r}")
+        if field == "title":
+            if title is not None:
+                return _extract_failure("ambiguous", "the title was given more than once")
+            title = value
+        elif field == "body":
+            if body_inline is not None:
+                return _extract_failure("ambiguous", "--body/-b was given more than once")
+            body_inline = value
+        elif field == "body_file":
+            if body_file is not None:
+                return _extract_failure("ambiguous", "--body-file/-F was given more than once")
+            body_file = value
+    if body_inline is not None and body_file is not None:
+        return _extract_failure("ambiguous", "both a body and a body file were given")
+    body: Optional[bytes] = None
+    display = ""
+    if body_file is not None:
+        display = body_file
+        if body_file == "-":
+            return _extract_failure("unreadable", "--body-file - (stdin) cannot be read at hook time", display)
+        file_path = os.path.expanduser(body_file)
+        if not os.path.isabs(file_path):
+            file_path = os.path.join(cwd, file_path)
+        try:
+            with open(file_path, "rb") as handle:
+                body = handle.read()
+        except OSError as exc:
+            return _extract_failure("unreadable", f"the body file cannot be read: {exc}", display)
+    elif body_inline is not None:
+        body = os.fsencode(body_inline)
+        display = "(inline --body)"
+    return {
+        "ok": True,
+        "title": title or "",
+        "has_body": body is not None,
+        "body_b64": base64.b64encode(body).decode("ascii") if body is not None else "",
+        "body_display": display,
+    }
+
+
+def cmd_extract() -> int:
+    try:
+        payload = json.load(sys.stdin)
+    except ValueError:
+        payload = {}
+    command = ((payload.get("tool_input") or {}).get("command")) or ""
+    cwd = payload.get("cwd") or os.getcwd()
+    print(json.dumps(extract_raw_create(command, cwd)))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# rewrite handlers: discovered from the settings in force, then dry-run
+# ---------------------------------------------------------------------------
+
+GUARD_FILES = {"issue-create-owner.py", "pre-issue-create-audit.sh"}
+_SCRIPT_REF = re.compile(r"(?:~|/)[A-Za-z0-9_./+@-]*\.(?:py|sh|bash|zsh|mjs|js|ts)\b")
+_UPDATED_INPUT = re.compile(r"updatedInput|updated_input")
+
+
+def _script_paths(text: str, plugin_root: str = "") -> List[str]:
+    expanded = text.replace("${CLAUDE_PLUGIN_ROOT}", plugin_root).replace("$CLAUDE_PLUGIN_ROOT", plugin_root)
+    expanded = os.path.expandvars(expanded)
+    return [os.path.expanduser(match) for match in _SCRIPT_REF.findall(expanded)]
+
+
+def can_emit_updated_input(command: str, plugin_root: str = "") -> bool:
+    """Does any script this registered command runs (or directly execs) mention updatedInput?"""
+    seen: set = set()
+    queue = [(item, 0) for item in _script_paths(command, plugin_root)]
+    while queue:
+        script, depth = queue.pop(0)
+        if script in seen or os.path.basename(script) in GUARD_FILES or not os.path.isfile(script):
+            continue
+        seen.add(script)
+        try:
+            with open(script, errors="replace") as handle:
+                content = handle.read()
+        except OSError:
+            continue
+        if _UPDATED_INPUT.search(content):
+            return True
+        if depth < 1:
+            queue.extend((item, depth + 1) for item in _script_paths(content, plugin_root))
+    return False
+
+
+def _settings_documents(cwd: str) -> Tuple[List[Tuple[str, Dict[str, Any], str]], List[str]]:
+    """(source, document, plugin_root) for every settings file in force, plus problems found reading them."""
+    problems: List[str] = []
+    documents: List[Tuple[str, Dict[str, Any], str]] = []
+    explicit = os.environ.get("ISSUE_CREATE_OWNER_SETTINGS_FILES")
+    home = Path.home() / ".claude"
+    if explicit is not None:
+        candidates = [Path(item) for item in explicit.split(os.pathsep) if item]
+    else:
+        candidates = [home / "settings.json", home / "settings.local.json",
+                      Path("/Library/Application Support/ClaudeCode/managed-settings.json")]
+        try:
+            current = Path(cwd).resolve()
+        except OSError:
+            current = Path.cwd()
+        for directory in [current, *current.parents]:
+            candidates += [directory / ".claude" / "settings.json", directory / ".claude" / "settings.local.json"]
+    seen: set = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen or not candidate.is_file():
+            continue
+        seen.add(key)
+        try:
+            with open(str(candidate)) as handle:
+                document = json.load(handle)
+        except (OSError, ValueError) as exc:
+            problems.append(f"settings file {candidate} could not be read ({type(exc).__name__})")
+            continue
+        if isinstance(document, dict):
+            documents.append((key, document, ""))
+    if explicit is None:
+        enabled: Dict[str, Any] = {}
+        for _, document, _ in documents:
+            plugins = document.get("enabledPlugins")
+            if isinstance(plugins, dict):
+                enabled.update(plugins)
+        for name, on in enabled.items():
+            if on is not True:
+                continue
+            plugin, _, market = str(name).partition("@")
+            versions = sorted((home / "plugins" / "cache" / market / plugin).glob("*"))
+            if not versions:
+                continue
+            root = versions[-1]
+            hooks_file = root / "hooks" / "hooks.json"
+            if hooks_file.is_file():
+                try:
+                    with open(str(hooks_file)) as handle:
+                        document = json.load(handle)
+                except (OSError, ValueError) as exc:
+                    problems.append(f"plugin hooks {hooks_file} could not be read ({type(exc).__name__})")
+                    continue
+                if isinstance(document, dict):
+                    documents.append((str(hooks_file), document, str(root)))
+    return documents, problems
+
+
+def discover_rewrite_handlers(cwd: str) -> Tuple[List[Tuple[str, str]], List[str]]:
+    """Every registered PreToolUse Bash command whose scripts can emit updatedInput: [(label, command)]."""
+    documents, problems = _settings_documents(cwd)
+    handlers: List[Tuple[str, str]] = []
+    seen: set = set()
+    for source, document, plugin_root in documents:
+        entries = (document.get("hooks") or {}).get("PreToolUse") or []
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            matcher = entry.get("matcher") or ""
+            try:
+                applies = matcher in ("", "*") or re.fullmatch(matcher, "Bash") is not None
+            except re.error:
+                applies = matcher == "Bash"
+            if not applies:
+                continue
+            for hook in entry.get("hooks") or []:
+                if not isinstance(hook, dict) or hook.get("type", "command") != "command" or not hook.get("command"):
+                    continue
+                command = str(hook["command"]).replace("${CLAUDE_PLUGIN_ROOT}", plugin_root)
+                if command in seen or any(name in command for name in GUARD_FILES):
+                    continue
+                seen.add(command)
+                if can_emit_updated_input(command, plugin_root):
+                    refs = _script_paths(command, plugin_root)
+                    label = os.path.basename(refs[-1]) if refs else command[:48]
+                    handlers.append((label, command))
+    return handlers, problems
+
+
+def _handler_violation(returncode: int, stdout: bytes) -> Optional[str]:
+    if returncode != 0:
+        return f"exit {returncode}"
+    for line in stdout.decode("utf-8", "replace").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(value, dict):
+            continue
+        output = value.get("hookSpecificOutput")
+        if isinstance(output, dict) and ("updatedInput" in output or output.get("permissionDecision") in ("deny", "ask")):
+            return "would rewrite or deny it"
+        if str(value.get("decision", "")).lower() == "block":
+            return "would block it"
+    return None
 
 
 def cmd_preserve() -> int:
-    """PreToolUse guard: prove every command rewriter is a no-op on this exact payload.
+    """PreToolUse guard: prove every rewrite handler in force is a no-op on this exact payload.
 
-    The rewriters run in parallel with the guard on the same payload and are pure functions of it
+    The handlers run in parallel with the guard on the same payload and are pure functions of it
     (a JSON document in, an optional updatedInput/deny document out), so running them here shows
-    exactly what they would do. Any output or failure means the command might not reach the shell
-    as written: block it before anything runs or is written.
+    exactly what they would do. The set is DISCOVERED from the settings in force, not assumed.
+    Any rewrite, deny, failure, or a handler that cannot be run or read means the command might not
+    reach the shell as written: block it before anything runs or is written.
     """
-    payload = sys.stdin.read()
+    raw = sys.stdin.read()
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        payload = {}
+    cwd = payload.get("cwd") if isinstance(payload, dict) and payload.get("cwd") else os.getcwd()
+    run_cwd = cwd if os.path.isdir(cwd) else None
     offenders: List[str] = []
-    for script in rewriter_hooks():
-        argv = ["bash", script] if script.endswith(".sh") else [sys.executable, script]
-        name = os.path.basename(script)
+    runs: List[Tuple[str, Any, bool]] = []
+    explicit = os.environ.get("ISSUE_CREATE_OWNER_REWRITER_HOOKS")
+    if explicit is not None:
+        for script in (item for item in explicit.split(os.pathsep) if item):
+            argv = ["bash", script] if script.endswith(".sh") else [sys.executable, script]
+            runs.append((os.path.basename(script), argv, False))
+    else:
+        handlers, problems = discover_rewrite_handlers(cwd)
+        offenders.extend(problems)
+        runs.extend((label, command, True) for label, command in handlers)
+    for label, spec, use_shell in runs:
         try:
-            proc = subprocess.run(argv, input=payload.encode("utf-8", "surrogateescape"),
-                                  capture_output=True, timeout=20, env=os.environ.copy())
+            proc = subprocess.run(
+                spec, shell=use_shell, executable="/bin/bash" if use_shell else None,
+                input=raw.encode("utf-8", "surrogateescape"), capture_output=True, timeout=20,
+                env=os.environ.copy(), cwd=run_cwd,
+            )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            offenders.append(f"{name} (could not be run: {type(exc).__name__})")
+            offenders.append(f"{label} (could not be run: {type(exc).__name__})")
             continue
-        if proc.returncode != 0:
-            offenders.append(f"{name} (exit {proc.returncode})")
-        elif proc.stdout.strip():
-            offenders.append(f"{name} (would rewrite or deny it)")
+        violation = _handler_violation(proc.returncode, proc.stdout)
+        if violation:
+            offenders.append(f"{label} ({violation})")
     if offenders:
         print(json.dumps({"decision": "block", "message": (
-            "BLOCKED: command rewriter(s) " + ", ".join(offenders) + " would not pass this create-owner "
+            "BLOCKED: command rewrite handler(s) " + ", ".join(offenders) + " would not pass this create-owner "
             "invocation through unchanged, so it would not reach the shell as written. Nothing ran and nothing "
             "was written. Remove the text they key on (put long or special body text in a literal --body-file) "
             "and run the owner again."
@@ -1024,6 +1356,8 @@ def cmd_create(args: List[str]) -> int:
 def main(argv: List[str]) -> int:
     if len(argv) >= 2 and argv[1] == "classify":
         return cmd_classify()
+    if len(argv) >= 2 and argv[1] == "extract":
+        return cmd_extract()
     if len(argv) >= 2 and argv[1] == "preserve":
         return cmd_preserve()
     if len(argv) >= 2 and argv[1] == "create":

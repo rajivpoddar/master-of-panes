@@ -1034,38 +1034,191 @@ def test_audit_hook_reads_every_body_consumer_through_the_one_stream():
     assert 'BODY=$(cat "$MOP_ISSUE_CREATE_BODY_FILE"' not in text
     assert "MOP_ISSUE_CREATE_BODY_FILE" not in text
     assert 'BODY_SHA=$(sha256_of "$BODY_OR_CMD")' not in text
+    # The perl regex extractors (only --body/--body-file, via command substitution) are gone: the
+    # byte-preserving `extract` parser is the only way a raw create's title and body are read.
+    for forbidden in ("perl", "extract_body", "extract_title", "BODY_OR_CMD", 'BODY=$(', "OWNER_BODY_B64"):
+        assert forbidden not in text, forbidden
+    assert 'python3 "$ISSUE_CREATE_OWNER_PY" extract' in text
     for needle in ('SOURCE_RESULT=$(body_stream |', "body_stream | grep -aiE '^Status:",
                    "body_stream | grep -aE '<!-- audit-bypass", "BODY_SHA=$(body_stream | sha256_stream)"):
         assert needle in text, needle
 
 
-# Raw / compound / wrapped permit-required creates are denied before any permit write.
+# A SIMPLE raw create that holds a valid permit is denied before any permit write, in EVERY gh spelling.
 
-RAW_SHAPES = {
-    "raw_simple": 'gh issue create --title "{title}" --body-file {body} --label status:todo',
-    "raw_compound": 'cd /tmp && gh issue create --title "{title}" --body-file {body} --label status:todo',
-    "raw_wrapped_env": 'env FOO=1 gh issue create --title "{title}" --body-file {body} --label status:todo',
-    "raw_wrapped_rtk": 'rtk gh issue create --title "{title}" --body-file {body} --label status:todo',
-    "raw_wrapped_shell": "bash -c 'gh issue create --title \"{title}\" --body-file {body} --label status:todo'",
+RAW_SIMPLE_SPELLINGS = {
+    "long_flags": 'gh issue create --title "{title}" --body-file {body} --label status:todo',
+    "short_flags": "gh issue create -t '{title}' -F {body} -l status:todo",
+    "equals_forms": "gh issue create --title='{title}' --body-file={body}",
+    "attached_short": "gh issue create -t'{title}' -F{body}",
+    "body_first": "gh issue create -F {body} --title '{title}'",
+    "single_quoted_path": "gh issue create -t '{title}' -F '{body}'",
+    "absolute_gh": "/opt/homebrew/bin/gh issue create -t '{title}' -F {body}",
 }
 
 
-@pytest.mark.parametrize("shape", sorted(RAW_SHAPES))
-def test_raw_permit_required_create_is_denied_before_any_permit_write(tmp_path, shape):
+@pytest.mark.parametrize("shape", sorted(RAW_SIMPLE_SPELLINGS))
+def test_simple_raw_permit_required_create_is_denied_before_any_permit_write_in_every_spelling(tmp_path, shape):
     title = f"Behavioral test: raw {shape}"
     body = f"Source: {CHANNEL}:{THREAD}\nDescription: raw create with a valid permit.\n"
     env = _env(tmp_path)
     _write_permit_for_body(tmp_path, body, title)
     body_file = tmp_path / "issue_body.md"
-    command = RAW_SHAPES[shape].format(title=title, body=body_file)
+    command = RAW_SIMPLE_SPELLINGS[shape].format(title=title, body=body_file)
     result = _run_pre_audit(env, body, title, tmp_path, stage=False, command=command)
     assert result.returncode == 0, result.stderr
     decision = json.loads(result.stdout.strip().splitlines()[-1])
     assert decision["decision"] == "block"
-    assert "single create owner" in decision["message"]
+    assert "single create owner" in decision["message"], "the permit must have been recognised"
     assert "issue-create-owner.py create" in decision["message"]
     assert "was NOT run" in decision["message"]
     _assert_nothing_written(tmp_path)
+
+
+# ALL compound or wrapped creates are denied upfront, with or without a permit: nothing is parsed,
+# classified or written.
+
+RAW_COMPOUND_OR_WRAPPED = {
+    "compound_and": 'cd /tmp && gh issue create --title "t" --body-file {body}',
+    "compound_semicolon": 'gh issue create --title "t" --body-file {body}; echo done',
+    "piped": 'gh issue create --title "t" --body-file {body} | cat',
+    "redirected": 'gh issue create --title "t" --body-file {body} 2>&1',
+    "subshell": '(gh issue create --title "t" --body-file {body})',
+    "wrapped_env": 'env FOO=1 gh issue create --title "t" --body-file {body}',
+    "wrapped_assignment": 'FOO=1 gh issue create --title "t" --body-file {body}',
+    "wrapped_rtk": 'rtk gh issue create --title "t" --body-file {body}',
+    "wrapped_shell": "bash -c 'gh issue create --title \"t\" --body-file {body}'",
+    "wrapped_eval": 'eval "gh issue create --title t --body-file {body}"',
+    "xargs": 'echo x | xargs gh issue create --title t',
+}
+
+
+@pytest.mark.parametrize("with_permit", [True, False])
+@pytest.mark.parametrize("shape", sorted(RAW_COMPOUND_OR_WRAPPED))
+def test_every_compound_or_wrapped_create_is_denied_upfront_with_or_without_a_permit(tmp_path, shape, with_permit):
+    title = "t"
+    body = f"Source: {CHANNEL}:{THREAD}\nDescription: compound.\n<!-- audit-bypass: internal-followup -->\n"
+    recorder = tmp_path / "pm-ops-recorder.sh"
+    recorder.write_text('#!/bin/sh\necho "$@" >> "$PM_OPS_RECORD"\necho 4242\n')
+    recorder.chmod(0o755)
+    record = tmp_path / "pm-ops-calls.log"
+    env = dict(
+        _env(tmp_path),
+        EXPLORE_ISSUE_CUSTOMER_CHANNELS_REGEX=f"^{CHANNEL}$",
+        EXPLORE_ISSUE_PM_OPS_CLI=str(recorder),
+        PM_OPS_RECORD=str(record),
+    )
+    body_file = tmp_path / "issue_body.md"
+    body_file.write_text(body)
+    if with_permit:
+        _write_permit_for_body(tmp_path, body, title)
+    command = RAW_COMPOUND_OR_WRAPPED[shape].format(body=body_file)
+    result = subprocess.run(
+        ["bash", str(PRE_AUDIT)], input=json.dumps({"tool_input": {"command": command}}),
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    decision = json.loads(result.stdout.strip().splitlines()[-1])
+    assert decision["decision"] == "block"
+    assert "ONLY command" in decision["message"] and "refused upfront" in decision["message"]
+    assert "Nothing was run and nothing was written" in decision["message"]
+    assert not record.exists(), "no obligation upsert"
+    for name in ("state", "slack", "inflight", "consumed", "pending", "reconciled"):
+        assert not (tmp_path / name).exists(), name
+    assert (tmp_path / "permits" / f"{KEY}.permit.json").exists() == with_permit
+
+
+# The bypass this closes: the old perl extraction knew only --body-file/--body, so a raw create using
+# gh's other spellings never had its Source line read and escaped the customer-origin / permit gates.
+
+EVASION_SPELLINGS = {
+    "short_F": "gh issue create -t 'customer bug' -F {body} -l status:todo",
+    "short_b_inline": "gh issue create -t 'customer bug' -b 'Source: {channel}:{thread}' -l status:todo",
+    "equals_body_file": "gh issue create --title='customer bug' --body-file={body}",
+    "equals_body": "gh issue create --title='customer bug' --body='Source: {channel}:{thread}'",
+    "single_quoted_path": "gh issue create -t 'customer bug' -F '{body}'",
+    "attached_F": "gh issue create -t 'customer bug' -F{body}",
+    "double_quoted_inline": 'gh issue create --title "customer bug" -b "Source: {channel}:{thread}"',
+}
+
+
+@pytest.mark.parametrize("shape", sorted(EVASION_SPELLINGS))
+def test_every_gh_spelling_of_the_body_flags_reaches_the_customer_origin_gate(tmp_path, shape):
+    body = f"Source: {CHANNEL}:{THREAD}\nDescription: customer report in an alias spelling.\n"
+    body_file = tmp_path / "issue_body.md"
+    body_file.write_text(body)
+    recorder = tmp_path / "pm-ops-recorder.sh"
+    recorder.write_text('#!/bin/sh\necho "$@" >> "$PM_OPS_RECORD"\necho 4242\n')
+    recorder.chmod(0o755)
+    record = tmp_path / "pm-ops-calls.log"
+    env = dict(
+        _env(tmp_path),
+        EXPLORE_ISSUE_CUSTOMER_CHANNELS_REGEX=f"^{CHANNEL}$",
+        EXPLORE_ISSUE_PM_OPS_CLI=str(recorder),
+        PM_OPS_RECORD=str(record),
+    )
+    command = EVASION_SPELLINGS[shape].format(body=body_file, channel=CHANNEL, thread=THREAD)
+    result = subprocess.run(
+        ["bash", str(PRE_AUDIT)], input=json.dumps({"tool_input": {"command": command}}),
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    decision = json.loads(result.stdout.strip().splitlines()[-1])
+    assert decision["decision"] == "block" and "Customer-origin" in decision["message"], decision
+    assert record.exists() and "obligation-upsert" in record.read_text()
+
+
+VALID_NON_PERMIT_SPELLINGS = {
+    "long_flags": 'gh issue create --title "internal follow-up" --body-file {body} --label status:todo',
+    "short_flags": "gh issue create -t 'internal follow-up' -F {body} -l status:todo",
+    "equals_forms": "gh issue create --title='internal follow-up' --body-file={body}",
+    "inline_body": "gh issue create -t 'internal follow-up' -b 'internal <!-- audit-bypass: internal-followup -->'",
+    "milestone_and_assignee": "gh issue create -t 'internal follow-up' -F {body} -m 'M1' -a someone",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(VALID_NON_PERMIT_SPELLINGS))
+def test_valid_non_permit_simple_creates_are_unchanged(tmp_path, shape):
+    body_file = tmp_path / "issue_body.md"
+    body_file.write_text("Internal follow-up body.\n<!-- audit-bypass: internal-followup -->\n")
+    command = VALID_NON_PERMIT_SPELLINGS[shape].format(body=body_file)
+    result = subprocess.run(
+        ["bash", str(PRE_AUDIT)], input=json.dumps({"tool_input": {"command": command}}),
+        capture_output=True, text=True, env=_env(tmp_path), timeout=60,
+    )
+    assert (result.returncode, result.stdout) == (0, ""), result.stdout
+
+
+FAIL_CLOSED_COMMANDS = {
+    "unknown_flag": ("ambiguous", "gh issue create -t x -b y --frobnicate"),
+    "duplicate_title": ("ambiguous", "gh issue create -t x -t y -b z"),
+    "duplicate_body": ("ambiguous", "gh issue create -t x -b y -b z"),
+    "body_and_file": ("ambiguous", "gh issue create -t x -b y -F /tmp/b.md"),
+    "positional": ("ambiguous", "gh issue create -t x -b y stray"),
+    "dollar_variable_title": ("expansion", 'gh issue create -t "$TITLE" -b y'),
+    "command_substitution_body": ("expansion", 'gh issue create -t x -b "$(cat /tmp/b.md)"'),
+    "backtick_body": ("expansion", 'gh issue create -t x -b "`cat /tmp/b.md`"'),
+    "glob_path": ("expansion", "gh issue create -t x -F /tmp/b*.md"),
+    "brace_list": ("expansion", "gh issue create -t x -b {a,b}"),
+    "stdin_body_file": ("unreadable", "gh issue create -t x -F -"),
+    "unreadable_body_file": ("unreadable", "gh issue create -t x -F /nonexistent/never-written.md"),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(FAIL_CLOSED_COMMANDS))
+def test_ambiguous_or_unreadable_simple_creates_fail_closed_before_any_write(tmp_path, shape):
+    error_class, command = FAIL_CLOSED_COMMANDS[shape]
+    result = subprocess.run(
+        ["bash", str(PRE_AUDIT)], input=json.dumps({"tool_input": {"command": command}}),
+        capture_output=True, text=True, env=_env(tmp_path), timeout=60,
+    )
+    decision = json.loads(result.stdout.strip().splitlines()[-1])
+    assert decision["decision"] == "block"
+    if error_class == "unreadable":
+        assert "cannot be read when this hook runs" in decision["message"]
+    else:
+        assert f"({error_class}:" in decision["message"] and "cannot be parsed unambiguously" in decision["message"]
+    for name in ("state", "slack", "inflight", "consumed", "pending", "permits"):
+        assert not (tmp_path / name).exists(), name
 
 
 OWNER_PATH = "/Users/rajiv/.claude/hooks/issue-create-owner.py"
