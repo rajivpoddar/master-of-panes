@@ -442,6 +442,34 @@ class StoppedCutoverTests(unittest.TestCase):
         self.assertEqual(self.events, ["bootout", "replace", "replace", "bootstrap:new", "bootout", "bootstrap:old"])
         self.assertTrue(self.owned)
 
+    def test_rollback_preserves_foreign_replacement_after_preimage_capture(self):
+        _, target = self.add_new_absent_target()
+        self.set_inventory()
+        self.fail_health = True
+        original = m._file_preimage
+        replaced = False
+        errors = io.StringIO()
+
+        def replace_after_capture(path):
+            nonlocal replaced
+            preimage = original(path)
+            if path == target and not replaced and self.current.resolve() == self.new and not self.owned:
+                replacement = target.with_name("foreign-replacement")
+                replacement.write_text("fresh foreign bytes\n")
+                os.replace(replacement, target)
+                replaced = True
+            return preimage
+
+        with contextlib.redirect_stderr(errors):
+            with patch.object(m, "_file_preimage", side_effect=replace_after_capture), \
+                 patch.object(contextlib, "redirect_stderr", return_value=contextlib.nullcontext()):
+                self.assertEqual(self.activate(), 2)
+        self.assertTrue(replaced)
+        self.assertEqual(target.read_text(), "fresh foreign bytes\n")
+        self.assertIn("RECOVERY_BLOCKED", errors.getvalue())
+        self.assertIn("fresh shared drift during rollback", errors.getvalue())
+        self.assertNotIn("bootstrap:old", self.events)
+
     def test_target_that_exists_with_unexpected_bytes_still_refuses(self):
         _, target = self.add_new_absent_target()
         target.write_text("someone else's file\n")

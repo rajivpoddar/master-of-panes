@@ -1228,6 +1228,8 @@ def restore_rollback_bundle(bundle: Path, *, only_if_current: dict[str, str] | N
             if target.exists() or target.is_symlink():
                 if target.is_dir() and not target.is_symlink():
                     raise InstallerError(f"cannot remove directory during rollback: {target}")
+                if current_preimage is not None and _file_preimage(target) != current_preimage:
+                    raise InstallerError(f"fresh shared drift during rollback: {target}; kept fresh bytes")
                 target.unlink()
             continue
         payload = bundle / entry["payload"]
