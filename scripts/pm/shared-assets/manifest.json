@@ -339,7 +339,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-buddhi",
-      "sha256": "39f8bc448cc029765910ec595bae6360aef80671b2c5a2de015daa5df5b45ba6",
+      "sha256": "c22b30685a45590419a2ade2a8405b8bb1d5bc8d3028d5c03841d259201abe1f",
       "source_path": "claude/rules/20-buddhi-pm.md"
     },
     {
@@ -1809,7 +1809,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill-executable",
-      "sha256": "a5f78ea0436dbdd9dc25558db5d69a0e6e7984499ea329f63b455d118048a525",
+      "sha256": "e779199d2ab7620aa914fe3eef242395c1737b2ada5c8a425704db5d15ce64c7",
       "source_path": "codex/skills/heydonna-open-pr-status/scripts/merge.py"
     },
     {
