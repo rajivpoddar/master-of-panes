@@ -117,10 +117,13 @@ for index, part in enumerate(parts):
         body_files.append(parts[index + 1])
     elif part.startswith("--body-file="):
         body_files.append(part.split("=", 1)[1])
+# Create owner stage: `--body-file -` is the in-memory buffer of the create owner, not an unnamed stdin.
+owner_stage = os.environ.get("MOP_ISSUE_CREATE_STAGE") == "audit"
 unsafe_body = any(
-    path == "-"
-    or not os.path.isfile(os.path.expanduser(path))
-    or not os.access(os.path.expanduser(path), os.R_OK)
+    (path == "-" and not owner_stage)
+    or (path != "-"
+        and (not os.path.isfile(os.path.expanduser(path))
+             or not os.access(os.path.expanduser(path), os.R_OK)))
     for path in body_files
 )
 print(len(pattern.findall(command)), "unsafe" if unsafe_body else "safe")

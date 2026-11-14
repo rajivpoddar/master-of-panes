@@ -23,20 +23,39 @@
 # open/in-progress obligation.
 #
 # Logic:
+# 0. SINGLE CHAIN. A permit-required create runs ONLY through the single owner
+#    (issue-create-owner.py create ...): one process captures the body bytes
+#    once, runs this script as stage `audit` (MOP_ISSUE_CREATE_STAGE=audit) and
+#    the ledger/tracker hook on those same bytes, then locks, records durable
+#    in-flight state, feeds gh the identical bytes on stdin and consumes the
+#    permit only on a verified issue URL. This hook therefore:
+#      - lets a single simple owner command through (the owner runs every gate)
+#        once every discovered PreToolUse rewrite handler is proven a no-op on it,
+#      - denies an owner command that is compound or wrapped,
+#      - denies EVERY compound or wrapped raw `gh issue create` upfront (permit
+#        or not), before any parsing, classification or write,
+#      - parses a SIMPLE raw create with a byte-preserving parser (`extract`:
+#        every gh spelling -t/-b/-F/--body-file=..., attached values, any
+#        quoting) and fails closed on anything ambiguous or unreadable,
+#      - denies a simple raw create whose source holds a valid permit, BEFORE any
+#        permit write; a valid non-permit simple create is unchanged.
+#    It never writes a permit pending file and never consumes a permit.
 # 1. Only fire on `gh issue create` (not list/view/edit/close/comment).
-# 2. Extract issue body (from --body or --body-file) and --title.
+# 2. Extract the exact issue body bytes (--body/-b or --body-file/-F) and the
+#    title (--title/-t) through `extract`. In stage `audit` the owner hands them
+#    over verbatim; they are never re-parsed.
 # 3. Extract Slack thread refs from the body; derive CHANNEL/THREAD_TS.
 # 4. PERMIT GATE: a valid READY_TO_FILE permit for this source
-#    (channel/thread_ts/body SHA/title digest all bound) is consumed atomically
-#    and the create is ALLOWED. A drifted permit is rejected fail-closed.
+#    (channel/thread_ts/body SHA/title digest all bound) releases the create
+#    ONLY in stage `audit` (the owner prints a machine-readable marker). A raw
+#    permit-required create is denied. A drifted permit is rejected fail-closed.
 # 5. Otherwise classify origin (Slack API cache / bot allowlist / internal IDs /
 #    keyword fallback).
 # 6. Customer-origin → BLOCK + atomically upsert ONE obligation keyed by the
 #    Slack source + write the per-source OPEN state record. audit-bypass markers
 #    are NOT accepted for customer-origin.
 # 7. Internal/unknown with bypass marker → allow (unchanged).
-# 8. Non-customer without marker → existing MoP Codex-evidence gate + CONFIRMED
-#    verdict check (unchanged).
+# 8. Non-customer without marker → CONFIRMED verdict check (unchanged).
 
 set -euo pipefail
 
@@ -46,6 +65,59 @@ CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)
 if [ -z "$CMD" ]; then
   exit 0
 fi
+
+# Cheap superset prefilter: only a command that mentions an issue create or the
+# single owner reaches the shape classifier below. Every other Bash call exits
+# here without spawning anything.
+case "$CMD" in
+  *issue*create*|*issue-create-owner*) ;;
+  *) exit 0 ;;
+esac
+
+OWNER_STAGE="${MOP_ISSUE_CREATE_STAGE:-}"
+ISSUE_CREATE_OWNER_PY="${ISSUE_CREATE_OWNER:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/issue-create-owner.py}"
+
+# Shape of the command: owner_simple | owner_unsafe | raw_simple | raw_compound |
+# raw_wrapped | none. In stage `audit` the owner synthesised a plain create and
+# already holds the exact bytes, so no classification is needed.
+SHAPE="raw_simple"
+if [ -z "$OWNER_STAGE" ]; then
+  SHAPE="$(printf '%s' "$INPUT" | python3 "$ISSUE_CREATE_OWNER_PY" classify 2>/dev/null | jq -r '.kind // empty' 2>/dev/null || true)"
+  [ -n "$SHAPE" ] || SHAPE="unclassified"
+fi
+
+case "$SHAPE" in
+  owner_simple)
+    # The owner is the single chain: it runs this script (stage audit), the
+    # ledger/tracker hook, the shared permit lock, the in-flight record, gh and
+    # the permit consumption itself. No permit decision and no write happen
+    # here. The one thing this guard proves is that the command reaches the
+    # shell unchanged: every PreToolUse Bash rewrite handler registered in the
+    # settings in force runs in parallel with this hook on the same payload and is
+    # a pure function of it, so `preserve` DISCOVERS them (user, local, managed,
+    # every project level from the payload cwd up, enabled plugins; no fixed list)
+    # and dry-runs each one. The invocation is let through only if none would
+    # rewrite, deny or block it; otherwise it is blocked BEFORE anything runs,
+    # naming the handler. No live hook is modified.
+    PRESERVE_BLOCK="$(printf '%s' "$INPUT" | python3 "$ISSUE_CREATE_OWNER_PY" preserve 2>/dev/null)" \
+      || PRESERVE_BLOCK='{"decision":"block","message":"BLOCKED: the guard could not prove that the command rewriters pass this create-owner invocation through unchanged (the preserve check failed). Nothing ran and nothing was written."}'
+    if [ -n "$PRESERVE_BLOCK" ]; then
+      printf '%s\n' "$PRESERVE_BLOCK"
+    fi
+    exit 0
+    ;;
+  owner_unsafe)
+    printf '%s\n' '{"decision":"block","message":"BLOCKED: the single create owner must be the ONLY command in the Bash call: exactly `python3 <owner> create <flags>` (or the owner path directly). Compound forms (; && || | &, subshell, redirection, heredoc, newline), wrapped forms (env, bash -c, xargs, time, rtk, ...), other subcommands and mixing it with a raw gh issue create are refused before any permit is written. No permit was written or consumed."}'
+    exit 0
+    ;;
+  raw_compound|raw_wrapped)
+    # ALL compound or wrapped creates are denied upfront, permit or not: their real title/body
+    # cannot be parsed reliably, so none of the Source/verdict/permit gates could be trusted for
+    # them. Nothing is read, classified or written.
+    printf '%s\n' '{"decision":"block","message":"BLOCKED: a gh issue create must be the ONLY command in the Bash call. Compound forms (; && || | &, subshell, redirection, heredoc, newline, cd ... &&) and wrapped forms (env, VAR=value, bash -c, eval, xargs, time, rtk, sudo, ...) are refused upfront, before any source, verdict or permit check. Nothing was run and nothing was written. Remedy: run exactly one simple gh issue create (a literal --body-file path, no wrapper, no operators); a create that needs a READY_TO_FILE permit runs through the single create owner instead."}'
+    exit 0
+    ;;
+esac
 
 # Split on pipeline operators to check each segment, skipping echo/cat/bash
 # blocks so we don't false-positive on quoted strings (same pattern as
@@ -62,7 +134,13 @@ while IFS= read -r seg; do
   fi
 done <<< "$(echo "$CMD" | tr ';' '\n' | tr '|' '\n' | tr '&' '\n')"
 
-if [ -z "$MATCH_GH_ISSUE_CREATE" ]; then
+if [ -z "$MATCH_GH_ISSUE_CREATE" ] && [ "$SHAPE" != "raw_simple" ]; then
+  exit 0
+fi
+if [ -n "$MATCH_GH_ISSUE_CREATE" ] && [ "$SHAPE" != "raw_simple" ]; then
+  # The classifier did not see a single simple create but the legacy scan did: ambiguous, so
+  # fail closed before anything is read or written.
+  printf '%s\n' '{"decision":"block","message":"BLOCKED: this command looks like a gh issue create but could not be classified as one single simple command (the shape check failed or disagreed). Refused before any source, verdict or permit check; nothing was run and nothing was written. Run exactly one simple gh issue create."}'
   exit 0
 fi
 
@@ -70,67 +148,65 @@ fi
 # Extract issue body content from --body or --body-file, and --title
 # ---------------------------------------------------------------------------
 FALLBACK_LOG=${EXPLORE_ISSUE_FALLBACK_LOG:-/tmp/pre-issue-audit-fallback.log}
+[ -z "$OWNER_STAGE" ] || FALLBACK_LOG=/dev/null
 SLACK_CACHE_DIR=${EXPLORE_ISSUE_SLACK_CACHE_DIR:-/tmp/slack-thread-cache}
-mkdir -p "$SLACK_CACHE_DIR" 2>/dev/null || true
 
-extract_body() {
-  local cmd="$1"
-  local body=""
-
-  # --body-file <path>
-  local body_file
-  body_file=$(echo "$cmd" | perl -ne 'if (/--body-file[\s=]+(?:"([^"]+)"|'\''([^'\'']+)'\''|(\S+))/) { print $1 || $2 || $3; exit }' 2>/dev/null || true)
-  if [ -n "$body_file" ] && [ -f "$body_file" ]; then
-    body=$(cat "$body_file" 2>/dev/null || true)
+# body_stream: every consumer of the issue body reads the body through this ONE function. The
+# bytes are held base64 encoded (BODY_B64) and decoded on every read, never kept in a shell variable
+# and never passed through command substitution, so trailing newlines and NUL bytes are preserved.
+#   stage audit  the EXACT buffer the owner put on this hook's stdin (.mop_issue_create.body_b64)
+#   raw stage    the exact bytes the byte-preserving parser (`extract`) read from --body/-b or from the
+#                --body-file/-F named in the one simple raw create; without a body flag, the command text
+BODY_B64=""
+TITLE=""
+BODY_FILE_PATH=""
+if [ -n "$OWNER_STAGE" ]; then
+  BODY_B64="$(printf '%s' "$INPUT" | jq -j '.mop_issue_create.body_b64 // empty' 2>/dev/null || true)"
+  if [ "$OWNER_STAGE" != "audit" ] || [ -z "$BODY_B64" ]; then
+    printf '%s\n' '{"decision":"block","message":"BLOCKED: the owner stage was invoked without the captured body buffer. Nothing was written."}'
+    exit 0
   fi
-
-  # --body "..." (only if body still empty)
-  if [ -z "$body" ]; then
-    body=$(echo "$cmd" | perl -ne 'BEGIN{$/=undef} if (/--body[\s=]+"((?:[^"\\]|\\.)*)"/s) { my $v=$1; $v =~ s/\\"/"/g; print $v; exit }' 2>/dev/null || true)
-  fi
-  if [ -z "$body" ]; then
-    body=$(echo "$cmd" | perl -ne "BEGIN{\$/=undef} if (/--body[\s=]+'((?:[^'\\\\]|\\\\.)*)'/s) { print \$1; exit }" 2>/dev/null || true)
-  fi
-
-  printf '%s' "$body"
-}
-
-extract_body_file() {
-  local cmd="$1"
-  echo "$cmd" | perl -ne 'if (/--body-file[\s=]+(?:"([^"]+)"|'\''([^'\'']+)'\''|(\S+))/) { print $1 || $2 || $3; exit }' 2>/dev/null || true
-}
-
-extract_title() {
-  local cmd="$1"
-  echo "$cmd" | perl -ne 'BEGIN{$/=undef} if (/--title[\s=]+"((?:[^"\\]|\\.)*)"/s) { my $v=$1; $v =~ s/\\"/"/g; print $v; exit }' 2>/dev/null || true
-}
-
-BODY=$(extract_body "$CMD")
-BODY_FILE_PATH=$(extract_body_file "$CMD")
-TITLE=$(extract_title "$CMD")
-# Fall back to whole command string if extraction yielded nothing — preserves
-# old behavior where the marker grep ran against the raw command.
-BODY_OR_CMD="${BODY:-$CMD}"
-
-# ---------------------------------------------------------------------------
-# Body-file hand-off contract (CP repair 2026-09-20, Rajiv directive
-# 1789902323.668159 "repair the issue create trap").
-#
-# The audit-bypass marker lives INSIDE the issue body. When --body-file names a
-# path this hook cannot read (a file that does not exist yet, or a path still
-# written as an unresolved shell variable), BODY is empty and the old fallback
-# to the raw command produced the WRONG remedy ("requires prior Codex
-# architecture review") while the ledger hook independently refused the same
-# command for the unreadable body file - a contradictory double block whose
-# combined advice was unsatisfiable. Refuse once, with the one remedy that
-# satisfies both hooks.
-# ---------------------------------------------------------------------------
-if [ -n "$BODY_FILE_PATH" ] && { [ ! -f "$BODY_FILE_PATH" ] || [ ! -r "$BODY_FILE_PATH" ]; }; then
-  cat <<BLOCK
+  BODY_FILE_PATH="$(printf '%s' "$INPUT" | jq -j '.mop_issue_create.body_display // empty' 2>/dev/null || true)"
+  TITLE="$(printf '%s' "$INPUT" | jq -j '.mop_issue_create.title // empty' 2>/dev/null || true)"
+else
+  EXTRACTED="$(printf '%s' "$INPUT" | python3 "$ISSUE_CREATE_OWNER_PY" extract 2>/dev/null || true)"
+  if [ -z "$EXTRACTED" ] || [ "$(printf '%s' "$EXTRACTED" | jq -r '.ok // false' 2>/dev/null || echo false)" != "true" ]; then
+    EXTRACT_CLASS="$(printf '%s' "$EXTRACTED" | jq -j '.error_class // empty' 2>/dev/null || true)"
+    EXTRACT_ERROR="$(printf '%s' "$EXTRACTED" | jq -j '.error // empty' 2>/dev/null || true)"
+    BODY_FILE_PATH="$(printf '%s' "$EXTRACTED" | jq -j '.body_display // empty' 2>/dev/null || true)"
+    # ---------------------------------------------------------------------
+    # Body-file hand-off contract (CP repair 2026-09-20, Rajiv directive
+    # 1789902323.668159 "repair the issue create trap").
+    #
+    # The audit-bypass marker lives INSIDE the issue body. When --body-file names a
+    # path this hook cannot read (a file that does not exist yet, or a path still
+    # written as an unresolved shell variable), the body - including any marker -
+    # cannot be classified. Refuse once, with the one remedy that satisfies both
+    # this hook and the ledger hook.
+    # ---------------------------------------------------------------------
+    if [ "$EXTRACT_CLASS" = "unreadable" ]; then
+      cat <<BLOCK
 {"decision": "block", "message": "BLOCKED: --body-file '${BODY_FILE_PATH}' cannot be read when this hook runs (missing file, an existing file the hook may not read, or a path that is still an unresolved shell variable), so the issue body - including any <!-- audit-bypass: internal-followup --> marker - cannot be classified. Remedy: write the completed body to a LITERAL path in a previous Write/Edit step, validate it, then run exactly one gh issue create with that literal --body-file path. Do not compute the path with a shell variable and do not create the body file inside the same Bash call."}
 BLOCK
-  exit 0
+      exit 0
+    fi
+    # Anything else is ambiguous: fail closed before any source, verdict or permit check.
+    BLOCK_MESSAGE="BLOCKED: this gh issue create cannot be parsed unambiguously at hook time (${EXTRACT_CLASS:-parser failure}: ${EXTRACT_ERROR:-no parser output}). Refused before any source, verdict or permit check; nothing was run and nothing was written. Remedy: one simple gh issue create with literal arguments only (single-quote values; no \$VAR, backticks, globs or brace lists) and the body in a literal --body-file path."
+    jq -nc --arg message "$BLOCK_MESSAGE" '{decision: "block", message: $message}'
+    exit 0
+  fi
+  TITLE="$(printf '%s' "$EXTRACTED" | jq -j '.title // empty' 2>/dev/null || true)"
+  BODY_FILE_PATH="$(printf '%s' "$EXTRACTED" | jq -j '.body_display // empty' 2>/dev/null || true)"
+  if [ "$(printf '%s' "$EXTRACTED" | jq -r '.has_body // false' 2>/dev/null)" = "true" ]; then
+    BODY_B64="$(printf '%s' "$EXTRACTED" | jq -j '.body_b64 // empty' 2>/dev/null || true)"
+  else
+    # No body flag: keep the legacy behaviour of classifying the command text itself.
+    BODY_B64="$(printf '%s' "$CMD" | python3 -c 'import base64, sys; sys.stdout.write(base64.b64encode(sys.stdin.buffer.read()).decode("ascii"))')"
+  fi
 fi
+body_stream() {
+  printf '%s' "$BODY_B64" | python3 -c 'import base64, sys; sys.stdout.buffer.write(base64.b64decode(sys.stdin.read()))'
+}
 
 # sha256 helper (portable mac+linux)
 sha256_of() {
@@ -144,9 +220,21 @@ sha256_of() {
 # explore-issue-latch-guard: context-aware customer signal
 source "${EXPLORE_ISSUE_LATCH_GUARD:-/Users/rajiv/.claude/hooks/explore-issue-latch-guard.sh}"
 
-BODY_SHA=$(sha256_of "$BODY_OR_CMD")
+# The permit binds the EXACT body bytes: sha256 of the buffer / file, never of a command
+# substitution (which would drop trailing newlines and NUL bytes).
+sha256_stream() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  else
+    shasum -a 256 | awk '{print $1}'
+  fi
+}
+BODY_SHA=$(body_stream | sha256_stream)
 CMD_SHA=$(sha256_of "$CMD")
 TITLE_DIGEST=$(sha256_of "${TITLE:-}")
+# The Slack cache directory is only created once the create parsed unambiguously (a refused
+# command must not touch the disk) and never in stage audit.
+[ -n "$OWNER_STAGE" ] || mkdir -p "$SLACK_CACHE_DIR" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Slack thread / channel extraction
@@ -154,7 +242,7 @@ TITLE_DIGEST=$(sha256_of "${TITLE:-}")
 # Only a labelled Source/handoff line can supply the pair. Never combine a
 # channel from one line with a timestamp from quoted, unrelated material.
 # A reply URL must be corroborated by Slack's thread response before use.
-SOURCE_RESULT=$(printf '%s' "$BODY_OR_CMD" | python3 -c '
+SOURCE_RESULT=$(body_stream | python3 -c '
 import json, os, re, subprocess, sys, urllib.parse
 body = sys.stdin.read()
 lines = re.findall(r"(?im)^\s*(?:[-*]\s*)?(?:source|handoff)\s*:\s*(.*?)\s*$", body)
@@ -228,10 +316,12 @@ else:
     # Reuse the corroborated response for origin classification; a later reply
     # need not appear in the first ten messages fetched by the legacy path.
     data["channel"] = channel
-    try:
-        with open(cache + ".tmp." + str(os.getpid()), "w") as f: json.dump(data, f)
-        os.replace(cache + ".tmp." + str(os.getpid()), cache)
-    except OSError: pass
+    # Stage audit writes nothing: the cache is a memo of a Slack read, never an input to acceptance.
+    if os.environ.get("MOP_ISSUE_CREATE_STAGE") != "audit":
+        try:
+            with open(cache + ".tmp." + str(os.getpid()), "w") as f: json.dump(data, f)
+            os.replace(cache + ".tmp." + str(os.getpid()), cache)
+        except OSError: pass
     print(channel, root, reply)
 ' || true)
 CHANNEL=""
@@ -265,10 +355,9 @@ fi
 
 # ---------------------------------------------------------------------------
 # Verdict gate helpers — computed HERE, before the permit gate, so the
-# verdict check can run BEFORE explore_issue_write_permit_pending is called.
-# A verdict block must never strand a pending file (which the finalizer would
-# then try to consume); checking first keeps the permit intact for a corrected
-# retry.
+# verdict check runs before the audit stage reports the permit as valid to the
+# owner. A verdict block writes nothing (this script never writes a permit
+# record), so the permit stays intact for a corrected retry.
 # ---------------------------------------------------------------------------
 NOW=$(date +%s)
 WINDOW_START=$((NOW - 1800))
@@ -310,11 +399,11 @@ PYEOF
 # are preserved without change.
 _VG_CLAIMS_FIX=false
 _VG_CLAIMS_INVESTIGATION=false
-if printf '%s' "$BODY_OR_CMD" | grep -qiE '^Status:[[:space:]]*(FIX|CONFIRMED)'; then
+if body_stream | grep -aiE '^Status:[[:space:]]*(FIX|CONFIRMED)' >/dev/null; then
   _VG_CLAIMS_FIX=true
 fi
-if printf '%s' "$BODY_OR_CMD" | grep -qiE '^Status:[[:space:]]*INVESTIGATION' && \
-   printf '%s' "$BODY_OR_CMD" | grep -qiE '^Cause:[[:space:]]*(HYPOTHESIS|UNKNOWN)'; then
+if body_stream | grep -aiE '^Status:[[:space:]]*INVESTIGATION' >/dev/null && \
+   body_stream | grep -aiE '^Cause:[[:space:]]*(HYPOTHESIS|UNKNOWN)' >/dev/null; then
   _VG_CLAIMS_INVESTIGATION=true
 fi
 
@@ -329,8 +418,18 @@ if [ -n "$THREAD_TS" ]; then
     PERMIT_STATUS=$?
   fi
   if [ "$PERMIT_STATUS" = "0" ]; then
-    # Verdict gate BEFORE writing pending so a verdict block leaves no stranded
-    # pending file and the permit remains intact for a corrected retry.
+    if [ -z "$OWNER_STAGE" ]; then
+      # RAW permit-required create (simple, compound or wrapped): refuse BEFORE
+      # any permit write. The permit is never written, pended or consumed here;
+      # only the single owner may release it. The owner command is a plain
+      # script path, so the rewriting hooks (rtk, priority-label) cannot touch it.
+      cat <<BLOCK
+{"decision": "block", "message": "BLOCKED: ${CHANNEL}:${THREAD_TS} holds a valid READY_TO_FILE permit, and a permit-required create may only run through the single create owner (one process captures the body bytes once, runs the source/verdict/permit and ledger/tracker gates on those bytes, records durable in-flight state before gh starts, feeds the identical bytes to gh on stdin and consumes the permit only on a verified issue URL). This ${SHAPE} command was NOT run; no permit was written or consumed. Remedy: run exactly one simple command and nothing else in the Bash call: python3 ${ISSUE_CREATE_OWNER_PY} create <the same flags as the gh issue create: --title ... --body-file ... --label ...>. Replace only the leading 'gh issue create'; no env prefix, no wrapper, no && ; | or redirection."}
+BLOCK
+      exit 0
+    fi
+    # Stage audit: the verdict gate runs on the owner's captured bytes. A verdict
+    # block here leaves nothing written, so the permit stays intact for a corrected retry.
     if [ -n "$THREAD_TS" ] && { [ "$_VG_CLAIMS_FIX" = "true" ] || [ "$_VG_CLAIMS_INVESTIGATION" = "true" ]; }; then
       _VERDICT_PATH="$(explore_issue_verdict_path "$CHANNEL" "$THREAD_TS" 2>/dev/null || true)"
       _VG_VERDICT="ABSENT"
@@ -358,13 +457,21 @@ if [ -n "$THREAD_TS" ]; then
         esac
       fi
     fi
-    # Verdict passed (or not applicable for this body type). Write pending;
-    # the finalizer hook (explore-issue-permit-consume-gate.sh) atomically
-    # consumes the permit right before gh runs.
-    if explore_issue_write_permit_pending "$CHANNEL" "$THREAD_TS" "$BODY_SHA" "$TITLE_DIGEST"; then
-      exit 0  # Pending written; finalizer will consume right before gh runs.
-    fi
-    PERMIT_STATUS=3  # Consumed guard hit: permit already consumed/UNKNOWN.
+    # Every gate in this stage passed. Report the bound identity to the owner as
+    # one machine-readable line. This script writes NOTHING: the lock, the
+    # in-flight record and the permit consumption belong to the owner alone.
+    jq -nc \
+      --arg key "${EXPLORE_ISSUE_SELECTED_KEY:-}" \
+      --arg channel "$CHANNEL" \
+      --arg thread_ts "$THREAD_TS" \
+      --arg source_message_ts "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-$THREAD_TS}" \
+      --arg body_sha256 "$BODY_SHA" \
+      --arg title_digest "$TITLE_DIGEST" \
+      --arg permit_file "$(explore_issue_permit_file "$CHANNEL" "$THREAD_TS")" \
+      --arg inflight_dir "$EXPLORE_ISSUE_INFLIGHT_DIR" \
+      --arg consumed_dir "$EXPLORE_ISSUE_CONSUMED_PERMIT_DIR" \
+      '{mop_issue_create_audit: {permit: "valid", key: $key, channel: $channel, thread_ts: $thread_ts, source_message_ts: $source_message_ts, body_sha256: $body_sha256, title_digest: $title_digest, permit_file: $permit_file, inflight_dir: $inflight_dir, consumed_dir: $consumed_dir}}'
+    exit 0
   fi
   if [ "$PERMIT_STATUS" = "3" ]; then
     printf '%s\n' '{"decision":"block","message":"BLOCKED: This source already consumed its create permit; the create result may be UNKNOWN. Reconcile by searching GitHub for the canonical Source permalink. Do not re-mint or create again for this source."}'
@@ -408,6 +515,7 @@ ORIGIN_REASON=""
 if [ -n "$THREAD_TS" ]; then
   CACHE_FILE="$SLACK_CACHE_DIR/${THREAD_TS}.json"
   USE_CACHE=""
+  SLACK_JSON_MEMORY=""
   if [ -f "$CACHE_FILE" ]; then
     MTIME=$(stat -c %Y "$CACHE_FILE" 2>/dev/null || stat -f %m "$CACHE_FILE" 2>/dev/null || echo 0)
     [ -z "$MTIME" ] && MTIME=0
@@ -425,21 +533,36 @@ if [ -n "$THREAD_TS" ]; then
       SLACK_BOT_TOKEN=$(grep -E '^SLACK_BOT_TOKEN=' "$ENV_LOCAL" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true)
     fi
     if [ -n "$SLACK_BOT_TOKEN" ]; then
-      curl -s --max-time 5 -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
-        "https://slack.com/api/conversations.replies?channel=${CHANNEL}&ts=${THREAD_TS}&limit=10" \
-        > "$CACHE_FILE" 2>/dev/null || true
+      if [ -n "$OWNER_STAGE" ]; then
+        # Stage audit: keep the Slack read in memory; write no cache file.
+        SLACK_JSON_MEMORY="$(curl -s --max-time 5 -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+          "https://slack.com/api/conversations.replies?channel=${CHANNEL}&ts=${THREAD_TS}&limit=10" 2>/dev/null || true)"
+      else
+        curl -s --max-time 5 -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+          "https://slack.com/api/conversations.replies?channel=${CHANNEL}&ts=${THREAD_TS}&limit=10" \
+          > "$CACHE_FILE" 2>/dev/null || true
+      fi
     else
       echo "[$(date -u +%FT%TZ)] no SLACK_BOT_TOKEN — falling back to regex" >> "$FALLBACK_LOG"
     fi
   fi
 
-  if [ -f "$CACHE_FILE" ] && [ -s "$CACHE_FILE" ]; then
-    OK=$(jq -r '.ok // false' "$CACHE_FILE" 2>/dev/null || echo "false")
+  # slack_json: the Slack thread JSON for the classification below. A fresh cache file when one
+  # exists; in stage audit a fresh fetch is held in memory instead of being written to disk.
+  slack_json() {
+    if [ -n "$OWNER_STAGE" ] && [ -z "$USE_CACHE" ] && [ -n "$SLACK_JSON_MEMORY" ]; then
+      printf '%s' "$SLACK_JSON_MEMORY"
+    else
+      cat "$CACHE_FILE" 2>/dev/null
+    fi
+  }
+  if [ -n "$(slack_json)" ]; then
+    OK=$(slack_json | jq -r '.ok // false' 2>/dev/null || echo "false")
     if [ "$OK" = "true" ]; then
-      ORIGINATOR_USER=$(jq -r --arg ts "$EXPLORE_ISSUE_SOURCE_MESSAGE_TS" --arg root "$THREAD_TS" '([.messages[]? | select(.ts == $ts)][0] // (if $ts == $root then .messages[0] else null end)).user // empty' "$CACHE_FILE" 2>/dev/null || true)
-      ORIGINATOR_USERNAME=$(jq -r --arg ts "$EXPLORE_ISSUE_SOURCE_MESSAGE_TS" --arg root "$THREAD_TS" '([.messages[]? | select(.ts == $ts)][0] // (if $ts == $root then .messages[0] else null end)).username // empty' "$CACHE_FILE" 2>/dev/null || true)
-      ORIGINATOR_BOT_ID=$(jq -r --arg ts "$EXPLORE_ISSUE_SOURCE_MESSAGE_TS" --arg root "$THREAD_TS" '([.messages[]? | select(.ts == $ts)][0] // (if $ts == $root then .messages[0] else null end)).bot_id // empty' "$CACHE_FILE" 2>/dev/null || true)
-      ORIGINATOR_APP_ID=$(jq -r --arg ts "$EXPLORE_ISSUE_SOURCE_MESSAGE_TS" --arg root "$THREAD_TS" '([.messages[]? | select(.ts == $ts)][0] // (if $ts == $root then .messages[0] else null end)).app_id // empty' "$CACHE_FILE" 2>/dev/null || true)
+      ORIGINATOR_USER=$(slack_json | jq -r --arg ts "$EXPLORE_ISSUE_SOURCE_MESSAGE_TS" --arg root "$THREAD_TS" '([.messages[]? | select(.ts == $ts)][0] // (if $ts == $root then .messages[0] else null end)).user // empty' 2>/dev/null || true)
+      ORIGINATOR_USERNAME=$(slack_json | jq -r --arg ts "$EXPLORE_ISSUE_SOURCE_MESSAGE_TS" --arg root "$THREAD_TS" '([.messages[]? | select(.ts == $ts)][0] // (if $ts == $root then .messages[0] else null end)).username // empty' 2>/dev/null || true)
+      ORIGINATOR_BOT_ID=$(slack_json | jq -r --arg ts "$EXPLORE_ISSUE_SOURCE_MESSAGE_TS" --arg root "$THREAD_TS" '([.messages[]? | select(.ts == $ts)][0] // (if $ts == $root then .messages[0] else null end)).bot_id // empty' 2>/dev/null || true)
+      ORIGINATOR_APP_ID=$(slack_json | jq -r --arg ts "$EXPLORE_ISSUE_SOURCE_MESSAGE_TS" --arg root "$THREAD_TS" '([.messages[]? | select(.ts == $ts)][0] // (if $ts == $root then .messages[0] else null end)).app_id // empty' 2>/dev/null || true)
 
       if [ -n "$ORIGINATOR_BOT_ID" ] && echo "$ORIGINATOR_BOT_ID" | grep -qE "$INTERNAL_BOT_IDS_REGEX"; then
         ORIGIN_CLASS="internal"
@@ -461,7 +584,7 @@ if [ -n "$THREAD_TS" ]; then
         ORIGIN_REASON="bot $ORIGINATOR_BOT_ID without internal-name match"
       fi
     else
-      echo "[$(date -u +%FT%TZ)] Slack API !ok ($(jq -r '.error // "?"' "$CACHE_FILE" 2>/dev/null)) for thread $THREAD_TS" >> "$FALLBACK_LOG"
+      echo "[$(date -u +%FT%TZ)] Slack API !ok ($(slack_json | jq -r '.error // "?"' 2>/dev/null)) for thread $THREAD_TS" >> "$FALLBACK_LOG"
     fi
   fi
 fi
@@ -489,7 +612,7 @@ elif [ -z "$ORIGIN_CLASS" ]; then
 fi
 
 HAS_BYPASS_MARKER=""
-if echo "$BODY_OR_CMD" | grep -qE '<!-- audit-bypass: internal-followup -->'; then
+if body_stream | grep -aE '<!-- audit-bypass: internal-followup -->' >/dev/null; then
   HAS_BYPASS_MARKER="yes"
 fi
 
@@ -498,6 +621,15 @@ fi
 # by the Slack source, and write/refresh the per-source OPEN state record.
 # ---------------------------------------------------------------------------
 write_durable_block() {
+  if [ -n "$OWNER_STAGE" ]; then
+    # Stage audit: the verdict is unchanged (BLOCK) but this gate writes NOTHING: no
+    # obligation upsert, no state record. The explore-issue run that invoked the owner
+    # already holds the source's obligation.
+    cat <<BLOCK
+{"decision": "block", "message": "BLOCKED: Customer-origin issue (${1}) has no valid READY_TO_FILE permit bound to this exact body and title, so the create owner refuses it. The owner stage writes no obligation or state record; mint a permit against the exact final body/title (explore_issue_file_sha256) from the open explore-issue obligation, then run the owner again."}
+BLOCK
+    exit 0
+  fi
   local detail="$1" reason="$2" now_iso required_at
   now_iso=$(date -u +%FT%TZ)
   required_at="$now_iso"
@@ -542,7 +674,7 @@ BLOCK
 # must re-mint after the final body/title is fixed.
 if [ -n "$THREAD_TS" ] && [ "$PERMIT_STATUS" = "2" ]; then
   cat <<BLOCK
-{"decision": "block", "message": "BLOCKED: READY_TO_FILE permit drift for ${CHANNEL}:${THREAD_TS} — the create body or title no longer matches the permit's bound final body SHA/title digest. Re-run the explore-issue agent so it re-mints a permit against the exact final body/title, then retry the identical command. Replay/edited retries are rejected."}
+{"decision": "block", "message": "BLOCKED: READY_TO_FILE permit drift for ${CHANNEL}:${THREAD_TS} — the create body or title no longer matches the permit's bound final body SHA/title digest. Re-run the explore-issue agent so it re-mints a permit against the exact final body/title, then run the single create owner again with the same flags (python3 ${ISSUE_CREATE_OWNER_PY} create ...). Replay/edited retries are rejected. No permit was written or consumed."}
 BLOCK
   exit 0
 fi

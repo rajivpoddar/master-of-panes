@@ -114,7 +114,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-contract-ledger",
-      "sha256": "5b941854322f25ce1f62514606fc60e4c544e58466ec03967eebd2eecb75db10",
+      "sha256": "50c260ae1d29c9c01bb3d347aec4911334cb8e78bb9226f8533f031935df4842",
       "source_path": "claude/hooks/block-invalid-issue-contract-ledger.sh"
     },
     {
@@ -132,7 +132,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-create-audit",
-      "sha256": "3c1778a44560401739520861afb1b7aea1a42a3fd4a8fe19de43c3e49c2647fa",
+      "sha256": "d6fae930fcadffdfd792195d87dccdac5f8a2ea7aa7004a486fef08c6af55480",
       "source_path": "claude/hooks/explore-issue-latch-guard.sh"
     },
     {
@@ -141,7 +141,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-create-audit",
-      "sha256": "8229514d6ea7a619d98d708eb60d1ff6a00069101bc9ec358d992865fcd8da53",
+      "sha256": "c7fe814238ea30a3355c833491c3d42e2fcc59fe495558edc702bdf337ae71f2",
       "source_path": "claude/hooks/explore-issue-permit-consume-gate.sh"
     },
     {
@@ -159,8 +159,44 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-contract-ledger",
-      "sha256": "2dc6e524164f2e82746a515fe8fd27516a2a655af2f3f03d0b6a57c668e68c97",
+      "sha256": "a5116d75e5b89a00224f543747c641d1e802792bad6717956a5e24378b476ad6",
       "source_path": "claude/hooks/heydonna-app-block-invalid-issue-contract-ledger.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/hooks/issue-create-owner.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-issue-create-audit",
+      "sha256": "c668f45531f6426cf3ccee01113eebe8705b0c4ae98e5cdc88b6dfe4a94894ef",
+      "source_path": "claude/hooks/issue-create-owner.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/hooks/owner-stage-block-invalid-backlog-issue-create.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-issue-create-audit",
+      "sha256": "f5bf4129359daf266d7cc785fe7a97778a5aa7f0f61e450e6541f593d7eb7e2b",
+      "source_path": "claude/hooks/owner-stage-block-invalid-backlog-issue-create.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/hooks/owner-stage-block-missing-directive-contract-issue-create.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-issue-create-audit",
+      "sha256": "9bfeac27a6134363d0b5cfcccd184d1c283e26cc25e2d81f365e50da6f584a58",
+      "source_path": "claude/hooks/owner-stage-block-missing-directive-contract-issue-create.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/hooks/owner-stage-block-status-todo-without-ready-pool.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-issue-create-audit",
+      "sha256": "96a4aa8e4e880520947784604fe1ed508c5cad0ff49a10ad1e426735b7d40b02",
+      "source_path": "claude/hooks/owner-stage-block-status-todo-without-ready-pool.sh"
     },
     {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/pm-ops-sync-stop-validator.sh",
@@ -195,7 +231,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-create-audit",
-      "sha256": "2c529cb1064807ff1c3831a5d75cbc0625dd5e49de4767d4948f7769210b40af",
+      "sha256": "f2e72cac5e4746c7849e81a9594eaa0ec7e0c896c36f7cc9e8e50bf61e287645",
       "source_path": "claude/hooks/pre-issue-create-audit.sh"
     },
     {
@@ -483,7 +519,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-contract-ledger",
-      "sha256": "94cc86a78de638c2b8e63c9dbfddb94562d63ebf07f9a9d8f4bd05eca16c8fab",
+      "sha256": "37ccdf3bd6c604d0733d4710c5630f7d713d23f292beaae1341f9efa8e21d52d",
       "source_path": "claude/scripts/issue-contract-ledger-hook.py"
     },
     {
@@ -1106,7 +1142,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-intake",
-      "sha256": "f44ee29588c1e6b89b035ab4bdfda8a14d88526af6ea7eaf59db7afac3e46272",
+      "sha256": "ae0de4f8f5f60ec4a497ca100ce0de3cb96a0cbbd50bd2456241b807e2d36264",
       "source_path": "claude/skills/explore-issue/SKILL.md"
     },
     {
@@ -1881,7 +1917,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 205,
+    "selected_count": 209,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -1985,6 +2021,7 @@
       "/Users/rajiv/.claude/scripts/tests/test_backlog_runnability.py",
       "~/.codex/skills/heydonna-file-promote-issue",
       "~/.claude/hooks/explore-issue-latch-guard.sh",
+      "~/.claude/hooks/issue-create-owner.py",
       "~/.claude/skills/explore-issue/SKILL.md",
       "~/.claude/scripts/spark-run-monitor.sh"
     ]

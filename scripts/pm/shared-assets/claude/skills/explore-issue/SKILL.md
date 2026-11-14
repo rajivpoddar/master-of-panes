@@ -38,8 +38,13 @@ OPEN -> ... -> RESOLVED_NO_ISSUE
 ```
 
 READY_TO_FILE mints a one-use permit bound to channel/thread_ts/final body SHA/title
-digest. Only that permit allows exactly one `gh issue create`; the hook consumes it
-atomically. Resolution requires the returned issue number/URL (RESOLVED_FILED) or an
+digest. Only that permit allows exactly one create, and only through the single create
+owner (`issue-create-owner.py create ...`): it captures the body bytes once, runs the
+audit and ledger/tracker gates on them, records durable in-flight state before gh,
+feeds gh the identical bytes on stdin and consumes the permit only on a verified issue
+URL (gh output plus a GitHub readback of repo/number/title/body). A raw
+`gh issue create` for a permit-holding source is denied before any permit
+write. Resolution requires the returned issue number/URL (RESOLVED_FILED) or an
 explicit typed no-issue disposition (RESOLVED_NO_ISSUE). No issue number is required
 before creation.
 
@@ -318,28 +323,73 @@ PHASE 2 — Codex Architecture Review (causal/FIX work only):
 
 PHASE 3 — READY_TO_FILE + File GitHub Issue:
   After the observation is confirmed (for `INVESTIGATION`) or Codex CONFIRMED (for a
-  causal/fix claim), mint the one-use permit bound to the FINAL body SHA and title
-  digest, then create the issue. The final body must carry the canonical source
-  permalink. The permit is the only release for the pre-issue-create-audit gate:
+  causal/fix claim), mint the one-use permit bound to the EXACT raw digest of the FINAL
+  body bytes and the title digest, then create the issue. The final body must carry the
+  canonical source permalink. The permit is the only release for the pre-issue-create-audit
+  gate. The body digest is of the file's exact bytes (trailing newlines and NUL bytes
+  included): use explore_issue_file_sha256 on the file, never a command substitution
+  such as `$(cat file)`, which strips them. A permit minted with the old stripped digest
+  no longer matches and must be re-minted; consumed/UNKNOWN records are never touched:
 
   source /Users/rajiv/.claude/hooks/explore-issue-latch-guard.sh
-  FINAL_BODY_SHA=$(explore_issue_sha256 "$(cat <final body file>)")
+  FINAL_BODY_SHA=$(explore_issue_file_sha256 <final body file>)
   TITLE_DIGEST=$(explore_issue_sha256 "<final title>")
   explore_issue_mint_permit "<CHANNEL>" "<THREAD_TS>" "$FINAL_BODY_SHA" "$TITLE_DIGEST" "<obligation_id>"
   explore_issue_set_state "<CHANNEL>" "<THREAD_TS>" READY_TO_FILE
 
-  Then create the issue with the exact final body/title the permit was minted against:
-    gh issue create --title "<final title>" --body-file <final body file> --label "..."
+  Then create the issue with the exact final body/title the permit was minted against,
+  through the single create owner. It is the ONLY command in the Bash call: a plain
+  script path, no env prefix, no wrapper (bash -c, xargs, time, rtk), no `&&` `;` `|`,
+  no redirection. Use `--body-file` with a literal path written in a previous step.
+  The PreToolUse rewrite handlers registered in the settings in force (rtk, priority-label,
+  agent-browser, convex, modal, send-to-slot, the rescue sandbox, and any other that can emit
+  updatedInput) run in parallel with the guard, so the guard DISCOVERS them (not a fixed list)
+  and dry-runs each on your exact command, letting it through only if none would rewrite, deny
+  or block it: what you write is what runs. If one would, the guard blocks before anything
+  runs or is written and names the handler; remove the text it keys on (put long or special
+  body text in the `--body-file`, never inline) and run it again. Any compound or wrapped
+  `gh issue create` is denied upfront, and a simple raw create is parsed byte-exactly (every
+  -t/-b/-F spelling) and refused when anything about it is ambiguous or unreadable.
+  The flags are the issue-create flags (--title/-t, --body/-b, --body-file/-F,
+  --label/-l, --assignee/-a, --milestone/-m, --project/-p, --repo/-R); only the
+  leading gh command words are replaced by the owner path:
+    python3 /Users/rajiv/.claude/hooks/issue-create-owner.py create --title "<final title>" --body-file <final body file> --label "..."
 
-  The hook consumes the permit atomically and allows exactly one create. If the create
-  is rejected for drift, the body/title changed after the mint — fix the body/title,
-  re-mint the permit against the new final SHA/digest, and retry. If the create fails
-  after the permit was consumed, or the create result is UNKNOWN (GitHub may have
-  accepted it but its response was lost), NEVER re-mint or create again for that
-  source. Use the existing reconcile-by-search path to find the issue by canonical
-  Source permalink and resolve the same obligation. If search is inconclusive,
-  remain reconciliation-only; absence of a response is not proof of no create.
-  A distinct reply source can still mint its own permit.
+  The owner holds the exact body bytes in one in-memory buffer, runs the audit
+  (source/verdict/permit) and ledger/tracker gates on those bytes (the buffer reaches
+  them in memory, never as a file; a rejected gate writes nothing: no obligation, no
+  draft, no cache), then under the shared permit lock re-checks, binds source/invocation/digest
+  and writes the durable in-flight record, runs gh with the identical bytes on stdin and
+  consumes the permit only when gh printed exactly one issue URL AND a GitHub readback of
+  that issue (repo, number, title, body) matches what was sent. Its stdout is that URL;
+  its stderr ends with one status line:
+    FILED <url>                 permit consumed; resolve the obligation with this URL.
+    REFUSED NO_GH_START ...     a gate rejected the create before anything was written;
+                                the permit is intact. Fix what the message names, then
+                                run the owner again. A drift refusal means the
+                                body/title changed after the mint: re-mint the permit
+                                against the new final SHA/digest first.
+    NO_GH_START                 gh could not be started; the in-flight record was
+                                released and the permit is intact. Run it again.
+    UNKNOWN / RECONCILIATION-ONLY / FILED_UNBOOKED
+                                gh may have started, its URL could not be verified by
+                                the GitHub readback (unavailable or mismatching), or
+                                the permit bookkeeping failed. NEVER re-mint, restore or
+                                create again for that source: an in-flight record is never
+                                released by a claimed absence (explore_issue_restore_permit
+                                refuses it); only the owner releases it, and only when gh
+                                definitely never started. A CONSUMED record is never released
+                                either, including a legacy one with no issue_url or
+                                consumed_by (restore returns 6 for it and writes nothing):
+                                a caller-supplied absence string is an assertion, not a
+                                durable no-start proof. Use the existing reconcile-by-search
+                                path to find the issue by canonical Source permalink
+                                and resolve the same obligation. If search is
+                                inconclusive, remain reconciliation-only; absence of a
+                                response is not proof of no create.
+  A raw create for this source is denied by the audit hook before any permit write;
+  compound or wrapped forms of either command are denied too. A distinct reply source
+  can still mint its own permit.
 
   Before reporting the issue as filed, register each confirmed OPEN prerequisite explicitly
   named in its body as a native GitHub blocked-by dependency. For each `<dep>`, resolve

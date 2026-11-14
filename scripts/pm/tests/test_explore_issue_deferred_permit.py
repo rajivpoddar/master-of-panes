@@ -1,26 +1,24 @@
-"""Focused proof for deferred permit consumption and verdict-file producer wiring.
+"""Focused proof for the single-chain permit protocol and the verdict-file producer wiring.
 
-Governing defect: pre-issue-create-audit.sh (hook N) consumed the permit
-immediately and exited 0. block-invalid-issue-contract-ledger.sh (hook N+10)
-could still block before gh ran. The permit was consumed but no issue was created.
+Superseded design (removed): pre-issue-create-audit.sh wrote a pending file and a
+parallel finalizer hook consumed the permit before gh ran. Claude Code runs matching
+hooks in parallel, every hook re-read the body at its own moment, and a permit could
+be consumed with no issue created.
 
-Fix: pre-issue-create-audit.sh writes a pending file (not consuming). The new
-explore-issue-permit-consume-gate.sh (runs AFTER all blocking hooks) atomically
-moves the permit to consumed right before gh runs (persist-UNKNOWN-first).
-
-If gh then fails: permit is in consumed/UNKNOWN state; manual
-explore_issue_restore_permit with proven GitHub absence is the only recovery.
-No unsafe auto-restore is wired.
-
-Verdict-file producer: SKILL.md Phase 2 step c2 instructs the agent to copy
-/tmp/codex-explore-output.txt to explore_issue_verdict_path() so the per-source
-gate does not read the global file (cross-source contamination prevented).
+Current design: issue-create-owner.py is the single owner of a permit-required create.
+It captures the body bytes once, runs pre-issue-create-audit.sh as stage `audit` and
+the ledger/tracker hook on those bytes, locks, writes a durable in-flight record
+before gh, feeds gh the identical bytes on stdin and consumes the permit only on a
+verified issue URL (see test_issue_create_owner.py for the owner itself). This file
+covers the library guards (in-flight == reconciliation-only), the retired finalizer,
+the audit hook's stage/shape behaviour and the verdict gate.
 
 No live services, real obligations, or customer content. All paths hermetic.
 Tests are committed but NOT executed under the MoP no-test-proof directive.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -53,7 +51,10 @@ def _env(tmp_path: Path) -> dict:
         EXPLORE_ISSUE_CONSUMED_PERMIT_DIR=str(tmp_path / "consumed"),
         EXPLORE_ISSUE_RECONCILED_PERMIT_DIR=str(tmp_path / "reconciled"),
         EXPLORE_ISSUE_VERDICT_DIR=str(tmp_path / "verdicts"),
-        EXPLORE_ISSUE_PERMIT_PENDING_DIR=str(tmp_path / "pending"),
+        EXPLORE_ISSUE_INFLIGHT_DIR=str(tmp_path / "inflight"),
+        EXPLORE_ISSUE_ENV_LOCAL=str(tmp_path / "no-credentials.env"),
+        EXPLORE_ISSUE_SLACK_CACHE_DIR=str(tmp_path / "slack"),
+        EXPLORE_ISSUE_FALLBACK_LOG=str(tmp_path / "fallback.log"),
         EXPLORE_ISSUE_PM_OPS_CLI="/usr/bin/true",
         EXPLORE_ISSUE_LATCH_GUARD=str(HELPER),
         EXPLORE_ISSUE_SOURCE_MESSAGE_TS=SOURCE_MSG,
@@ -95,161 +96,233 @@ def _write_state(tmp_path: Path, state: str = "READY_TO_FILE") -> None:
 
 
 # ---------------------------------------------------------------------------
-# Deferred consumption: write_permit_pending
+# In-flight guards: a durable in-flight record means gh may have started
 # ---------------------------------------------------------------------------
 
-def test_write_permit_pending_creates_pending_file(tmp_path):
-    """write_permit_pending writes a .pending.json file with the correct fields."""
-    env = _env(tmp_path)
-    result = _run_helper(env, (
-        f'explore_issue_write_permit_pending "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"'
-    ))
-    assert result.returncode == 0, result.stderr
-    pending_dir = tmp_path / "pending"
-    files = list(pending_dir.glob(f"{KEY}.permit.pending.json"))
-    assert len(files) == 1, "pending file must exist"
-    data = json.loads(files[0].read_text())
-    assert data["body_sha256"] == BODY_SHA
-    assert data["title_digest"] == TITLE_DIGEST
-    assert data["channel"] == CHANNEL
-    assert data["thread_ts"] == THREAD
+def _write_inflight(tmp_path: Path) -> Path:
+    inflight_dir = tmp_path / "inflight"
+    inflight_dir.mkdir(exist_ok=True)
+    record = inflight_dir / f"{KEY}.inflight.json"
+    record.write_text(json.dumps({
+        "schema": 1,
+        "state": "IN_FLIGHT",
+        "key": KEY,
+        "invocation": "0" * 32,
+        "channel": CHANNEL,
+        "thread_ts": THREAD,
+        "source_message_ts": SOURCE_MSG,
+        "body_sha256": BODY_SHA,
+        "title_digest": TITLE_DIGEST,
+    }))
+    return record
 
 
-def test_write_permit_pending_does_not_consume_actual_permit(tmp_path):
-    """Writing pending must NOT move the permit file to consumed."""
+def test_pending_protocol_is_gone_from_the_lib():
+    text = HELPER.read_text()
+    assert "explore_issue_write_permit_pending" not in text
+    assert "explore_issue_consume_pending_permit" not in text
+    assert "EXPLORE_ISSUE_PERMIT_PENDING_DIR" not in text
+
+
+def test_permit_status_is_3_while_an_inflight_record_exists(tmp_path):
     _write_permit(tmp_path)
-    env = _env(tmp_path)
-    _run_helper(env, (
-        f'explore_issue_write_permit_pending "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"'
-    ))
-    # Actual permit file still present, consumed dir empty.
-    permit_file = tmp_path / "permits" / f"{KEY}.permit.json"
-    assert permit_file.exists(), "actual permit must NOT be consumed yet"
-    consumed_dir = tmp_path / "consumed"
-    if consumed_dir.exists():
-        consumed = list(consumed_dir.glob(f"{KEY}.permit.consumed.*.json"))
-        assert len(consumed) == 0, "permit must NOT be in consumed dir"
-
-
-def test_write_permit_pending_blocked_when_already_consumed(tmp_path):
-    """write_permit_pending returns 1 when the consumed guard is active."""
-    env = _env(tmp_path)
-    consumed_dir = tmp_path / "consumed"
-    consumed_dir.mkdir()
-    (consumed_dir / f"{KEY}.permit.consumed.20261114T100000Z.json").write_text("{}")
-    result = _run_helper(env, (
-        f'explore_issue_write_permit_pending "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"; echo "rc=$?"'
-    ))
-    assert "rc=1" in result.stdout, "consumed guard must block pending write"
-
-
-# ---------------------------------------------------------------------------
-# Finalizer: consume_pending_permit
-# ---------------------------------------------------------------------------
-
-def test_consume_pending_permit_moves_permit_to_consumed(tmp_path):
-    """consume_pending_permit atomically moves permit → consumed when pending matches."""
-    _write_permit(tmp_path)
-    env = _env(tmp_path)
-    # Write matching pending.
-    _run_helper(env, (
-        f'explore_issue_write_permit_pending "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"'
-    ))
-    # Now consume via finalizer function.
-    result = _run_helper(env, (
-        f'explore_issue_consume_pending_permit "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"'
-    ))
-    assert result.returncode == 0, result.stderr
-    # Permit must now be in consumed dir.
-    consumed_dir = tmp_path / "consumed"
-    files = list(consumed_dir.glob(f"{KEY}.permit.consumed.*.json"))
-    assert len(files) == 1, "permit must be in consumed dir after finalizer"
-    # Actual permit file must be gone.
-    permit_file = tmp_path / "permits" / f"{KEY}.permit.json"
-    assert not permit_file.exists(), "actual permit must be gone after consumption"
-    # Pending file must be cleared.
-    pending_file = tmp_path / "pending" / f"{KEY}.permit.pending.json"
-    assert not pending_file.exists(), "pending file must be cleared after consumption"
-
-
-def test_consume_pending_permit_returns_1_when_no_pending(tmp_path):
-    """consume_pending_permit returns 1 when no pending file exists."""
-    _write_permit(tmp_path)
-    env = _env(tmp_path)
-    result = _run_helper(env, (
-        f'explore_issue_consume_pending_permit "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"; echo "rc=$?"'
-    ))
-    assert "rc=1" in result.stdout, "must return 1 when no pending file"
-
-
-def test_consume_pending_permit_clears_stale_pending_on_body_mismatch(tmp_path):
-    """consume_pending_permit clears a stale pending file when body SHA changed."""
-    _write_permit(tmp_path)
-    env = _env(tmp_path)
-    # Write pending with original body SHA.
-    _run_helper(env, (
-        f'explore_issue_write_permit_pending "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"'
-    ))
-    # Consume with DIFFERENT body SHA (body changed between pre-audit and finalizer).
-    different_sha = "ffffeeeedddddddddddddddddddddddddddddddddddddddddddddddddddfffff"
-    result = _run_helper(env, (
-        f'explore_issue_consume_pending_permit "{CHANNEL}" "{THREAD}" "{different_sha}" "{TITLE_DIGEST}"; echo "rc=$?"'
-    ))
-    assert "rc=1" in result.stdout, "must return 1 when body SHA changed"
-    # Pending file must be cleared (stale).
-    pending_file = tmp_path / "pending" / f"{KEY}.permit.pending.json"
-    assert not pending_file.exists(), "stale pending file must be cleared"
-    # Actual permit must be UNTOUCHED.
-    permit_file = tmp_path / "permits" / f"{KEY}.permit.json"
-    assert permit_file.exists(), "actual permit must be untouched when pending was stale"
-
-
-def test_permit_survives_when_intermediate_hook_would_block(tmp_path):
-    """Full flow: write_pending does NOT consume; actual permit survives until finalizer."""
-    _write_permit(tmp_path)
-    env = _env(tmp_path)
-    # Simulate pre-audit hook writing pending.
-    _run_helper(env, (
-        f'explore_issue_write_permit_pending "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"'
-    ))
-    # Simulate an intermediate hook blocking (tool never runs; finalizer never fires).
-    # In this scenario, the pending file is left over and the actual permit is intact.
-    permit_file = tmp_path / "permits" / f"{KEY}.permit.json"
-    assert permit_file.exists(), "permit must be intact (intermediate block scenario)"
-    consumed_dir = tmp_path / "consumed"
-    if consumed_dir.exists():
-        assert not list(consumed_dir.glob(f"{KEY}.permit.consumed.*.json")), \
-            "permit must NOT be consumed (intermediate block scenario)"
-    # Agent retries gh issue create with same body:
-    # 1. pre-audit writes pending again (overwrites stale).
-    _run_helper(env, (
-        f'explore_issue_write_permit_pending "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"'
-    ))
-    # 2. No intermediate block this time; finalizer runs.
-    result = _run_helper(env, (
-        f'explore_issue_consume_pending_permit "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"'
-    ))
-    assert result.returncode == 0, "finalizer must succeed on retry after intermediate block"
-    files = list((tmp_path / "consumed").glob(f"{KEY}.permit.consumed.*.json"))
-    assert len(files) == 1, "permit must be consumed on successful retry"
-
-
-def test_permit_status_returns_absent_after_finalizer_consumes(tmp_path):
-    """After finalizer consumes, permit_status returns 1 (absent, not 0=valid)."""
-    _write_permit(tmp_path)
-    env = _env(tmp_path)
-    _run_helper(env, (
-        f'explore_issue_write_permit_pending "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"'
-    ))
-    _run_helper(env, (
-        f'explore_issue_consume_pending_permit "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"'
-    ))
-    result = _run_helper(env, (
+    _write_inflight(tmp_path)
+    result = _run_helper(_env(tmp_path), (
         f'explore_issue_permit_status "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"; echo "rc=$?"'
     ))
-    # Status=3 (consumed) or 1 (absent permit file, consumed guard active).
-    assert "rc=3" in result.stdout or "rc=1" in result.stdout, \
-        f"permit status must be 3 (consumed) or 1 (absent), got: {result.stdout!r}"
+    assert "rc=3" in result.stdout, result.stdout + result.stderr
+
+
+def test_permit_status_is_0_for_a_valid_permit_with_no_inflight_or_consumed(tmp_path):
+    _write_permit(tmp_path)
+    result = _run_helper(_env(tmp_path), (
+        f'explore_issue_permit_status "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"; echo "rc=$?"'
+    ))
+    assert "rc=0" in result.stdout, result.stdout + result.stderr
+
+
+def test_mint_is_refused_while_an_inflight_record_exists(tmp_path):
+    _write_inflight(tmp_path)
+    result = _run_helper(_env(tmp_path), (
+        f'explore_issue_mint_permit "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}" "{OBLIGATION_ID}"; echo "rc=$?"'
+    ))
+    assert "rc=0" not in result.stdout, "an UNKNOWN in-flight create must never be re-minted"
+    assert not (tmp_path / "permits" / f"{KEY}.permit.json").exists()
+
+
+def test_restore_refuses_an_inflight_record_even_with_absence_proof(tmp_path):
+    """gh may have started: no claimed absence releases an in-flight invocation."""
+    _write_permit(tmp_path)
+    _write_state(tmp_path, "READY_TO_FILE")
+    record = _write_inflight(tmp_path)
+    before = record.read_bytes()
+    result = _run_helper(_env(tmp_path), (
+        f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "gh search found no issue for the permalink"; echo "rc=$?"'
+    ))
+    assert "rc=4" in result.stdout, result.stdout + result.stderr
+    assert record.read_bytes() == before, "the in-flight record must be untouched"
+    assert not (tmp_path / "reconciled").exists() or not list((tmp_path / "reconciled").glob("*.json"))
+    assert (tmp_path / "permits" / f"{KEY}.permit.json").exists()
+    status = _run_helper(_env(tmp_path), (
+        f'explore_issue_permit_status "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"; echo "rc=$?"'
+    ))
+    assert "rc=3" in status.stdout, "the source stays reconciliation-only"
+
+
+def test_restore_refuses_an_inflight_record_even_when_a_legacy_consumed_record_also_exists(tmp_path):
+    _write_state(tmp_path, "READY_TO_FILE")
+    record = _write_inflight(tmp_path)
+    consumed_dir = tmp_path / "consumed"
+    consumed_dir.mkdir()
+    consumed = consumed_dir / f"{KEY}.permit.consumed.20261113T210948Z.json"
+    consumed.write_text(json.dumps({"obligation_id": OBLIGATION_ID}))
+    result = _run_helper(_env(tmp_path), f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "proof"; echo "rc=$?"')
+    assert "rc=4" in result.stdout, result.stdout + result.stderr
+    assert record.exists() and consumed.exists()
+
+
+def test_restore_refuses_a_verified_owner_consumed_record(tmp_path):
+    """The owner verified the issue exists; claiming absence is a contradiction, not a recovery."""
+    _write_state(tmp_path, "READY_TO_FILE")
+    consumed_dir = tmp_path / "consumed"
+    consumed_dir.mkdir()
+    consumed = consumed_dir / f"{KEY}.permit.consumed.20261114T100000Z.json"
+    consumed.write_text(json.dumps({
+        "consumed_by": "issue-create-owner",
+        "issue_url": "https://github.com/Scribie/heydonna-app/issues/4242",
+    }))
+    before = consumed.read_bytes()
+    result = _run_helper(_env(tmp_path), f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "proof"; echo "rc=$?"')
+    assert "rc=5" in result.stdout, result.stdout + result.stderr
+    assert consumed.read_bytes() == before
+
+
+def test_restore_refuses_a_legacy_unknown_consumed_record(tmp_path):
+    """CTO REVISE (review-permit-chain 0d2d8dc8): a legacy consumed/UNKNOWN record (no URL, no owner)
+    has no durable no-start proof, and a caller-supplied absence string is not one. Restore must
+    refuse, leave the record in consumed/, write no reconciled file and keep the source
+    reconciliation-only."""
+    _write_state(tmp_path, "READY_TO_FILE")
+    consumed_dir = tmp_path / "consumed"
+    consumed_dir.mkdir()
+    consumed = consumed_dir / f"{KEY}.permit.consumed.20261113T210948Z.json"
+    consumed.write_text(json.dumps({"obligation_id": OBLIGATION_ID, "body_sha256": BODY_SHA}))
+    before = consumed.read_bytes()
+    result = _run_helper(_env(tmp_path), (
+        f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" '
+        f'"gh search found no issue for the permalink, title or keywords"; echo "rc=$?"'
+    ))
+    assert "rc=6" in result.stdout, result.stdout + result.stderr
+    assert consumed.exists() and consumed.read_bytes() == before, "the consumed record must be untouched"
+    assert not (tmp_path / "reconciled").exists() or not list((tmp_path / "reconciled").glob("*.json"))
+    status = _run_helper(_env(tmp_path), (
+        f'explore_issue_permit_status "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"; echo "rc=$?"'
+    ))
+    assert "rc=3" in status.stdout, "the source stays reconciliation-only"
+
+
+def test_restore_refuses_a_legacy_consumed_record_with_an_unreadable_body(tmp_path):
+    """An unreadable consumed record is UNKNOWN, never absent: refuse, do not move it."""
+    _write_state(tmp_path, "READY_TO_FILE")
+    consumed_dir = tmp_path / "consumed"
+    consumed_dir.mkdir()
+    consumed = consumed_dir / f"{KEY}.permit.consumed.20261113T210948Z.json"
+    consumed.write_bytes(b"{not json")
+    result = _run_helper(_env(tmp_path), f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "proof"; echo "rc=$?"')
+    assert "rc=6" in result.stdout, result.stdout + result.stderr
+    assert consumed.read_bytes() == b"{not json"
+    assert not (tmp_path / "reconciled").exists() or not list((tmp_path / "reconciled").glob("*.json"))
+
+
+def test_restore_refusal_is_repeatable_and_never_mints_or_reconciles(tmp_path):
+    """Calling restore again, with any proof, is still a refusal: nothing is ever released."""
+    _write_state(tmp_path, "READY_TO_FILE")
+    consumed_dir = tmp_path / "consumed"
+    consumed_dir.mkdir()
+    consumed = consumed_dir / f"{KEY}.permit.consumed.20261113T210948Z.json"
+    consumed.write_text(json.dumps({"obligation_id": OBLIGATION_ID, "body_sha256": BODY_SHA}))
+    env = _env(tmp_path)
+    for proof in ("first proof", "second proof", ""):
+        result = _run_helper(env, f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "{proof}"; echo "rc=$?"')
+        assert "rc=6" in result.stdout, result.stdout + result.stderr
+    assert consumed.exists()
+    assert not (tmp_path / "permits" / f"{KEY}.permit.json").exists(), "restore never mints a permit"
+    mint = _run_helper(env, (
+        f'explore_issue_mint_permit "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}" "{OBLIGATION_ID}"; echo "rc=$?"'
+    ))
+    assert "rc=0" not in mint.stdout, "a consumed/UNKNOWN create must never be re-minted"
+    assert not (tmp_path / "permits" / f"{KEY}.permit.json").exists()
+
+
+def test_remint_of_an_unused_stripped_digest_permit_does_not_reopen_consumed_custody(tmp_path):
+    """Migrating a permit that was never consumed (retired stripped digest) is a plain re-mint with the
+    exact digest. It replaces only the permit file and works while NO consumed/in-flight record exists;
+    once a consumed record exists the same re-mint is refused and restore cannot reopen it."""
+    stripped = "1" * 64
+    exact = "2" * 64
+    env = _env(tmp_path)
+    minted = _run_helper(env, (
+        f'explore_issue_mint_permit "{CHANNEL}" "{THREAD}" "{stripped}" "{TITLE_DIGEST}" "{OBLIGATION_ID}"; echo "rc=$?"'
+    ))
+    assert "rc=0" in minted.stdout, minted.stdout + minted.stderr
+    migrated = _run_helper(env, (
+        f'explore_issue_mint_permit "{CHANNEL}" "{THREAD}" "{exact}" "{TITLE_DIGEST}" "{OBLIGATION_ID}"; echo "rc=$?"'
+    ))
+    assert "rc=0" in migrated.stdout, migrated.stdout + migrated.stderr
+    permit = json.loads((tmp_path / "permits" / f"{KEY}.permit.json").read_text())
+    assert permit["body_sha256"] == exact
+    status = _run_helper(env, (
+        f'explore_issue_permit_status "{CHANNEL}" "{THREAD}" "{exact}" "{TITLE_DIGEST}"; echo "rc=$?"'
+    ))
+    assert "rc=0" in status.stdout, status.stdout + status.stderr
+
+    # The permit is then spent by a create (consumed record written, gh may have run).
+    consumed = _run_helper(env, (
+        f'explore_issue_consume_permit "{CHANNEL}" "{THREAD}" "{exact}" "{TITLE_DIGEST}"; echo "rc=$?"'
+    ))
+    assert "rc=0" in consumed.stdout, consumed.stdout + consumed.stderr
+    _write_state(tmp_path, "READY_TO_FILE")
+    record = next((tmp_path / "consumed").glob(f"{KEY}.permit.consumed.*.json"))
+    before = record.read_bytes()
+    again = _run_helper(env, (
+        f'explore_issue_mint_permit "{CHANNEL}" "{THREAD}" "{stripped}" "{TITLE_DIGEST}" "{OBLIGATION_ID}"; echo "rc=$?"'
+    ))
+    assert "rc=0" not in again.stdout, "a migration re-mint must not reopen consumed custody"
+    restore = _run_helper(env, f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "proof"; echo "rc=$?"')
+    assert "rc=6" in restore.stdout, restore.stdout + restore.stderr
+    assert record.exists() and record.read_bytes() == before
+    final = _run_helper(env, (
+        f'explore_issue_permit_status "{CHANNEL}" "{THREAD}" "{exact}" "{TITLE_DIGEST}"; echo "rc=$?"'
+    ))
+    assert "rc=3" in final.stdout, "consumed custody stays reconciliation-only"
+
+
+def test_file_sha256_is_the_exact_byte_digest_and_differs_from_the_stripped_one(tmp_path):
+    exact = b"Source: x\n\nbody with NUL \x00 inside\n\n\n"
+    body = tmp_path / "body.md"
+    body.write_bytes(exact)
+    env = _env(tmp_path)
+    exact_digest = _run_helper(env, f'explore_issue_file_sha256 "{body}"').stdout.strip()
+    stripped_digest = _run_helper(env, f'explore_issue_sha256 "$(cat "{body}")"').stdout.strip()
+    assert exact_digest == hashlib.sha256(exact).hexdigest()
+    assert stripped_digest != exact_digest, "command substitution drops NUL and trailing newlines"
+    piped = _run_helper(env, f'cat "{body}" | explore_issue_file_sha256').stdout.strip()
+    assert piped == exact_digest
+
+
+def test_restore_does_not_touch_a_legacy_consumed_record_for_another_source(tmp_path):
+    """Source 33762 stays as it is: nothing in this protocol edits an existing consumed/state record."""
+    _write_state(tmp_path, "READY_TO_FILE")
+    consumed_dir = tmp_path / "consumed"
+    consumed_dir.mkdir()
+    consumed = consumed_dir / f"{KEY}.permit.consumed.20261113T210948Z.json"
+    consumed.write_text(json.dumps({"obligation_id": OBLIGATION_ID, "body_sha256": BODY_SHA}))
+    before = consumed.read_bytes()
+    result = _run_helper(_env(tmp_path), (
+        f'explore_issue_permit_status "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"; echo "rc=$?"'
+    ))
+    assert "rc=3" in result.stdout, "a legacy consumed record stays reconciliation-only"
+    assert consumed.read_bytes() == before
 
 
 # ---------------------------------------------------------------------------
@@ -327,134 +400,36 @@ def test_needs_deeper_requires_investigation_plus_hypothesis_to_pass(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Fail-closed: finalizer blocks on consume errors and protocol violations
+# Retired finalizer: explore-issue-permit-consume-gate.sh decides nothing
 # ---------------------------------------------------------------------------
 
-def test_finalizer_blocks_when_consume_returns_error(tmp_path):
-    """RC>=2 from consume_pending_permit (actual permit consumption failed) must block.
-
-    Simulates: pending file exists, body SHA matches, but the actual permit file
-    has drifted (sha256 changed) so consume_permit returns non-zero. The finalizer
-    must NOT let the create through.
-    """
+def test_finalizer_is_an_inert_noop(tmp_path):
     env = _env(tmp_path)
-    # Write a permit with one body SHA.
     _write_permit(tmp_path)
-    # Write pending with the SAME body SHA.
-    _run_helper(env, (
-        f'explore_issue_write_permit_pending "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"'
-    ))
-    # Now tamper with the actual permit file so consume_permit sees a drift
-    # (mismatched body_sha256 on disk vs. what consume_pending_permit will verify).
-    permit_file = tmp_path / "permits" / f"{KEY}.permit.json"
-    data = json.loads(permit_file.read_text())
-    data["body_sha256"] = "0" * 64  # Corrupt the permit's body sha
-    permit_file.write_text(json.dumps(data))
-    # explore_issue_consume_pending_permit should return 2 (consume failed due to drift).
-    result = _run_helper(env, (
-        f'explore_issue_consume_pending_permit "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"; echo "rc=$?"'
-    ))
-    # RC must be non-zero (1 or 2 depending on internal path).
-    assert "rc=0" not in result.stdout, \
-        f"consume must NOT return 0 when permit is drifted; got: {result.stdout!r}"
+    commands = (
+        'gh issue create --title "x" --body-file /tmp/x.md',
+        "python3 /Users/rajiv/.claude/hooks/issue-create-owner.py create --title x --body-file /tmp/x.md",
+        "ls -la",
+    )
+    for command in commands:
+        proc = subprocess.run(
+            ["bash", str(FINALIZER)],
+            input=json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}),
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+        assert proc.returncode == 0, (command, proc.stderr)
+        assert proc.stdout == "", (command, proc.stdout)
+    # Nothing consumed, nothing pended, permit untouched.
+    assert (tmp_path / "permits" / f"{KEY}.permit.json").exists()
+    consumed_dir = tmp_path / "consumed"
+    assert not consumed_dir.exists() or not list(consumed_dir.glob("*.json"))
+    assert not (tmp_path / "pending").exists()
 
 
-def test_finalizer_blocks_when_permit_exists_but_no_pending(tmp_path):
-    """When no pending file but a valid permit exists, the create must be blocked.
-
-    Simulates: pre-audit failed to write the pending marker (or stale pending was
-    cleared by a body-mismatch). The actual permit is intact. Letting the create
-    through would bypass the deferred-consumption protocol.
-    """
-    _write_permit(tmp_path)
-    env = _env(tmp_path)
-    # Confirm: no pending file exists.
-    pending_file = tmp_path / "pending" / f"{KEY}.permit.pending.json"
-    assert not pending_file.exists(), "no pending file should exist at test start"
-    # consume_pending_permit returns 1 (no pending).
-    result = _run_helper(env, (
-        f'explore_issue_consume_pending_permit "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"; echo "rc=$?"'
-    ))
-    assert "rc=1" in result.stdout, f"must return 1 when no pending; got: {result.stdout!r}"
-    # The permit file must still be intact (no consumption happened).
-    assert permit_file.parent.parent.joinpath("permits", f"{KEY}.permit.json").exists(), \
-        "permit must remain intact when no pending"
-    # Finalizer would then check explore_issue_permit_file → file exists → block.
-    result2 = _run_helper(env, (
-        f'_pf="$(explore_issue_permit_file "{CHANNEL}" "{THREAD}")"; '
-        f'[ -n "$_pf" ] && [ -f "$_pf" ] && echo "PERMIT_EXISTS" || echo "NO_PERMIT"'
-    ))
-    assert "PERMIT_EXISTS" in result2.stdout, \
-        "gate check must detect permit exists (finalizer must block in this case)"
-
-
-def test_finalizer_passes_when_no_permit_no_pending(tmp_path):
-    """When neither permit nor pending exists, the create is a legitimate bypass — must pass."""
-    env = _env(tmp_path)
-    # No permit file, no pending file.
-    result = _run_helper(env, (
-        f'explore_issue_consume_pending_permit "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"; echo "rc=$?"'
-    ))
-    assert "rc=1" in result.stdout, f"no pending → rc=1; got: {result.stdout!r}"
-    # Permit file also absent.
-    result2 = _run_helper(env, (
-        f'_pf="$(explore_issue_permit_file "{CHANNEL}" "{THREAD}")"; '
-        f'[ -n "$_pf" ] && [ -f "$_pf" ] && echo "PERMIT_EXISTS" || echo "NO_PERMIT"'
-    ))
-    assert "NO_PERMIT" in result2.stdout, \
-        "no permit should exist — finalizer allows the bypass create"
-
-
-def test_finalizer_blocks_when_source_parse_fails_and_pending_exist(tmp_path):
-    """If source identity cannot be parsed but pending files exist, block the create.
-
-    Simulates: the body has a malformed Source line (or none), but a pending permit
-    from a prior pre-audit run is sitting in the queue. Allowing the create would
-    bypass the pending permit's intended create.
-    """
-    env = _env(tmp_path)
-    # Write a pending file for some source (simulating a prior pre-audit run).
-    pending_dir = tmp_path / "pending"
-    pending_dir.mkdir(exist_ok=True)
-    (pending_dir / f"{KEY}.permit.pending.json").write_text(json.dumps({
-        "channel": CHANNEL,
-        "thread_ts": THREAD,
-        "source_message_ts": SOURCE_MSG,
-        "body_sha256": BODY_SHA,
-        "title_digest": TITLE_DIGEST,
-        "pending_at": "2026-11-14T10:00:00Z",
-        "pid": 99999,
-    }))
-    pending_file = pending_dir / f"{KEY}.permit.pending.json"
-    assert pending_file.exists(), "pending file must exist for this test"
-    # Verify: when any pending file exists, the finalizer's source-parse-fail branch
-    # detects it. Test the detection logic directly.
-    result = _run_helper(env, (
-        f'HAS_PENDING=0; '
-        f'for _pf in "$EXPLORE_ISSUE_PERMIT_PENDING_DIR"/*.permit.pending.json; do '
-        f'  [ -f "$_pf" ] && HAS_PENDING=1 && break; '
-        f'done 2>/dev/null || true; '
-        f'echo "HAS_PENDING=$HAS_PENDING"'
-    ))
-    assert "HAS_PENDING=1" in result.stdout, \
-        "gate must detect pending file when source parse fails"
-
-
-def test_finalizer_passes_when_source_parse_fails_and_no_pending(tmp_path):
-    """If source cannot be parsed and no pending files exist, the create is safe to pass."""
-    env = _env(tmp_path)
-    # No pending files in the pending dir.
-    result = _run_helper(env, (
-        f'HAS_PENDING=0; '
-        f'if [ -d "$EXPLORE_ISSUE_PERMIT_PENDING_DIR" ]; then '
-        f'  for _pf in "$EXPLORE_ISSUE_PERMIT_PENDING_DIR"/*.permit.pending.json; do '
-        f'    [ -f "$_pf" ] && HAS_PENDING=1 && break; '
-        f'  done 2>/dev/null || true; '
-        f'fi; '
-        f'echo "HAS_PENDING=$HAS_PENDING"'
-    ))
-    assert "HAS_PENDING=0" in result.stdout, \
-        "no pending files → finalizer must pass the create (no permit required)"
+def test_finalizer_carries_no_consumption_code():
+    text = FINALIZER.read_text()
+    assert "explore_issue_consume" not in text
+    assert "explore-issue-latch-guard" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -861,23 +836,23 @@ def test_investigation_without_hypothesis_or_unknown_does_not_trigger():
 
 
 # ---------------------------------------------------------------------------
-# Behavioral integration: verdict gate REACHABLE for permit-approved creates
+# Behavioral integration: the audit hook as the owner's `audit` stage, and as the
+# PreToolUse guard for raw / compound / wrapped / owner commands.
 #
-# Control-flow defect fixed: pre-issue-create-audit.sh formerly exited 0
-# immediately after explore_issue_write_permit_pending succeeded (line 283),
-# so the verdict gate was dead code for every permit-approved create.
+# Stage audit (MOP_ISSUE_CREATE_STAGE=audit): the owner hands over the captured body
+# and title verbatim. A valid permit + passing verdict prints ONE machine-readable
+# marker line and writes NOTHING (no pending file, no lock, no in-flight record, no
+# consumption). A rejecting gate prints a block and leaves the permit intact.
 #
-# These tests run the ACTUAL hook end-to-end (no network, hermetic tmp_path)
-# and prove that verdict evaluation occurs BEFORE pending is written, so:
-#   - a verdict block leaves no stranded pending file (permit intact for retry)
-#   - a verdict pass writes the pending file and allows the create
+# Raw create (no stage): a source that holds a valid permit is denied BEFORE any
+# permit write, whatever the shape; the remedy names the single owner command.
 #
 # Note: MoP no-test-proof directive — committed but NOT executed in CI.
 # ---------------------------------------------------------------------------
 
 def _body_sha(body: str) -> str:
-    """Match hook's sha256_of: strip trailing newlines (bash command-substitution strips them)."""
-    return hashlib.sha256(body.rstrip('\n').encode()).hexdigest()
+    """The permit binds the EXACT raw digest of the body bytes (nothing stripped)."""
+    return hashlib.sha256(body.encode()).hexdigest()
 
 
 def _title_sha(title: str) -> str:
@@ -899,110 +874,99 @@ def _write_permit_for_body(tmp_path: Path, body: str, title: str) -> None:
     }))
 
 
-def _run_pre_audit(env: dict, body: str, title: str, tmp_path: Path) -> subprocess.CompletedProcess:
-    """Run pre-issue-create-audit.sh via a --body-file so body is read exactly."""
-    body_file = tmp_path / "issue_body.md"
-    body_file.write_text(body)
-    input_json = json.dumps({
-        "tool_input": {
-            "command": f"gh issue create --title {json.dumps(title)} --body-file {body_file}"
-        }
+def _stage_input(body: str, title: str, command: str | None = None, display: str = "(test buffer)") -> str:
+    """The owner's stage-audit payload: the exact buffer base64 encoded on the hook's stdin. No file."""
+    return json.dumps({
+        "tool_input": {"command": command or f"gh issue create --title {json.dumps(title)} --body-file -"},
+        "mop_issue_create": {
+            "title": title,
+            "body_b64": base64.b64encode(body.encode()).decode("ascii"),
+            "body_display": display,
+        },
     })
+
+
+def _run_pre_audit(env: dict, body: str, title: str, tmp_path: Path, *, stage: bool = True,
+                   command: str | None = None) -> subprocess.CompletedProcess:
+    """Run pre-issue-create-audit.sh. stage=True is the owner's `audit` stage on the in-memory buffer."""
+    body_file = tmp_path / "issue_body.md"
+    run_env = dict(env)
+    if stage:
+        run_env.update(MOP_ISSUE_CREATE_STAGE="audit")
+        payload = _stage_input(body, title, command)
+    else:
+        body_file.write_text(body)
+        command = command or f"gh issue create --title {json.dumps(title)} --body-file {body_file}"
+        payload = json.dumps({"tool_input": {"command": command}})
     return subprocess.run(
         ["bash", str(PRE_AUDIT)],
-        input=input_json,
-        capture_output=True, text=True, env=env, timeout=30,
+        input=payload,
+        capture_output=True, text=True, env=run_env, timeout=60,
     )
 
 
-def test_permit_plus_fix_claim_plus_needs_deeper_verdict_blocks(tmp_path):
-    """CRITICAL behavioral test: permit present + Status: FIX + NEEDS_DEEPER verdict must BLOCK.
+def _marker(stdout: str) -> dict:
+    lines = [line for line in stdout.splitlines() if line.strip().startswith("{")]
+    assert lines, f"no marker line in {stdout!r}"
+    return json.loads(lines[-1])["mop_issue_create_audit"]
 
-    Before the control-flow fix, pre-issue-create-audit.sh exited 0 immediately
-    after explore_issue_write_permit_pending succeeded — the verdict gate was
-    unreachable for every permit-approved create. This test proves the gate is
-    now reached and enforced before the pending file is written.
 
-    Expected behaviour:
-      - hook outputs {"decision": "block", ...} naming NEEDS_DEEPER_INVESTIGATION
-      - NO pending file is written (permit remains intact for a corrected retry)
-    """
+def _assert_nothing_written(tmp_path: Path) -> None:
+    """The audit hook never writes a permit record of any kind."""
+    assert (tmp_path / "permits" / f"{KEY}.permit.json").exists(), "permit must stay intact"
+    assert not (tmp_path / "state").exists(), "no obligation/state record"
+    for name in ("pending", "inflight", "consumed", "reconciled"):
+        directory = tmp_path / name
+        assert not directory.exists() or not list(directory.iterdir()), f"{name} must stay empty"
+
+
+FIX_BODY = (
+    "Status: FIX\n"
+    f"Source: {CHANNEL}:{THREAD}\n"
+    "Cause: CODE_DEFECT\n"
+    "Description: Fix a confirmed root cause.\n"
+)
+
+
+def test_stage_audit_permit_plus_fix_claim_plus_needs_deeper_verdict_blocks(tmp_path):
+    """Permit present + Status: FIX + NEEDS_DEEPER verdict must BLOCK before anything is written."""
     title = "Behavioral test: FIX claim with NEEDS_DEEPER verdict"
-    body = (
-        "Status: FIX\n"
-        f"Source: {CHANNEL}:{THREAD}\n"
-        "Cause: CODE_DEFECT\n"
-        "Description: Fix a confirmed root cause.\n"
-    )
     env = _env(tmp_path)
-    _write_permit_for_body(tmp_path, body, title)
-    _write_verdict(tmp_path, CHANNEL, THREAD,
-                   "Verdict: NEEDS_DEEPER_INVESTIGATION\nEFFORT:M\n")
+    _write_permit_for_body(tmp_path, FIX_BODY, title)
+    _write_verdict(tmp_path, CHANNEL, THREAD, "Verdict: NEEDS_DEEPER_INVESTIGATION\nEFFORT:M\n")
 
-    result = _run_pre_audit(env, body, title, tmp_path)
+    result = _run_pre_audit(env, FIX_BODY, title, tmp_path)
     assert result.returncode == 0, f"hook must exit 0 (block via JSON): {result.stderr}"
-    output = result.stdout
-    assert '"decision"' in output and '"block"' in output, (
-        "hook must BLOCK when permit is valid but verdict is NEEDS_DEEPER_INVESTIGATION\n"
-        f"stdout={output!r}\nstderr={result.stderr!r}"
-    )
-    assert "NEEDS_DEEPER_INVESTIGATION" in output, \
-        "block message must name the actual verdict returned"
-    assert "intact for a corrected retry" in output, \
-        "block message must confirm the permit is preserved for retry"
-    # Critical: NO pending file must exist — the verdict block must run BEFORE
-    # explore_issue_write_permit_pending is called, leaving the permit intact.
-    pending_dir = tmp_path / "pending"
-    if pending_dir.exists():
-        pending_files = list(pending_dir.glob("*.pending.json"))
-        assert len(pending_files) == 0, (
-            "verdict block must NOT write a pending file — permit must remain "
-            "intact for a corrected retry, but found: "
-            + str([str(f) for f in pending_files])
-        )
+    assert '"decision"' in result.stdout and '"block"' in result.stdout, result.stdout
+    assert "NEEDS_DEEPER_INVESTIGATION" in result.stdout, "block message must name the actual verdict"
+    assert "intact for a corrected retry" in result.stdout
+    assert "mop_issue_create_audit" not in result.stdout, "a rejecting gate must not report a valid permit"
+    _assert_nothing_written(tmp_path)
 
 
-def test_permit_plus_fix_claim_plus_confirmed_verdict_allows_and_writes_pending(tmp_path):
-    """Permit + FIX claim + CONFIRMED verdict: hook writes pending and exits without block.
-
-    Proves the happy path through the new control flow: verdict passes, then
-    explore_issue_write_permit_pending is called, then hook exits 0 with no block.
-    """
+def test_stage_audit_permit_plus_fix_claim_plus_confirmed_verdict_reports_marker_and_writes_nothing(tmp_path):
     title = "Behavioral test: FIX claim with CONFIRMED verdict"
-    body = (
-        "Status: FIX\n"
-        f"Source: {CHANNEL}:{THREAD}\n"
-        "Cause: CODE_DEFECT\n"
-        "Description: Fix a confirmed root cause.\n"
-    )
     env = _env(tmp_path)
-    _write_permit_for_body(tmp_path, body, title)
-    _write_verdict(tmp_path, CHANNEL, THREAD,
-                   "Verdict: CONFIRMED\nEFFORT:S\n")
+    _write_permit_for_body(tmp_path, FIX_BODY, title)
+    _write_verdict(tmp_path, CHANNEL, THREAD, "Verdict: CONFIRMED\nEFFORT:S\n")
 
-    result = _run_pre_audit(env, body, title, tmp_path)
-    assert result.returncode == 0, f"hook must exit 0: {result.stderr}"
-    output = result.stdout
-    assert '"block"' not in output, (
-        "hook must NOT block when permit is valid and verdict is CONFIRMED\n"
-        f"stdout={output!r}\nstderr={result.stderr!r}"
-    )
-    # Pending file must have been written
-    pending_dir = tmp_path / "pending"
-    assert pending_dir.exists(), "pending dir must exist after write_permit_pending"
-    pending_files = list(pending_dir.glob("*.pending.json"))
-    assert len(pending_files) == 1, (
-        "hook must write exactly one pending file when CONFIRMED verdict passes\n"
-        f"pending_dir contents: {[str(f) for f in pending_dir.iterdir()]}"
-    )
+    result = _run_pre_audit(env, FIX_BODY, title, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert '"block"' not in result.stdout, result.stdout
+    marker = _marker(result.stdout)
+    assert marker["permit"] == "valid"
+    assert marker["key"] == KEY
+    assert marker["channel"] == CHANNEL and marker["thread_ts"] == THREAD
+    assert marker["body_sha256"] == _body_sha(FIX_BODY), "audit must digest the captured bytes"
+    assert marker["title_digest"] == _title_sha(title)
+    assert marker["permit_file"] == str(tmp_path / "permits" / f"{KEY}.permit.json")
+    assert marker["inflight_dir"] == str(tmp_path / "inflight")
+    assert marker["consumed_dir"] == str(tmp_path / "consumed")
+    _assert_nothing_written(tmp_path)
 
 
-def test_permit_plus_no_verdict_claim_skips_verdict_check(tmp_path):
-    """Permit present, body has no Status: FIX/INVESTIGATION claim: verdict check skipped.
-
-    Non-verdict creates (internal follow-ups, tracking tickets without a verdict
-    claim) must not be blocked even when no verdict file exists.
-    """
+def test_stage_audit_permit_plus_no_verdict_claim_skips_verdict_check(tmp_path):
+    """Body without a Status: FIX/INVESTIGATION claim: verdict check skipped, marker printed."""
     title = "Behavioral test: internal follow-up, no verdict claim"
     body = (
         f"Source: {CHANNEL}:{THREAD}\n"
@@ -1013,16 +977,375 @@ def test_permit_plus_no_verdict_claim_skips_verdict_check(tmp_path):
     # Deliberately write NO verdict file.
 
     result = _run_pre_audit(env, body, title, tmp_path)
-    assert result.returncode == 0, f"hook must exit 0: {result.stderr}"
-    output = result.stdout
-    assert '"block"' not in output, (
-        "body without FIX/INVESTIGATION claim must not be blocked even with no verdict file\n"
-        f"stdout={output!r}\nstderr={result.stderr!r}"
+    assert result.returncode == 0, result.stderr
+    assert '"block"' not in result.stdout, result.stdout
+    assert _marker(result.stdout)["permit"] == "valid"
+    _assert_nothing_written(tmp_path)
+
+
+def test_stage_audit_uses_the_handed_over_bytes_not_the_command_text(tmp_path):
+    """The command's --body-file points elsewhere; the audit stage must digest the stdin buffer."""
+    title = "Behavioral test: captured bytes win over the command text"
+    body = f"Source: {CHANNEL}:{THREAD}\nDescription: captured bytes.\n"
+    env = _env(tmp_path)
+    _write_permit_for_body(tmp_path, body, title)
+    result = _run_pre_audit(
+        env, body, title, tmp_path,
+        command='gh issue create --title "something else" --body-file /nonexistent/never-read.md',
     )
-    # Pending file must be written — permit is consumed by finalizer later
-    pending_dir = tmp_path / "pending"
-    assert pending_dir.exists(), "pending dir must exist"
-    pending_files = list(pending_dir.glob("*.pending.json"))
-    assert len(pending_files) == 1, (
-        "pending file must be written for non-verdict-claim body with valid permit"
+    assert result.returncode == 0, result.stderr
+    assert _marker(result.stdout)["body_sha256"] == _body_sha(body)
+    assert "cannot be read when this hook runs" not in result.stdout
+    assert not (tmp_path / "issue_body.md").exists(), "stage audit reads no file and writes none"
+
+
+def test_stage_audit_without_a_valid_permit_prints_no_marker(tmp_path):
+    """No permit: the audit stage must not claim one (the owner then refuses before any write)."""
+    title = "Behavioral test: no permit"
+    body = f"Source: {CHANNEL}:{THREAD}\nDescription: no permit exists.\n<!-- audit-bypass: internal-followup -->\n"
+    result = _run_pre_audit(_env(tmp_path), body, title, tmp_path)
+    assert "mop_issue_create_audit" not in result.stdout
+
+
+def test_stage_audit_with_consumed_record_is_reconciliation_only(tmp_path):
+    """Legacy consumed record (source 33762 shape): blocked, record bytes unchanged."""
+    title = "Behavioral test: consumed"
+    body = f"Source: {CHANNEL}:{THREAD}\nDescription: consumed.\n"
+    env = _env(tmp_path)
+    _write_permit_for_body(tmp_path, body, title)
+    consumed_dir = tmp_path / "consumed"
+    consumed_dir.mkdir()
+    consumed = consumed_dir / f"{KEY}.permit.consumed.20261113T210948Z.json"
+    consumed.write_text(json.dumps({"obligation_id": OBLIGATION_ID}))
+    before = consumed.read_bytes()
+    result = _run_pre_audit(env, body, title, tmp_path)
+    assert '"block"' in result.stdout and "already consumed" in result.stdout
+    assert consumed.read_bytes() == before
+
+
+def test_stage_audit_with_inflight_record_is_reconciliation_only(tmp_path):
+    title = "Behavioral test: in flight"
+    body = f"Source: {CHANNEL}:{THREAD}\nDescription: in flight.\n"
+    env = _env(tmp_path)
+    _write_permit_for_body(tmp_path, body, title)
+    record = _write_inflight(tmp_path)
+    before = record.read_bytes()
+    result = _run_pre_audit(env, body, title, tmp_path)
+    assert '"block"' in result.stdout and "already consumed" in result.stdout
+    assert record.read_bytes() == before
+
+
+def test_owner_stage_without_the_buffer_fails_closed(tmp_path):
+    env = dict(_env(tmp_path), MOP_ISSUE_CREATE_STAGE="audit")
+    result = subprocess.run(
+        ["bash", str(PRE_AUDIT)],
+        input=json.dumps({"tool_input": {"command": 'gh issue create --title "t" --body-file /x'}}),
+        capture_output=True, text=True, env=env, timeout=30,
     )
+    assert '"block"' in result.stdout and "without the captured body buffer" in result.stdout
+    assert not (tmp_path / "state").exists()
+
+
+def test_stage_audit_digest_keeps_trailing_newlines_and_nul(tmp_path):
+    """The permit binds the exact raw digest: a NUL byte and trailing blank lines are part of it."""
+    title = "Behavioral test: exact bytes"
+    body = f"Source: {CHANNEL}:{THREAD}\nBody with NUL \x00 inside.\n\n\n"
+    env = _env(tmp_path)
+    _write_permit_for_body(tmp_path, body, title)
+    assert _body_sha(body) != hashlib.sha256(body.rstrip("\n").replace("\x00", "").encode()).hexdigest()
+    result = _run_pre_audit(env, body, title, tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert '"block"' not in result.stdout, result.stdout
+    assert _marker(result.stdout)["body_sha256"] == _body_sha(body)
+    _assert_nothing_written(tmp_path)
+
+
+def test_stage_audit_rejects_a_permit_minted_with_the_retired_stripped_digest(tmp_path):
+    title = "Behavioral test: retired digest"
+    body = f"Source: {CHANNEL}:{THREAD}\nDescription: trailing newlines.\n\n"
+    env = _env(tmp_path)
+    _write_permit_for_body(tmp_path, body, title)
+    permit = tmp_path / "permits" / f"{KEY}.permit.json"
+    data = json.loads(permit.read_text())
+    data["body_sha256"] = hashlib.sha256(body.rstrip("\n").encode()).hexdigest()
+    permit.write_text(json.dumps(data))
+    result = _run_pre_audit(env, body, title, tmp_path)
+    assert "mop_issue_create_audit" not in result.stdout, "a stripped-digest permit must not release the create"
+    assert "permit drift" in result.stdout
+
+
+def test_stage_audit_customer_origin_block_writes_no_obligation_or_state(tmp_path):
+    """write_durable_block is suppressed in stage audit: same BLOCK decision, zero writes."""
+    title = "Behavioral test: customer origin, no permit"
+    body = f"Source: {CHANNEL}:{THREAD}\nDescription: customer report with no permit.\n"
+    recorder = tmp_path / "pm-ops-recorder.sh"
+    recorder.write_text('#!/bin/sh\necho "$@" >> "$PM_OPS_RECORD"\necho 4242\n')
+    recorder.chmod(0o755)
+    record = tmp_path / "pm-ops-calls.log"
+    env = dict(
+        _env(tmp_path),
+        EXPLORE_ISSUE_CUSTOMER_CHANNELS_REGEX=f"^{CHANNEL}$",
+        EXPLORE_ISSUE_PM_OPS_CLI=str(recorder),
+        PM_OPS_RECORD=str(record),
+    )
+    result = _run_pre_audit(env, body, title, tmp_path)
+    decision = json.loads(result.stdout.strip().splitlines()[-1])
+    assert decision["decision"] == "block" and "has no valid READY_TO_FILE permit" in decision["message"]
+    assert not record.exists(), "no obligation upsert"
+    assert not (tmp_path / "state").exists(), "no OPEN state record"
+    assert not (tmp_path / "fallback.log").exists(), "no diagnostic log write"
+    assert not (tmp_path / "slack").exists(), "no Slack cache directory or file is written in stage audit"
+
+
+def test_raw_customer_origin_block_still_upserts_the_obligation(tmp_path):
+    """The raw (non-stage) path keeps its durable obligation: the suppression is stage-audit only."""
+    title = "Behavioral test: raw customer origin"
+    body = f"Source: {CHANNEL}:{THREAD}\nDescription: raw customer report.\n"
+    recorder = tmp_path / "pm-ops-recorder.sh"
+    recorder.write_text('#!/bin/sh\necho "$@" >> "$PM_OPS_RECORD"\necho 4242\n')
+    recorder.chmod(0o755)
+    record = tmp_path / "pm-ops-calls.log"
+    env = dict(
+        _env(tmp_path),
+        EXPLORE_ISSUE_CUSTOMER_CHANNELS_REGEX=f"^{CHANNEL}$",
+        EXPLORE_ISSUE_PM_OPS_CLI=str(recorder),
+        PM_OPS_RECORD=str(record),
+    )
+    _run_pre_audit(env, body, title, tmp_path, stage=False)
+    assert record.exists() and "obligation-upsert" in record.read_text()
+
+
+def test_audit_hook_reads_every_body_consumer_through_the_one_stream():
+    """Source inspection: no command substitution of the body feeds a digest, claim grep or source parse."""
+    text = PRE_AUDIT.read_text()
+    assert 'BODY=$(cat "$MOP_ISSUE_CREATE_BODY_FILE"' not in text
+    assert "MOP_ISSUE_CREATE_BODY_FILE" not in text
+    assert 'BODY_SHA=$(sha256_of "$BODY_OR_CMD")' not in text
+    # The perl regex extractors (only --body/--body-file, via command substitution) are gone: the
+    # byte-preserving `extract` parser is the only way a raw create's title and body are read.
+    for forbidden in ("perl", "extract_body", "extract_title", "BODY_OR_CMD", 'BODY=$(', "OWNER_BODY_B64"):
+        assert forbidden not in text, forbidden
+    assert 'python3 "$ISSUE_CREATE_OWNER_PY" extract' in text
+    for needle in ('SOURCE_RESULT=$(body_stream |', "body_stream | grep -aiE '^Status:",
+                   "body_stream | grep -aE '<!-- audit-bypass", "BODY_SHA=$(body_stream | sha256_stream)"):
+        assert needle in text, needle
+
+
+# A SIMPLE raw create that holds a valid permit is denied before any permit write, in EVERY gh spelling.
+
+RAW_SIMPLE_SPELLINGS = {
+    "long_flags": 'gh issue create --title "{title}" --body-file {body} --label status:todo',
+    "short_flags": "gh issue create -t '{title}' -F {body} -l status:todo",
+    "equals_forms": "gh issue create --title='{title}' --body-file={body}",
+    "attached_short": "gh issue create -t'{title}' -F{body}",
+    "body_first": "gh issue create -F {body} --title '{title}'",
+    "single_quoted_path": "gh issue create -t '{title}' -F '{body}'",
+    "absolute_gh": "/opt/homebrew/bin/gh issue create -t '{title}' -F {body}",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(RAW_SIMPLE_SPELLINGS))
+def test_simple_raw_permit_required_create_is_denied_before_any_permit_write_in_every_spelling(tmp_path, shape):
+    title = f"Behavioral test: raw {shape}"
+    body = f"Source: {CHANNEL}:{THREAD}\nDescription: raw create with a valid permit.\n"
+    env = _env(tmp_path)
+    _write_permit_for_body(tmp_path, body, title)
+    body_file = tmp_path / "issue_body.md"
+    command = RAW_SIMPLE_SPELLINGS[shape].format(title=title, body=body_file)
+    result = _run_pre_audit(env, body, title, tmp_path, stage=False, command=command)
+    assert result.returncode == 0, result.stderr
+    decision = json.loads(result.stdout.strip().splitlines()[-1])
+    assert decision["decision"] == "block"
+    assert "single create owner" in decision["message"], "the permit must have been recognised"
+    assert "issue-create-owner.py create" in decision["message"]
+    assert "was NOT run" in decision["message"]
+    _assert_nothing_written(tmp_path)
+
+
+# ALL compound or wrapped creates are denied upfront, with or without a permit: nothing is parsed,
+# classified or written.
+
+RAW_COMPOUND_OR_WRAPPED = {
+    "compound_and": 'cd /tmp && gh issue create --title "t" --body-file {body}',
+    "compound_semicolon": 'gh issue create --title "t" --body-file {body}; echo done',
+    "piped": 'gh issue create --title "t" --body-file {body} | cat',
+    "redirected": 'gh issue create --title "t" --body-file {body} 2>&1',
+    "subshell": '(gh issue create --title "t" --body-file {body})',
+    "wrapped_env": 'env FOO=1 gh issue create --title "t" --body-file {body}',
+    "wrapped_assignment": 'FOO=1 gh issue create --title "t" --body-file {body}',
+    "wrapped_rtk": 'rtk gh issue create --title "t" --body-file {body}',
+    "wrapped_shell": "bash -c 'gh issue create --title \"t\" --body-file {body}'",
+    "wrapped_eval": 'eval "gh issue create --title t --body-file {body}"',
+    "xargs": 'echo x | xargs gh issue create --title t',
+}
+
+
+@pytest.mark.parametrize("with_permit", [True, False])
+@pytest.mark.parametrize("shape", sorted(RAW_COMPOUND_OR_WRAPPED))
+def test_every_compound_or_wrapped_create_is_denied_upfront_with_or_without_a_permit(tmp_path, shape, with_permit):
+    title = "t"
+    body = f"Source: {CHANNEL}:{THREAD}\nDescription: compound.\n<!-- audit-bypass: internal-followup -->\n"
+    recorder = tmp_path / "pm-ops-recorder.sh"
+    recorder.write_text('#!/bin/sh\necho "$@" >> "$PM_OPS_RECORD"\necho 4242\n')
+    recorder.chmod(0o755)
+    record = tmp_path / "pm-ops-calls.log"
+    env = dict(
+        _env(tmp_path),
+        EXPLORE_ISSUE_CUSTOMER_CHANNELS_REGEX=f"^{CHANNEL}$",
+        EXPLORE_ISSUE_PM_OPS_CLI=str(recorder),
+        PM_OPS_RECORD=str(record),
+    )
+    body_file = tmp_path / "issue_body.md"
+    body_file.write_text(body)
+    if with_permit:
+        _write_permit_for_body(tmp_path, body, title)
+    command = RAW_COMPOUND_OR_WRAPPED[shape].format(body=body_file)
+    result = subprocess.run(
+        ["bash", str(PRE_AUDIT)], input=json.dumps({"tool_input": {"command": command}}),
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    decision = json.loads(result.stdout.strip().splitlines()[-1])
+    assert decision["decision"] == "block"
+    assert "ONLY command" in decision["message"] and "refused upfront" in decision["message"]
+    assert "Nothing was run and nothing was written" in decision["message"]
+    assert not record.exists(), "no obligation upsert"
+    for name in ("state", "slack", "inflight", "consumed", "pending", "reconciled"):
+        assert not (tmp_path / name).exists(), name
+    assert (tmp_path / "permits" / f"{KEY}.permit.json").exists() == with_permit
+
+
+# The bypass this closes: the old perl extraction knew only --body-file/--body, so a raw create using
+# gh's other spellings never had its Source line read and escaped the customer-origin / permit gates.
+
+EVASION_SPELLINGS = {
+    "short_F": "gh issue create -t 'customer bug' -F {body} -l status:todo",
+    "short_b_inline": "gh issue create -t 'customer bug' -b 'Source: {channel}:{thread}' -l status:todo",
+    "equals_body_file": "gh issue create --title='customer bug' --body-file={body}",
+    "equals_body": "gh issue create --title='customer bug' --body='Source: {channel}:{thread}'",
+    "single_quoted_path": "gh issue create -t 'customer bug' -F '{body}'",
+    "attached_F": "gh issue create -t 'customer bug' -F{body}",
+    "double_quoted_inline": 'gh issue create --title "customer bug" -b "Source: {channel}:{thread}"',
+}
+
+
+@pytest.mark.parametrize("shape", sorted(EVASION_SPELLINGS))
+def test_every_gh_spelling_of_the_body_flags_reaches_the_customer_origin_gate(tmp_path, shape):
+    body = f"Source: {CHANNEL}:{THREAD}\nDescription: customer report in an alias spelling.\n"
+    body_file = tmp_path / "issue_body.md"
+    body_file.write_text(body)
+    recorder = tmp_path / "pm-ops-recorder.sh"
+    recorder.write_text('#!/bin/sh\necho "$@" >> "$PM_OPS_RECORD"\necho 4242\n')
+    recorder.chmod(0o755)
+    record = tmp_path / "pm-ops-calls.log"
+    env = dict(
+        _env(tmp_path),
+        EXPLORE_ISSUE_CUSTOMER_CHANNELS_REGEX=f"^{CHANNEL}$",
+        EXPLORE_ISSUE_PM_OPS_CLI=str(recorder),
+        PM_OPS_RECORD=str(record),
+    )
+    command = EVASION_SPELLINGS[shape].format(body=body_file, channel=CHANNEL, thread=THREAD)
+    result = subprocess.run(
+        ["bash", str(PRE_AUDIT)], input=json.dumps({"tool_input": {"command": command}}),
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+    decision = json.loads(result.stdout.strip().splitlines()[-1])
+    assert decision["decision"] == "block" and "Customer-origin" in decision["message"], decision
+    assert record.exists() and "obligation-upsert" in record.read_text()
+
+
+VALID_NON_PERMIT_SPELLINGS = {
+    "long_flags": 'gh issue create --title "internal follow-up" --body-file {body} --label status:todo',
+    "short_flags": "gh issue create -t 'internal follow-up' -F {body} -l status:todo",
+    "equals_forms": "gh issue create --title='internal follow-up' --body-file={body}",
+    "inline_body": "gh issue create -t 'internal follow-up' -b 'internal <!-- audit-bypass: internal-followup -->'",
+    "milestone_and_assignee": "gh issue create -t 'internal follow-up' -F {body} -m 'M1' -a someone",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(VALID_NON_PERMIT_SPELLINGS))
+def test_valid_non_permit_simple_creates_are_unchanged(tmp_path, shape):
+    body_file = tmp_path / "issue_body.md"
+    body_file.write_text("Internal follow-up body.\n<!-- audit-bypass: internal-followup -->\n")
+    command = VALID_NON_PERMIT_SPELLINGS[shape].format(body=body_file)
+    result = subprocess.run(
+        ["bash", str(PRE_AUDIT)], input=json.dumps({"tool_input": {"command": command}}),
+        capture_output=True, text=True, env=_env(tmp_path), timeout=60,
+    )
+    assert (result.returncode, result.stdout) == (0, ""), result.stdout
+
+
+FAIL_CLOSED_COMMANDS = {
+    "unknown_flag": ("ambiguous", "gh issue create -t x -b y --frobnicate"),
+    "duplicate_title": ("ambiguous", "gh issue create -t x -t y -b z"),
+    "duplicate_body": ("ambiguous", "gh issue create -t x -b y -b z"),
+    "body_and_file": ("ambiguous", "gh issue create -t x -b y -F /tmp/b.md"),
+    "positional": ("ambiguous", "gh issue create -t x -b y stray"),
+    "dollar_variable_title": ("expansion", 'gh issue create -t "$TITLE" -b y'),
+    "command_substitution_body": ("expansion", 'gh issue create -t x -b "$(cat /tmp/b.md)"'),
+    "backtick_body": ("expansion", 'gh issue create -t x -b "`cat /tmp/b.md`"'),
+    "glob_path": ("expansion", "gh issue create -t x -F /tmp/b*.md"),
+    "brace_list": ("expansion", "gh issue create -t x -b {a,b}"),
+    "stdin_body_file": ("unreadable", "gh issue create -t x -F -"),
+    "unreadable_body_file": ("unreadable", "gh issue create -t x -F /nonexistent/never-written.md"),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(FAIL_CLOSED_COMMANDS))
+def test_ambiguous_or_unreadable_simple_creates_fail_closed_before_any_write(tmp_path, shape):
+    error_class, command = FAIL_CLOSED_COMMANDS[shape]
+    result = subprocess.run(
+        ["bash", str(PRE_AUDIT)], input=json.dumps({"tool_input": {"command": command}}),
+        capture_output=True, text=True, env=_env(tmp_path), timeout=60,
+    )
+    decision = json.loads(result.stdout.strip().splitlines()[-1])
+    assert decision["decision"] == "block"
+    if error_class == "unreadable":
+        assert "cannot be read when this hook runs" in decision["message"]
+    else:
+        assert f"({error_class}:" in decision["message"] and "cannot be parsed unambiguously" in decision["message"]
+    for name in ("state", "slack", "inflight", "consumed", "pending", "permits"):
+        assert not (tmp_path / name).exists(), name
+
+
+OWNER_PATH = "/Users/rajiv/.claude/hooks/issue-create-owner.py"
+OWNER_UNSAFE = {
+    "compound_and": f"python3 {OWNER_PATH} create --title t --body-file /tmp/b.md && echo done",
+    "compound_semicolon": f"python3 {OWNER_PATH} create --title t --body-file /tmp/b.md; echo done",
+    "piped": f"python3 {OWNER_PATH} create --title t --body-file /tmp/b.md | tee /tmp/out",
+    "redirected": f"python3 {OWNER_PATH} create --title t --body-file /tmp/b.md 2>&1",
+    "wrapped_env": f"env X=1 python3 {OWNER_PATH} create --title t --body-file /tmp/b.md",
+    "wrapped_shell": f"bash -c 'python3 {OWNER_PATH} create --title t --body-file /tmp/b.md'",
+    "mixed_with_raw": f"python3 {OWNER_PATH} create --title t --body-file /tmp/b.md; gh issue create --title t --body-file /tmp/b.md",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(OWNER_UNSAFE))
+def test_compound_or_wrapped_owner_command_is_denied(tmp_path, shape):
+    result = subprocess.run(
+        ["bash", str(PRE_AUDIT)],
+        input=json.dumps({"tool_input": {"command": OWNER_UNSAFE[shape]}}),
+        capture_output=True, text=True, env=_env(tmp_path), timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    decision = json.loads(result.stdout.strip().splitlines()[-1])
+    assert decision["decision"] == "block"
+    assert "ONLY command" in decision["message"]
+    assert "No permit was written" in decision["message"]
+
+
+@pytest.mark.parametrize("command", [
+    f"python3 {OWNER_PATH} create --title t --body-file /tmp/b.md --label status:todo",
+    f"{OWNER_PATH} create --title t --body-file /tmp/b.md",
+])
+def test_single_simple_owner_command_passes_the_guard_silently_and_writes_nothing(tmp_path, command):
+    env = dict(_env(tmp_path), ISSUE_CREATE_OWNER_WORK_DIR=str(tmp_path / "work"))
+    result = subprocess.run(
+        ["bash", str(PRE_AUDIT)],
+        input=json.dumps({"tool_input": {"command": command}}),
+        capture_output=True, text=True, env=env, timeout=30,
+    )
+    assert (result.returncode, result.stdout) == (0, "")
+    # No seal, no capture, no permit state of any kind: the guard decides and writes nothing.
+    for name in ("pending", "permits", "inflight", "consumed", "state", "work"):
+        assert not (tmp_path / name).exists(), name

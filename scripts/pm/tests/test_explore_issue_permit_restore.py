@@ -1,27 +1,24 @@
-"""Focused proof for explore_issue_restore_permit: safe recovery when a consumed
-permit's create is proven absent from GitHub.
+"""Focused proof for explore_issue_restore_permit: a consumed permit is NEVER released.
 
-Governing defect: explore_issue_consume_permit moves the permit to the consumed
-dir before the external gh issue create (persist-UNKNOWN-first design). If the
-create never lands in GitHub (network failure, API error, process kill), the
-state stays READY_TO_FILE and the consumed guard blocks every subsequent
-explore_issue_mint_permit call for the same key, leaving the obligation
-permanently stuck.
+Governing defect (CTO REVISE, review key review-permit-chain:0d2d8dc8...:1794624109.107149:v1):
+explore_issue_consume_permit moves the permit to the consumed dir before the external
+gh issue create (persist-UNKNOWN-first design). The earlier restore helper accepted
+READY_TO_FILE plus a LEGACY consumed record (no issue_url, no consumed_by), archived it with
+a caller-supplied absence_proof string and let the obligation re-mint. A legacy record has no
+durable no-start proof, and a free-text absence string is an assertion, not proof, so that
+released a possibly-created issue for a second create.
 
-explore_issue_restore_permit provides the ONLY supported recovery path once
-GitHub absence has been proven by searching the canonical source permalink,
-title, keywords, channel, and both source_message_ts values with no match.
-
-Safety invariants (each covered by a test below):
-  - Only succeeds when state is exactly READY_TO_FILE.
-  - Exactly one reconcile per key (second call returns 2).
-  - After restore, explore_issue_mint_permit succeeds (consumed guard is gone).
-  - After restore, explore_issue_permit_status returns 1 (no permit yet, not 3).
-  - After restore and re-mint, explore_issue_consume_permit succeeds.
-  - A second restore after a fresh consumed permit from the new create is blocked.
-  - Reconciled file captures the absence_proof annotation for audit.
-  - Resolved (terminal) states refuse restoration.
-  - Missing consumed file returns 1.
+Contract now (each covered by a test below):
+  - A consumed record is reconciliation-only. Restore is refuse-only and releases nothing.
+  - A legacy consumed/UNKNOWN record (including source 33762) -> rc 6, record untouched.
+  - A verified owner create (issue_url / consumed_by) -> rc 5, record untouched.
+  - An in-flight create (gh may have started) -> rc 4, record untouched.
+  - An unreadable consumed record is UNKNOWN, never absent -> rc 6.
+  - No reconciled/ record is ever written, so no caller can unlock a re-mint with a string.
+  - Mint stays refused and permit_status stays 3 (reconciliation-only) after any restore call.
+  - Repeating restore, with any proof, is still a refusal.
+  - Non READY_TO_FILE states, a missing consumed record and a missing state file keep their
+    non-release results (rc != 0 / rc 1).
 
 No live services, real obligations, or customer content. All paths are hermetic.
 Tests are committed but NOT executed under the MoP no-test-proof directive.
@@ -31,10 +28,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import tempfile
 from pathlib import Path
-
-import pytest
 
 ROOT = Path(__file__).parents[3]
 HELPER = ROOT / "scripts/pm/shared-assets/claude/hooks/explore-issue-latch-guard.sh"
@@ -61,6 +55,7 @@ def _env(tmp_path: Path) -> dict[str, str]:
         EXPLORE_ISSUE_PERMIT_DIR=str(tmp_path / "permits"),
         EXPLORE_ISSUE_CONSUMED_PERMIT_DIR=str(tmp_path / "consumed"),
         EXPLORE_ISSUE_RECONCILED_PERMIT_DIR=str(tmp_path / "reconciled"),
+        EXPLORE_ISSUE_INFLIGHT_DIR=str(tmp_path / "inflight"),
         EXPLORE_ISSUE_PM_OPS_CLI="/usr/bin/true",
         EXPLORE_ISSUE_SOURCE_MESSAGE_TS=SOURCE_MSG,
     )
@@ -69,6 +64,10 @@ def _env(tmp_path: Path) -> dict[str, str]:
 def _run_helper(env: dict, cmds: str) -> subprocess.CompletedProcess:
     script = f"source {HELPER}\n{cmds}"
     return subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=30)
+
+
+def _restore(env: dict, proof: str = ABSENCE_PROOF) -> subprocess.CompletedProcess:
+    return _run_helper(env, f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "{proof}"; echo "rc=$?"')
 
 
 def _write_state(tmp_path: Path, state: str = "READY_TO_FILE") -> None:
@@ -90,11 +89,12 @@ def _write_state(tmp_path: Path, state: str = "READY_TO_FILE") -> None:
     }))
 
 
-def _write_consumed(tmp_path: Path) -> Path:
+def _write_consumed(tmp_path: Path, **extra) -> Path:
+    """Default is the LEGACY shape (no issue_url, no consumed_by), as source 33762 was left."""
     consumed_dir = tmp_path / "consumed"
     consumed_dir.mkdir(exist_ok=True)
     f = consumed_dir / f"{KEY}.permit.consumed.20261113T210948Z.json"
-    f.write_text(json.dumps({
+    record = {
         "channel": CHANNEL,
         "thread_ts": THREAD,
         "source_message_ts": SOURCE_MSG,
@@ -102,119 +102,142 @@ def _write_consumed(tmp_path: Path) -> Path:
         "title_digest": TITLE_DIGEST,
         "obligation_id": OBLIGATION_ID,
         "minted_at": "2026-11-13T21:09:36Z",
-    }))
+    }
+    record.update(extra)
+    f.write_text(json.dumps(record))
     return f
 
 
-def test_restore_succeeds_when_state_is_ready_to_file_and_consumed_exists(tmp_path):
-    _write_state(tmp_path)
-    _write_consumed(tmp_path)
-    env = _env(tmp_path)
-    result = _run_helper(env, f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "{ABSENCE_PROOF}"')
-    assert result.returncode == 0, result.stderr
-
-
-def test_restore_moves_consumed_to_reconciled_with_absence_proof(tmp_path):
-    _write_state(tmp_path)
-    _write_consumed(tmp_path)
-    env = _env(tmp_path)
-    _run_helper(env, f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "{ABSENCE_PROOF}"')
+def _no_reconciled_record(tmp_path: Path) -> bool:
     reconciled_dir = tmp_path / "reconciled"
-    files = list(reconciled_dir.glob(f"{KEY}.permit.reconciled.*.json"))
-    assert len(files) == 1, "exactly one reconciled file expected"
-    data = json.loads(files[0].read_text())
-    assert data["absence_proof"] == ABSENCE_PROOF
-    assert data["body_sha256"] == BODY_SHA
-    assert "reconciled_at" in data
-    # Consumed dir must be clear for this key after restoration.
+    return not reconciled_dir.exists() or not list(reconciled_dir.glob("*.json"))
+
+
+def test_restore_refuses_a_legacy_unknown_consumed_record_for_source_33762(tmp_path):
+    _write_state(tmp_path)
+    consumed = _write_consumed(tmp_path)
+    before = consumed.read_bytes()
+    result = _restore(_env(tmp_path))
+    assert "rc=6" in result.stdout, result.stdout + result.stderr
+    assert consumed.exists() and consumed.read_bytes() == before
+    assert _no_reconciled_record(tmp_path)
+
+
+def test_restore_never_writes_a_reconciled_record_whatever_the_absence_proof(tmp_path):
+    _write_state(tmp_path)
+    consumed = _write_consumed(tmp_path)
+    before = consumed.read_bytes()
+    env = _env(tmp_path)
+    for proof in (ABSENCE_PROOF, "", "no issue found", "github_search_confirmed_absent"):
+        result = _restore(env, proof)
+        assert "rc=6" in result.stdout, result.stdout + result.stderr
+    assert consumed.read_bytes() == before
+    assert _no_reconciled_record(tmp_path)
+
+
+def test_restore_refuses_a_verified_owner_create_record(tmp_path):
+    _write_state(tmp_path)
+    consumed = _write_consumed(tmp_path, issue_url="https://github.com/o/r/issues/1", consumed_by="issue-create-owner")
+    before = consumed.read_bytes()
+    result = _restore(_env(tmp_path))
+    assert "rc=5" in result.stdout, result.stdout + result.stderr
+    assert consumed.read_bytes() == before
+    assert _no_reconciled_record(tmp_path)
+
+
+def test_restore_refuses_an_unreadable_consumed_record(tmp_path):
+    _write_state(tmp_path)
     consumed_dir = tmp_path / "consumed"
-    assert not list(consumed_dir.glob(f"{KEY}.permit.consumed.*.json"))
+    consumed_dir.mkdir()
+    consumed = consumed_dir / f"{KEY}.permit.consumed.20261113T210948Z.json"
+    consumed.write_bytes(b"{not json")
+    result = _restore(_env(tmp_path))
+    assert "rc=6" in result.stdout, result.stdout + result.stderr
+    assert consumed.read_bytes() == b"{not json"
+    assert _no_reconciled_record(tmp_path)
 
 
-def test_restore_allows_fresh_mint_after_clearing_consumed(tmp_path):
+def test_restore_refuses_while_a_create_is_in_flight(tmp_path):
+    _write_state(tmp_path)
+    consumed = _write_consumed(tmp_path)
+    inflight_dir = tmp_path / "inflight"
+    inflight_dir.mkdir()
+    (inflight_dir / f"{KEY}.inflight.json").write_text(json.dumps({"obligation_id": OBLIGATION_ID}))
+    before = consumed.read_bytes()
+    result = _restore(_env(tmp_path))
+    assert "rc=4" in result.stdout, result.stdout + result.stderr
+    assert consumed.read_bytes() == before
+    assert _no_reconciled_record(tmp_path)
+
+
+def test_mint_stays_refused_after_a_restore_attempt(tmp_path):
     _write_state(tmp_path)
     _write_consumed(tmp_path)
     env = _env(tmp_path)
-    restore = _run_helper(env, f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "{ABSENCE_PROOF}"')
-    assert restore.returncode == 0, restore.stderr
-    # Minting should succeed now that consumed guard is gone.
-    new_body_sha = "aabbcc"
-    new_title_digest = "ddeeff"
+    _restore(env)
     mint = _run_helper(env, (
-        f'explore_issue_mint_permit "{CHANNEL}" "{THREAD}" "{new_body_sha}" "{new_title_digest}" "{OBLIGATION_ID}"'
+        f'explore_issue_mint_permit "{CHANNEL}" "{THREAD}" "aabbcc" "ddeeff" "{OBLIGATION_ID}"; echo "rc=$?"'
     ))
-    assert mint.returncode == 0, mint.stderr
-    permit_dir = tmp_path / "permits"
-    files = list(permit_dir.glob(f"{KEY}.permit.json"))
-    assert len(files) == 1
-    data = json.loads(files[0].read_text())
-    assert data["body_sha256"] == new_body_sha
+    assert "rc=0" not in mint.stdout, "a consumed/UNKNOWN create must never be re-minted"
+    assert not (tmp_path / "permits" / f"{KEY}.permit.json").exists()
 
 
-def test_restore_then_permit_status_returns_1_before_mint(tmp_path):
-    """After restore, before re-minting, permit_status should be 1 (absent), not 3 (consumed)."""
+def test_permit_status_stays_reconciliation_only_after_a_restore_attempt(tmp_path):
+    """Before the fix status flipped 3 -> 1 after restore, which is what unlocked the re-mint."""
     _write_state(tmp_path)
     _write_consumed(tmp_path)
     env = _env(tmp_path)
-    _run_helper(env, f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "{ABSENCE_PROOF}"')
+    _restore(env)
     result = _run_helper(env, (
         f'explore_issue_permit_status "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"; echo "rc=$?"'
     ))
-    assert "rc=1" in result.stdout, f"expected rc=1 (absent), got: {result.stdout!r}"
+    assert "rc=3" in result.stdout, f"expected rc=3 (reconciliation-only), got: {result.stdout!r}"
 
 
-def test_second_restore_is_blocked_returns_2(tmp_path):
-    """Double-reconcile is blocked to preserve UNKNOWN safety on the new consumed file."""
+def test_a_second_restore_is_still_a_refusal(tmp_path):
     _write_state(tmp_path)
-    _write_consumed(tmp_path)
+    consumed = _write_consumed(tmp_path)
     env = _env(tmp_path)
-    first = _run_helper(env, f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "{ABSENCE_PROOF}"')
-    assert first.returncode == 0
-    # Create a second consumed file (simulating a second create attempt)
-    consumed_dir = tmp_path / "consumed"
-    consumed_dir.mkdir(exist_ok=True)
-    (consumed_dir / f"{KEY}.permit.consumed.20261114T120000Z.json").write_text(json.dumps({
-        "channel": CHANNEL, "thread_ts": THREAD, "body_sha256": "aabbcc", "obligation_id": OBLIGATION_ID,
-    }))
-    second = _run_helper(env, f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "second proof"')
-    assert second.returncode == 2, f"expected 2 (already reconciled), got {second.returncode}"
+    first = _restore(env)
+    assert "rc=6" in first.stdout, first.stdout + first.stderr
+    second = _restore(env, "second proof")
+    assert "rc=6" in second.stdout, second.stdout + second.stderr
+    assert consumed.exists()
+    assert _no_reconciled_record(tmp_path)
 
 
 def test_restore_blocked_when_state_is_terminal_resolved_filed(tmp_path):
     _write_state(tmp_path, state="RESOLVED_FILED")
-    _write_consumed(tmp_path)
-    env = _env(tmp_path)
-    result = _run_helper(env, f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "{ABSENCE_PROOF}"')
+    consumed = _write_consumed(tmp_path)
+    result = _run_helper(_env(tmp_path), f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "{ABSENCE_PROOF}"')
     assert result.returncode != 0, "restore must refuse when state is terminal"
+    assert consumed.exists()
 
 
 def test_restore_blocked_when_state_is_terminal_resolved_no_issue(tmp_path):
     _write_state(tmp_path, state="RESOLVED_NO_ISSUE")
-    _write_consumed(tmp_path)
-    env = _env(tmp_path)
-    result = _run_helper(env, f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "{ABSENCE_PROOF}"')
+    consumed = _write_consumed(tmp_path)
+    result = _run_helper(_env(tmp_path), f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "{ABSENCE_PROOF}"')
     assert result.returncode != 0, "restore must refuse when state is RESOLVED_NO_ISSUE"
+    assert consumed.exists()
 
 
 def test_restore_blocked_when_state_is_in_progress(tmp_path):
     _write_state(tmp_path, state="IN_PROGRESS")
-    _write_consumed(tmp_path)
-    env = _env(tmp_path)
-    result = _run_helper(env, f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "{ABSENCE_PROOF}"')
+    consumed = _write_consumed(tmp_path)
+    result = _run_helper(_env(tmp_path), f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "{ABSENCE_PROOF}"')
     assert result.returncode != 0, "restore must refuse when state is not READY_TO_FILE"
+    assert consumed.exists()
 
 
 def test_restore_returns_1_when_no_consumed_permit_exists(tmp_path):
     _write_state(tmp_path)
-    # No consumed permit written.
-    env = _env(tmp_path)
-    result = _run_helper(env, f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "{ABSENCE_PROOF}"')
+    result = _run_helper(_env(tmp_path), f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "{ABSENCE_PROOF}"')
     assert result.returncode == 1, "restore must return 1 when no consumed permit exists"
 
 
 def test_restore_returns_1_when_state_file_missing(tmp_path):
-    _write_consumed(tmp_path)
-    # No state file written.
-    env = _env(tmp_path)
-    result = _run_helper(env, f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "{ABSENCE_PROOF}"')
+    consumed = _write_consumed(tmp_path)
+    result = _run_helper(_env(tmp_path), f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "{ABSENCE_PROOF}"')
     assert result.returncode == 1
+    assert consumed.exists()

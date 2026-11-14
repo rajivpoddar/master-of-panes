@@ -53,6 +53,7 @@ def intake(tmp_path):
                EXPLORE_ISSUE_STATE_DIR=str(state),
                EXPLORE_ISSUE_PERMIT_DIR=str(tmp_path / "permits"),
                EXPLORE_ISSUE_CONSUMED_PERMIT_DIR=str(tmp_path / "consumed"),
+               EXPLORE_ISSUE_INFLIGHT_DIR=str(tmp_path / "inflight"),
                EXPLORE_ISSUE_SLACK_CACHE_DIR=str(cache),
                EXPLORE_ISSUE_PM_OPS_CLI=str(recorder),
                EXPLORE_ISSUE_LATCH_GUARD=str(HELPER),

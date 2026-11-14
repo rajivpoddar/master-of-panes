@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -340,6 +341,19 @@ def raw_issue_create_targets_heydonna(command: str) -> bool:
     return False
 
 
+def owner_buffer() -> str:
+    """The create owner's single buffer (stage audit), delivered IN MEMORY.
+
+    issue-create-owner.py puts the exact bytes it will send to gh into the environment of this
+    hook as base64 (MOP_ISSUE_CREATE_BODY_B64) and passes `--body-file -`. Nothing is read from or
+    written to disk. The text is decoded exactly like a file read would be: strict UTF-8 (a bad
+    byte raises, which blocks the command just as an undecodable file does) and universal
+    newlines, so every decision matches the one made for the same bytes in a named body file.
+    """
+    text = base64.b64decode(os.environ.get("MOP_ISSUE_CREATE_BODY_B64", "")).decode("utf-8")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def body_arg(parts: list[str]) -> str | None:
     inline = values(parts, {"--body"})
     if inline:
@@ -352,6 +366,10 @@ def body_arg(parts: list[str]) -> str | None:
         return None
     path = files[-1]
     if path == "-":
+        if os.environ.get("MOP_ISSUE_CREATE_STAGE") == "audit":
+            if "MOP_ISSUE_CREATE_BODY_B64" not in os.environ:
+                return "__ICL_BODY_FILE_UNREADABLE__"
+            return owner_buffer()
         return "__ICL_STDIN_UNSUPPORTED__"
     try:
         with open(os.path.expanduser(path), encoding="utf-8") as handle:
