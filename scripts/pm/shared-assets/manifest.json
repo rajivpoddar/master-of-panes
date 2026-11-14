@@ -393,7 +393,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-report",
-      "sha256": "a4e601f52c6ee9afcefcfae1d1dccc2472efd2110fbdb1b52eba60bde38b8de2",
+      "sha256": "87c63bdfe3f6ef8d7414104c1eca13d68643fe693694d43154c4161d2a077cf7",
       "source_path": "claude/scripts/axiom-activity-report.py"
     },
     {

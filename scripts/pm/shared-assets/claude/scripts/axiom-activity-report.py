@@ -1242,6 +1242,7 @@ def main():
     )
     parser.add_argument("--json", action="store_true", help="Output as JSON instead of formatted text")
     parser.add_argument("--quiet", action="store_true", help="Suppress hourly distribution section")
+    parser.add_argument("--uncaught-errors", action="store_true", help="Return up to 100 production uncaught-error events as JSON")
     parser.add_argument(
         "--soft-fail",
         action="store_true",
@@ -1289,6 +1290,21 @@ def main():
         parser.error(f"--frozen-proof requires {FROZEN_START}..{FROZEN_END}")
 
     token = load_token()
+
+    if args.uncaught_errors:
+        apl = (
+            f"['{DATASET}'] {PROD_FILTER} "
+            "| where ['action'] == 'uncaught_error' "
+            "| project ['_time'], ['action'], ['message'], ['userId'], ['fileId'], ['context'], ['meta'] "
+            "| order by ['_time'] asc | take 100"
+        )
+        result = run_apl_query(token, apl, start_iso, end_iso)
+        if result.get('_unavailable'):
+            print(json.dumps(result))
+            sys.exit(1)
+        print(json.dumps({"window": {"start": start_iso, "end": end_iso},
+                          "isPartial": result.get("isPartial"), "events": extract_matches(result)}, default=str))
+        return
 
     print(f"Querying Axiom for {human_period}...", file=sys.stderr)
 
