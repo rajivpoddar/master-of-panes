@@ -200,6 +200,13 @@ Each hourly, read the report's `*Training:*` line (e.g. `sindhu-r7-n5625 step 11
   If the run did finish, record it as `training: <run> COMPLETE` and skip.
   Source: Rajiv, C0ALZJHGE49 thread 1793583921.659259, ts 1793585706.576799: *"why wasn't it auto restarted? does the hourly report processing have that?"* Trigger: the box reboot on 11-01 at 14:27 IST killed r7 at step 2754. The hourly read "no run active" and skipped it for about 17h.
 
+## [HIGH] Dead tmux window cleanup (every hourly)
+Source: Rajiv, C0ALZJHGE49 thread 1794653217.364359, ts 1794653496.600909: *"add a dead tmux window cleanup step to the hourly report processing as well. i just manually killed a few right now. it piles up each cycle."*
+- Every hourly, PM runs `~/.claude/scripts/tmux-dead-window-cleanup.sh --apply` (dry-run without `--apply`). It kills only (1) windows whose pane tmux reports dead (`pane_dead=1`), in any session, and (2) `px-*` windows with no live proxy-agent/claude/codex/node/python descendant (the proxy exited and left an idle shell).
+- It never touches `0:0` (the PM pane) or any window with a live agent process. A live proxy is stopped by killing its processes (see the stop-proxy memory), never by this step.
+- PM's own helper windows (`run-*.sh` launched with `tmux new-window`) close on exit. If one is left dead, this step removes it.
+- The hourly reply states `DEAD_WINDOWS=<n>` with the killed names.
+
 ## Step 3c: Inactive background agents (Rajiv 2026-10-22, DM D0AMF0XE6TS thread 1792637361.212159, ts 1792638231.158209)
 Stale agents (2026-10-25, Rajiv C0ALZJHGE49 thread 1792914695.006599): Step 3c also stops every agent the composer lists as `stale` (quiet >3h or completed but uncollected, up to 24h), not only completed/inactive.
 *"add a inactive bg agent check the hourly report. udpate hourly report processing to stop inactive agents."* Trigger: the donna-influencer and two blog-post-builder agents from the previous PM session sat idle for 12h+ after their PRs merged (#10727); Rajiv spotted them in the PM pane footer.
