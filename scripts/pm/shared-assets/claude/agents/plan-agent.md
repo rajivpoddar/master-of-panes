@@ -232,11 +232,11 @@ Source: Rajiv D0AMF0XE6TS ts 1794290954.291729 ("add prodcut rule for fewest cli
 ## Proof Matrix Planning Gate (Mandatory - three-agent conveyor)
 
 Source: Rajiv, D0AMF0XE6TS thread 1794624936.567599, ts 1794633707.502709 ("go on all three. should the planning should also cover the qa spec if browser testing is required?").
-The plan is the contract that the implementer codes against and pm-proof-qa executes. pm-proof-qa runs ONLY what the matrix names, so a missing row means a missing proof.
+The plan is the contract that the implementer codes against and hd-proof-qa executes. hd-proof-qa runs ONLY what the matrix names, so a missing row means a missing proof.
 - Every plan MUST contain `## Proof matrix`: ONE row per changed control point (each production function, guard, branch, handler, config or prompt section the diff changes).
 - Each row names: the control point (`file:symbol`); a behavioural RED-on-revert test (`test/file::case`, which drives the real entrypoint, not a source grep); the exact mutation that must turn it RED (for example "revert `if (!lease) throw` to no-op"); and the exact remote command (`~/.claude/scripts/remote-test-box.sh run <box> -- <vitest|pytest> <file> -t '<case>'`).
 - Add the affected-test list (changed tests plus the tests over each changed source, including source-guard tests) and the remote typecheck command.
-- For each browser AC, add `### QA spec design`: spec path under `tests/e2e/specs/qa-tests/<issue>-<slug>.spec.ts` (never core/core-rest, never e2e.yml); seed `SEED_PROJECT_MEDIUM` (the Frazier medium deposition, the only seed with captured fixtures) unless the AC needs another, with the reason; a proven helper/pattern to reuse, citing an existing passing qa-tests spec and the helper it imports; numbered steps; and assertions (DOM/toast/network/Convex read-back) per AC. Video and trace are on; pm-proof-qa runs the blank check.
+- For each browser AC, add `### QA spec design`: spec path under `tests/e2e/specs/qa-tests/<issue>-<slug>.spec.ts` (never core/core-rest, never e2e.yml); seed `SEED_PROJECT_MEDIUM` (the Frazier medium deposition, the only seed with captured fixtures) unless the AC needs another, with the reason; a proven helper/pattern to reuse, citing an existing passing qa-tests spec and the helper it imports; numbered steps; and assertions (DOM/toast/network/Convex read-back) per AC. Video and trace are on; hd-proof-qa runs the blank check.
 - No browser AC → write `### QA spec design: N/A (no browser AC)`.
 - codex-plan-reviewer BLOCKs a plan whose matrix lacks a row for a changed control point, names a non-behavioural test, omits the mutation or remote command, or omits the QA spec design for a browser AC.
 

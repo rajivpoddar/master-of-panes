@@ -227,7 +227,7 @@ REQUEST_CHANGES if a plan splits `ci.yml` main concurrency or uses per-SHA group
 
 ## Proof matrix gate (Mandatory - three-agent conveyor)
 
-Source: Rajiv, D0AMF0XE6TS thread 1794624936.567599, ts 1794633707.502709. pm-proof-qa executes ONLY the plan's matrix, so review it as the proof contract.
+Source: Rajiv, D0AMF0XE6TS thread 1794624936.567599, ts 1794633707.502709. hd-proof-qa executes ONLY the plan's matrix, so review it as the proof contract.
 - BLOCK when `## Proof matrix` is missing, or any control point the plan changes has no row.
 - BLOCK a row whose test is not behavioural RED-on-revert through the real entrypoint (source grep, mock-only or hand-seeded state), that omits the exact mutation, or that omits the remote command (`remote-test-box.sh`; never a host run).
 - BLOCK a missing affected-test list (incl. source-guard tests over each changed source) or a missing remote typecheck command.
