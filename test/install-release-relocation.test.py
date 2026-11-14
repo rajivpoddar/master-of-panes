@@ -89,6 +89,22 @@ class RelocationTests(unittest.TestCase):
         self.write(retirement())
         self.assertEqual(self.relocated(), set())
 
+    def test_synced_live_edit_preimage_equal_to_destination_is_a_relocation(self):
+        self.write(retirement(preimage_sha256="b" * 64))
+        digests = {NEW: ("b" * 64, 0o644)}
+        records = m._relocation_records(self.release, self.baseline, self.candidate, digests)
+        self.assertEqual(records, {OLD: {"path": OLD, "kind": "file", "mode": 0o644, "sha256": "b" * 64}})
+        self.assertEqual(m._relocated_baseline_targets(self.release, self.baseline, self.candidate, digests), {OLD})
+
+    def test_preimage_matching_neither_baseline_nor_destination_is_not_a_relocation(self):
+        self.write(retirement(preimage_sha256="c" * 64))
+        digests = {NEW: ("b" * 64, 0o644)}
+        self.assertEqual(m._relocated_baseline_targets(self.release, self.baseline, self.candidate, digests), set())
+
+    def test_destination_digest_is_not_consulted_when_not_supplied(self):
+        self.write(retirement(preimage_sha256="b" * 64))
+        self.assertEqual(self.relocated(), set())
+
     def test_invalid_destination_is_refused_by_the_manifest_loader(self):
         for bad in ("relative/path", "", OLD, "/home/u/../etc/passwd", 7):
             with self.subTest(destination=bad):

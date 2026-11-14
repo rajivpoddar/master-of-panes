@@ -603,6 +603,18 @@ def live_drift_report(
         for entry in _read_shared_entries(active_release):
             for target_name in _shared_entry_targets(entry):
                 sources.setdefault(target_name, entry.get("source_path"))
+    # A retired, relocated home copy may hold the declared preimage (a synced live edit).
+    relocated_sha: dict[str, str] = {}
+    if candidate_root is not None and active_release is not None:
+        old_records = {name: {"sha256": entry.get("sha256", ""), "mode": entry.get("mode")}
+                       for entry in _read_shared_entries(active_release) for name in _shared_entry_targets(entry)}
+        new_digests = {name: (entry.get("sha256", ""), entry.get("mode"))
+                       for entry in _read_shared_entries(candidate_root) for name in _shared_entry_targets(entry)}
+        try:
+            relocated_sha = {name: record["sha256"] for name, record in
+                             _relocation_records(candidate_root, old_records, set(new_digests), new_digests).items()}
+        except InstallerError:
+            relocated_sha = {}
     drift: list[dict[str, Any]] = []
     allowed: dict[str, set[str | None]] = {}
     for target_name in sorted(set(candidate_sha) | set(baseline or {})):
@@ -610,7 +622,7 @@ def live_drift_report(
         active_sha = (baseline or {}).get(target_name)
         deployed = _current_digest(target)
         permitted: set[str | None] = {None}
-        for digest in (active_sha, candidate_sha.get(target_name)):
+        for digest in (active_sha, candidate_sha.get(target_name), relocated_sha.get(target_name)):
             if digest:
                 permitted.add(digest)
         if deployed is not None and (target_name in accepted or str(target) in accepted):
@@ -1544,37 +1556,57 @@ def _load_retirement_manifest(release_dir: Path) -> dict[str, Any]:
     return manifest
 
 
-def _relocated_baseline_targets(
+def _relocation_records(
     release_dir: Path,
     baseline: dict[str, dict[str, Any]],
     candidate_targets: set[str],
-) -> set[str]:
-    """Baseline shared targets the candidate deliberately moves to a new home.
+    candidate_digests: dict[str, tuple[Any, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Baseline shared target -> declared preimage record, for each deliberate relocation.
 
     A target may leave the shared manifest only when the candidate's canonical
     retirement inventory declares it DELETE with ``relocated_to`` naming a
     candidate shared target, and the declared preimage equals the pinned old
-    manifest entry (same bytes and mode).  Such a target is still pinned and
-    captured as a rollback preimage by ``activate``, which never writes or
-    deletes it; ``shared-retire`` removes it afterwards under its own
-    exact-preimage drift check and rollback bundle.
+    manifest entry (same bytes and mode).  When ``candidate_digests`` is given,
+    the declared preimage may instead equal the (sha256, mode) of the
+    ``relocated_to`` destination in the candidate: a live edit that was synced
+    into main (at the destination) while the retired home copy still holds the
+    same edited bytes.  Such a target is still pinned and captured as a rollback
+    preimage by ``activate``, which never writes or deletes it; ``shared-retire``
+    removes it afterwards under its own exact-preimage drift check and rollback
+    bundle.
     """
     if not (release_dir / RETIREMENT_MANIFEST).is_file():
-        return set()
-    relocated: set[str] = set()
+        return {}
+    relocated: dict[str, dict[str, Any]] = {}
     for item in _load_retirement_manifest(release_dir)["items"]:
         name = item["absolute_current_path"]
         prior = baseline.get(name)
-        if (
+        destination = item.get("relocated_to")
+        if not (
             item.get("disposition") == "DELETE"
             and prior is not None
             and name not in candidate_targets
-            and item.get("relocated_to") in candidate_targets
-            and item["preimage_sha256"] == prior["sha256"]
-            and item["preimage_mode"] == prior["mode"]
+            and destination in candidate_targets
         ):
-            relocated.add(name)
+            continue
+        declared = (item["preimage_sha256"], item["preimage_mode"])
+        accepted = {(prior["sha256"], prior["mode"])}
+        if candidate_digests is not None and destination in candidate_digests:
+            accepted.add(tuple(candidate_digests[destination]))
+        if declared in accepted:
+            relocated[name] = {"path": name, "kind": "file", "mode": declared[1], "sha256": declared[0]}
     return relocated
+
+
+def _relocated_baseline_targets(
+    release_dir: Path,
+    baseline: dict[str, dict[str, Any]],
+    candidate_targets: set[str],
+    candidate_digests: dict[str, tuple[Any, Any]] | None = None,
+) -> set[str]:
+    """Names of the baseline shared targets the candidate deliberately relocates."""
+    return set(_relocation_records(release_dir, baseline, candidate_targets, candidate_digests))
 
 
 def _assert_no_symlink_components(path: Path) -> None:
@@ -1782,7 +1814,10 @@ def activate(
         candidate_manifest = _load_shared_manifest(release_dir)
         candidate_targets = {name for entry in candidate_manifest["entries"] for name in _shared_entry_targets(entry)}
         retired_absent = (baseline.keys() - candidate_targets) & RETIRED_ABSENT_TARGETS
-        relocated = _relocated_baseline_targets(release_dir, baseline, candidate_targets)
+        candidate_digests = {name: (entry["sha256"], entry["mode"])
+                             for entry in candidate_manifest["entries"] for name in _shared_entry_targets(entry)}
+        relocation_records = _relocation_records(release_dir, baseline, candidate_targets, candidate_digests)
+        relocated = set(relocation_records)
         if baseline.keys() - candidate_targets - RETIRED_ABSENT_TARGETS - relocated:
             raise InstallerError("REFUSE: candidate removes unapproved shared targets")
         for name in baseline.keys() & candidate_targets & RETIRED_ABSENT_TARGETS:
@@ -1803,6 +1838,10 @@ def activate(
         # Ops ruling: pm-escalation-ladder row pel-mw5rdoqk-fad6ae96 (pm_act).
         candidate_records = {name: {"path": name, "kind": "file", "mode": entry["mode"], "sha256": entry["sha256"]}
                              for entry in candidate_manifest["entries"] for name in _shared_entry_targets(entry)}
+        # A relocated home copy that holds exactly the declared (synced) preimage is the
+        # same proven running pair: pinned and captured, never written.
+        for name, record in relocation_records.items():
+            candidate_records.setdefault(name, record)
         running_pair: bool | None = None
         for name, prior in baseline.items():
             if name in retired_absent:
