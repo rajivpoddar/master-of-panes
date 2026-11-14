@@ -15,6 +15,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -1284,6 +1285,9 @@ def main():
         end_dt = datetime.now(timezone.utc)
         start_dt = end_dt - timedelta(hours=hours)
 
+    if args.uncaught_errors and (end_dt > datetime.now(timezone.utc) or end_dt - start_dt > timedelta(hours=24)):
+        parser.error("--uncaught-errors requires a window of at most 24 hours ending no later than now")
+
     start_iso = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     end_iso = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     if args.frozen_proof and (start_iso, end_iso) != (FROZEN_START, FROZEN_END):
@@ -1302,8 +1306,34 @@ def main():
         if result.get('_unavailable'):
             print(json.dumps(result))
             sys.exit(1)
+        status = result.get("status")
+        partial = status.get("isPartial") if isinstance(status, dict) else None
+        if not isinstance(partial, bool):
+            print(json.dumps({"error": "unknown_completeness"}))
+            sys.exit(1)
+        events = []
+        allowed_classes = {"Error", "TypeError", "RangeError", "ReferenceError", "SyntaxError", "URIError", "EvalError"}
+        for match in result.get("matches", []):
+            data = match.get("data", {})
+            meta = _parse_meta(data.get("meta"))
+            event = {}
+            timestamp = match.get("_time")
+            if isinstance(timestamp, str):
+                try:
+                    event["timestamp"] = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).isoformat()
+                except ValueError:
+                    pass
+            error_class = meta.get("errorName")
+            if isinstance(error_class, str) and error_class in allowed_classes:
+                event["error_class"] = error_class
+            user_id = data.get("userId")
+            if isinstance(user_id, str) and user_id:
+                event["user_hash"] = hashlib.sha256(user_id.encode()).hexdigest()
+            events.append(event)
         print(json.dumps({"window": {"start": start_iso, "end": end_iso},
-                          "isPartial": result.get("isPartial"), "events": extract_matches(result)}, default=str))
+                          "isPartial": partial, "count": len(events), "events": events}))
+        if partial:
+            sys.exit(1)
         return
 
     print(f"Querying Axiom for {human_period}...", file=sys.stderr)

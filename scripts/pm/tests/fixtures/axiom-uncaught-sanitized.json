@@ -1,0 +1,16 @@
+{
+  "status": {
+    "isPartial": false
+  },
+  "matches": [
+    {
+      "data": {
+        "action": "uncaught_error",
+        "meta": {
+          "redacted": true,
+          "errorName": "Error"
+        }
+      }
+    }
+  ]
+}
