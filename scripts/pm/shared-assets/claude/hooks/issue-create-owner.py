@@ -21,7 +21,20 @@ One process now owns the whole chain, in this order:
   2. gates     Run the EXISTING gates sequentially on that buffer, which reaches every one
                of them IN MEMORY: pre-issue-create-audit.sh as stage `audit` (base64 in the
                hook's stdin payload) and then the issue-contract-ledger hook(s) (ledger +
-               tracker checks; base64 in MOP_ISSUE_CREATE_BODY_B64 with `--body-file -`).
+               tracker checks; base64 in MOP_ISSUE_CREATE_BODY_B64 with `--body-file -`) and
+               then the three peer FILING gates (status:todo needs a dispatchable ready-pool
+               block, status:backlog needs park/investigation metadata, a directive-scoped
+               body needs `## Directive Contract`). Those three hooks only recognise a command
+               that BEGINS `gh issue create`, which the owner command never does, so they
+               would never see an owner create. The owner therefore runs shipped, byte-for-byte
+               copies of them (`owner-stage-*.sh`, installed beside the owner; no env override
+               and no gate-disabling seam) on the SAME buffer, the same synthesized command and
+               the same stage env. The copies add no acceptance rule: they change only where
+               the body comes from, the suppression of their debug file and of the textual
+               PM_READY_POOL_SCHEMA_OVERRIDE bypass in stage `audit`, and single-segment command
+               parsing. Their pass is empty stdout and rc 0; a block, a non-zero exit or ANY
+               other output (e.g. a block whose message was malformed JSON because the title
+               held a quote) refuses the create.
                No gate gets a file, and no file, scratch copy, seal, lock content, in-flight
                record, obligation or draft is written by a gate: in stage `audit` the
                validators suppress their own side effects (Slack cache and fallback log,
@@ -103,6 +116,8 @@ Environment (all optional; tests point these at temp roots)
 -----------------------------------------------------------
   ISSUE_CREATE_OWNER_AUDIT_HOOK      pre-issue-create-audit.sh path
   ISSUE_CREATE_OWNER_LEDGER_HOOKS    os.pathsep list of ledger hook paths (all required)
+                                     (the three peer filing gates have NO override: they are a fixed
+                                     set beside the owner and a missing one refuses the create)
   ISSUE_CREATE_OWNER_REWRITER_HOOKS  os.pathsep list of hook scripts `preserve` dry-runs INSTEAD of
                                      discovery (test seam)
   ISSUE_CREATE_OWNER_SETTINGS_FILES  os.pathsep list of settings files discovery reads INSTEAD of
@@ -242,18 +257,76 @@ def _is_operator(token: str) -> bool:
     return token != "" and all(char in _PUNCT for char in token)
 
 
+_SHELL_C = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
+_CREATE_TEXT = re.compile(r"gh\s+issue\s+create\b")
+# Wrapper options that take a COMMAND STRING (as the attached value or the next word):
+# `env -S 'cmd'` / `env -iS'cmd'` / `env --split-string=cmd` and `sudo -s 'cmd'` / `sudo -i 'cmd'`.
+_ENV_SPLIT_OPT = re.compile(r"^(?:-[A-Za-z]*S|--split-string)")
+_SUDO_SHELL_OPT = re.compile(r"^(?:-[A-Za-z]*[si]|--shell|--login)$")
+
+
+def _recognized_at(words: List[str], index: int) -> bool:
+    """True when words[index] starts a command this classifier understands: a `gh issue create`,
+    the create owner, `python* <owner>`, a shell with `-c <string>`, or `eval`."""
+    head = os.path.basename(words[index])
+    rest = words[index + 1:]
+    if head == "gh":
+        return rest[:2] == ["issue", "create"]
+    if head == OWNER_NAME:
+        return True
+    if head.startswith("python") and rest and os.path.basename(rest[0]) == OWNER_NAME:
+        return True
+    if head in _SHELLS:
+        return any(_SHELL_C.fullmatch(word) and offset + 1 < len(rest) for offset, word in enumerate(rest))
+    return head == "eval"
+
+
+def _note_embedded(text: str, compound: bool, found: Dict[str, list]) -> None:
+    """A command string we cannot parse further (it is data to a wrapper option): fail closed on a
+    literal mention, exactly like the unbalanced-quote fallback in scan()."""
+    if _CREATE_TEXT.search(text):
+        found["creates"].append({"direct": False, "compound": compound})
+    if OWNER_NAME in text:
+        found["owners"].append({"direct": False, "subcommand": ""})
+
+
+def _scan_wrapper_operands(
+    words: List[str], start: int, chain: List[str], compound: bool, found: Dict[str, list]
+) -> None:
+    """Wrapper options whose value IS a command string (see _ENV_SPLIT_OPT / _SUDO_SHELL_OPT).
+
+    Only the options that introduce a command string are inspected, so `rtk git commit -m '... gh
+    issue create ...'` and `timeout 5 curl -d '...'` stay `none`."""
+    for position in range(start, len(words)):
+        word = words[position]
+        introduces = ("env" in chain and _ENV_SPLIT_OPT.match(word)) or (
+            "sudo" in chain and _SUDO_SHELL_OPT.match(word)
+        )
+        if introduces:
+            _note_embedded(word, compound, found)
+            if position + 1 < len(words):
+                _note_embedded(words[position + 1], compound, found)
+
+
 def _scan_segment(words: List[str], compound: bool, depth: int, found: Dict[str, list]) -> None:
     index = 0
     wrapped = compound
+    chain: List[str] = []
+    wrapper_at = -1
     while True:
         while index < len(words) and _ASSIGN.match(words[index]):
             index += 1
             wrapped = True
         if index >= len(words):
+            if chain:
+                _scan_wrapper_operands(words, wrapper_at + 1, chain, compound, found)
             return
         head = os.path.basename(words[index])
         if head in _WRAPPERS:
             wrapped = True
+            chain.append(head)
+            if wrapper_at < 0:
+                wrapper_at = index
             index += 1
             while index < len(words) and (
                 words[index].startswith("-") or _ASSIGN.match(words[index]) or _COUNT.match(words[index])
@@ -261,6 +334,18 @@ def _scan_segment(words: List[str], compound: bool, depth: int, found: Dict[str,
                 index += 1
             continue
         break
+    if chain and not _recognized_at(words, index):
+        # CTO REVISE review-permit-chain:0d2d8dc8: a wrapper option can take an operand we cannot
+        # know (`env -u GH_TOKEN`, `timeout -s KILL 5`, `sudo -u root`, `xargs -I X`, `rtk proxy`),
+        # which made that operand the apparent head and the real `gh issue create` invisible. Refuse
+        # the ambiguous form: take the first recognized head anywhere after the wrapper, as wrapped.
+        _scan_wrapper_operands(words, wrapper_at + 1, chain, compound, found)
+        for position in range(wrapper_at + 1, len(words)):
+            if _recognized_at(words, position):
+                index = position
+                break
+        else:
+            return
     head = os.path.basename(words[index])
     rest = words[index + 1:]
     if head == "gh":
@@ -278,7 +363,7 @@ def _scan_segment(words: List[str], compound: bool, depth: int, found: Dict[str,
     nested: Optional[str] = None
     if head in _SHELLS:
         for offset, word in enumerate(rest):
-            if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", word) and offset + 1 < len(rest):
+            if _SHELL_C.fullmatch(word) and offset + 1 < len(rest):
                 nested = rest[offset + 1]
                 break
     elif head == "eval":
@@ -882,6 +967,19 @@ def ledger_hooks() -> List[str]:
     return hooks
 
 
+# The peer filing gates the owner command never reaches as a live hook (they match only a command
+# that begins `gh issue create`). Fixed set, shipped beside the owner, deliberately NOT overridable.
+PEER_HOOK_NAMES = (
+    "owner-stage-block-status-todo-without-ready-pool.sh",
+    "owner-stage-block-invalid-backlog-issue-create.sh",
+    "owner-stage-block-missing-directive-contract-issue-create.sh",
+)
+
+
+def peer_hooks() -> List[str]:
+    return [str(HERE / name) for name in PEER_HOOK_NAMES]
+
+
 # ---------------------------------------------------------------------------
 # permit / lock / in-flight bookkeeping
 # ---------------------------------------------------------------------------
@@ -1157,6 +1255,39 @@ def run_ledger_stage(spec: Spec, cwd: str, command_words: List[str]) -> None:
             raise Refusal(f"ledger/tracker gate rejected the create: {blocked}")
 
 
+def run_peer_stage(spec: Spec, cwd: str, command_words: List[str]) -> None:
+    """Run the peer filing gates (status:todo / status:backlog / directive contract) on the SAME bytes.
+
+    Same in-memory contract as run_ledger_stage: base64 buffer in MOP_ISSUE_CREATE_BODY_B64, the
+    synthesized `--body-file -` command, MOP_ISSUE_CREATE_STAGE=audit, nothing written. The three
+    hooks print NOTHING when they pass, so this stage fails CLOSED on anything else: a non-zero
+    exit, a parseable block, or any other output (a block whose message is malformed JSON, for
+    example when the title holds a quote, is skipped by block_message and would otherwise read
+    as a pass).
+    """
+    hooks = peer_hooks()
+    for script in hooks:
+        if not os.path.isfile(script):
+            raise Refusal(f"a required filing gate is missing: {script}")
+    payload = {
+        "hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": cwd,
+        "tool_input": {"command": shlex.join(command_words + ["--body-file", "-"])},
+    }
+    env = {
+        "MOP_ISSUE_CREATE_STAGE": "audit",
+        "MOP_ISSUE_CREATE_BODY_B64": base64.b64encode(spec.body).decode("ascii"),
+    }
+    for script in hooks:
+        rc, out, err = run_hook(script, payload, env)
+        if rc != 0:
+            raise Refusal(f"filing gate {script} failed (rc={rc}): {err.strip() or out.strip()}")
+        blocked = block_message(out)
+        if blocked:
+            raise Refusal(f"filing gate rejected the create: {blocked}")
+        if out.strip():
+            raise Refusal(f"filing gate {script} gave unreadable output; refusing: {out.strip()[:400]}")
+
+
 def run_chain(args: List[str]) -> int:
     spec = parse_spec(args)  # reads --body-file into memory; nothing is written
     cwd = os.getcwd()
@@ -1214,6 +1345,9 @@ def run_chain(args: List[str]) -> int:
 
     # 2b. gate: ledger + tracker validators on the same bytes.
     run_ledger_stage(spec, cwd, command_words)
+
+    # 2c. gate: the peer filing checks (status:todo, status:backlog, directive contract) on the same bytes.
+    run_peer_stage(spec, cwd, command_words)
 
     # 3. bind: check + binding + IN_FLIGHT under the shared permit lock, then release it.
     key = marker["key"]

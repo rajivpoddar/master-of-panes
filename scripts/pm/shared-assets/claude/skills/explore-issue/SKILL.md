@@ -378,7 +378,11 @@ PHASE 3 — READY_TO_FILE + File GitHub Issue:
                                 create again for that source: an in-flight record is never
                                 released by a claimed absence (explore_issue_restore_permit
                                 refuses it); only the owner releases it, and only when gh
-                                definitely never started. Use the existing reconcile-by-search
+                                definitely never started. A CONSUMED record is never released
+                                either, including a legacy one with no issue_url or
+                                consumed_by (restore returns 6 for it and writes nothing):
+                                a caller-supplied absence string is an assertion, not a
+                                durable no-start proof. Use the existing reconcile-by-search
                                 path to find the issue by canonical Source permalink
                                 and resolve the same obligation. If search is
                                 inconclusive, remain reconciliation-only; absence of a

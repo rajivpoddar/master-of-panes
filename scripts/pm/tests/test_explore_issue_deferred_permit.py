@@ -197,17 +197,104 @@ def test_restore_refuses_a_verified_owner_consumed_record(tmp_path):
     assert consumed.read_bytes() == before
 
 
-def test_restore_still_clears_a_legacy_unknown_consumed_record(tmp_path):
-    """Preserved behaviour: a legacy consumed/UNKNOWN record (no URL) can be reconciled with proven absence."""
+def test_restore_refuses_a_legacy_unknown_consumed_record(tmp_path):
+    """CTO REVISE (review-permit-chain 0d2d8dc8): a legacy consumed/UNKNOWN record (no URL, no owner)
+    has no durable no-start proof, and a caller-supplied absence string is not one. Restore must
+    refuse, leave the record in consumed/, write no reconciled file and keep the source
+    reconciliation-only."""
     _write_state(tmp_path, "READY_TO_FILE")
     consumed_dir = tmp_path / "consumed"
     consumed_dir.mkdir()
     consumed = consumed_dir / f"{KEY}.permit.consumed.20261113T210948Z.json"
     consumed.write_text(json.dumps({"obligation_id": OBLIGATION_ID, "body_sha256": BODY_SHA}))
+    before = consumed.read_bytes()
+    result = _run_helper(_env(tmp_path), (
+        f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" '
+        f'"gh search found no issue for the permalink, title or keywords"; echo "rc=$?"'
+    ))
+    assert "rc=6" in result.stdout, result.stdout + result.stderr
+    assert consumed.exists() and consumed.read_bytes() == before, "the consumed record must be untouched"
+    assert not (tmp_path / "reconciled").exists() or not list((tmp_path / "reconciled").glob("*.json"))
+    status = _run_helper(_env(tmp_path), (
+        f'explore_issue_permit_status "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}"; echo "rc=$?"'
+    ))
+    assert "rc=3" in status.stdout, "the source stays reconciliation-only"
+
+
+def test_restore_refuses_a_legacy_consumed_record_with_an_unreadable_body(tmp_path):
+    """An unreadable consumed record is UNKNOWN, never absent: refuse, do not move it."""
+    _write_state(tmp_path, "READY_TO_FILE")
+    consumed_dir = tmp_path / "consumed"
+    consumed_dir.mkdir()
+    consumed = consumed_dir / f"{KEY}.permit.consumed.20261113T210948Z.json"
+    consumed.write_bytes(b"{not json")
     result = _run_helper(_env(tmp_path), f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "proof"; echo "rc=$?"')
-    assert "rc=0" in result.stdout, result.stdout + result.stderr
-    assert not consumed.exists()
-    assert len(list((tmp_path / "reconciled").glob(f"{KEY}.permit.reconciled.*.json"))) == 1
+    assert "rc=6" in result.stdout, result.stdout + result.stderr
+    assert consumed.read_bytes() == b"{not json"
+    assert not (tmp_path / "reconciled").exists() or not list((tmp_path / "reconciled").glob("*.json"))
+
+
+def test_restore_refusal_is_repeatable_and_never_mints_or_reconciles(tmp_path):
+    """Calling restore again, with any proof, is still a refusal: nothing is ever released."""
+    _write_state(tmp_path, "READY_TO_FILE")
+    consumed_dir = tmp_path / "consumed"
+    consumed_dir.mkdir()
+    consumed = consumed_dir / f"{KEY}.permit.consumed.20261113T210948Z.json"
+    consumed.write_text(json.dumps({"obligation_id": OBLIGATION_ID, "body_sha256": BODY_SHA}))
+    env = _env(tmp_path)
+    for proof in ("first proof", "second proof", ""):
+        result = _run_helper(env, f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "{proof}"; echo "rc=$?"')
+        assert "rc=6" in result.stdout, result.stdout + result.stderr
+    assert consumed.exists()
+    assert not (tmp_path / "permits" / f"{KEY}.permit.json").exists(), "restore never mints a permit"
+    mint = _run_helper(env, (
+        f'explore_issue_mint_permit "{CHANNEL}" "{THREAD}" "{BODY_SHA}" "{TITLE_DIGEST}" "{OBLIGATION_ID}"; echo "rc=$?"'
+    ))
+    assert "rc=0" not in mint.stdout, "a consumed/UNKNOWN create must never be re-minted"
+    assert not (tmp_path / "permits" / f"{KEY}.permit.json").exists()
+
+
+def test_remint_of_an_unused_stripped_digest_permit_does_not_reopen_consumed_custody(tmp_path):
+    """Migrating a permit that was never consumed (retired stripped digest) is a plain re-mint with the
+    exact digest. It replaces only the permit file and works while NO consumed/in-flight record exists;
+    once a consumed record exists the same re-mint is refused and restore cannot reopen it."""
+    stripped = "1" * 64
+    exact = "2" * 64
+    env = _env(tmp_path)
+    minted = _run_helper(env, (
+        f'explore_issue_mint_permit "{CHANNEL}" "{THREAD}" "{stripped}" "{TITLE_DIGEST}" "{OBLIGATION_ID}"; echo "rc=$?"'
+    ))
+    assert "rc=0" in minted.stdout, minted.stdout + minted.stderr
+    migrated = _run_helper(env, (
+        f'explore_issue_mint_permit "{CHANNEL}" "{THREAD}" "{exact}" "{TITLE_DIGEST}" "{OBLIGATION_ID}"; echo "rc=$?"'
+    ))
+    assert "rc=0" in migrated.stdout, migrated.stdout + migrated.stderr
+    permit = json.loads((tmp_path / "permits" / f"{KEY}.permit.json").read_text())
+    assert permit["body_sha256"] == exact
+    status = _run_helper(env, (
+        f'explore_issue_permit_status "{CHANNEL}" "{THREAD}" "{exact}" "{TITLE_DIGEST}"; echo "rc=$?"'
+    ))
+    assert "rc=0" in status.stdout, status.stdout + status.stderr
+
+    # The permit is then spent by a create (consumed record written, gh may have run).
+    consumed = _run_helper(env, (
+        f'explore_issue_consume_permit "{CHANNEL}" "{THREAD}" "{exact}" "{TITLE_DIGEST}"; echo "rc=$?"'
+    ))
+    assert "rc=0" in consumed.stdout, consumed.stdout + consumed.stderr
+    _write_state(tmp_path, "READY_TO_FILE")
+    record = next((tmp_path / "consumed").glob(f"{KEY}.permit.consumed.*.json"))
+    before = record.read_bytes()
+    again = _run_helper(env, (
+        f'explore_issue_mint_permit "{CHANNEL}" "{THREAD}" "{stripped}" "{TITLE_DIGEST}" "{OBLIGATION_ID}"; echo "rc=$?"'
+    ))
+    assert "rc=0" not in again.stdout, "a migration re-mint must not reopen consumed custody"
+    restore = _run_helper(env, f'explore_issue_restore_permit "{CHANNEL}" "{THREAD}" "proof"; echo "rc=$?"')
+    assert "rc=6" in restore.stdout, restore.stdout + restore.stderr
+    assert record.exists() and record.read_bytes() == before
+    final = _run_helper(env, (
+        f'explore_issue_permit_status "{CHANNEL}" "{THREAD}" "{exact}" "{TITLE_DIGEST}"; echo "rc=$?"'
+    ))
+    assert "rc=3" in final.stdout, "consumed custody stays reconciliation-only"
 
 
 def test_file_sha256_is_the_exact_byte_digest_and_differs_from_the_stripped_one(tmp_path):

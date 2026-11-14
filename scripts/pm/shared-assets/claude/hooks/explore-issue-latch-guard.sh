@@ -400,76 +400,71 @@ with open(path + ".lock", "a") as lock:
 }
 
 explore_issue_restore_permit() {
-  # channel thread_ts absence_proof -> 0 cleared, 1 not found or wrong state, 2 already reconciled,
-  #                                    4 refused: an in-flight create exists (gh may have started),
-  #                                    5 refused: the consumed record is a verified owner create
+  # channel thread_ts absence_proof -> never releases anything.
+  #   1  not found: state is not READY_TO_FILE, or there is no consumed record for the key
+  #   2  a reconcile record from an earlier release already exists for the key
+  #   4  refused: an in-flight create exists (gh may have started)
+  #   5  refused: the consumed record is a verified owner create (issue_url / consumed_by)
+  #   6  refused: the consumed record is a LEGACY UNKNOWN create (retired finalizer)
   #
-  # Moves a LEGACY consumed permit (UNKNOWN create from the retired finalizer) to the reconciled
-  # dir when the caller has proven that the guarded create never landed in GitHub (searched by
-  # title, keywords, channel, and both source permalinks; no match found). After this returns 0,
-  # the agent MUST re-prepare the body with the correct source_message_ts, compute a fresh exact
-  # body digest (explore_issue_file_sha256) and title_digest, call explore_issue_mint_permit, set
-  # state READY_TO_FILE, and run the create owner. This function never re-mints the permit itself.
+  # A consumed record means the permit was spent BEFORE the external gh create ran
+  # (persist-UNKNOWN-first). A legacy record (the retired finalizer; source 33762 is one) carries
+  # no durable no-start proof: the old finalizer consumed the permit, then gh ran under a separate
+  # process that left no in-flight record, no URL and no readback. A caller-supplied
+  # `absence_proof` string is an assertion, not proof that gh never started. The CTO review
+  # (review-permit-chain 0d2d8dc8, REVISE) found that releasing such a record re-opens a create
+  # that may already exist. So this function is REFUSE-ONLY: it reads, classifies and returns.
+  # It never moves, edits or deletes a consumed, in-flight, permit or reconciled record, and it
+  # never writes a reconciled record. Legacy consumed/UNKNOWN stays reconciliation-only until the
+  # existing reconcile-by-search path finds the issue (by canonical Source permalink) and
+  # resolves the same obligation.
   #
-  # Hard refusals (no absence proof, however strong, overrides them):
-  #   - an `<key>.inflight.json` record exists: issue-create-owner.py wrote it BEFORE gh was
-  #     spawned, so gh may have started. It is released ONLY by the owner itself, and only on a
-  #     definite spawn failure. Restore never touches it.
-  #   - the consumed record carries consumed_by=issue-create-owner / issue_url: the owner verified
-  #     that the issue exists; "absence" is a contradiction, not a recovery.
+  # Re-minting a permit that was NEVER consumed (for example an unused permit that carries the
+  # retired stripped digest) is a plain explore_issue_mint_permit: it refuses while a consumed or
+  # in-flight record exists and otherwise replaces only the permit file. It does not need this
+  # function and never reopens consumed custody.
   #
-  # Safety invariants:
-  #   - Only succeeds when state is READY_TO_FILE (not any terminal state).
-  #   - Exactly one reconcile per key: a second call returns 2.
-  #   - All checks and the move run under the SAME permit lock the mint (atomic write) and the
-  #     owner use: `<permit file>.lock`.
+  # The refusals run under the SAME permit lock the mint and the owner use (`<permit file>.lock`).
   local EXPLORE_ISSUE_SELECTED_KEY="${EXPLORE_ISSUE_SELECTED_KEY:-}"
   EXPLORE_ISSUE_SELECTED_KEY="$(explore_issue_source_key "$1" "$2" "${EXPLORE_ISSUE_SOURCE_MESSAGE_TS:-}")" || return $?
-  local channel="$1" thread_ts="$2" absence_proof="${3:-}"
+  local channel="$1" thread_ts="$2"
   local consumed_dir reconciled_dir key state_file state permit_file
   key="$EXPLORE_ISSUE_SELECTED_KEY"
   consumed_dir="${EXPLORE_ISSUE_CONSUMED_PERMIT_DIR:-/tmp/heydonna-explore-issue-permit-consumed}"
   reconciled_dir="${EXPLORE_ISSUE_RECONCILED_PERMIT_DIR:-/tmp/heydonna-explore-issue-permit-reconciled}"
   permit_file="$(explore_issue_permit_file "$channel" "$thread_ts")" || return $?
 
-  # State must be READY_TO_FILE (not terminal, not unstarted).
   state_file="$EXPLORE_ISSUE_STATE_DIR/$key.json"
   [ -f "$state_file" ] || return 1
   state="$(jq -er .state "$state_file" 2>/dev/null)" || return 1
   [ "$state" = "READY_TO_FILE" ] || return 1
 
   local inflight_file="${EXPLORE_ISSUE_INFLIGHT_DIR:-/tmp/heydonna-explore-issue-inflight}/${key}.inflight.json"
-  local now
-  now="$(date -u +%Y%m%dT%H%M%SZ)"
-  mkdir -p "$reconciled_dir"
   python3 -c '
 import fcntl, glob, json, os, sys
-key, permit_file, consumed_dir, inflight_file, reconciled_dir, now, absence_proof = sys.argv[1:]
+key, permit_file, consumed_dir, inflight_file, reconciled_dir = sys.argv[1:]
 os.makedirs(os.path.dirname(permit_file), exist_ok=True)
 with open(permit_file + ".lock", "a") as lock:
     fcntl.flock(lock, fcntl.LOCK_EX)
     if os.path.exists(inflight_file):
-        sys.exit(4)  # gh may have started: never released by restore.
-    found = ""
-    for candidate in sorted(glob.glob(os.path.join(consumed_dir, key + ".permit.consumed.*.json"))):
-        found = candidate
-        break
+        sys.exit(4)  # gh may have started: never released.
+    found = sorted(glob.glob(os.path.join(consumed_dir, key + ".permit.consumed.*.json")))
     if not found:
         sys.exit(1)
     if glob.glob(os.path.join(reconciled_dir, key + ".permit.reconciled.*.json")):
-        sys.exit(2)  # Already reconciled once; preserve UNKNOWN safety.
-    with open(found) as f:
-        permit = json.load(f)
-    if permit.get("consumed_by") == "issue-create-owner" or permit.get("issue_url"):
-        sys.exit(5)  # A verified create exists; absence cannot be claimed.
-    permit["reconciled_at"] = now
-    permit["absence_proof"] = absence_proof
-    reconciled = os.path.join(reconciled_dir, key + ".permit.reconciled." + now + ".json")
-    with open(reconciled + ".tmp", "w") as f:
-        json.dump(permit, f)
-    os.replace(reconciled + ".tmp", reconciled)
-    os.remove(found)
-' "$key" "$permit_file" "$consumed_dir" "$inflight_file" "$reconciled_dir" "$now" "$absence_proof" || return $?
+        sys.exit(2)  # An earlier release is on record; nothing more is released.
+    for candidate in found:
+        try:
+            with open(candidate) as f:
+                permit = json.load(f)
+        except (OSError, ValueError):
+            sys.exit(6)  # Unreadable is UNKNOWN, never absent.
+        if not isinstance(permit, dict):
+            sys.exit(6)
+        if permit.get("consumed_by") == "issue-create-owner" or permit.get("issue_url"):
+            sys.exit(5)  # A verified create exists; absence cannot be claimed.
+    sys.exit(6)  # Legacy consumed/UNKNOWN: no no-start proof exists, so reconciliation-only.
+' "$key" "$permit_file" "$consumed_dir" "$inflight_file" "$reconciled_dir"
 }
 
 explore_issue_verdict_path() {

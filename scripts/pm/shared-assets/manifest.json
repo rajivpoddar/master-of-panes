@@ -132,7 +132,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-create-audit",
-      "sha256": "79db65106dabeaa64e6c229a8d7bf74deaa2275b5a7f781baaf3f182a0379301",
+      "sha256": "d6fae930fcadffdfd792195d87dccdac5f8a2ea7aa7004a486fef08c6af55480",
       "source_path": "claude/hooks/explore-issue-latch-guard.sh"
     },
     {
@@ -168,8 +168,35 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-create-audit",
-      "sha256": "53734ab47b30e3c58bd0bc9cd56984bf20bb35b4ff4b91083de00c73037a5c09",
+      "sha256": "c668f45531f6426cf3ccee01113eebe8705b0c4ae98e5cdc88b6dfe4a94894ef",
       "source_path": "claude/hooks/issue-create-owner.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/hooks/owner-stage-block-invalid-backlog-issue-create.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-issue-create-audit",
+      "sha256": "f5bf4129359daf266d7cc785fe7a97778a5aa7f0f61e450e6541f593d7eb7e2b",
+      "source_path": "claude/hooks/owner-stage-block-invalid-backlog-issue-create.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/hooks/owner-stage-block-missing-directive-contract-issue-create.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-issue-create-audit",
+      "sha256": "9bfeac27a6134363d0b5cfcccd184d1c283e26cc25e2d81f365e50da6f584a58",
+      "source_path": "claude/hooks/owner-stage-block-missing-directive-contract-issue-create.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/hooks/owner-stage-block-status-todo-without-ready-pool.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-issue-create-audit",
+      "sha256": "96a4aa8e4e880520947784604fe1ed508c5cad0ff49a10ad1e426735b7d40b02",
+      "source_path": "claude/hooks/owner-stage-block-status-todo-without-ready-pool.sh"
     },
     {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/pm-ops-sync-stop-validator.sh",
@@ -1115,7 +1142,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-intake",
-      "sha256": "ca1664ce521512e1ebd4195479b0a2965327a23234126c4e13fd6ea35a21ad2f",
+      "sha256": "ae0de4f8f5f60ec4a497ca100ce0de3cb96a0cbbd50bd2456241b807e2d36264",
       "source_path": "claude/skills/explore-issue/SKILL.md"
     },
     {
@@ -1890,7 +1917,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 206,
+    "selected_count": 209,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",

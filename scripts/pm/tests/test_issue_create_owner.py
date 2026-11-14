@@ -8,9 +8,14 @@ a live permit, were both reachable.
 
 Contract proven here (one owner, one process):
   1. the exact --body/--body-file bytes are held in ONE in-memory buffer that reaches every gate IN
-     MEMORY: the audit gate on stdin, the ledger gates in MOP_ISSUE_CREATE_BODY_B64 with `--body-file -`.
-     No file, scratch copy or temp directory exists at any point;
-  2. the existing audit (source/verdict/permit) and ledger/tracker gates run sequentially on them;
+     MEMORY: the audit gate on stdin, the ledger gates and the peer filing gates in
+     MOP_ISSUE_CREATE_BODY_B64 with `--body-file -`. The issue body is never written to a file, scratch
+     copy or temp directory at any point;
+  2. the existing audit (source/verdict/permit), ledger/tracker gates AND the peer filing gates that
+     used to guard a raw `gh issue create` (status:todo Ready Pool frontmatter, status:backlog intent,
+     Directive Contract) run sequentially on them. The peer gates are owner-stage copies of the
+     existing hooks: same acceptance logic, fixed beside the owner (no override seam), and the owner
+     refuses on any block, any non-zero exit and any output it cannot read as a pass;
   3. the permit binds the EXACT raw digest (trailing newlines and NUL bytes included);
   4. a rejecting gate writes nothing: no lock content, no in-flight record, no obligation, no state,
      no draft copy, no Slack cache, no log, no seal, no capture file;
@@ -34,11 +39,14 @@ directive.
 """
 from __future__ import annotations
 
+import base64
 import fcntl
 import hashlib
 import importlib.util
+import inspect
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -59,7 +67,22 @@ KEY = f"{CHANNEL}__{THREAD.replace('.', '_')}"
 OBLIGATION_ID = "33762"
 TITLE = "Owner test: filing with a valid permit"
 BODY = f"Source: {CHANNEL}:{THREAD}\nDescription: owner chain body.\n"
-URL = "https://github.com/Scribie/heydonna-app/issues/4242"
+# Bodies that satisfy the peer filing gates (owner-stage copies of the existing raw-create hooks).
+READY_POOL_BLOCK = (
+    "<!-- ready-pool:\n"
+    "priority: P2\n"
+    "lane: infra\n"
+    "ac_summary: owner chain filing\n"
+    "claimable_slot_type: dev-slot\n"
+    "blockers: none\n"
+    "work_type: implementation\n"
+    "-->\n"
+)
+READY_POOL_BODY = BODY + READY_POOL_BLOCK
+BACKLOG_BODY = BODY + "Parent: #1\nUnblock condition: x\nOwner: pm-held\n"
+DIRECTIVE_BODY = BODY + "Rajiv directive: keep the original capability.\n"
+DIRECTIVE_CONTRACT_BODY = DIRECTIVE_BODY + "## Directive Contract\nOriginal directive: kept.\n"
+URL ="https://github.com/Scribie/heydonna-app/issues/4242"
 O = "/Users/rajiv/.claude/hooks/issue-create-owner.py"
 G = 'gh issue create --title "t" --body-file /tmp/b.md'
 
@@ -216,6 +239,12 @@ class World:
             "state": "open",
         }))
 
+    def use(self, body: str, title: str = TITLE) -> None:
+        """Make body/title the one the file, the permit and the GitHub readback all agree on."""
+        self.write_body(body)
+        self.write_permit(body, title)
+        self.write_api(body, title)
+
     def api_calls(self) -> int:
         calls = self.gh_dir / "api-calls"
         return len(calls.read_text().splitlines()) if calls.exists() else 0
@@ -333,6 +362,7 @@ def test_a_permit_minted_with_the_retired_stripped_digest_is_refused(world: Worl
 
 
 def test_priority_label_alias_is_canonicalised_by_the_owner(world: World):
+    world.use(READY_POOL_BODY)  # status:todo must carry the Ready Pool frontmatter the peer gate requires
     result = world.run_owner(
         "--title", TITLE, "--body-file", str(world.body_file), "--label", "priority:p1,status:todo",
     )
@@ -606,8 +636,9 @@ def test_source_order_inflight_before_gh_and_consume_after_verified_url():
     # Every gate runs before the shared permit lock is taken and before the in-flight write.
     audit = source.index("run_hook(audit_script")
     ledger = source.index("run_ledger_stage(spec, cwd, command_words)")
+    peer = source.index("run_peer_stage(spec, cwd, command_words)")
     lock = source.index("with PermitLock(permit_file, lock_wait) as lock:")
-    assert audit < ledger < lock < inflight_write
+    assert audit < ledger < peer < lock < inflight_write
     # check + binding + in-flight are inside that one lock block; gh is outside it.
     assert lock < source.index("lock.bind(record)") < inflight_write < popen
     # The permit lock is the file the mint and restore take: `<permit file>.lock`.
@@ -621,6 +652,11 @@ def test_source_order_inflight_before_gh_and_consume_after_verified_url():
     for forbidden in ("open(", "write(", "mkdtemp", "os.open", "--body-file\", body_path"):
         assert forbidden not in ledger_stage, forbidden
     assert "MOP_ISSUE_CREATE_BODY_B64" in ledger_stage
+    # The peer filing gates see the same in-memory buffer; nothing about the body touches disk.
+    peer_stage = inspect.getsource(owner.run_peer_stage)
+    for forbidden in ("open(", "write(", "mkdtemp", "os.open"):
+        assert forbidden not in peer_stage, forbidden
+    assert "MOP_ISSUE_CREATE_BODY_B64" in peer_stage
 
 
 def test_busy_permit_lock_refuses_without_starting_gh_or_writing_in_flight(world: World):
@@ -655,6 +691,7 @@ def test_mint_restore_and_owner_all_use_the_one_permit_lock_file():
 
 
 def test_post_create_hooks_are_replayed_with_a_synthesized_payload(world: World):
+    world.use(READY_POOL_BODY)  # status:todo must carry the Ready Pool frontmatter the peer gate requires
     record = world.root / "post-record.json"
     sweep = world._script(world.root / "post-sweep.sh", '#!/bin/sh\ncat > "$POST_RECORD"\n')
     env = world.env(ISSUE_CREATE_OWNER_POST_SWEEP_HOOK=str(sweep), POST_RECORD=str(record))
@@ -671,6 +708,186 @@ def test_post_create_hooks_are_replayed_with_a_synthesized_payload(world: World)
     assert payload["tool_input"]["command"].startswith("gh issue create ")
     assert "status:todo" in payload["tool_input"]["command"]
     assert payload["tool_response"] == {"stdout": URL + "\n", "stderr": "", "exit_code": 0}
+
+
+# ---------------------------------------------------------------------------
+# 9b: the peer filing gates (status:todo Ready Pool, status:backlog intent, Directive Contract)
+#     run on the SAME in-memory bytes before gh can start (CTO REVISE, boundary 3)
+# ---------------------------------------------------------------------------
+
+def _refused_before_gh(world: World, result: subprocess.CompletedProcess, *needles: str) -> None:
+    assert result.returncode == 2, result.stderr
+    assert "REFUSED NO_GH_START" in result.stderr, result.stderr
+    for needle in needles:
+        assert needle in result.stderr, (needle, result.stderr)
+    world.nothing_written()
+
+
+def _filed_with_exact_bytes(world: World, body: str, result: subprocess.CompletedProcess) -> None:
+    assert result.returncode == 0, result.stderr
+    assert "FILED" in result.stdout + result.stderr
+    assert (world.gh_dir / "stdin").read_bytes() == body.encode()
+    assert world.gh_calls() == 1
+
+
+def _peer_copy(name: str, command: str, body: str, stage: str = "audit") -> subprocess.CompletedProcess:
+    """Run one owner-stage hook copy directly, exactly as run_peer_stage does."""
+    payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": "/tmp",
+               "tool_input": {"command": command}}
+    env = dict(os.environ)
+    env["MOP_ISSUE_CREATE_STAGE"] = stage
+    env["MOP_ISSUE_CREATE_BODY_B64"] = base64.b64encode(body.encode()).decode("ascii")
+    return subprocess.run(
+        ["bash", str(HOOKS / name)], input=json.dumps(payload), capture_output=True, text=True, env=env, timeout=60,
+    )
+
+
+def test_status_todo_without_ready_pool_frontmatter_is_refused_before_gh(world: World):
+    result = world.run_owner(
+        "--title", TITLE, "--body-file", str(world.body_file), "--label", "status:todo",
+    )
+    _refused_before_gh(world, result, "filing gate rejected the create", "missing_ready_pool_frontmatter")
+
+
+def test_status_todo_with_a_non_claimable_slot_type_is_refused_before_gh(world: World):
+    world.use(READY_POOL_BODY.replace("claimable_slot_type: dev-slot", "claimable_slot_type: pm"))
+    result = world.run_owner(
+        "--title", TITLE, "--body-file", str(world.body_file), "--label", "status:todo",
+    )
+    _refused_before_gh(world, result, "filing gate rejected the create", "non_claimable_slot_type:pm")
+
+
+def test_status_todo_missing_a_required_ready_pool_field_is_refused_before_gh(world: World):
+    world.use(READY_POOL_BODY.replace("lane: infra\n", ""))
+    result = world.run_owner(
+        "--title", TITLE, "--body-file", str(world.body_file), "--label", "status:todo",
+    )
+    _refused_before_gh(world, result, "filing gate rejected the create", "missing_ready_pool_fields:lane")
+
+
+def test_status_backlog_without_park_metadata_is_refused_before_gh(world: World):
+    result = world.run_owner(
+        "--title", TITLE, "--body-file", str(world.body_file), "--label", "status:backlog",
+    )
+    _refused_before_gh(world, result, "filing gate rejected the create", "invalid status:backlog issue create")
+
+
+def test_directive_scoped_body_without_directive_contract_is_refused_before_gh(world: World):
+    world.use(DIRECTIVE_BODY)
+    result = world.run_owner()
+    _refused_before_gh(world, result, "filing gate rejected the create", "Directive Contract")
+
+
+def test_the_ready_pool_override_text_in_a_title_is_data_not_an_override(world: World):
+    """The raw hook skips the Ready Pool gate when the command text carries the override string.
+    In the owner stage the command holds a title and labels, so the string is data: still refused."""
+    title = "Owner test PM_READY_POOL_SCHEMA_OVERRIDE=PM_OVERRIDE_WITH_PROOF"
+    world.use(BODY, title=title)
+    result = world.run_owner("--title", title, "--body-file", str(world.body_file), "--label", "status:todo")
+    _refused_before_gh(world, result, "missing_ready_pool_frontmatter")
+    # And the copy itself, called directly, ignores the string only in the owner stage.
+    command = shlex.join(["gh", "issue", "create", "--title", title, "--label", "status:todo", "--body-file", "-"])
+    owner_stage = _peer_copy("owner-stage-block-status-todo-without-ready-pool.sh", command, BODY)
+    assert owner_stage.returncode == 0 and '"decision":"block"' in owner_stage.stdout, owner_stage.stdout
+
+
+@pytest.mark.parametrize("separator", [";", "|", "&", "&&", "||"])
+def test_a_title_with_shell_separators_cannot_hide_the_label_from_the_peer_copies(separator: str):
+    """The raw hooks split the command text on ; | & and can lose the --label that follows a quoted
+    title. The owner command is ONE synthesized gh issue create, so the copies keep it whole."""
+    title = f"Owner test a {separator} b"
+    command = shlex.join(["gh", "issue", "create", "--title", title, "--label", "status:backlog", "--body-file", "-"])
+    backlog = _peer_copy("owner-stage-block-invalid-backlog-issue-create.sh", command, BODY)
+    assert backlog.returncode == 0, backlog.stderr
+    assert '"decision":"block"' in backlog.stdout, backlog.stdout
+    directive_command = shlex.join(["gh", "issue", "create", "--title", title, "--body-file", "-"])
+    directive = _peer_copy("owner-stage-block-missing-directive-contract-issue-create.sh", directive_command, DIRECTIVE_BODY)
+    assert directive.returncode == 0, directive.stderr
+    assert '"decision":"block"' in directive.stdout, directive.stdout
+
+
+def test_a_title_with_a_double_quote_cannot_turn_a_peer_block_into_a_pass(world: World):
+    """A block message is printed with the raw title, so a double quote yields malformed JSON that
+    block_message skips. The owner must fail closed on that unreadable output."""
+    title = 'Owner "quoted" test'
+    world.use(BODY, title=title)
+    result = world.run_owner("--title", title, "--body-file", str(world.body_file), "--label", "status:backlog")
+    _refused_before_gh(world, result)
+    assert "filing gate" in result.stderr
+
+
+def test_peer_stage_fails_closed_on_unreadable_nonzero_and_missing_gates(tmp_path: Path, monkeypatch):
+    def stub(name: str, text: str) -> None:
+        path = tmp_path / name
+        path.write_text(text)
+        path.chmod(0o755)
+
+    spec = owner.Spec()
+    spec.title, spec.body = TITLE, BODY.encode()
+    command_words = ["gh", "issue", "create", "--title", TITLE]
+    monkeypatch.setattr(owner, "HERE", tmp_path)
+    monkeypatch.setattr(owner, "PEER_HOOK_NAMES", ("peer-a.sh",))
+
+    with pytest.raises(owner.Refusal, match="a required filing gate is missing"):
+        owner.run_peer_stage(spec, str(tmp_path), command_words)
+
+    stub("peer-a.sh", '#!/bin/bash\ncat >/dev/null\nprintf \'%s\\n\' \'{"decision":"block","message":"BLOCKED: "quoted""}\'\n')
+    with pytest.raises(owner.Refusal, match="unreadable output"):
+        owner.run_peer_stage(spec, str(tmp_path), command_words)
+
+    stub("peer-a.sh", "#!/bin/bash\ncat >/dev/null\nexit 3\n")
+    with pytest.raises(owner.Refusal, match=r"failed \(rc="):
+        owner.run_peer_stage(spec, str(tmp_path), command_words)
+
+    stub("peer-a.sh", '#!/bin/bash\ncat >/dev/null\nprintf \'%s\\n\' \'{"decision":"block","message":"BLOCKED: nope"}\'\n')
+    with pytest.raises(owner.Refusal, match="filing gate rejected the create: BLOCKED: nope"):
+        owner.run_peer_stage(spec, str(tmp_path), command_words)
+
+    stub("peer-a.sh", "#!/bin/bash\ncat >/dev/null\nexit 0\n")
+    owner.run_peer_stage(spec, str(tmp_path), command_words)  # a silent pass is the only pass
+
+
+def test_status_todo_with_ready_pool_frontmatter_files_with_the_exact_bytes(world: World):
+    world.use(READY_POOL_BODY)
+    result = world.run_owner(
+        "--title", TITLE, "--body-file", str(world.body_file), "--label", "status:todo",
+    )
+    _filed_with_exact_bytes(world, READY_POOL_BODY, result)
+
+
+def test_status_backlog_with_park_metadata_files_with_the_exact_bytes(world: World):
+    world.use(BACKLOG_BODY)
+    result = world.run_owner(
+        "--title", TITLE, "--body-file", str(world.body_file), "--label", "status:backlog",
+    )
+    _filed_with_exact_bytes(world, BACKLOG_BODY, result)
+
+
+def test_directive_scoped_body_with_directive_contract_files_with_the_exact_bytes(world: World):
+    world.use(DIRECTIVE_CONTRACT_BODY)
+    result = world.run_owner()
+    _filed_with_exact_bytes(world, DIRECTIVE_CONTRACT_BODY, result)
+
+
+def test_peer_gate_set_is_fixed_beside_the_owner_with_no_override_seam():
+    source = OWNER.read_text()
+    names = (
+        "owner-stage-block-status-todo-without-ready-pool.sh",
+        "owner-stage-block-invalid-backlog-issue-create.sh",
+        "owner-stage-block-missing-directive-contract-issue-create.sh",
+    )
+    assert tuple(owner.PEER_HOOK_NAMES) == names
+    assert owner.peer_hooks() == [str(HOOKS / name) for name in names]
+    # An env override of the peer gates would be a way to switch the filing checks off.
+    assert "ISSUE_CREATE_OWNER_PEER_HOOKS" not in source
+    assert "PEER_HOOK" not in "".join(
+        line for line in source.splitlines() if "environ" in line
+    ), "no environment variable may select or disable the peer gates"
+    for name in names:
+        text = (HOOKS / name).read_text()
+        assert "OWNER-STAGE COPY" in text.splitlines()[1], name
+        assert os.access(HOOKS / name, os.X_OK), f"{name} must keep its executable mode"
+        assert "MOP_ISSUE_CREATE_BODY_B64" in text and "MOP_ISSUE_CREATE_STAGE" in text
 
 
 # ---------------------------------------------------------------------------
@@ -719,6 +936,35 @@ CLASSIFY_CASES = [
     (f"bash -c '{G}'", "raw_wrapped"),
     (f"bash -lc '{G}'", "raw_wrapped"),
     (f'eval "{G}"', "raw_wrapped"),
+    # CTO REVISE review-permit-chain:0d2d8dc8: a wrapper option with an OPERAND used to make that
+    # operand the apparent head (`GH_TOKEN`, `KILL`, `root`, `X`, `proxy`...), so the real create was
+    # invisible and the audit hook fell through to `exit 0`. Every recognized-wrapper form is refused.
+    (f"env -u GH_TOKEN {G}", "raw_wrapped"),
+    (f"env --unset GH_TOKEN {G}", "raw_wrapped"),
+    (f"env -C /tmp {G}", "raw_wrapped"),
+    (f"timeout -s KILL 5 {G}", "raw_wrapped"),
+    (f"timeout --signal KILL 5 {G}", "raw_wrapped"),
+    (f"stdbuf -o L {G}", "raw_wrapped"),
+    (f"exec -a x {G}", "raw_wrapped"),
+    (f"sudo -u root {G}", "raw_wrapped"),
+    (f"sudo -u root env -u GH_TOKEN {G}", "raw_wrapped"),
+    (f"xargs -I X {G}", "raw_wrapped"),
+    (f"rtk proxy {G}", "raw_wrapped"),
+    (f"nohup setsid -f {G}", "raw_wrapped"),
+    (f"env -S '{G}'", "raw_wrapped"),
+    (f"env -iS '{G}'", "raw_wrapped"),
+    (f"env --split-string='{G}'", "raw_wrapped"),
+    (f"sudo -u root bash -c '{G}'", "raw_wrapped"),
+    (f"sudo -s '{G}'", "raw_wrapped"),
+    (f"env -u GH_TOKEN bash -lc '{G}'", "raw_wrapped"),
+    (f"echo x | xargs -I X {G}", "raw_compound"),
+    (f"cd /tmp && env -u GH_TOKEN {G}", "raw_compound"),
+    # Wrapped forms that do NOT contain a create stay out of the way.
+    ("env -u GH_TOKEN gh issue list", "none"),
+    ("time echo 'gh issue create'", "none"),
+    ("timeout 5 curl https://x.example/issue/create", "none"),
+    ("rtk gh issue comment 5 --body 'gh issue create later'", "none"),
+    ("sudo -u root git commit -m 'docs: gh issue create flow'", "none"),
     (f"python3 {O} create --title t --body-file /tmp/b.md", "owner_simple"),
     (f"{O} create --title t --body-file /tmp/b.md --label status:todo", "owner_simple"),
     (f"python3 {O} create --title t --body-file /tmp/b.md && echo ok", "owner_unsafe"),
@@ -839,6 +1085,42 @@ def test_the_guard_blocks_an_owner_invocation_a_rewriter_would_change_and_passes
                              env=dict(os.environ, ISSUE_CREATE_OWNER_REWRITER_HOOKS=loud))
     assert blocked.returncode == 0
     assert json.loads(blocked.stdout)["decision"] == "block" and "loud.sh" in blocked.stdout
+
+
+WRAPPER_OPERAND_BYPASSES = [
+    f"env -u GH_TOKEN {G}",
+    f"timeout -s KILL 5 {G}",
+    f"sudo -u root {G}",
+    f"xargs -I X {G}",
+    f"rtk proxy {G}",
+    f"env -S '{G}'",
+]
+
+
+@pytest.mark.parametrize("command", WRAPPER_OPERAND_BYPASSES)
+def test_the_audit_hook_refuses_a_wrapper_with_operands_before_anything_runs(command):
+    """CTO REVISE review-permit-chain:0d2d8dc8: `env -u GH_TOKEN gh issue create ...` made GH_TOKEN the
+    apparent head, classify returned `none`, and the audit hook fell through to `exit 0`. The create
+    now classifies as raw_wrapped and the hook blocks it upfront (no source, verdict or permit check)."""
+    audit = HOOKS / "pre-issue-create-audit.sh"
+    payload = json.dumps({"tool_name": "Bash", "cwd": "/tmp", "tool_input": {"command": command}})
+    env = {key: value for key, value in os.environ.items() if key != "MOP_ISSUE_CREATE_STAGE"}
+    result = subprocess.run(["bash", str(audit)], input=payload, capture_output=True, text=True, timeout=60, env=env)
+    assert result.returncode == 0, result.stderr
+    decision = json.loads(result.stdout)
+    assert decision["decision"] == "block", result.stdout
+    assert "must be the ONLY command" in decision["message"]
+    assert "Nothing was run and nothing was written" in decision["message"]
+
+
+def test_the_audit_hook_still_passes_an_unwrapped_operand_free_command_through_the_classifier():
+    """The refusal is shape-based: a wrapped command that is not a create is not blocked by it."""
+    audit = HOOKS / "pre-issue-create-audit.sh"
+    command = "env -u GH_TOKEN gh issue list --label create"  # passes the cheap prefilter, is not a create
+    payload = json.dumps({"tool_name": "Bash", "cwd": "/tmp", "tool_input": {"command": command}})
+    env = {key: value for key, value in os.environ.items() if key != "MOP_ISSUE_CREATE_STAGE"}
+    result = subprocess.run(["bash", str(audit)], input=payload, capture_output=True, text=True, timeout=60, env=env)
+    assert (result.returncode, result.stdout) == (0, "")
 
 
 # ---- discovery: the handler set comes from the settings in force, never from a fixed list ----------------
@@ -1086,6 +1368,9 @@ DEPLOYED = {
     "claude/hooks/explore-issue-latch-guard.sh": "/Users/rajiv/.claude/hooks/explore-issue-latch-guard.sh",
     "claude/hooks/explore-issue-permit-consume-gate.sh": "/Users/rajiv/.claude/hooks/explore-issue-permit-consume-gate.sh",
     "claude/skills/explore-issue/SKILL.md": "/Users/rajiv/.claude/skills/explore-issue/SKILL.md",
+    "claude/hooks/owner-stage-block-status-todo-without-ready-pool.sh": "/Users/rajiv/.claude/hooks/owner-stage-block-status-todo-without-ready-pool.sh",
+    "claude/hooks/owner-stage-block-invalid-backlog-issue-create.sh": "/Users/rajiv/.claude/hooks/owner-stage-block-invalid-backlog-issue-create.sh",
+    "claude/hooks/owner-stage-block-missing-directive-contract-issue-create.sh": "/Users/rajiv/.claude/hooks/owner-stage-block-missing-directive-contract-issue-create.sh",
 }
 
 
