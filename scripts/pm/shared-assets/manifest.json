@@ -708,7 +708,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-ops",
-      "sha256": "2866573a95de597f57d5158f38cc72398139932e2dc3b6cb143aae1b4c15115a",
+      "sha256": "1e8060017515160a0b09a34cf4d7d53a88d7a646a809e24cbf94c97135a321ae",
       "source_path": "claude/scripts/pm-ops-legacy.py"
     },
     {
@@ -852,7 +852,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "07e716cb1c11b6558f077ad0ef0c36a3fecfc5c9e8c00187f4afca8d22483057",
+      "sha256": "55f7508ab04c85b9e838a9971ea61277b6febc8b17022909122f59eae4e3fe23",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -1907,6 +1907,15 @@
       "ownership_class": "shared-codex-skill-test",
       "sha256": "3b20dfdfa3357e0bd0d0252392d0fb7354df63006330f709fd8b912177427710",
       "source_path": "codex/skills/heydonna-slack-postback/scripts/test_cto_slack_rest.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/proxy-agent-notify.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-proxy-notify",
+      "sha256": "f95ea999fe338ba96284e9ca65cdb5c932aa2fef5b70be1b7da8281c01a22c8e",
+      "source_path": "claude/scripts/proxy-agent-notify.py"
     }
   ],
   "inventory": {
@@ -1923,7 +1932,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 210,
+    "selected_count": 211,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -2030,7 +2039,8 @@
       "~/.claude/hooks/issue-create-owner.py",
       "~/.claude/skills/explore-issue/SKILL.md",
       "~/.claude/scripts/spark-run-monitor.sh",
-      "~/.claude/scripts/proxy-agent.sh"
+      "~/.claude/scripts/proxy-agent.sh",
+      "~/.claude/scripts/proxy-agent-notify.py"
     ]
   },
   "owner": "master-of-panes",

@@ -1684,6 +1684,13 @@ CLAUDE_BIN="$(command -v claude)"
   # PROXY_STOP (stop script) must return before kill-window. Out/log/jsonl are
   # already on disk; this only closes the tmux window.
   printf 'PROXY_AGENT_STOP_MODEL=%q PROXY_AGENT_STOP_LOG=%q PROXY_AGENT_STOP_JSONL=%q bash %q %q "$rc" %q %q\n' "$MODEL_ID" "$LOG" "$JSONL" "$HOME/.claude/scripts/proxy-agent-stop.sh" "$NAME" "$OUT" "$DELIVERY"
+  # Issue-thread result line (Rajiv DM D0AMF0XE6TS ts 1794720957.200479). Runs synchronously but is
+  # budget-bounded and fail-open (always exits 0); it must finish before kill-window, like the stop relay.
+  case "$TYPE" in
+    hd-planner|hd-builder|hd-proof-qa|hd-investigator)
+      printf 'PROXY_AGENT_NAME=%q python3 -I %q stop --type %q --brief %q --name %q --model %q --out %q --jsonl %q --rc "$rc" </dev/null >/dev/null 2>>%q || true\n' \
+        "$NAME" "$HOME/.claude/scripts/proxy-agent-notify.py" "$TYPE" "$PROMPT_FILE" "$NAME" "$MODEL_ID" "$OUT" "$JSONL" "$LOG";;
+  esac
   printf 'printf "%%s\\n" "$rc" > %q\n' "$JOB_DIR/rc"
   printf 'printf "PROXY_AGENT_DONE rc=%%s\\n" "$rc"\n'
   printf 'tmux wait-for -S %q\n' "$CHANNEL"
@@ -1743,6 +1750,16 @@ python3 -I "$STATE_HELPER" start --name "$PROXY_AGENT_RUN_NAME" --token "$PROXY_
 PROXY_AGENT_NAME="$NAME" PROXY_AGENT_NOTICE_MODEL="$MODEL_ID" \
   python3 -I "$HOME/.claude/scripts/proxy-assignment-notice.py" "$TYPE" "$PROMPT_FILE" \
   || echo "PROXY_AGENT_WARN reason=assignment_notice_failed" >&2
+# Issue-thread status line (Rajiv DM D0AMF0XE6TS thread 1794720837.453299, ts 1794720957.200479:
+# "go. track the issue thread in pm ops db to save lookups."). One line as HeyDonna Alerts into the
+# issue's stored assignment thread for hd-* roles. Detached with a bounded budget and fail-open:
+# a lookup/post failure only logs and can never delay or block the launch.
+case "$TYPE" in
+  hd-planner|hd-builder|hd-proof-qa|hd-investigator)
+    ( PROXY_AGENT_NAME="$NAME" python3 -I "$HOME/.claude/scripts/proxy-agent-notify.py" launch \
+        --type "$TYPE" --brief "$PROMPT_FILE" --name "$NAME" --model "$MODEL_ID" \
+        </dev/null >/dev/null 2>>"$LOG" & ) 2>/dev/null || true;;
+esac
 if tmux has-session -t "=$VISIBLE_SESSION" 2>/dev/null; then
   tmux new-window -d -t "$VISIBLE_SESSION:" -n "$WINDOW_NAME" -c "$CWD" "bash $(printf '%q' "$JOB_DIR/run.sh")"
 else

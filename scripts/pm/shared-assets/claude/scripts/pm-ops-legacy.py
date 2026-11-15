@@ -261,8 +261,23 @@ def connect_readonly() -> sqlite3.Connection:
     return con
 
 
+# One row per issue: the Slack thread agent-lane updates for that issue are posted into.
+# Rajiv, DM D0AMF0XE6TS thread 1794720837.453299, ts 1794720957.200479: "go. track the
+# issue thread in pm ops db to save lookups."
+ISSUE_THREADS_DDL = """
+CREATE TABLE IF NOT EXISTS issue_threads (
+  issue INTEGER PRIMARY KEY,
+  channel TEXT,
+  thread_ts TEXT,
+  source TEXT,
+  updated_at TEXT
+)
+"""
+
+
 def init_db(*, reclassify_horizons: bool = True) -> None:
     con = connect()
+    con.execute(ISSUE_THREADS_DDL)
     con.executescript(
         """
         CREATE TABLE IF NOT EXISTS events (
@@ -2663,6 +2678,167 @@ def print_status(args: argparse.Namespace) -> None:
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 
+# ---------------------------------------------------------------------------
+# issue-thread: remember (and resolve) the Slack thread an issue's agent updates go to.
+# Resolution order when no row is stored (Rajiv DM D0AMF0XE6TS thread 1794720837.453299):
+#   (a) the issue body's Source / thread_ts reference (C0ALZJHGE49 or a DM),
+#   (b) the HeyDonna Alerts PR thread recorded by the Slack bridge,
+#   (c) none: the caller skips the post.
+# The customer channel is never a target; DMs are only used when the issue itself names one.
+# ---------------------------------------------------------------------------
+ISSUE_THREAD_CHANNEL = "C0ALZJHGE49"
+ISSUE_THREAD_CUSTOMER_CHANNELS = frozenset({"C0A56RX6FNW"})
+ISSUE_THREAD_CHANNEL_RE = re.compile(r"^[CD][0-9A-Z]{8,}$")
+ISSUE_THREAD_TS_RE = re.compile(r"^\d{9,11}\.\d{6}$")
+BRIDGE_DB = Path(
+    os.environ.get("PM_OPS_BRIDGE_DB", str(Path.home() / "Downloads/projects/tmux-slack-bridge/bridge.db"))
+)
+_SLACK_ID = r"((?=[0-9A-Z]*\d)[CD][0-9A-Z]{8,})"
+_BODY_THREAD_PATTERNS = (
+    # "C0ALZJHGE49 thread 1793944749.704259", "DM D0AMF0XE6TS thread_ts: 1793109340.474709"
+    re.compile(rf"\b{_SLACK_ID}\b[^\n]{{0,40}}?\bthread(?:_ts)?\s*[:=]?\s*`?(\d{{9,11}}\.\d{{6}})"),
+    # "C0ALZJHGE49/1793350227.955789"
+    re.compile(rf"\b{_SLACK_ID}/(\d{{9,11}}\.\d{{6}})\b"),
+)
+_BODY_ARCHIVE_URL = re.compile(
+    rf"archives/{_SLACK_ID}/p(\d{{10}})(\d{{6}})(?:\?thread_ts=(\d{{9,11}}\.\d{{6}}))?"
+)
+
+
+def issue_thread_target_ok(channel: str, thread_ts: str, *, from_body: bool = False) -> bool:
+    """True when (channel, thread_ts) is a legal agent-lane target."""
+    if not ISSUE_THREAD_CHANNEL_RE.match(channel or "") or not ISSUE_THREAD_TS_RE.match(thread_ts or ""):
+        return False
+    if channel in ISSUE_THREAD_CUSTOMER_CHANNELS:
+        return False
+    if from_body:
+        # An issue body may cite many channels (customer, PM, partner); only the dev
+        # channel or a DM that the issue itself names is a legal agent-lane thread.
+        return channel == ISSUE_THREAD_CHANNEL or channel.startswith("D")
+    return True
+
+
+def thread_from_issue_body(body: str) -> tuple[str, str] | None:
+    """(a) First dev-channel or DM thread reference in an issue body, in document order."""
+    found: list[tuple[int, str, str]] = []
+    for pattern in _BODY_THREAD_PATTERNS:
+        for match in pattern.finditer(body or ""):
+            found.append((match.start(), match.group(1), match.group(2)))
+    for match in _BODY_ARCHIVE_URL.finditer(body or ""):
+        thread = match.group(4) or f"{match.group(2)}.{match.group(3)}"
+        found.append((match.start(), match.group(1), thread))
+    for _pos, channel, thread in sorted(found):
+        if issue_thread_target_ok(channel, thread, from_body=True):
+            return channel, thread
+    return None
+
+
+def thread_from_pr_alerts(issue: int, pr: int | None = None) -> tuple[str, str] | None:
+    """(b) Latest HeyDonna Alerts thread for the issue's PR, from the Slack bridge DB."""
+    if not BRIDGE_DB.is_file():
+        return None
+    like = [f"%/{issue}-%"]
+    if pr:
+        like += [f"%pull/{pr}|%", f"%PR #{pr}%"]
+    clause = " OR ".join("first_message LIKE ?" for _ in like)
+    verify = re.compile(
+        rf"[`/\s]{issue}-|pull/{pr}\b|PR #{pr}\b" if pr else rf"[`/\s]{issue}-"
+    )
+    con = sqlite3.connect(f"file:{BRIDGE_DB}?mode=ro", uri=True, timeout=3)
+    try:
+        rows = con.execute(
+            "SELECT channel_id, thread_ts, first_message FROM threads "
+            f"WHERE channel_id = ? AND started_by_name = 'HeyDonna Alerts' AND ({clause}) "
+            "ORDER BY thread_ts DESC LIMIT 60",
+            [ISSUE_THREAD_CHANNEL, *like],
+        ).fetchall()
+    finally:
+        con.close()
+    for channel, thread_ts, first_message in rows:
+        if verify.search(first_message or "") and issue_thread_target_ok(channel, thread_ts):
+            return channel, thread_ts
+    return None
+
+
+def resolve_issue_thread(issue: int, pr: int | None = None) -> tuple[str, str, str] | None:
+    """Resolve (channel, thread_ts, source) for an issue; None when nothing is found."""
+    data, err = run_json(["gh", "issue", "view", str(issue), "--repo", REPO, "--json", "body"], timeout_s=20)
+    if err:
+        print(f"issue-thread: issue body lookup failed: {err}", file=sys.stderr)
+    elif isinstance(data, dict):
+        hit = thread_from_issue_body(str(data.get("body") or ""))
+        if hit:
+            return hit[0], hit[1], "issue-body"
+    try:
+        hit = thread_from_pr_alerts(issue, pr)
+    except Exception as exc:  # fail-open: the bridge DB is a convenience source
+        print(f"issue-thread: bridge lookup failed: {exc}", file=sys.stderr)
+        hit = None
+    if hit:
+        return hit[0], hit[1], "pr-alert-thread"
+    return None
+
+
+def _issue_threads_connect() -> sqlite3.Connection:
+    con = connect()
+    con.execute(ISSUE_THREADS_DDL)
+    return con
+
+
+def issue_thread_store(issue: int, channel: str, thread_ts: str, source: str) -> None:
+    con = _issue_threads_connect()
+    try:
+        with con:
+            con.execute(
+                "INSERT INTO issue_threads(issue, channel, thread_ts, source, updated_at) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(issue) DO UPDATE SET channel=excluded.channel, thread_ts=excluded.thread_ts, "
+                "source=excluded.source, updated_at=excluded.updated_at",
+                (issue, channel, thread_ts, source, utc_now()),
+            )
+    finally:
+        con.close()
+
+
+def issue_thread_stored(issue: int) -> tuple[str, str, str] | None:
+    con = _issue_threads_connect()
+    try:
+        row = con.execute("SELECT channel, thread_ts, source FROM issue_threads WHERE issue = ?", (issue,)).fetchone()
+    finally:
+        con.close()
+    if not row or not row["channel"] or not row["thread_ts"]:
+        return None
+    return row["channel"], row["thread_ts"], row["source"] or ""
+
+
+def issue_thread_command(args: argparse.Namespace) -> int:
+    if args.thread_cmd == "set":
+        if not issue_thread_target_ok(args.channel, args.thread):
+            print(
+                "issue-thread set: refused (channel must match ^[CD][0-9A-Z]{8,}$, thread ^\\d{9,11}\\.\\d{6}$, "
+                "and the customer channel is never a target)",
+                file=sys.stderr,
+            )
+            return 2
+        issue_thread_store(args.issue, args.channel, args.thread, args.source or "manual")
+        found: tuple[str, str, str] | None = (args.channel, args.thread, args.source or "manual")
+    else:
+        found = None if args.refresh else issue_thread_stored(args.issue)
+        if found and not issue_thread_target_ok(found[0], found[1]):
+            found = None  # a stored customer-channel/garbage row is never returned
+        if not found and not args.no_resolve:
+            found = resolve_issue_thread(args.issue, args.pr)
+            if found:
+                issue_thread_store(args.issue, *found)
+    if not found:
+        print("NONE")
+        return 1
+    if getattr(args, "format", "tsv") == "json":
+        print(json.dumps({"issue": args.issue, "channel": found[0], "thread_ts": found[1], "source": found[2]}))
+    else:
+        print("\t".join(found))
+    return 0
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -2798,6 +2974,21 @@ def main(argv: list[str]) -> int:
     p.add_argument("--format", choices=["prompt", "json"], default="prompt")
     p.add_argument("--read-only", action="store_true", help="read the ledger without sentinel ingestion or live reconciliation")
 
+    p = sub.add_parser("issue-thread", help="stored Slack thread for an issue's agent-lane updates")
+    thread_sub = p.add_subparsers(dest="thread_cmd", required=True)
+    g = thread_sub.add_parser("get", help="print channel<TAB>thread_ts<TAB>source; resolves and stores when unset")
+    g.add_argument("--issue", type=int, required=True)
+    g.add_argument("--pr", type=int, help="PR number that helps resolve the PR alert thread")
+    g.add_argument("--no-resolve", action="store_true", help="only read the stored row")
+    g.add_argument("--refresh", action="store_true", help="ignore the stored row and resolve again")
+    g.add_argument("--format", choices=["tsv", "json"], default="tsv")
+    s = thread_sub.add_parser("set", help="store a thread explicitly")
+    s.add_argument("--issue", type=int, required=True)
+    s.add_argument("--channel", required=True)
+    s.add_argument("--thread", required=True)
+    s.add_argument("--source", default="manual")
+    s.add_argument("--format", choices=["tsv", "json"], default="tsv")
+
     args = parser.parse_args(argv)
     if args.cmd == "init":
         init_db()
@@ -2829,6 +3020,8 @@ def main(argv: list[str]) -> int:
         print_status(args)
     elif args.cmd == "obligation-list":
         list_obligations(args)
+    elif args.cmd == "issue-thread":
+        return issue_thread_command(args)
     return 0
 
 
