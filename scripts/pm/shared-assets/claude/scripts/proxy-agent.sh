@@ -1310,20 +1310,18 @@ fi
 # Concurrent-Claude cap (Rajiv D0AMF0XE6TS thread 1794624936.567599, ts 1794632685.538419: "yes, cap concurrent claude proxies").
 # Counts live proxy claude processes whose --model is a claude-* id; at/over the cap, claude-* tiers are skipped (reason claude_cap).
 PROXY_AGENT_CLAUDE_CAP="${PROXY_AGENT_CLAUDE_CAP:-5}"  # lowered 8→5 at 05:48Z; 5→3 at 09:46Z; raised 3→5 at 12:51Z (Rajiv D0AMF0XE6TS thread 1794659684.547559 ts 1794660569.044089: "raise it"; 4 Claude team accounts)
-proxy_agent_live_claude_count() {
-  # pgrep exits 1 on zero matches; under set -e/pipefail that aborted every launch (11-14 06:00Z).
-  # Fail CLOSED on any other pgrep error (e.g. "illegal byte sequence" from a non-UTF-8 argv): an error used to count as 0,
-  # which can let a launch onto Claude at/over the cap. Observed: px-bench-exec / px-bd-13701b launched on Claude at 4/4 and 5/4 (2026-11-15 03:24Z/03:28Z); that a pgrep error fired at those two launches is INFERRED, not logged (CTO ts 1794714527.992439, 1794715052.313539). 999 is an error sentinel, not a headcount.
-  local out rc
-  out="$(LC_ALL=en_US.UTF-8 pgrep -f -- '-p --name px-[^ ]+ --model claude-' 2>&1)"; rc=$?
-  if [[ $rc -gt 1 || "$out" == *"pgrep:"* ]]; then echo 999; return 0; fi
-  [[ $rc -eq 1 ]] && { echo 0; return 0; }
-  printf '%s\n' "$out" | grep -c '^[0-9]'
+# Only long-running roles participate in either cap (Rajiv ts 1794737134.234539).
+proxy_agent_is_capped() {
+  case "$1" in hd-planner|hd-builder|hd-proof-qa|pm-hotfix|pm-proof-qa|hd-investigator|superproofer) return 0;; *) return 1;; esac
+}
+proxy_agent_live_count() {
+  python3 -I "$HOME/.claude/scripts/proxy-cap-count.py" "$1" || printf '999\n'
 }
 # Ordered tiers; escalation after a stall is LIGHT -> MID -> TOP.
 proxy_agent_pick_tier() {
   local tier="$1" id skipped="" last="" models rc claude_live
-  claude_live="$(proxy_agent_live_claude_count)"
+  claude_live=0
+  if proxy_agent_is_capped "$TYPE"; then claude_live="$(proxy_agent_live_count claude)"; fi
   case "$tier" in
     LIGHT) models="claude-haiku-5-5 grok-4.7 gpt-6-luna";;
     MID) models="claude-sonnet-5-5 grok-4.7 gpt-6.1-terra";;
@@ -1345,7 +1343,7 @@ proxy_agent_pick_tier() {
   esac
   for id in $models; do
     last="$id"
-    if [[ "$tier" != REVIEW && "$id" == claude-* && "${claude_live:-0}" -ge "$PROXY_AGENT_CLAUDE_CAP" ]]; then
+    if proxy_agent_is_capped "$TYPE" && [[ "$id" == claude-* && "${claude_live:-0}" -ge "$PROXY_AGENT_CLAUDE_CAP" ]]; then
       skipped="${skipped:+$skipped,}$id:claude_cap(${claude_live}/$PROXY_AGENT_CLAUDE_CAP)"
       continue
     fi
@@ -1632,11 +1630,18 @@ if [[ -n "$_PROXY_TOTAL_CAP_ENV" && "$_PROXY_TOTAL_CAP_ENV" -gt "$_dialed_total"
     PROXY_AGENT_TOTAL_CAP="$_dialed_total"
   fi
 fi
-if [[ "$TYPE" != *-reviewer ]]; then
-  _live_total="$({ pgrep -f -- '-p --name (px|proxy)-[^ ]+ --model ' 2>/dev/null || true; } | wc -l | tr -d ' ')"
-  if [[ "${_live_total:-0}" -ge "$PROXY_AGENT_TOTAL_CAP" ]]; then
+if proxy_agent_is_capped "$TYPE"; then
+  _live_total="$(proxy_agent_live_count total)"
+  if [[ "${_live_total:-999}" -ge "$PROXY_AGENT_TOTAL_CAP" ]]; then
     printf 'proxy-agent: REFUSED total_cap (%s live >= %s). Wait for a proxy to stop, or set PROXY_AGENT_TOTAL_CAP for a P0.\n' "$_live_total" "$PROXY_AGENT_TOTAL_CAP" >&2
     exit 75
+  fi
+  if [[ "$MODEL_ID" == claude-* ]]; then
+    _live_claude="$(proxy_agent_live_count claude)"
+    if [[ "${_live_claude:-999}" -ge "$PROXY_AGENT_CLAUDE_CAP" ]]; then
+      printf 'proxy-agent: REFUSED claude_cap (%s live >= %s).\n' "$_live_claude" "$PROXY_AGENT_CLAUDE_CAP" >&2
+      exit 75
+    fi
   fi
 fi
 ARGS=(-p --name "${PROXY_AGENT_NAME:-proxy-$TYPE-$STAMP}" --model "$MODEL_ID" --max-turns "$MAX_TURNS" --output-format stream-json --verbose

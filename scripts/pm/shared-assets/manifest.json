@@ -861,8 +861,17 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "55f7508ab04c85b9e838a9971ea61277b6febc8b17022909122f59eae4e3fe23",
+      "sha256": "befee95222c3f1e729662944aa3a0149ac3c015803e9115f326c6322c7f87374",
       "source_path": "claude/scripts/proxy-agent.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/proxy-cap-count.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "733b33cad849f372bdd4f505a1c1a1a524d15fe42b92604838fea245b7446b0d",
+      "source_path": "claude/scripts/proxy-cap-count.py"
     },
     {
       "additional_targets": [
@@ -1358,7 +1367,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-skill",
-      "sha256": "51e77e4d5c514696f9719106d23c184b439b389cbc32e33a31762b327d9bcbf7",
+      "sha256": "f992a6bc9b02703f6825e0eaac8a1c834187cfb1bd8f379a354e9e095d388585",
       "source_path": "claude/skills/proxy-agent/SKILL.md"
     },
     {
@@ -1941,7 +1950,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 212,
+    "selected_count": 213,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",

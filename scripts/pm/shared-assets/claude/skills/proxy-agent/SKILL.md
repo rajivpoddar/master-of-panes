@@ -102,6 +102,9 @@ PM gates are unchanged:
 
 In-flight in-process agents finish where they started; don't restart work to migrate it.
 
+## S143: Proxy concurrency caps
+- CI repairs and PM admin agents are exempt; total and Claude caps apply only to long-running hd-planner, hd-builder, hd-proof-qa, pm-hotfix, pm-proof-qa, hd-investigator and superproofer (Rajiv, DM D0AMF0XE6TS thread 1794732969.387329, ts 1794737134.234539).
+
 ## Limits
 - There is no agent panel. The transcript is the `--out` and `.log` files plus the session JSONL.
 - Claude Code still logs `[claude-code:unrecognized_model]` for gpt/grok/gemini ids. This is cosmetic, because context and output sizes are set via env.
