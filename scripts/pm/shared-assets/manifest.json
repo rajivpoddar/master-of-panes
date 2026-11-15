@@ -1,15 +1,6 @@
 {
   "entries": [
     {
-      "canonical_target": "/Users/rajiv/.claude/skills/proxy-agent/SKILL.md",
-      "dependencies": [],
-      "dependency_status": "closed",
-      "mode": 420,
-      "ownership_class": "shared-claude-proxy-skill",
-      "sha256": "51e77e4d5c514696f9719106d23c184b439b389cbc32e33a31762b327d9bcbf7",
-      "source_path": "claude/skills/proxy-agent/SKILL.md"
-    },
-    {
       "canonical_target": "/Users/rajiv/Downloads/projects/tmux-slack-bridge/cto-bridge.ts",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1360,6 +1351,15 @@
       "ownership_class": "shared-claude-pr-state-sweep",
       "sha256": "c2ee5791cd4f75b8e6b359776e6bb92ddb147a7077f72f38db4d37e619c39f6b",
       "source_path": "claude/skills/pr-state-sweep/scripts/sweep.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/skills/proxy-agent/SKILL.md",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-skill",
+      "sha256": "51e77e4d5c514696f9719106d23c184b439b389cbc32e33a31762b327d9bcbf7",
+      "source_path": "claude/skills/proxy-agent/SKILL.md"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/skills/qa-brief/LESSONS.md",
