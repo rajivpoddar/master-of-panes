@@ -1327,17 +1327,17 @@ proxy_agent_pick_tier() {
   case "$tier" in
     LIGHT) models="claude-haiku-5-5 grok-4.7 gpt-6-luna";;
     MID) models="claude-sonnet-5-5 grok-4.7 gpt-6.1-terra";;
-    TOP) models="claude-opus-5-5 grok-4.7 gpt-6.1-sol";;
+    TOP) models="claude-opus-5-5 grok-4.7 gpt-6.1-terra";;  # sol dropped (Rajiv C0ALZJHGE49 ts 1794720589.429929: "cut down sol usage on proxies")
     # Per-role ladders (Rajiv D0AMF0XE6TS thread 1794624936.567599: ts 1794639918.387399 ladder, ts 1794640102.756179 hydrogen in the mid rungs).
     # First id not in 429/402 cooldown wins within a rung; claude-* ids still skip at the cap (claude_cap), then the next id in the SAME rung is tried.
-    PLAN) models="grok-4.7 claude-opus-5-5 gpt-6.1-sol";;
+    PLAN) models="grok-4.7 claude-opus-5-5 gpt-6.1-terra";;
     # Grok before Codex in every rung: Codex must last to Thu (Rajiv ts 1794660714.234059 "only grok, claude, codex").
     # Dev ladder (Rajiv C0ALZJHGE49 thread 1794665799.784789, ts 1794665970.826379): haiku/luna → sonnet/terra → opus/sol. No Grok on dev rungs.
     BUILD1) models="claude-haiku-5-5 gpt-6-luna";;
     BUILD2) models="claude-sonnet-5-5 gpt-6.1-terra";;
-    BUILD3) models="claude-opus-5-5 gpt-6.1-sol";;
+    BUILD3) models="claude-opus-5-5 gpt-6.1-terra";;
     PROOF1) models="claude-sonnet-5-5 gpt-6.1-terra";;
-    PROOF2) models="claude-opus-5-5 gpt-6.1-sol";;
+    PROOF2) models="claude-opus-5-5 gpt-6.1-terra";;
     # 12b reviews: carbon -> fable -> astra (Rajiv D0AMF0XE6TS thread 1794624936.567599, ts 1794640502.657479 "the 12b reviewer ladder can be carbon/fable/astra").
     # Supersedes the earlier fable-first list (thread 1794573312.657559, ts 1794623641.572859). Reviews never skip claude-* at the cap (see below).
     REVIEW) models="claude-fable-5-2 gpt-6-astra";;
