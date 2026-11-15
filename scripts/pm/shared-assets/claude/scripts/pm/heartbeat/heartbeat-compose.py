@@ -2229,6 +2229,71 @@ def composer_release_sha(current: Path | None = None, source: Path | None = None
         return 'UNVERIFIED'
 
 
+# Burn line (Rajiv C0ALZJHGE49 thread 1794746097.575959, 2026-11-15): the hourly shows Claude and
+# Codex burn against budget. Same snapshot file and formula as the launcher burn gate
+# (proxy-burn-shadow.py, MoP release 1e4787ff). Read-only: no paid calls.
+BURN_ACTION = "burn P0-only: queue non-P0 launches; CI repair/PM admin continue"
+USAGE_SNAPSHOTS = Path.home() / ".claude/state/usage-snapshots.jsonl"
+PROXY_BURN_SHADOW = Path.home() / ".claude/scripts/proxy-burn-shadow.py"
+PROXY_CONFIG = Path("/opt/homebrew/etc/cliproxyapi.conf")
+BURN_MODELS = (("Claude", "claude", "claude-opus-5-5"), ("Codex", "codex", "gpt-6.1-terra"))
+BURN_STATE = {"allow": "OK", "over_budget": "OVER", "exhausted": "EXHAUSTED", "unknown": "UNKNOWN"}
+
+
+def _burn_module(path: Path = PROXY_BURN_SHADOW):
+    spec = importlib.util.spec_from_file_location("proxy_burn_shadow", path)
+    if spec is None or spec.loader is None:
+        raise ImportError("proxy-burn-shadow unavailable")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = PROXY_CONFIG, shadow=None) -> tuple[str, str]:
+    """Return (line, mode) with mode 'P0-ONLY' or 'NORMAL'.
+
+    Any account that is over budget, exhausted or unknown, or any pool whose accounts
+    cannot be bound, makes its pool OVER and the mode P0-ONLY (same per-account rule
+    as the launcher gate). Failure of the check itself is P0-ONLY.
+    """
+    try:
+        shadow = shadow or _burn_module()
+        shadow.LOG = str(snapshot)
+        ts_now = now.timestamp()
+        try:
+            rows = shadow.read_latest(str(snapshot))
+        except (OSError, ValueError, json.JSONDecodeError):
+            rows = {}
+        segments: list[str] = []
+        verdicts: list[str] = []
+        for label, pool, model in BURN_MODELS:
+            try:
+                _, accounts = shadow.bindings(model, shadow.read_config(str(config)))
+            except Exception:
+                accounts = None
+            if not accounts:
+                segments.append(f"{label} accounts UNKNOWN")
+                verdicts.append(f"{label} OVER")
+                continue
+            pool_ok = True
+            for acct in accounts:
+                key = f"{pool}:{acct}:weekly"
+                decision, burn, budget = shadow.account_decision(key, rows, pool, ts_now)
+                state = BURN_STATE.get(decision, "UNKNOWN")
+                used = rows.get(key, {}).get("pct")
+                used_txt = f"{used:g}%" if isinstance(used, (int, float)) and not isinstance(used, bool) else "UNKNOWN"
+                fmt = lambda v: "n/a" if v is None else f"{v:.2f}%/h"
+                segments.append(f"{acct} used {used_txt} burn {fmt(burn)} budget {fmt(budget)} {state}")
+                if state != "OK":
+                    pool_ok = False
+            verdicts.append(f"{label} {'OK' if pool_ok else 'OVER'}")
+        mode = "NORMAL" if all(v.endswith(" OK") for v in verdicts) else "P0-ONLY"
+        line = "*Burn:* " + " · ".join(segments) + " → " + ", ".join(verdicts) + f" → mode {mode}"
+        return line, mode
+    except Exception as exc:
+        return f"*Burn:* UNKNOWN ({type(exc).__name__}) → mode P0-ONLY", "P0-ONLY"
+
+
 def compose(
     mode: str,
     now: datetime,
@@ -2259,6 +2324,7 @@ def compose(
     proxies: dict | None = None,
     usage_error: str | None = None,
     slots_authoritative: bool = True,
+    burn: tuple[str, str] | None = None,
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -2319,10 +2385,13 @@ def compose(
     else:
         mention = f"{CTO} " if asks else ""
         first = f"{mention}*Hourly — {stamp}* — TL;DR: {tldr}"
-    lines = [first, *body]
+    burn_line, burn_mode = burn if (burn and mode == "1h") else (None, None)
+    lines = [first, *([burn_line] if burn_line else []), *body]
     if asks:
         lines += ["", "*Asks:* " + " | ".join(asks)]
     pm_actions = [] if mode == "3h" else [a for r in (prs or []) for a in r.get("actions") or []]
+    if burn_mode == "P0-ONLY":
+        pm_actions = [BURN_ACTION, *pm_actions]
     if pm_actions:
         lines += ["", "*ACTIONS (PM):* " + "; ".join(pm_actions)]
     if cleanup_alert:
@@ -2875,6 +2944,7 @@ def main() -> int:
     unblockable = None
     tracked = None
     langsmith = None  # LangSmith ingest dropped from the hourly (Rajiv ts 1792806414.519859)
+    burn = burn_status(datetime.now(timezone.utc)) if args.mode == "1h" else None
     report = compose(
         args.mode, datetime.now(timezone.utc), axiom, mapping_doc.get("mapping", {}), prs,
         support=support, failures=failures, escalations=args.escalation,
@@ -2889,6 +2959,7 @@ def main() -> int:
                       + "\n" + (hourly.get("mac-box") or {}).get("line", "• Mac test box: UNKNOWN (collector deadline)")) if args.mode == "1h" else None,
         pending_actions=(pending_obligations(PM_OPS_DB, now), hourly.get("pending-github") or {"error": "UNAVAILABLE (no recent successful probe)"}) if args.mode == "1h" else None,
         proxies=hourly.get("proxies") if args.mode == "1h" else None,
+        burn=burn,
     )
     labels = {"axiom": "*Axiom errors", "active": "*Active users", "prs": "open non-draft PRs",
               "slots": "*Slots", "priority": "*Slots",
