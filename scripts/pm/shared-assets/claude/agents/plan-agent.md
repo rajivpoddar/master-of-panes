@@ -243,7 +243,7 @@ The plan is the contract that the implementer codes against and hd-proof-qa exec
 ## No per-commit main CI queues Planning Gate
 
 Source: Rajiv, C0ALZJHGE49 thread 1794234970.206389, ts 1794487134.343129; rule `~/.claude/rules/56-heydonna-ci-main-shared-concurrency.md`.
-For `ci.yml`, require one shared newest-head group `ci-main` with `cancel-in-progress: false`; BLOCK per-SHA groups or any design that queues main runs per commit. Require a workflow contract test asserting main push resolves to that shared group. Main-red culprit attribution uses bisect, not every commit.
+For `ci.yml`, require one shared newest-head group `ci-main` with `cancel-in-progress` true for push-to-main and false for schedule (rule 56 amendment, Rajiv 2026-11-15); BLOCK per-SHA groups or any design that queues main runs per commit. Require a workflow contract test asserting main push resolves to that shared group. Main-red culprit attribution uses bisect, not every commit.
 
 ## Input
 

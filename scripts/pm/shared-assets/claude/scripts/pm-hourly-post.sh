@@ -37,4 +37,17 @@ fi
 TS=$(sed -n 's/^OK ts=\([0-9][0-9]*\.[0-9][0-9]*\) channel=C0ALZJHGE49$/\1/p' "$CLAIM/receipt")
 /Users/rajiv/.claude/scripts/hourly-thread-ts --set "$TS" --bucket "$BUCKET" --receipt "$RECEIPT" >/dev/null 2>&1 \
   || echo "WARN hourly-thread-ts --set failed for ts=$TS"
+# CTO verification reminder (Rajiv C0ALZJHGE49 thread 1794667497.289909, ts 1794668173.816399: "why is cto at mention alerts
+# reminder missing for this? it should triggered for each hourly report thread"). MoP's +5m mention is skipped when PM/this
+# script posts the parent, so schedule it here: +10 min backstop (Rajiv 21:27 IST ts 1794671837.615089: "the cto review message is missing again"). PM posts the CTO verification itself as soon as Step 3 + per-PR replies are done, and deletes this backstop.
+# CTO review reminder is now scheduled +5m by slack-send.sh right after the per-PR status reply (single source; Rajiv ts 1794672251.671699).
+# Dead tmux window cleanup, every hourly (Rajiv C0ALZJHGE49 thread 1794671177.730179, ts 1794672013.713759: "there are some tmux dead windows
+# which has not been cleaned up yet ... how do we enforce it?"). Deterministic: any window whose pane process has exited (pane_dead=1) in
+# sessions 0/proxies, PM scratch windows included, except the PM 'claude' window. Live panes are never touched.
+bash /Users/rajiv/.claude/scripts/tmux-dead-window-cleanup.sh --apply 2>&1 | tail -3 | sed "s/^/DEAD_WINDOWS: /"
 echo "POSTED ts=$TS bucket=$BUCKET"
+# Explicit +5m CTO review reminder with a receipt check (Rajiv C0ALZJHGE49 thread 1794674773.624389, ts 1794675774.355359:
+# "where's the cto at mention on this thread"). The sender-side hook did not fire on the 22:16 hourly; this is the primary path.
+_AT=$(python3 -c 'import datetime as d;print((d.datetime.now(d.timezone.utc)+d.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+_REM=$(python3 /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/alerts-reminder/scripts/alerts-schedule.py --channel C0ALZJHGE49 --thread "$TS" --at "$_AT" --text "<@U0BNFGX2UAX> CTO review: please review all PM actions on this hourly with your hourly review skill (15-item checklist reply, Step 3 lane steering with send disposition and checkpoints, per-PR dispositions and STUCK owners, dead windows closed, caps)." 2>&1 | grep -E '^OK scheduled' | head -1)
+if [ -n "$_REM" ]; then echo "CTO_REVIEW_REMINDER $_REM"; else echo "CTO_REVIEW_REMINDER_FAILED ts=$TS (PM must post the CTO mention by hand)"; fi

@@ -223,7 +223,7 @@ Source: Rajiv D0AMF0XE6TS ts 1794290954.291729 ("add prodcut rule for fewest cli
 ## No per-commit main CI queues gate (Mandatory)
 
 Source: Rajiv, C0ALZJHGE49 thread 1794234970.206389, ts 1794487134.343129; rule `~/.claude/rules/56-heydonna-ci-main-shared-concurrency.md`.
-REQUEST_CHANGES if a plan splits `ci.yml` main concurrency or uses per-SHA groups. Require `group: ci-main`, `cancel-in-progress: false`, and a workflow contract test asserting the main push branch resolves to that shared group; attribute main reds by bisect.
+REQUEST_CHANGES if a plan splits `ci.yml` main concurrency or uses per-SHA groups. Require `group: ci-main`, `cancel-in-progress` true for push-to-main and false for schedule (rule 56 amendment, Rajiv 2026-11-15 ts 1794682943.445719), and a workflow contract test asserting the main push branch resolves to that shared group; attribute main reds by bisect.
 
 ## Proof matrix gate (Mandatory - three-agent conveyor)
 

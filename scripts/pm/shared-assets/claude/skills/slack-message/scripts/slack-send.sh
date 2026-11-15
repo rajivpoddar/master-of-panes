@@ -1076,6 +1076,8 @@ if r.get('ok'):
             if result.returncode:
                 print(f'HOURLY_REPLY_FAILED parent_ts={ts}; retry {name} --thread {ts}', file=sys.stderr)
                 rc = rc or result.returncode
+        # +5m CTO review reminder: scheduled ONLY by ~/.claude/scripts/pm-hourly-post.sh (single owner, receipt-checked).
+        # The former in-sender block here never ran (unescaped double quote ended the shell-quoted Python at the comment; CTO C0ALZJHGE49 ts 1794677883.867829).
         if rc:
             sys.exit(rc)
 else:

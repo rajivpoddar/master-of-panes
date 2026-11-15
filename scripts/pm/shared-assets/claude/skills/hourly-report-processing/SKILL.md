@@ -36,6 +36,29 @@ its current claim, fingerprint and full remaining scope. Preserve any unique
 commitment first. Record "routine tracking retained in GitHub/PM", never
 "feature completed". Do not force claims, erase UNKNOWN or rewrite history.
 
+## [HIGH] Hourly processing checklist (Rajiv 2026-11-14)
+Source: Rajiv, C0ALZJHGE49 thread 1794671177.730179, ts 1794673308.379679: *"add a checklist to the hourly report processing skill"*. Evidence contract: CTO ts 1794673225.865779 (`hourly_report_due` resolves on verified delivery of the hourly parent; the PM thread reply is the processing evidence).
+
+The PM thread reply OPENS with `<@U0BNFGX2UAX>` (an explicit CTO @-mention on the first line of every PM processing reply and amendment in the hourly thread, Rajiv C0ALZJHGE49 thread 1794674773.624389, ts 1794675774.355359 / 1794675839.986199). It carries this checklist, one line per item, each marked DONE / NONE / PENDING (blocker, owner, next checkpoint) / UNAVAILABLE (reason). Separate *instruction delivered* from *picked up* from *completed*. Amend the same thread as receipts arrive; the audit may stay open after the reporting debt resolves.
+
+- [ ] 1. Hourly parent delivered (ts) and per-PR status posted (ts cited).
+- [ ] 2. Step 1 errors: every Axiom error class has a cause, an owner or "no action: <reason>".
+- [ ] 3. Step 2 / 2d: every open PR has its next transition (merge ask, admit, 12b, rework owner, hold with row id).
+- [ ] 4. Dual greens: head-pinned CTO merge ask sent, with both run ids (Step 2; hourly-per-pr-processing).
+- [ ] 5. Step 2b-2c / 2f: WIP cap, stale/stuck PRs and drafts dispositioned.
+- [ ] 6. Step 2e: Ready Pool refilled (P0/P1 first) or the reason it was not.
+- [ ] 7. Step 3 / 3b / 3c-3: for EVERY live proxy running > 60 min, PM reads its own log/out file (not the badge), classifies it progressing / waiting / stalled / over bound, and sends each one a tailored SendMessage steer naming its next deliverable and checkpoint. The reply lists name, issue/PR, model, total/stage elapsed, last substantive progress with its time, blocker, the steer sent, and the next checkpoint. Every S131 bound is checked. A run that is *stalled* or *looping* (no new substantive evidence for more than 60 min and no named external wait, or repeating the same failing action) is promoted at the FIRST hourly check that finds it, never after waiting for the 3h bound (S144, Rajiv, C0ALZJHGE49 thread 1794671177.730179, ts 1794673980.861719: "proxies can get stuck in a loops sometimes. we shouldn't be waiting for 3h before promoting. it should happen after > 1h"). Runs *over bound* are promoted too. Promotion happens the same turn: push or preserve its WIP, stop and fence the old run, then relaunch ONE successor one tier up at the pushed head (S142: Luna→Terra→Sol, rung 1→2→3; after Sol, one CTO decision). The successor gets the original total and stage history, its proof and the next deliverable. No age-only kills, no relaunch loops, no clock reset.
+- [ ] 8. Every ACTIONS / Pending PM actions item has an owner or is done this turn.
+- [ ] 9. Step 3a / 2g: remote boxes healthy, or broken ones deleted and recreated (S141).
+- [ ] 10. Step 3x / 3c-2: dead-window cleanup result (DEAD_WINDOWS_CLOSED=N) plus per-window custody for any non-proxy scratch window closed.
+- [ ] 11. Step 3d: proxy caps (live/total, Claude) and any overrides used.
+- [ ] 12. Step 3b training progress and Step 3d social digest receipts, when present.
+- [ ] 13. Issue lifecycle dispositions and unblockables (Step 3d), with each issue's next action.
+- [ ] 14. Obligations: actionable rows classified (no bulk re-dating); new commitments recorded.
+- [ ] 15. +5m CTO review reminder scheduled on the thread (automatic via slack-send; check it fired).
+
+A reply missing any line is an incomplete processing record: add the missing lines in the same thread the same turn.
+
 ## Trigger
 - A HeyDonna Alerts message starting `*Hourly — HH:MM IST*` in C0ALZJHGE49 (the thread ts is the report's ts).
 - Rajiv asking about that report ("are PRs moving?", "any limbo?", "why is S2 idle?").
@@ -224,7 +247,8 @@ The hourly heartbeat post carries the same count once the composer supports it (
 *"close the dead proxy windows. update hourly report processing skill to do it automatically?"*
 Each hourly, PM closes every proxy tmux window whose pane process has exited (`pane_dead=1`): `px-*` windows in session `0` and `proxy-*` windows in session `proxies`. A dead pane has no live process, so closing it loses nothing; the run's out/log/jsonl files and its PROXY_STOP message are the record.
 ```bash
-for s in 0 proxies; do for w in $(tmux list-windows -t $s -F '#{window_id}:#{window_name}:#{pane_dead}' 2>/dev/null | awk -F: '($2 ~ /^px-|^proxy-/) && $3==1 {print $1}'); do tmux kill-window -t "$w"; done; done
+# Automated: pm-hourly-post.sh closes every dead window (pane_dead=1, PM scratch windows included, except 'claude') and prints DEAD_WINDOWS_CLOSED=N. PM re-runs this at processing time and reports the count:
+for s in 0 proxies; do for w in $(tmux list-windows -t $s -F '#{window_id}|#{window_name}|#{pane_dead}' 2>/dev/null | awk -F'|' '$3==1 && $2!="claude" {print $1}'); do tmux kill-window -t "$w"; done; done
 ```
 Never close a window whose pane is alive (`pane_dead=0`), even when the heartbeat marks it STALE. Classify its work through Step 3b; silence is not death and never authorizes kill/relaunch. Even for an exited pane, reconcile live children/remote jobs, retained results and UNKNOWN custody before ownership-safe cleanup. The Step 4 reply includes `Proxy windows: closed N dead` and Step 3b progress/handoff dispositions.
 
@@ -234,12 +258,15 @@ Each hourly, list EVERY live proxy (`ListAgents` plus live `px-*` tmux panes wit
 For each one, record in the Step 4 reply: name · issue/PR · model · elapsed · S131 stage start/bound · last substantive progress (head pushed, proof receipt, review marker), with its time · current blocker · next checkpoint. Classify each:
 - *progressing:* new evidence within the last 60 min. Send one tailored checkpoint naming the next deliverable.
 - *waiting:* a named external wait (CI run, CTO decision, merge, box lease). Record the wait and its wake; the S131 clock pauses for external waits.
-- *stalled:* no new evidence for 60 min or more and no named wait. Ask for the exact state in the same turn; if it's still stalled at the next check, apply S131 (push WIP, hand-off, transfer).
+- *stalled / looping:* no new substantive evidence for more than 60 min and no named wait, or the log shows the same action failing repeatedly. Promote it the same turn, without waiting for the 3h bound or a second check (S144, Rajiv ts 1794673980.861719): push or preserve WIP, stop and fence the run, and relaunch ONE successor one tier up at the pushed head.
 - *over bound:* past its S131 3h bound. Push WIP, hand off and transfer the same turn (Luna→Terra→Sol; after Sol, one CTO decision). No age-only kill.
 Report rows for exited or fenced runs as `ended`, with their PROXY_STOP result, not as live. Stale badges in the heartbeat report don't prove a run is alive or dead; check the pane and the socket.
 
 ## Step 3d: Social digest cycle receipts (CTO 2026-11-06, C0ALZJHGE49 thread 1793951140.445569, ts 1793954568.068649)
 Every scheduled `donna-daily-social-digest` cycle (IST 00:30, 03:30 … 21:30) posts a receipt in C0C7U35LBKR showing attempts / confirmed / UNKNOWN / reason, even when it sends 0. Each hourly, check the cycles due in the last 3h. If a cycle has no receipt 45 min after its slot, flag it `MISSING` in the Step 4 reply (or `UNKNOWN` if a partial receipt exists) and report it in the CP Repairs thread. Missing proof is not proof that the slot never ran, and it is never a replay trigger. Add no new timer or registry.
+
+## Step 3d: Proxy caps monitor (Rajiv D0AMF0XE6TS thread 1794659684.547559, ts 1794662285.037179: "we have to set the caps in the morning brief and monitor the caps in the hourlies")
+Every hourly, run `python3 -I ~/.claude/scripts/cost/proxy-burn-dial.py --hourly`. The morning brief (step 5g) sets the day's caps. The hourly only reports, plus lowers the caps if an account is burning faster than its pace (at most one cut per 6h; it never raises them, since raising waits for the next brief). Put its first line, plus the PM pane account's burn against the 1.2%/h target, in the Step 4 reply. Unmeasured accounts are named, never shown as 0. A cut also pauses new issue assignments until the next brief; in-progress PRs continue.
 
 ## Step 4: Close the loop
 Post ONE reply in the report thread with this content:
@@ -250,7 +277,7 @@ Post ONE reply in the report thread with this content:
 - Proxies: Step 3b's complete work-progress rows, total/stage elapsed, resolved model, status, real handoff/collection receipt or exact blocked disposition. A missed stage bound remains visible through Terra -> Sol -> CTO.
 - Agents: running count and inactive agents stopped (Step 3c).
 
-No CTO @-mention unless the reply contains an exact-head admission or merge ask. Do not poll or watch workflows. Stop when every line has a disposition.
+Every PM reply in the hourly thread opens with `<@U0BNFGX2UAX>` (see the checklist header; this supersedes the older "no CTO mention unless an admission/merge ask" wording, CTO C0ALZJHGE49 ts 1794677883.867829). Do not poll or watch workflows. Stop when every line has a disposition.
 
 ## ONE PR cap = 25 (Rajiv 2026-10-16, C0ALZJHGE49 ts 1792128929.335409; supersedes Step 2b caps)
 "just keep one cap at 25 open prs". If open non-draft PRs > 25, stop new_issue assignments (rework/repro only). At 25 or fewer, assign new_issue automatically; no Rajiv approval, no hysteresis. The 20 WIP alarm and the 20 resume threshold are retired.
