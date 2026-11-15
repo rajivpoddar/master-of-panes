@@ -847,6 +847,15 @@
       "source_path": "claude/scripts/pr-delivery-retro.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/proxy-agent.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "ff219a0ec3ac721653615e77f92159b8cb7954bdfa4fd8f958ffd6f5d5b9a6d6",
+      "source_path": "claude/scripts/proxy-agent.sh"
+    },
+    {
       "additional_targets": [
         "/Users/rajiv/.claude/scripts/qa-visual-proof-gate.py"
       ],
@@ -1914,7 +1923,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 209,
+    "selected_count": 210,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -2020,7 +2029,8 @@
       "~/.claude/hooks/explore-issue-latch-guard.sh",
       "~/.claude/hooks/issue-create-owner.py",
       "~/.claude/skills/explore-issue/SKILL.md",
-      "~/.claude/scripts/spark-run-monitor.sh"
+      "~/.claude/scripts/spark-run-monitor.sh",
+      "~/.claude/scripts/proxy-agent.sh"
     ]
   },
   "owner": "master-of-panes",
