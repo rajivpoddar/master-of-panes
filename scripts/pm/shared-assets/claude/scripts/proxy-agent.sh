@@ -1304,8 +1304,16 @@ PY
 _PROXY_TOTAL_CAP_ENV="${PROXY_AGENT_TOTAL_CAP:-}"
 if [[ -r "$HOME/.claude/state/proxy-caps.env" ]]; then
   while IFS== read -r _k _v; do
-    case "$_k" in PROXY_AGENT_TOTAL_CAP|PROXY_AGENT_CLAUDE_CAP) [[ -z "${!_k:-}" && "$_v" =~ ^[0-9]+$ ]] && printf -v "$_k" %s "$_v";; esac
+    case "$_k" in
+      PROXY_AGENT_TOTAL_CAP|PROXY_AGENT_CLAUDE_CAP) [[ -z "${!_k:-}" && "$_v" =~ ^[0-9]+$ ]] && printf -v "$_k" %s "$_v";;
+      PROXY_BURN_GATE) [[ -z "${!_k:-}" && ( "$_v" == enforce || "$_v" == shadow ) ]] && printf -v "$_k" %s "$_v";;
+    esac
   done < "$HOME/.claude/state/proxy-caps.env"
+fi
+PROXY_BURN_GATE="${PROXY_BURN_GATE:-enforce}"
+if [[ "$PROXY_BURN_GATE" != enforce && "$PROXY_BURN_GATE" != shadow ]]; then
+  printf 'proxy-burn: invalid mode=%s; using enforce\n' "$PROXY_BURN_GATE" >&2
+  PROXY_BURN_GATE=enforce
 fi
 # Concurrent-Claude cap (Rajiv D0AMF0XE6TS thread 1794624936.567599, ts 1794632685.538419: "yes, cap concurrent claude proxies").
 # Counts live proxy claude processes whose --model is a claude-* id; at/over the cap, claude-* tiers are skipped (reason claude_cap).
@@ -1344,10 +1352,15 @@ proxy_agent_pick_tier() {
   for id in $models; do
     last="$id"
     if proxy_agent_is_capped "$TYPE" && [[ "$id" == claude-* && "${claude_live:-0}" -ge "$PROXY_AGENT_CLAUDE_CAP" ]]; then
-      skipped="${skipped:+$skipped,}$id:claude_cap(${claude_live}/$PROXY_AGENT_CLAUDE_CAP)"
-      continue
+      printf 'proxy-agent: telemetry claude_cap (%s live >= %s)\n' "$claude_live" "$PROXY_AGENT_CLAUDE_CAP" >&2
     fi
     if proxy_agent_sub_usable "$id"; then
+      if [[ "${PICK_ENFORCE_BURN:-0}" == 1 && "$PROXY_BURN_GATE" == enforce ]] && proxy_agent_is_capped "$TYPE"; then
+        if ! python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$id" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >&2; then
+          skipped="${skipped:+$skipped,}$id:burn_refused"
+          continue
+        fi
+      fi
       PICK_MODEL="$id"
       PICK_REASON="${skipped:+cooled:$skipped}"
       PICK_REASON="${PICK_REASON:-first_usable}"
@@ -1361,6 +1374,10 @@ proxy_agent_pick_tier() {
       fi
     fi
   done
+  if [[ "${PICK_ENFORCE_BURN:-0}" == 1 && "$PROXY_BURN_GATE" == enforce ]] && proxy_agent_is_capped "$TYPE"; then
+    printf 'proxy-agent: REFUSED no usable tier model (%s)\n' "$skipped" >&2
+    return 75
+  fi
   PICK_MODEL="$last"; PICK_REASON="fallback_last"
 }
 
@@ -1406,7 +1423,8 @@ proxy_agent_select() {
   # Effective rung for the run state (auto-escalation reads it back): BUILD1-3 / PROOF1-2 only; empty for raw models and other roles.
   case "$tier" in BUILD[123]|PROOF[12]) SELECT_RUNG="${tier: -1}";; *) SELECT_RUNG="";; esac
   if [[ "$tier" != RAW ]]; then
-    proxy_agent_pick_tier "$tier"; MODEL="$PICK_MODEL"; SELECT_REASON="$PICK_REASON"
+    PICK_ENFORCE_BURN=1 proxy_agent_pick_tier "$tier" || return 75
+    MODEL="$PICK_MODEL"; SELECT_REASON="$PICK_REASON"
   fi
   proxy_agent_pick_tier LIGHT; HAIKU_MODEL="$PICK_MODEL"
   proxy_agent_pick_tier MID; SONNET_MODEL="$PICK_MODEL"
@@ -1484,14 +1502,17 @@ proxy_agent_print_selection() {
 }
 
 proxy_agent_resolve_type
-proxy_agent_select
-# Shadow only: count gates retain authority; never enforce burn during this rollout.
+proxy_agent_select || exit 75
+# Enforce burn decisions for capped roles; shadow remains an explicit rollback switch.
 read -r _burn_model _burn_window _burn_max < <(resolve_model "$MODEL")
-if [[ "${PROXY_BURN_GATE:-shadow}" != shadow ]]; then
-  printf 'proxy-burn: unsupported mode=%s; using shadow\n' "$PROXY_BURN_GATE" >&2
+_burn_rc=0
+python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$_burn_model" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >&2 || _burn_rc=$?
+if [[ "$_burn_rc" -ne 0 ]]; then
+  printf 'proxy-burn: mode=%s decision=would_refuse rc=%s\n' "$PROXY_BURN_GATE" "$_burn_rc" >&2
+  if [[ "$PROXY_BURN_GATE" == enforce ]] && proxy_agent_is_capped "$TYPE"; then exit 75; fi
+elif [[ "$PROXY_BURN_GATE" == enforce ]] && proxy_agent_is_capped "$TYPE" && [[ "${PROXY_AGENT_CAP_OVERRIDE:-}" =~ ^(P0:[0-9]+|rajiv:[0-9]+\.[0-9]+)$ ]]; then
+  printf '%s BURN_OVERRIDE name=%s type=%s model=%s reason=%s\n' "$(date -u +%FT%TZ)" "${PROXY_AGENT_NAME:-}" "$TYPE" "$_burn_model" "$PROXY_AGENT_CAP_OVERRIDE" >> "$HOME/.claude/state/proxy-cap-overrides.log"
 fi
-python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$_burn_model" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >&2 || \
-  printf 'proxy-burn: mode=shadow decision=would_refuse reason=collector_error\n' >&2
 # A UTC-second stamp alone is not unique: several same-type proxies started in
 # one second overwrite one markdown file, and delivery/jsonl follow that name.
 # PROXY_AGENT_NAME (sanitized) plus this process id keeps concurrent launches apart.
@@ -1640,14 +1661,12 @@ fi
 if proxy_agent_is_capped "$TYPE"; then
   _live_total="$(proxy_agent_live_count total)"
   if [[ "${_live_total:-999}" -ge "$PROXY_AGENT_TOTAL_CAP" ]]; then
-    printf 'proxy-agent: REFUSED total_cap (%s live >= %s). Wait for a proxy to stop, or set PROXY_AGENT_TOTAL_CAP for a P0.\n' "$_live_total" "$PROXY_AGENT_TOTAL_CAP" >&2
-    exit 75
+    printf 'proxy-agent: telemetry total_cap (%s live >= %s).\n' "$_live_total" "$PROXY_AGENT_TOTAL_CAP" >&2
   fi
   if [[ "$MODEL_ID" == claude-* ]]; then
     _live_claude="$(proxy_agent_live_count claude)"
     if [[ "${_live_claude:-999}" -ge "$PROXY_AGENT_CLAUDE_CAP" ]]; then
-      printf 'proxy-agent: REFUSED claude_cap (%s live >= %s).\n' "$_live_claude" "$PROXY_AGENT_CLAUDE_CAP" >&2
-      exit 75
+      printf 'proxy-agent: telemetry claude_cap (%s live >= %s).\n' "$_live_claude" "$PROXY_AGENT_CLAUDE_CAP" >&2
     fi
   fi
 fi

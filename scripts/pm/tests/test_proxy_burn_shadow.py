@@ -84,3 +84,24 @@ def test_unmapped_and_grok_unknown():
             burn.shadow('grok-4.7', 'hd-builder', '', 'unused', 'unused', 10000)
         assert 'pool=grok' in out.getvalue()
         assert 'decision=would_refuse' in out.getvalue()
+
+
+@pytest.mark.parametrize('model', ['claude-haiku-5-5', 'gpt-6-luna', 'grok-4.7'])
+def test_unknown_decisions_block_capped_roles_but_not_exemptions_or_override(model):
+    with mock.patch.object(burn, 'read_config', side_effect=ValueError()):
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            assert burn.shadow(model, 'hd-builder', '', '', '', 10000) == 'would_refuse'
+            assert burn.shadow(model, 'ci-repair', '', '', '', 10000) == 'exempt'
+            assert burn.shadow(model, 'hd-builder', 'P0:123', '', '', 10000) == 'override'
+        assert 'override=P0:123' in out.getvalue()
+
+
+def test_tier_picker_skips_burn_refusal_and_fails_closed():
+    launcher = (SCRIPT.parent / 'proxy-agent.sh').read_text()
+    picker = launcher[launcher.index('proxy_agent_pick_tier() {'):launcher.index('# hd-* split compat')]
+    assert 'PICK_ENFORCE_BURN' in picker
+    assert 'id:burn_refused' in picker
+    assert 'continue' in picker[picker.index('id:burn_refused'):]
+    assert 'return 75' in picker
+    assert 'PICK_ENFORCE_BURN=1 proxy_agent_pick_tier "$tier" || return 75' in launcher
+    assert 'PROXY_BURN_GATE="${PROXY_BURN_GATE:-enforce}"' in launcher

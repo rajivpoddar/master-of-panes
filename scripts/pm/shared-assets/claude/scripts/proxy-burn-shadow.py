@@ -160,7 +160,9 @@ def shadow(model, role, override, config_path, snapshot_path, now):
         print(f'{prefix} decision={verdict} effective={reason} override={override if override_ok else "none"}')
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, subprocess.SubprocessError):
         print(f'{prefix} account=unknown decision=unknown burn=unknown budget=unknown')
-        print(f'{prefix} decision=would_refuse effective={"exempt" if exemption else ("override" if override_ok else "would_refuse")}')
+        reason = 'exempt' if exemption else ('override' if override_ok else 'would_refuse')
+        print(f'{prefix} decision=would_refuse effective={reason} override={override if override_ok else "none"}')
+    return reason
 
 
 def main():
@@ -168,8 +170,8 @@ def main():
         return 2
     global LOG
     LOG = os.environ.get('PROXY_BURN_SNAPSHOT', LOG)
-    shadow(sys.argv[1], sys.argv[2], sys.argv[3], os.environ.get('PROXY_BURN_CONFIG', '/opt/homebrew/etc/cliproxyapi.conf'), LOG, time.time())
-    return 0
+    decision = shadow(sys.argv[1], sys.argv[2], sys.argv[3], os.environ.get('PROXY_BURN_CONFIG', '/opt/homebrew/etc/cliproxyapi.conf'), LOG, time.time())
+    return 75 if decision == 'would_refuse' else 0
 
 
 if __name__ == '__main__':
