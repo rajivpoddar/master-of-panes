@@ -2790,13 +2790,42 @@ def parallel_collect(jobs, wall_cap=COMPOSE_COLLECTOR_BUDGET, cache_dir=HOURLY_C
     return results, stale
 
 
-def hourly_usage_job(py, failures: list[str]):
+HOURLY_CLAIM_ROOT = Path.home() / ".claude/hourly-heartbeat-posts"
+_HOURLY_BUCKET_RE = re.compile(r"^\d{4}-\d{2}-\d{2}:\d{2}$")
+
+
+def usage_sample_claim_ok(claim: str | None) -> bool:
+    """True only for a live, unsent bucket claim made by the normal hourly wrapper (pm-hourly-post.sh).
+
+    The wrapper creates <HOURLY_CLAIM_ROOT>/<YYYY-MM-DD:HH> with an atomic mkdir BEFORE it composes, and passes
+    the path as --sample-usage-claim. A posted or uncertain bucket never reaches compose (the wrapper returns
+    HOURLY_ALREADY_POSTED / HOURLY_POST_UNCERTAIN first), and a claim that already holds a receipt or errors file
+    means the Slack send started, so it never authorizes another sample. No claim, a path outside the claim root,
+    a non-bucket name, or a sent claim all mean: do not sample (renderers then consume the cache only).
+    """
+    if not claim:
+        return False
+    path = Path(claim)
+    if path.parent != HOURLY_CLAIM_ROOT or not _HOURLY_BUCKET_RE.match(path.name):
+        return False
+    try:
+        return path.is_dir() and not (path / "receipt").exists() and not (path / "errors").exists()
+    except OSError:
+        return False
+
+
+def hourly_usage_job(py, failures: list[str], claim: str | None):
     """The one usage sampler. Appends usage-snapshots.jsonl and returns the account lines.
 
+    Reachable only from the claimed normal 1h producer: collect_hourly registers this job only when
+    usage_sample_claim_ok(claim), and run() re-checks the claim immediately before the single Popen below.
     Timed-out or empty output raises, so parallel_collect never caches a partial reading
     and a failed hour keeps the previous successful sample with its original timestamp.
     """
     def run():
+        if not usage_sample_claim_ok(claim):
+            failures.append("usage: sampling refused, no live hourly bucket claim")
+            raise RuntimeError("usage sampling requires the claimed hourly producer")
         try:
             proc = subprocess.Popen([py, str(USAGE_SNAPSHOT_SCRIPT)], stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, text=True, errors="replace")
@@ -2865,9 +2894,13 @@ def collect_hourly(args, py, hours, now, failures):
         "mac-box": mac_box_stats,
         "pending-github": lambda: pending_github(timeout=COLLECTOR_TIMEOUTS["pending-github"]),
         "proxies": lambda: read_proxies(now),
-        # Hourly producer for usage/quota (appends usage-snapshots.jsonl before the 1h burn read).
-        "usage": hourly_usage_job(py, failures),
     }
+    # Hourly producer for usage/quota (appends usage-snapshots.jsonl before the 1h burn read). Registered ONLY for the
+    # claimed normal producer (pm-hourly-post.sh passes --sample-usage-claim after its atomic bucket mkdir). Bare CLI
+    # runs, saved-input renders, posted/uncertain buckets and the 3h path leave it out and read the cache only
+    # (CTO REVISE C0ALZJHGE49 thread 1794753780.694859, ts 1794756599.261169).
+    if usage_sample_claim_ok(getattr(args, "sample_usage_claim", None)):
+        jobs["usage"] = hourly_usage_job(py, failures, args.sample_usage_claim)
     for key, path in (("axiom", args.axiom_json), ("prs", args.prs_json)):
         if path:
             jobs[key] = lambda path=path: _load(path)
@@ -2916,6 +2949,8 @@ def main() -> int:
     parser.add_argument("--escalation", action="append", default=[], help="ladder-approved escalation line")
     parser.add_argument("--no-in-app", action="store_true")
     parser.add_argument("--save-inputs", help="directory to write collected inputs to")
+    parser.add_argument("--sample-usage-claim", help="live hourly bucket claim dir; set only by pm-hourly-post.sh after its atomic mkdir. "
+                        "Without it the 1h composer never runs the usage sampler")
     args = parser.parse_args()
 
     failures: list[str] = []
@@ -2980,8 +3015,9 @@ def main() -> int:
         for name, value in (("axiom", axiom), ("map", mapping_doc), ("support", support), ("prs", prs), ("active", active), ("slots", slots), ("actions", pm_actions), ("decisions", decisions), ("agents", agents)):
             (out / f"{name}.json").write_text(json.dumps(value, indent=2))
 
-    # Usage is sampled once per hour by the 1h producer (collect_hourly). The 3h heartbeat
-    # reads that cache and never runs the collector, so the hours do not double-sample.
+    # Usage is sampled once per hour, only by the claimed normal 1h producer (collect_hourly with a live
+    # --sample-usage-claim). The 3h heartbeat and every unclaimed 1h render read that cache and never run
+    # the collector, so the hours do not double-sample.
     usage_lines = None
     usage_error = None
     if args.mode == "3h":

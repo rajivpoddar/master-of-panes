@@ -151,5 +151,81 @@ class HourlyCollectors(unittest.TestCase):
                 self.assertEqual(json.loads(path.read_text()), original)
 
 
+class UsageSamplerClaimGate(unittest.TestCase):
+    """CTO REVISE C0ALZJHGE49 thread 1794753780.694859: the quota sampler runs only for the claimed normal 1h producer.
+
+    Offline: Popen and parallel_collect are replaced, so no collector, provider or network call is possible.
+    """
+
+    BUCKET = "2026-11-15:16"
+
+    def make_root(self, tmp):
+        root = Path(tmp) / "hourly-heartbeat-posts"
+        root.mkdir()
+        return root
+
+    def collected_job_names(self, claim, root):
+        seen = {}
+        args = compose.argparse.Namespace(
+            mode="1h", axiom_json=None, map_json=None, prs_json=None, active_json=None, no_active_users=True,
+            slots_json=None, decisions_json=None, agents_json=None, sample_usage_claim=claim)
+        def capture(jobs, **_kw):
+            seen["names"] = set(jobs)
+            return {}, {}
+        with patch.object(compose, "HOURLY_CLAIM_ROOT", root), patch.object(compose, "parallel_collect", side_effect=capture), \
+                patch.object(compose.subprocess, "Popen") as popen:
+            compose.collect_hourly(args, "python3", "1", datetime.now(timezone.utc), [])
+        popen.assert_not_called()
+        return seen["names"]
+
+    def test_no_claim_flag_registers_no_sampler(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertNotIn("usage", self.collected_job_names(None, self.make_root(tmp)))
+
+    def test_live_unsent_claim_registers_the_sampler(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.make_root(tmp)
+            (root / self.BUCKET).mkdir()
+            self.assertIn("usage", self.collected_job_names(str(root / self.BUCKET), root))
+
+    def test_posted_uncertain_missing_or_foreign_claims_never_register_the_sampler(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.make_root(tmp)
+            posted = root / "2026-11-15:15"
+            posted.mkdir()
+            (posted / "receipt").write_text("OK ts=1.2 channel=C0ALZJHGE49\n")
+            sent = root / "2026-11-15:14"
+            sent.mkdir()
+            (sent / "errors").write_text("")
+            foreign = Path(tmp) / self.BUCKET
+            foreign.mkdir()
+            badname = root / "not-a-bucket"
+            badname.mkdir()
+            for claim in (posted, sent, root / "2026-11-15:13", foreign, badname):
+                with self.subTest(claim=claim.name):
+                    with patch.object(compose, "HOURLY_CLAIM_ROOT", root):
+                        self.assertFalse(compose.usage_sample_claim_ok(str(claim)))
+                    self.assertNotIn("usage", self.collected_job_names(str(claim), root))
+
+    def test_job_itself_refuses_to_sample_without_a_live_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self.make_root(tmp)
+            failures = []
+            with patch.object(compose, "HOURLY_CLAIM_ROOT", root), patch.object(compose.subprocess, "Popen") as popen:
+                with self.assertRaises(RuntimeError):
+                    compose.hourly_usage_job("python3", failures, str(root / self.BUCKET))()
+                with self.assertRaises(RuntimeError):
+                    compose.hourly_usage_job("python3", failures, None)()
+            popen.assert_not_called()
+            self.assertEqual(len(failures), 2)
+
+    def test_sampler_is_the_only_popen_site_and_is_claim_guarded(self):
+        text = SOURCE.read_text()
+        self.assertEqual(text.count("USAGE_SNAPSHOT_SCRIPT)"), 1)
+        self.assertEqual(text.count("hourly_usage_job("), 2)  # definition + the one guarded registration
+        body = text.split("def hourly_usage_job", 1)[1].split("def read_hourly_usage", 1)[0]
+        self.assertLess(body.index("usage_sample_claim_ok(claim)"), body.index("subprocess.Popen"))
+
+
 if __name__ == "__main__":
     unittest.main()
