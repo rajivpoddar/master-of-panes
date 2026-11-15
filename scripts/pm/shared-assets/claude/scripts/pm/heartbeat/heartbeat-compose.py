@@ -2232,7 +2232,16 @@ def composer_release_sha(current: Path | None = None, source: Path | None = None
 # Burn line (Rajiv C0ALZJHGE49 thread 1794746097.575959, 2026-11-15): the hourly shows Claude and
 # Codex burn against budget. Same snapshot file and formula as the launcher burn gate
 # (proxy-burn-shadow.py, MoP release 1e4787ff). Read-only: no paid calls.
-BURN_ACTION = "burn P0-only: queue non-P0 launches; CI repair/PM admin continue"
+BURN_SCOPE_NOTE = "Claude and Codex only; Grok not metered"
+
+
+def burn_action(denied: list[str]) -> str:
+    """ACTIONS text naming only the denied route families (P0, scoped rajiv:<ts> overrides, CI/admin exemptions continue)."""
+    routes = " and ".join(denied)
+    return (f"burn P0-only for {routes} routes: queue non-P0 launches that need {routes} routes; "
+            "P0 and scoped rajiv:<ts> overrides and CI/admin exemptions continue")
+
+
 USAGE_SNAPSHOTS = Path.home() / ".claude/state/usage-snapshots.jsonl"
 PROXY_BURN_SHADOW = Path.home() / ".claude/scripts/proxy-burn-shadow.py"
 PROXY_CONFIG = Path("/opt/homebrew/etc/cliproxyapi.conf")
@@ -2249,13 +2258,14 @@ def _burn_module(path: Path = PROXY_BURN_SHADOW):
     return mod
 
 
-def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = PROXY_CONFIG, shadow=None) -> tuple[str, str]:
-    """Return (line, mode) with mode 'P0-ONLY' or 'NORMAL'.
+def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = PROXY_CONFIG, shadow=None) -> tuple[str, dict[str, str]]:
+    """Return (line, modes). modes maps each route family label to 'NORMAL' or 'P0-ONLY'.
 
-    Any account that is over budget, exhausted or unknown, or any pool whose accounts
-    cannot be bound, makes its pool OVER and the mode P0-ONLY (same per-account rule
-    as the launcher gate). Failure of the check itself is P0-ONLY.
+    Mode is scoped per family: an over-budget, exhausted or unknown account, or a pool whose
+    accounts cannot be bound, sets only its own family to P0-ONLY (same per-account rule as
+    the launcher gate). Failure of the check itself sets every family to P0-ONLY.
     """
+    fail_modes = {label: "P0-ONLY" for label, _, _ in BURN_MODELS}
     try:
         shadow = shadow or _burn_module()
         shadow.LOG = str(snapshot)
@@ -2266,6 +2276,7 @@ def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = 
             rows = {}
         segments: list[str] = []
         verdicts: list[str] = []
+        modes: dict[str, str] = {}
         for label, pool, model in BURN_MODELS:
             try:
                 _, accounts = shadow.bindings(model, shadow.read_config(str(config)))
@@ -2274,6 +2285,7 @@ def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = 
             if not accounts:
                 segments.append(f"{label} accounts UNKNOWN")
                 verdicts.append(f"{label} OVER")
+                modes[label] = "P0-ONLY"
                 continue
             pool_ok = True
             for acct in accounts:
@@ -2287,11 +2299,13 @@ def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = 
                 if state != "OK":
                     pool_ok = False
             verdicts.append(f"{label} {'OK' if pool_ok else 'OVER'}")
-        mode = "NORMAL" if all(v.endswith(" OK") for v in verdicts) else "P0-ONLY"
-        line = "*Burn:* " + " · ".join(segments) + " → " + ", ".join(verdicts) + f" → mode {mode}"
-        return line, mode
+            modes[label] = "NORMAL" if pool_ok else "P0-ONLY"
+        routes = " | ".join(f"{label} routes: {modes[label]}" for label, _, _ in BURN_MODELS)
+        line = "*Burn:* " + " · ".join(segments) + " → " + ", ".join(verdicts) + f" → {routes} ({BURN_SCOPE_NOTE})"
+        return line, modes
     except Exception as exc:
-        return f"*Burn:* UNKNOWN ({type(exc).__name__}) → mode P0-ONLY", "P0-ONLY"
+        routes = " | ".join(f"{label} routes: P0-ONLY" for label, _, _ in BURN_MODELS)
+        return f"*Burn:* UNKNOWN ({type(exc).__name__}) → {routes} ({BURN_SCOPE_NOTE})", fail_modes
 
 
 def compose(
@@ -2385,13 +2399,14 @@ def compose(
     else:
         mention = f"{CTO} " if asks else ""
         first = f"{mention}*Hourly — {stamp}* — TL;DR: {tldr}"
-    burn_line, burn_mode = burn if (burn and mode == "1h") else (None, None)
+    burn_line, burn_modes = burn if (burn and mode == "1h") else (None, None)
     lines = [first, *([burn_line] if burn_line else []), *body]
     if asks:
         lines += ["", "*Asks:* " + " | ".join(asks)]
     pm_actions = [] if mode == "3h" else [a for r in (prs or []) for a in r.get("actions") or []]
-    if burn_mode == "P0-ONLY":
-        pm_actions = [BURN_ACTION, *pm_actions]
+    denied = [label for label, _, _ in BURN_MODELS if (burn_modes or {}).get(label) == "P0-ONLY"]
+    if denied:
+        pm_actions = [burn_action(denied), *pm_actions]
     if pm_actions:
         lines += ["", "*ACTIONS (PM):* " + "; ".join(pm_actions)]
     if cleanup_alert:

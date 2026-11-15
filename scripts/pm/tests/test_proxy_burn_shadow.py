@@ -99,9 +99,29 @@ def test_unknown_decisions_block_capped_roles_but_not_exemptions_or_override(mod
 def test_tier_picker_skips_burn_refusal_and_fails_closed():
     launcher = (SCRIPT.parent / 'proxy-agent.sh').read_text()
     picker = launcher[launcher.index('proxy_agent_pick_tier() {'):launcher.index('# hd-* split compat')]
-    assert 'PICK_ENFORCE_BURN' in picker
-    assert 'id:burn_refused' in picker
-    assert 'continue' in picker[picker.index('id:burn_refused'):]
+    # Burn refusal is checked BEFORE the usability probe, so no provider call is made for a refused id.
+    refused = picker.index('if proxy_agent_burn_refused "$id"; then')
+    assert refused < picker.index('if proxy_agent_sub_usable "$id"; then')
+    assert 'id:burn_refused' in picker[refused:]
+    assert 'continue' in picker[refused:refused + 200]
+    # Capped types fail closed when no tier model survives.
+    assert 'if proxy_agent_burn_enforced; then' in picker
     assert 'return 75' in picker
-    assert 'PICK_ENFORCE_BURN=1 proxy_agent_pick_tier "$tier" || return 75' in launcher
+    # Primary and every nested alias (Haiku/Sonnet/Opus) go through the same picker.
+    assert 'PICK_ENFORCE_BURN' not in launcher
+    assert 'proxy_agent_pick_tier "$tier" || return 75' in launcher
+    assert 'proxy_agent_pick_tier LIGHT || true; HAIKU_MODEL="$PICK_MODEL"' in launcher
+    assert 'proxy_agent_pick_tier MID || true; SONNET_MODEL="$PICK_MODEL"' in launcher
+    assert 'proxy_agent_pick_tier TOP || true; OPUS_MODEL="$PICK_MODEL"' in launcher
+    # An empty refused alias exports a non-model sentinel, never an unchecked fallback.
+    assert 'ANTHROPIC_DEFAULT_HAIKU_MODEL="${HAIKU_MODEL:-burn-refused-haiku}"' in launcher
     assert 'PROXY_BURN_GATE="${PROXY_BURN_GATE:-enforce}"' in launcher
+
+
+@pytest.mark.parametrize('field', ['pct', 'reset'])
+def test_bool_or_non_number_meter_is_unknown(field):
+    # float(False) == 0.0 would otherwise turn a bad reading into an allow.
+    row = {'ts': 9000, 'pct': 10, 'reset': 50000}
+    for bad in (False, True, '10', None):
+        row[field] = bad
+        assert burn.account_decision('codex:a:weekly', {'codex:a:weekly': row}, 'codex', 10000)[0] == 'unknown'

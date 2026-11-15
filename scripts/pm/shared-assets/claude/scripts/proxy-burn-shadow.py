@@ -35,12 +35,20 @@ def burn_for(key, pct, reset):
     return burn
 
 
+def meter(latest, field):
+    # Type-check BEFORE float(): float(False) == 0.0 would turn a bad reading into an allow.
+    value = latest[field]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError('bad_meter')
+    return float(value)
+
+
 def account_decision(key, rows, pool, now):
     latest = rows.get(key)
     if not latest:
         return 'unknown', None, None
     try:
-        ts, pct, reset = (float(latest[k]) for k in ('ts', 'pct', 'reset'))
+        ts, pct, reset = (meter(latest, k) for k in ('ts', 'pct', 'reset'))
         if not all(map(math.isfinite, (ts, pct, reset))) or not 0 <= pct <= 100 or not 0 <= now - ts <= 7200 or reset <= now:
             return 'unknown', None, None
         if pct >= 100:

@@ -54,40 +54,62 @@ class BurnLineTests(unittest.TestCase):
         })
         return self.hc.burn_status(NOW, snapshot=Path("/nonexistent"), config=Path("/nonexistent"), shadow=shadow)
 
-    def test_all_ok_is_normal(self):
-        line, mode = self._status(("allow", 0.1, 1.0), ("allow", 0.1, 1.0))
-        self.assertEqual(mode, "NORMAL")
-        self.assertIn("Claude OK, Codex OK → mode NORMAL", line)
+    def test_all_ok_is_normal_for_both_families(self):
+        line, modes = self._status(("allow", 0.1, 1.0), ("allow", 0.1, 1.0))
+        self.assertEqual(modes, {"Claude": "NORMAL", "Codex": "NORMAL"})
+        self.assertIn("Claude OK, Codex OK", line)
+        self.assertIn("Claude and Codex only; Grok not metered", line)
 
-    def test_over_budget_is_p0_only(self):
-        line, mode = self._status(("over_budget", 2.0, 1.0), ("allow", 0.1, 1.0))
-        self.assertEqual(mode, "P0-ONLY")
+    def test_claude_over_budget_is_scoped_to_claude(self):
+        line, modes = self._status(("over_budget", 2.0, 1.0), ("allow", 0.1, 1.0))
+        self.assertEqual(modes, {"Claude": "P0-ONLY", "Codex": "NORMAL"})
         self.assertIn("Claude OVER", line)
+        self.assertIn("Claude routes: P0-ONLY | Codex routes: NORMAL", line)
 
-    def test_unknown_counts_as_p0_only(self):
-        _, mode = self._status(("unknown", None, None), ("allow", 0.1, 1.0))
-        self.assertEqual(mode, "P0-ONLY")
+    def test_unknown_counts_as_p0_only_for_its_family(self):
+        _, modes = self._status(("unknown", None, None), ("allow", 0.1, 1.0))
+        self.assertEqual(modes, {"Claude": "P0-ONLY", "Codex": "NORMAL"})
 
-    def test_exhausted_counts_as_p0_only(self):
-        _, mode = self._status(("allow", 0.1, 1.0), ("exhausted", None, 0.0))
-        self.assertEqual(mode, "P0-ONLY")
+    def test_exhausted_codex_is_scoped_to_codex(self):
+        _, modes = self._status(("allow", 0.1, 1.0), ("exhausted", None, 0.0))
+        self.assertEqual(modes, {"Claude": "NORMAL", "Codex": "P0-ONLY"})
 
-    def test_check_failure_is_p0_only(self):
+    def test_both_families_denied_names_both(self):
+        line, modes = self._status(("over_budget", 2.0, 1.0), ("unknown", None, None))
+        self.assertEqual(modes, {"Claude": "P0-ONLY", "Codex": "P0-ONLY"})
+        out = self.hc.compose("1h", NOW, None, {}, [], failures=[], burn=(line, modes))
+        self.assertIn("*ACTIONS (PM):* burn P0-only for Claude and Codex routes", out)
+
+    def test_check_failure_is_p0_only_for_every_family(self):
         class Broken:
             LOG = ""
 
             def read_latest(self, path):
                 raise RuntimeError("boom")
 
-        line, mode = self.hc.burn_status(NOW, shadow=Broken())
-        self.assertEqual(mode, "P0-ONLY")
+        line, modes = self.hc.burn_status(NOW, shadow=Broken())
+        self.assertEqual(modes, {"Claude": "P0-ONLY", "Codex": "P0-ONLY"})
         self.assertIn("UNKNOWN", line)
 
-    def test_p0_only_adds_pm_action(self):
-        line, mode = self._status(("over_budget", 2.0, 1.0), ("allow", 0.1, 1.0))
-        out = self.hc.compose("1h", NOW, None, {}, [], failures=[], burn=(line, mode))
-        self.assertIn("*ACTIONS (PM):* " + self.hc.BURN_ACTION, out)
+    def test_mixed_pool_action_names_only_denied_route(self):
+        line, modes = self._status(("over_budget", 2.0, 1.0), ("allow", 0.1, 1.0))
+        out = self.hc.compose("1h", NOW, None, {}, [], failures=[], burn=(line, modes))
+        actions = [l for l in out.splitlines() if l.startswith("*ACTIONS (PM):*")][0]
+        self.assertIn("burn P0-only for Claude routes", actions)
+        self.assertNotIn("Codex routes", actions)
+        self.assertIn("P0 and scoped rajiv:<ts> overrides and CI/admin exemptions continue", actions)
         self.assertIn(line, out)
+
+    def test_all_normal_adds_no_burn_action(self):
+        line, modes = self._status(("allow", 0.1, 1.0), ("allow", 0.1, 1.0))
+        out = self.hc.compose("1h", NOW, None, {}, [], failures=[], burn=(line, modes))
+        self.assertNotIn("burn P0-only", out)
+
+    def test_decision_uses_unrounded_value_not_display(self):
+        # Display rounds to 2 dp; the decision the helper returned must stand as-is.
+        line, modes = self._status(("over_budget", 1.00001, 1.0), ("allow", 0.1, 1.0))
+        self.assertEqual(modes["Claude"], "P0-ONLY")
+        self.assertIn("1.00%/h", line)
 
 
 if __name__ == "__main__":

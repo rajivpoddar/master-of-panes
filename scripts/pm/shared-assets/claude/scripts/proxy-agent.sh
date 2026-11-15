@@ -1354,13 +1354,12 @@ proxy_agent_pick_tier() {
     if proxy_agent_is_capped "$TYPE" && [[ "$id" == claude-* && "${claude_live:-0}" -ge "$PROXY_AGENT_CLAUDE_CAP" ]]; then
       printf 'proxy-agent: telemetry claude_cap (%s live >= %s)\n' "$claude_live" "$PROXY_AGENT_CLAUDE_CAP" >&2
     fi
+    # Burn decision runs BEFORE the usability probe: a refused pool never sends a provider request.
+    if proxy_agent_burn_refused "$id"; then
+      skipped="${skipped:+$skipped,}$id:burn_refused"
+      continue
+    fi
     if proxy_agent_sub_usable "$id"; then
-      if [[ "${PICK_ENFORCE_BURN:-0}" == 1 && "$PROXY_BURN_GATE" == enforce ]] && proxy_agent_is_capped "$TYPE"; then
-        if ! python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$id" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >&2; then
-          skipped="${skipped:+$skipped,}$id:burn_refused"
-          continue
-        fi
-      fi
       PICK_MODEL="$id"
       PICK_REASON="${skipped:+cooled:$skipped}"
       PICK_REASON="${PICK_REASON:-first_usable}"
@@ -1374,11 +1373,25 @@ proxy_agent_pick_tier() {
       fi
     fi
   done
-  if [[ "${PICK_ENFORCE_BURN:-0}" == 1 && "$PROXY_BURN_GATE" == enforce ]] && proxy_agent_is_capped "$TYPE"; then
+  if proxy_agent_burn_enforced; then
+    # Fail closed for capped roles: no unchecked fallback is ever exported.
+    PICK_MODEL=""
     printf 'proxy-agent: REFUSED no usable tier model (%s)\n' "$skipped" >&2
     return 75
   fi
   PICK_MODEL="$last"; PICK_REASON="fallback_last"
+}
+
+# Ordinary burn gate for capped roles in enforce mode (proxy-burn-shadow.py; overrides and exemptions live there).
+# Applied to EVERY pick (primary and nested Haiku/Sonnet/Opus aliases) and always before a usability probe.
+proxy_agent_burn_enforced() {
+  [[ "$PROXY_BURN_GATE" == enforce ]] && proxy_agent_is_capped "$TYPE"
+}
+# Returns 0 when the burn gate refuses the model id, 1 when it allows it or does not apply.
+proxy_agent_burn_refused() {
+  proxy_agent_burn_enforced || return 1
+  python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$1" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >&2 && return 1
+  return 0
 }
 
 # hd-* split compat (Rajiv D0AMF0XE6TS thread 1794624936.567599, ts 1794639434.146359 split, ts 1794639511.486209 hd prefix):
@@ -1423,12 +1436,13 @@ proxy_agent_select() {
   # Effective rung for the run state (auto-escalation reads it back): BUILD1-3 / PROOF1-2 only; empty for raw models and other roles.
   case "$tier" in BUILD[123]|PROOF[12]) SELECT_RUNG="${tier: -1}";; *) SELECT_RUNG="";; esac
   if [[ "$tier" != RAW ]]; then
-    PICK_ENFORCE_BURN=1 proxy_agent_pick_tier "$tier" || return 75
+    proxy_agent_pick_tier "$tier" || return 75
     MODEL="$PICK_MODEL"; SELECT_REASON="$PICK_REASON"
   fi
-  proxy_agent_pick_tier LIGHT; HAIKU_MODEL="$PICK_MODEL"
-  proxy_agent_pick_tier MID; SONNET_MODEL="$PICK_MODEL"
-  proxy_agent_pick_tier TOP; OPUS_MODEL="$PICK_MODEL"
+  # Nested aliases get the same burn gate. A refused alias leaves PICK_MODEL empty; the export block below fails it closed.
+  proxy_agent_pick_tier LIGHT || true; HAIKU_MODEL="$PICK_MODEL"
+  proxy_agent_pick_tier MID || true; SONNET_MODEL="$PICK_MODEL"
+  proxy_agent_pick_tier TOP || true; OPUS_MODEL="$PICK_MODEL"
 }
 
 # Model table: alias | CLIProxyAPI model id | context window | max output tokens.
@@ -1607,9 +1621,11 @@ export ANTHROPIC_BASE_URL="${CLIPROXY_BASE_URL:-http://127.0.0.1:8317}"
 export ANTHROPIC_AUTH_TOKEN="$CLIPROXY_API_KEY"
 unset ANTHROPIC_API_KEY
 # S129: nested models come from the pre-launch selector (or the static fallback when --model is explicit).
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="$HAIKU_MODEL"
-export ANTHROPIC_DEFAULT_SONNET_MODEL="$SONNET_MODEL"
-export ANTHROPIC_DEFAULT_OPUS_MODEL="$OPUS_MODEL"
+# An empty alias (burn-refused for a capped role) exports a sentinel that is not a model id, so a nested call fails at the
+# proxy instead of unsetting the alias (which would let Claude Code fall back to its built-in id, unchecked).
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="${HAIKU_MODEL:-burn-refused-haiku}"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="${SONNET_MODEL:-burn-refused-sonnet}"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="${OPUS_MODEL:-burn-refused-opus}"
 export CLAUDE_CODE_ATTRIBUTION_HEADER=0
 export PROXY_AGENT=1
 # Context sizing for the selected model (Claude Code docs: env-vars, model-config).
