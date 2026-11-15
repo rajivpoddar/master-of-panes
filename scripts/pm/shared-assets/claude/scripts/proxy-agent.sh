@@ -1393,6 +1393,22 @@ proxy_agent_burn_refused() {
   python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$1" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >&2 && return 1
   return 0
 }
+# Primary burn check (CTO REVISE 2026-11-15, C0ALZJHGE49 ts 1794754734.596349). Runs in proxy_agent_select right after the
+# PRIMARY pick and BEFORE the nested alias picks, which make usability POSTs. A refused primary (e.g. a raw
+# claude-opus-5-5, which skips pick_tier) therefore spends no alias probes. Same check, same decisions; only its position moved.
+# Returns 75 when enforce mode refuses a capped role's primary; 0 otherwise (shadow mode never refuses).
+proxy_agent_primary_burn_check() {
+  local _burn_model _burn_window _burn_max _burn_rc=0
+  read -r _burn_model _burn_window _burn_max < <(resolve_model "$MODEL")
+  python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$_burn_model" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >&2 || _burn_rc=$?
+  if [[ "$_burn_rc" -ne 0 ]]; then
+    printf 'proxy-burn: mode=%s decision=would_refuse rc=%s\n' "$PROXY_BURN_GATE" "$_burn_rc" >&2
+    if [[ "$PROXY_BURN_GATE" == enforce ]] && proxy_agent_is_capped "$TYPE"; then return 75; fi
+  elif [[ "$PROXY_BURN_GATE" == enforce ]] && proxy_agent_is_capped "$TYPE" && [[ "${PROXY_AGENT_CAP_OVERRIDE:-}" =~ ^(P0:[0-9]+|rajiv:[0-9]+\.[0-9]+)$ ]]; then
+    printf '%s BURN_OVERRIDE name=%s type=%s model=%s reason=%s\n' "$(date -u +%FT%TZ)" "${PROXY_AGENT_NAME:-}" "$TYPE" "$_burn_model" "$PROXY_AGENT_CAP_OVERRIDE" >> "$HOME/.claude/state/proxy-cap-overrides.log"
+  fi
+  return 0
+}
 
 # hd-* split compat (Rajiv D0AMF0XE6TS thread 1794624936.567599, ts 1794639434.146359 split, ts 1794639511.486209 hd prefix):
 # pm-hotfix and pm-proof-qa stay launchable so queued/in-flight briefs and resumes keep working.
@@ -1439,6 +1455,8 @@ proxy_agent_select() {
     proxy_agent_pick_tier "$tier" || return 75
     MODEL="$PICK_MODEL"; SELECT_REASON="$PICK_REASON"
   fi
+  # Primary burn decision first (covers RAW primaries too): a refused primary returns before any alias usability POST.
+  proxy_agent_primary_burn_check || return 75
   # Nested aliases get the same burn gate. A refused alias leaves PICK_MODEL empty; the export block below fails it closed.
   proxy_agent_pick_tier LIGHT || true; HAIKU_MODEL="$PICK_MODEL"
   proxy_agent_pick_tier MID || true; SONNET_MODEL="$PICK_MODEL"
@@ -1516,17 +1534,7 @@ proxy_agent_print_selection() {
 }
 
 proxy_agent_resolve_type
-proxy_agent_select || exit 75
-# Enforce burn decisions for capped roles; shadow remains an explicit rollback switch.
-read -r _burn_model _burn_window _burn_max < <(resolve_model "$MODEL")
-_burn_rc=0
-python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$_burn_model" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >&2 || _burn_rc=$?
-if [[ "$_burn_rc" -ne 0 ]]; then
-  printf 'proxy-burn: mode=%s decision=would_refuse rc=%s\n' "$PROXY_BURN_GATE" "$_burn_rc" >&2
-  if [[ "$PROXY_BURN_GATE" == enforce ]] && proxy_agent_is_capped "$TYPE"; then exit 75; fi
-elif [[ "$PROXY_BURN_GATE" == enforce ]] && proxy_agent_is_capped "$TYPE" && [[ "${PROXY_AGENT_CAP_OVERRIDE:-}" =~ ^(P0:[0-9]+|rajiv:[0-9]+\.[0-9]+)$ ]]; then
-  printf '%s BURN_OVERRIDE name=%s type=%s model=%s reason=%s\n' "$(date -u +%FT%TZ)" "${PROXY_AGENT_NAME:-}" "$TYPE" "$_burn_model" "$PROXY_AGENT_CAP_OVERRIDE" >> "$HOME/.claude/state/proxy-cap-overrides.log"
-fi
+proxy_agent_select || exit 75  # includes the primary burn check (proxy_agent_primary_burn_check), before alias probes
 # A UTC-second stamp alone is not unique: several same-type proxies started in
 # one second overwrite one markdown file, and delivery/jsonl follow that name.
 # PROXY_AGENT_NAME (sanitized) plus this process id keeps concurrent launches apart.
