@@ -2258,14 +2258,6 @@ def _burn_module(path: Path = PROXY_BURN_SHADOW):
     return mod
 
 
-def _sample_age_txt(ts, now_ts: float) -> str:
-    """' sample <age> old' for the newest meter row (the launcher treats rows older than 7200s as unknown)."""
-    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
-        return " sample age UNKNOWN"
-    age = max(0, int(now_ts - ts))
-    return f" sample {age // 3600}h{age % 3600 // 60:02d}m old" if age >= 3600 else f" sample {age // 60}m old"
-
-
 def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = PROXY_CONFIG, shadow=None) -> tuple[str, dict[str, str]]:
     """Return (line, modes). modes maps each route family label to 'NORMAL' or 'P0-ONLY'.
 
@@ -2292,11 +2284,10 @@ def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = 
                 accounts = None
             if not accounts:
                 segments.append(f"{label} accounts UNKNOWN")
-                verdicts.append(f"{label} UNKNOWN (deny)")
+                verdicts.append(f"{label} OVER")
                 modes[label] = "P0-ONLY"
                 continue
             pool_ok = True
-            measured_over = False  # over_budget or exhausted (a measured overspend); unknown alone is not
             for acct in accounts:
                 key = f"{pool}:{acct}:weekly"
                 decision, burn, budget = shadow.account_decision(key, rows, pool, ts_now)
@@ -2304,17 +2295,10 @@ def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = 
                 used = rows.get(key, {}).get("pct")
                 used_txt = f"{used:g}%" if isinstance(used, (int, float)) and not isinstance(used, bool) else "UNKNOWN"
                 fmt = lambda v: "n/a" if v is None else f"{v:.2f}%/h"
-                segments.append(f"{acct} used {used_txt} burn {fmt(burn)} budget {fmt(budget)} {state}{_sample_age_txt(rows.get(key, {}).get('ts'), ts_now)}")
+                segments.append(f"{acct} used {used_txt} burn {fmt(burn)} budget {fmt(budget)} {state}")
                 if state != "OK":
                     pool_ok = False
-                if state in ("OVER", "EXHAUSTED"):
-                    measured_over = True
-            if pool_ok:
-                verdicts.append(f"{label} OK")
-            elif measured_over:
-                verdicts.append(f"{label} OVER")
-            else:
-                verdicts.append(f"{label} UNKNOWN (deny)")  # stale or missing meter rows deny; they are not measured overspend
+            verdicts.append(f"{label} {'OK' if pool_ok else 'OVER'}")
             modes[label] = "NORMAL" if pool_ok else "P0-ONLY"
         routes = " | ".join(f"{label} routes: {modes[label]}" for label, _, _ in BURN_MODELS)
         line = "*Burn:* " + " · ".join(segments) + " → " + ", ".join(verdicts) + f" → {routes} ({BURN_SCOPE_NOTE})"
