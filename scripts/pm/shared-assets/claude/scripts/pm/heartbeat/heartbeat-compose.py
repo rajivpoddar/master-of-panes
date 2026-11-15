@@ -2246,7 +2246,11 @@ USAGE_SNAPSHOTS = Path.home() / ".claude/state/usage-snapshots.jsonl"
 PROXY_BURN_SHADOW = Path.home() / ".claude/scripts/proxy-burn-shadow.py"
 PROXY_CONFIG = Path("/opt/homebrew/etc/cliproxyapi.conf")
 BURN_MODELS = (("Claude", "claude", "claude-opus-5-5"), ("Codex", "codex", "gpt-6.1-terra"))
-BURN_STATE = {"allow": "OK", "over_budget": "OVER", "exhausted": "EXHAUSTED", "unknown": "UNKNOWN"}
+USAGE_SNAPSHOT_SCRIPT = Path.home() / ".claude/scripts/usage-snapshot.py"
+# Same freshness bound as proxy-burn-shadow's per-sample check; the 3h reader enforces it too.
+USAGE_SAMPLE_MAX_AGE = 7200
+UNKNOWN_DENY = "UNKNOWN (deny)"
+BURN_STATE = {"allow": "OK", "over_budget": "OVER", "exhausted": "EXHAUSTED", "unknown": UNKNOWN_DENY}
 
 
 def _burn_module(path: Path = PROXY_BURN_SHADOW):
@@ -2283,29 +2287,40 @@ def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = 
             except Exception:
                 accounts = None
             if not accounts:
-                segments.append(f"{label} accounts UNKNOWN")
-                verdicts.append(f"{label} OVER")
+                segments.append(f"{label} accounts {UNKNOWN_DENY}")
+                verdicts.append(f"{label} {UNKNOWN_DENY}")
                 modes[label] = "P0-ONLY"
                 continue
-            pool_ok = True
+            states = []
             for acct in accounts:
                 key = f"{pool}:{acct}:weekly"
                 decision, burn, budget = shadow.account_decision(key, rows, pool, ts_now)
-                state = BURN_STATE.get(decision, "UNKNOWN")
+                state = BURN_STATE.get(decision, UNKNOWN_DENY)
+                states.append(state)
                 used = rows.get(key, {}).get("pct")
                 used_txt = f"{used:g}%" if isinstance(used, (int, float)) and not isinstance(used, bool) else "UNKNOWN"
+                sampled = rows.get(key, {}).get("ts")
+                if isinstance(sampled, (int, float)) and not isinstance(sampled, bool):
+                    age_txt = f"sampled {max(0, round((ts_now - sampled) / 60))}m ago"
+                else:
+                    age_txt = "sample missing"
                 fmt = lambda v: "n/a" if v is None else f"{v:.2f}%/h"
-                segments.append(f"{acct} used {used_txt} burn {fmt(burn)} budget {fmt(budget)} {state}")
-                if state != "OK":
-                    pool_ok = False
-            verdicts.append(f"{label} {'OK' if pool_ok else 'OVER'}")
-            modes[label] = "NORMAL" if pool_ok else "P0-ONLY"
+                segments.append(f"{acct} used {used_txt} burn {fmt(burn)} budget {fmt(budget)} {age_txt} {state}")
+            # Measured over-budget/exhausted wins; otherwise an unknown account is UNKNOWN (deny), never OVER.
+            if all(s == "OK" for s in states):
+                verdict, mode = "OK", "NORMAL"
+            elif any(s not in ("OK", UNKNOWN_DENY) for s in states):
+                verdict, mode = "OVER", "P0-ONLY"
+            else:
+                verdict, mode = UNKNOWN_DENY, "P0-ONLY"
+            verdicts.append(f"{label} {verdict}")
+            modes[label] = mode
         routes = " | ".join(f"{label} routes: {modes[label]}" for label, _, _ in BURN_MODELS)
         line = "*Burn:* " + " · ".join(segments) + " → " + ", ".join(verdicts) + f" → {routes} ({BURN_SCOPE_NOTE})"
         return line, modes
     except Exception as exc:
         routes = " | ".join(f"{label} routes: P0-ONLY" for label, _, _ in BURN_MODELS)
-        return f"*Burn:* UNKNOWN ({type(exc).__name__}) → {routes} ({BURN_SCOPE_NOTE})", fail_modes
+        return f"*Burn:* {UNKNOWN_DENY} ({type(exc).__name__}) → {routes} ({BURN_SCOPE_NOTE})", fail_modes
 
 
 def compose(
@@ -2775,6 +2790,53 @@ def parallel_collect(jobs, wall_cap=COMPOSE_COLLECTOR_BUDGET, cache_dir=HOURLY_C
     return results, stale
 
 
+def hourly_usage_job(py, failures: list[str]):
+    """The one usage sampler. Appends usage-snapshots.jsonl and returns the account lines.
+
+    Timed-out or empty output raises, so parallel_collect never caches a partial reading
+    and a failed hour keeps the previous successful sample with its original timestamp.
+    """
+    def run():
+        try:
+            proc = subprocess.Popen([py, str(USAGE_SNAPSHOT_SCRIPT)], stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, text=True, errors="replace")
+            try:
+                out, _err = proc.communicate(timeout=COLLECTOR_TIMEOUTS["usage"])
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                raise RuntimeError(f"usage-snapshot timed out after {COLLECTOR_TIMEOUTS['usage']}s")
+        except RuntimeError as exc:
+            failures.append(f"usage: {exc}")
+            raise
+        except Exception as exc:
+            failures.append(f"usage: usage-snapshot {type(exc).__name__}")
+            raise
+        lines = [ln for ln in (out or "").splitlines() if ln.strip()]
+        if not lines:
+            failures.append(f"usage: usage-snapshot rc={proc.returncode}, no account lines")
+            raise RuntimeError("usage-snapshot produced no lines")
+        return lines
+    return run
+
+
+def read_hourly_usage(now_ts: float | None = None) -> tuple[list[str] | None, str | None]:
+    """3h reader: the 1h producer's last successful usage sample, if it is within the freshness bound."""
+    now_ts = datetime.now(timezone.utc).timestamp() if now_ts is None else now_ts
+    try:
+        cached = json.loads((HOURLY_CACHE / "1h" / "usage.json").read_text())
+        sampled_at = float(cached["at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None, "no hourly usage sample"
+    age = now_ts - sampled_at
+    if age >= USAGE_SAMPLE_MAX_AGE or age < 0:
+        return None, f"last usage sample {max(0, int(age // 60))}m old"
+    lines = cached.get("value")
+    if not isinstance(lines, list) or not lines:
+        return None, "hourly usage sample empty"
+    return [str(ln) for ln in lines], None
+
+
 def collect_hourly(args, py, hours, now, failures):
     """Independent network probes start together; dependencies remain in their worker."""
     def json_job(name, cmd):
@@ -2803,6 +2865,8 @@ def collect_hourly(args, py, hours, now, failures):
         "mac-box": mac_box_stats,
         "pending-github": lambda: pending_github(timeout=COLLECTOR_TIMEOUTS["pending-github"]),
         "proxies": lambda: read_proxies(now),
+        # Hourly producer for usage/quota (appends usage-snapshots.jsonl before the 1h burn read).
+        "usage": hourly_usage_job(py, failures),
     }
     for key, path in (("axiom", args.axiom_json), ("prs", args.prs_json)):
         if path:
@@ -2916,35 +2980,14 @@ def main() -> int:
         for name, value in (("axiom", axiom), ("map", mapping_doc), ("support", support), ("prs", prs), ("active", active), ("slots", slots), ("actions", pm_actions), ("decisions", decisions), ("agents", agents)):
             (out / f"{name}.json").write_text(json.dumps(value, indent=2))
 
+    # Usage is sampled once per hour by the 1h producer (collect_hourly). The 3h heartbeat
+    # reads that cache and never runs the collector, so the hours do not double-sample.
     usage_lines = None
     usage_error = None
     if args.mode == "3h":
-        # Read stdout even on timeout. A killed snapshot has often already printed
-        # the account lines; discarding them is what turned a late helper into
-        # "usage Claude UNAVAILABLE" with no Codex lines.
-        proc = subprocess.Popen(
-            [py, str(Path.home() / ".claude/scripts/usage-snapshot.py")],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace",
-        )
-        try:
-            out, _err = proc.communicate(timeout=COLLECTOR_TIMEOUTS["usage"])
-            usage_lines = [ln for ln in (out or "").splitlines() if ln.strip()]
-            if proc.returncode != 0 and not usage_lines:
-                usage_error = f"usage-snapshot rc={proc.returncode}"
-                failures.append(f"usage: {usage_error}")
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            out, _err = proc.communicate()
-            usage_lines = [ln for ln in (out or "").splitlines() if ln.strip()]
-            usage_error = f"usage-snapshot timed out after {COLLECTOR_TIMEOUTS['usage']}s"
+        usage_lines, usage_error = read_hourly_usage()
+        if usage_error:
             failures.append(f"usage: {usage_error}")
-        except Exception as exc:
-            usage_error = f"usage-snapshot {type(exc).__name__}"
-            failures.append(f"usage: {usage_error}")
-            try:
-                proc.kill()
-            except OSError:
-                pass
     email_doc = None
     if args.mode == "3h":
         try:
