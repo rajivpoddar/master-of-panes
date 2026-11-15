@@ -861,8 +861,17 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "befee95222c3f1e729662944aa3a0149ac3c015803e9115f326c6322c7f87374",
+      "sha256": "ab78edeefb4a7c6b129ad045b06ab62bac5b22bc46cca19cbba98060d3ba9d09",
       "source_path": "claude/scripts/proxy-agent.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/proxy-burn-shadow.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "66d5bf27eaae08689a7b87887748ec6d1dd332acf36012bfea99e5c84240dc0d",
+      "source_path": "claude/scripts/proxy-burn-shadow.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/proxy-cap-count.py",

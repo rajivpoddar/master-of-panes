@@ -1485,6 +1485,13 @@ proxy_agent_print_selection() {
 
 proxy_agent_resolve_type
 proxy_agent_select
+# Shadow only: count gates retain authority; never enforce burn during this rollout.
+read -r _burn_model _burn_window _burn_max < <(resolve_model "$MODEL")
+if [[ "${PROXY_BURN_GATE:-shadow}" != shadow ]]; then
+  printf 'proxy-burn: unsupported mode=%s; using shadow\n' "$PROXY_BURN_GATE" >&2
+fi
+python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$_burn_model" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >&2 || \
+  printf 'proxy-burn: mode=shadow decision=would_refuse reason=collector_error\n' >&2
 # A UTC-second stamp alone is not unique: several same-type proxies started in
 # one second overwrite one markdown file, and delivery/jsonl follow that name.
 # PROXY_AGENT_NAME (sanitized) plus this process id keeps concurrent launches apart.
@@ -1713,7 +1720,7 @@ CLAUDE_BIN="$(command -v claude)"
   printf 'PA_START=$(date +%%s); export PA_START PROXY_AGENT_NOTICE_MODEL=%q\n' "$MODEL_ID"
   printf 'python3 -I - %q %q %q %q %q > %q <<'"'"'PY'"'"'\n' "$PROMPT_FILE" "$NAME" "$MODEL" "$MODEL_ID" "$PM_ROLE" "$LOG"
   printf '%s\n' 'import datetime, pathlib, re, sys' 'brief, name, alias, model, pm = sys.argv[1:]' 'text = pathlib.Path(brief).read_text(errors="replace")' 'refs = []' 'for key in ("ISSUE", "PR"):' '    m = re.search(r"^\s*" + key + r"\s*:\s*#?(\d{3,6})\b", text, re.I | re.M)' '    refs.append(key + ":" + (m.group(1) if m else "UNKNOWN"))' 'print("[{}] LAUNCH name={} {} model_alias={} model_id={} MODE:{}".format(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), name, " ".join(refs), alias, model, "pm" if pm == "1" else "dev"))' 'PY'
-  printf '{ cat %q; printf "\\n\\n---\\nNOTE: Project skills may not be discoverable through Skill in proxy sessions. If a skill is unavailable, read its SKILL.md directly from %s and follow its instructions; do not repeatedly self-call an unknown skill.\\nPROXY RUN CONTRACT: end your turn ONLY when the task is finished or truly blocked, with a final line starting DONE:, BLOCKED: (exact external blocker) or HANDOFF:. Send intermediate status to PM via SendMessage, NOT by ending your turn. Ending without a marker auto-resumes this session.\\n"; } > %q\n' "$PROMPT_FILE" "$SKILL_NOTE_DIRS" "$JOB_DIR/prompt0.md"
+  printf '{ cat %q; printf "\\n\\n---\\nNOTE: Project skills may not be discoverable through Skill in proxy sessions. If a skill is unavailable, read its SKILL.md directly from %s and follow its instructions; do not repeatedly self-call an unknown skill.\\nPROXY RUN CONTRACT: end your turn ONLY when the task is finished or truly blocked, with a final line starting DONE:, BLOCKED: (exact external blocker) or HANDOFF:. Ending without a marker auto-resumes this session.\\nDo not send interim progress peer messages to PM; send ONE message only for a blocker that needs a PM decision, plus the final Stop.\\n"; } > %q\n' "$PROMPT_FILE" "$SKILL_NOTE_DIRS" "$JOB_DIR/prompt0.md"
   printf '%q ' "$CLAUDE_BIN" "${ARGS[@]}"
   printf '< %q 2>> %q | python3 -I -u %q %q %q\n' "$JOB_DIR/prompt0.md" "$LOG" "$HOME/.claude/scripts/proxy-agent-stream.py" "$OUT" "$JSONL"
   printf 'statuses=("${PIPESTATUS[@]}"); rc=${statuses[0]}; if [[ "$rc" == 0 ]]; then rc=${statuses[1]}; fi\n'
@@ -1724,7 +1731,7 @@ CLAUDE_BIN="$(command -v claude)"
     pm-lock-release|prod-*|manual-lease-release|customer-artifact-investigator|remote-qa-runner|pm-admission-reviewer|codex-*|main-red-skip)
       printf 'PROXY_AGENT_NO_CONTINUE=1\n';;
   esac
-  printf 'printf "Continue the task in your brief from exactly where you stopped. Do not end your turn until it is DONE, or BLOCKED with the exact external blocker (or HANDOFF). Report progress to PM via SendMessage, not by ending your turn.\\n" > %q\n' "$JOB_DIR/continue.md"
+  printf 'printf "Continue the task in your brief from exactly where you stopped. Do not end your turn until it is DONE, or BLOCKED with the exact external blocker (or HANDOFF). Do not send interim progress peer messages to PM; send ONE message only for a blocker that needs a PM decision, plus the final Stop.\\n" > %q\n' "$JOB_DIR/continue.md"
   # Also continue after an error_max_turns stop (rc!=0): 4 sol runs died that way on 2026-11-13 with work mid-flight (PM).
   printf 'pa_maxturns() { tail -c 6000 %q 2>/dev/null | grep -q "\\"subtype\\":\\"error_max_turns\\""; }\n' "$JSONL"
   printf 'while [[ ( "$rc" == 0 || $(pa_maxturns && echo 1 || echo 0) == 1 ) && "${PROXY_AGENT_NO_CONTINUE:-0}" != 1 && "$pa_n" -lt "$pa_max" && $(( $(date +%%s) - PA_START )) -lt "$pa_wall" ]]; do\n'
