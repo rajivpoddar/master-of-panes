@@ -1521,6 +1521,8 @@ resolve_model() {
     sonnet)       echo "claude-sonnet-5-5 200000 64000";;
     opus)         echo "claude-opus-5-5 200000 64000";;
     fable)        echo "claude-fable-5-2 200000 64000";;
+    # DeepSeek (balance-metered, emergencies only; Rajiv D0AMF0XE6TS ts 1794806595.680589). Never in a tier list.
+    deepseek|deepseek-flash-4.1) echo "deepseek-flash-4.1 128000 8192";;
     gpt-6-luna|gpt-6.1-terra|gpt-6.1-sol|gpt-6-astra|grok-4.7|gemini-4-argon-high|gemini-3.8-flash-high|gemini-4-hydrogen-xhigh|claude-opus-5-5-high|claude-sonnet-5-5-high|claude-haiku-5-5|claude-sonnet-5-5|claude-opus-5-5|claude-fable-5-2)
                   resolve_model "$(proxy_agent_alias_for_id "$1")";;
     *)            echo "$1 200000 32000";;
@@ -1604,6 +1606,12 @@ if [[ "$PM_ROLE" == "1" ]]; then SETTING_SOURCES="user"; else SETTING_SOURCES="u
 read -r MODEL_ID WINDOW MAX_OUT < <(resolve_model "$MODEL")
 case "$MODEL" in
   ag-opus|ag-sonnet|luna|terra|sol|astra|grok|hydrogen|ernie|gemini-pro|gemini-flash|gpt-6-luna|gpt-6.1-terra|gpt-6.1-sol|gpt-6-astra|grok-4.7|gemini-4-argon-high|gemini-3.8-flash-high|gemini-4-hydrogen-xhigh|claude-opus-5-5-high|claude-sonnet-5-5-high|haiku|sonnet|opus|fable|claude-haiku-5-5|claude-sonnet-5-5|claude-opus-5-5|claude-fable-5-2) ;;
+  deepseek|deepseek-flash-4.1)
+    # Emergencies only: explicit --model plus a P0 cap override (Rajiv D0AMF0XE6TS ts 1794806595.680589).
+    case "${PROXY_AGENT_CAP_OVERRIDE:-}" in
+      P0:*) echo "proxy-agent: DeepSeek emergency route for ${PROXY_AGENT_CAP_OVERRIDE}" >&2;;
+      *) echo "PROXY_AGENT_FAILED reason=deepseek_requires_p0_override (set PROXY_AGENT_CAP_OVERRIDE=P0:<issue>)" >&2; exit 2;;
+    esac;;
   *) echo "proxy-agent: model '$MODEL' not in alias table; using 200000-token window (warning)" >&2;;
 esac
 # Auto-compact window is capped by Claude Code at 1,000,000 tokens.
@@ -1648,7 +1656,11 @@ export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="${CLAUDE_CODE_PRINT_BG_WAIT_CEILING
 # Retain the PM project's safety subset as extra settings even when the clone's
 # settings contain no such guards. The deny rules below remain unchanged.
 SAFETY_SETTINGS="$(mktemp "${TMPDIR:-/tmp}/proxy-agent-safety.XXXXXX")"
-python3 - "/Users/rajiv/Downloads/projects/heydonna-app/.claude/settings.json" "$SAFETY_SETTINGS" <<'PY'
+# Report-only helpers (heartbeat/hourly) may not act on CI/PR lanes. On 11-16 02:00 IST a heartbeat
+# helper ran an unauthorized "gh run rerun" for #13844 (Rajiv D0AMF0XE6TS 1794787507.634289; PM trace 12:10 IST).
+_HELPER_READONLY=0
+if [[ "${PROXY_AGENT_NAME:-}" == *heartbeat* || "${PROXY_AGENT_NAME:-}" == *hourly* ]] || head -1 "$PROMPT_FILE" 2>/dev/null | grep -qiE '^MODE:[[:space:]]*(heartbeat|hourly)'; then _HELPER_READONLY=1; fi
+HELPER_READONLY="$_HELPER_READONLY" python3 - "/Users/rajiv/Downloads/projects/heydonna-app/.claude/settings.json" "$SAFETY_SETTINGS" <<'PY'
 import json, sys
 src, out = sys.argv[1], sys.argv[2]
 want = ("block-cto-mention-without-ladder", "block-invalid-backlog-issue-create",
@@ -1664,10 +1676,16 @@ except Exception:
     pass
 keep.append({"matcher": "Bash", "hooks": [{"type": "command",
              "command": "bash /Users/rajiv/.claude/hooks/block-force-push-rebase.sh"}]})
+import os
+deny = ["Bash(git reset --hard*)", "Bash(git restore *)",
+        "Bash(gh pr merge *)", "Bash(git push --force*)",
+        "Bash(git push -f*)"]
+if os.environ.get("HELPER_READONLY") == "1":
+    deny += ["Bash(gh run rerun*)", "Bash(gh run cancel*)", "Bash(gh workflow run*)",
+             "Bash(gh pr ready*)", "Bash(gh pr close*)", "Bash(gh pr edit*)",
+             "Bash(*pm-admit-ci.sh*)", "Bash(git push*)"]
 json.dump({"hooks": {"PreToolUse": keep},
-           "permissions": {"deny": ["Bash(git reset --hard*)", "Bash(git restore *)",
-                                     "Bash(gh pr merge *)", "Bash(git push --force*)",
-                                     "Bash(git push -f*)"]}}, open(out, "w"))
+           "permissions": {"deny": deny}}, open(out, "w"))
 PY
 # Hard total cap on live long-running proxies (S143; Rajiv D0AMF0XE6TS thread 1794659684.547559, ts 1794661097.599409: "dial things down and keep all accounts within limits"). Reviewers are exempt so 12b is never blocked; override with PROXY_AGENT_TOTAL_CAP.
 PROXY_AGENT_TOTAL_CAP="${PROXY_AGENT_TOTAL_CAP:-8}"
