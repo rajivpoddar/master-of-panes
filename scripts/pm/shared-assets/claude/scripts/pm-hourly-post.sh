@@ -96,8 +96,13 @@ TS=$(sed -n 's/^OK ts=\([0-9][0-9]*\.[0-9][0-9]*\) channel=C0ALZJHGE49$/\1/p' "$
 # sessions 0/proxies, PM scratch windows included, except the PM 'claude' window. Live panes are never touched.
 bash /Users/rajiv/.claude/scripts/tmux-dead-window-cleanup.sh --apply 2>&1 | tail -3 | sed "s/^/DEAD_WINDOWS: /"
 echo "POSTED ts=$TS bucket=$BUCKET"
-# Explicit +5m CTO review reminder with a receipt check (Rajiv C0ALZJHGE49 thread 1794674773.624389, ts 1794675774.355359:
+# Explicit CTO review reminder with a receipt check (Rajiv C0ALZJHGE49 thread 1794674773.624389, ts 1794675774.355359:
 # "where's the cto at mention on this thread"). The sender-side hook did not fire on the 22:16 hourly; this is the primary path.
-_AT=$(python3 -c 'import datetime as d;print((d.datetime.now(d.timezone.utc)+d.timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
-_REM=$(python3 /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/alerts-reminder/scripts/alerts-schedule.py --channel C0ALZJHGE49 --thread "$TS" --at "$_AT" --text "<@U0BNFGX2UAX> CTO review: please review all PM actions on this hourly with your hourly review skill (15-item checklist reply, Step 3 lane steering with send disposition and checkpoints, per-PR dispositions and STUCK owners, dead windows closed, caps)." 2>&1 | grep -E '^OK scheduled' | head -1)
-if [ -n "$_REM" ]; then echo "CTO_REVIEW_REMINDER $_REM"; else echo "CTO_REVIEW_REMINDER_FAILED ts=$TS (PM must post the CTO mention by hand)"; fi
+# Anchor = the POSTED parent ts ($TS, from the confirmed receipt) + 300 s, NOT the wrapper exit time. Slack post_at is whole
+# seconds, so use ceil(ts)+300: the reminder never fires before ts+300. Before: now()+300 landed ~93 s past ts+300 (CTO audits 11:16, 12:15).
+_AT=$(python3 -c 'import datetime as d,math,sys;print(d.datetime.fromtimestamp(math.ceil(float(sys.argv[1]))+300,d.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$TS" 2>/dev/null)
+_REM=""
+if [ -n "$_AT" ]; then
+  _REM=$(python3 /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/alerts-reminder/scripts/alerts-schedule.py --channel C0ALZJHGE49 --thread "$TS" --at "$_AT" --text "<@U0BNFGX2UAX> CTO review: please review all PM actions on this hourly with your hourly review skill (15-item checklist reply, Step 3 lane steering with send disposition and checkpoints, per-PR dispositions and STUCK owners, dead windows closed, caps)." 2>&1 | grep -E '^OK scheduled' | head -1)
+fi
+if [ -n "$_REM" ]; then echo "CTO_REVIEW_REMINDER $_REM anchor_ts=$TS"; else echo "CTO_REVIEW_REMINDER_FAILED ts=$TS (PM must post the CTO mention by hand)"; fi
