@@ -204,7 +204,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-ops-sync-stop-validator",
-      "sha256": "be2958cfafd3bb0fc1479ed0bd99a3d136b61cf979b4dad831c8d13dda1422a5",
+      "sha256": "7af170dd9b5cb26a705aff2da7e26f0bf12a5117c2ed1911e4179da864cd10ca",
       "source_path": "claude/hooks/pm-ops-sync-stop-validator.sh"
     },
     {
@@ -690,7 +690,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-runtime-closure",
-      "sha256": "7cfa79a57e858a34ef1dcb91f85e33adf071fed35bffb4d4bd83abf18ddf1d87",
+      "sha256": "bf819d90dd8d74593ba15fda674f302c051742ff8195d2fbdeb6ba7b82f0ef7b",
       "source_path": "claude/scripts/pm-hourly-post.sh"
     },
     {
@@ -861,7 +861,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "37da0d7aa266676b6b667818e796a0eeaac4b608ad85f4f3d898f54c74f3dc0a",
+      "sha256": "037a3a06538ae510be4be47253a800c3ace05047746a7b1ecdb0a390d5678fc7",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {

@@ -189,7 +189,11 @@ def main():
         findings.append((row, disposition, step))
     counts = Counter(d for _, d, _ in findings)
     runnable = [(r, d, s) for r, d, s in findings if d in {"runnable", "classify"}]
+    # Runnable first, then urgent (P0/customer) classify, then severity (CTO REVISE 11-16 ts 1794817176.197419).
     runnable.sort(key=lambda item: (
+        0 if item[1] == "runnable" else 1,
+        0 if (str(item[0].get("severity") or "") == "P0" or str(item[0].get("kind") or "") == "p0_custody"
+              or str(item[0].get("kind") or "").startswith("customer_")) else 1,
         {"critical": 0, "high": 1, "medium": 2, "normal": 3}.get(item[0].get("severity"), 4), item[0]["id"]))
     waiting = [(r, d, s) for r, d, s in findings if d not in {"runnable", "classify"}]
     parts = [f"open commitments={len(findings)}; " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))]
@@ -204,7 +208,15 @@ def main():
         parts.append(f"remaining held/future/in-flight/unverified={len(waiting) - 3}")
     parts.append("Inspect remaining rows with pm-ops.py obligation-list --actionable --format json. "
                  "Use original authority/owners and canonical protected writers. No bulk close, unsafe replay or moved-wake waiver.")
-    if runnable:
+    # Rajiv D0AMF0XE6TS ts 1794815313.330999 (11-16): "why has the pm turn not ended for 4h? the stop hook keeps blocking it."
+    # Only concrete runnable steps block Stop; classify rows are advisory and are worked at the hourly/brief.
+    # Side-agent catch (11-16): P0 and customer classify rows must still block; only routine classify rows are advisory.
+    def _urgent(row):
+        kind = str(row.get("kind") or "")
+        return (str(row.get("severity") or "") == "P0" or kind == "p0_custody"
+                or kind.startswith("customer_") or kind in {"lockout_followup", "lockout_watch", "production_data", "save_suppression_investigation"})
+    # CTO REVISE 11-16 (ts 1794817176.197419): only executable (runnable) rows block; urgency only orders the advisory list.
+    if any(d == "runnable" for _, d, _ in runnable):
         parts.insert(0, "[PM_OBLIGATION_DRAIN] Handle every currently runnable PM step before Stop; one unrelated resolution does not waive the rest.")
         message = " | ".join(parts)
         print(json.dumps({"decision": "block", "message": message, "reason": message}))

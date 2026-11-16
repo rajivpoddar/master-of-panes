@@ -1129,6 +1129,15 @@ PY
 }
 
 proxy_agent_canonical_id() {
+  # No Codex for proxies (Rajiv C0ALZJHGE49 ts 1794834402.077499): while ~/.claude/state/proxy-no-codex exists, gpt-* ids remap to Claude equivalents.
+  if [[ -e "$HOME/.claude/state/proxy-no-codex" ]]; then
+    case "$1" in
+      luna|gpt-6-luna) printf 'claude-haiku-5-5\n'; return;;
+      terra|gpt-6.1-terra) printf 'claude-sonnet-5-5\n'; return;;
+      sol|gpt-6.1-sol) printf 'claude-opus-5-5\n'; return;;
+      astra|gpt-6-astra) printf 'claude-fable-5-2\n'; return;;
+    esac
+  fi
   case "$1" in
     luna|gpt-6-luna) printf 'gpt-6-luna\n';;
     terra|gpt-6.1-terra) printf 'gpt-6.1-terra\n';;
@@ -1349,6 +1358,12 @@ proxy_agent_pick_tier() {
     REVIEW) models="claude-fable-5-2 gpt-6-astra";;
     *) return 1;;
   esac
+  # No Codex for proxies (Rajiv ts 1794834402.077499): drop gpt-* from every rung while the flag file exists.
+  if [[ -e "$HOME/.claude/state/proxy-no-codex" ]]; then
+    local _m _kept=""
+    for _m in $models; do [[ "$_m" == gpt-* ]] || _kept="${_kept:+$_kept }$_m"; done
+    models="$_kept"
+  fi
   for id in $models; do
     last="$id"
     if proxy_agent_is_capped "$TYPE" && [[ "$id" == claude-* && "${claude_live:-0}" -ge "$PROXY_AGENT_CLAUDE_CAP" ]]; then

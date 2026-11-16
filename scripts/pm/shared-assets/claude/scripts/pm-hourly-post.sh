@@ -100,9 +100,10 @@ echo "POSTED ts=$TS bucket=$BUCKET"
 # "where's the cto at mention on this thread"). The sender-side hook did not fire on the 22:16 hourly; this is the primary path.
 # Anchor = the POSTED parent ts ($TS, from the confirmed receipt) + 300 s, NOT the wrapper exit time. Slack post_at is whole
 # seconds, so use ceil(ts)+300: the reminder never fires before ts+300. Before: now()+300 landed ~93 s past ts+300 (CTO audits 11:16, 12:15).
-_AT=$(python3 -c 'import datetime as d,math,sys;print(d.datetime.fromtimestamp(math.ceil(float(sys.argv[1]))+300,d.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$TS" 2>/dev/null)
-_REM=""
+# DISABLED 2026-11-16 (Rajiv C0ALZJHGE49 thread 1794836804.990559, ts 1794837337.978459: "stop the cto review of checklist items").
+_AT=""
+_REM="disabled"
 if [ -n "$_AT" ]; then
   _REM=$(python3 /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/alerts-reminder/scripts/alerts-schedule.py --channel C0ALZJHGE49 --thread "$TS" --at "$_AT" --text "<@U0BNFGX2UAX> CTO review: please review all PM actions on this hourly with your hourly review skill (15-item checklist reply, Step 3 lane steering with send disposition and checkpoints, per-PR dispositions and STUCK owners, dead windows closed, caps)." 2>&1 | grep -E '^OK scheduled' | head -1)
 fi
-if [ -n "$_REM" ]; then echo "CTO_REVIEW_REMINDER $_REM anchor_ts=$TS"; else echo "CTO_REVIEW_REMINDER_FAILED ts=$TS (PM must post the CTO mention by hand)"; fi
+if [ "$_REM" = "disabled" ]; then echo "CTO_REVIEW_REMINDER disabled (Rajiv ts 1794837337.978459)"; elif [ -n "$_REM" ]; then echo "CTO_REVIEW_REMINDER $_REM anchor_ts=$TS"; else echo "CTO_REVIEW_REMINDER_FAILED ts=$TS (PM must post the CTO mention by hand)"; fi
