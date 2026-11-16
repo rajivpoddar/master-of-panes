@@ -2229,9 +2229,10 @@ def composer_release_sha(current: Path | None = None, source: Path | None = None
         return 'UNVERIFIED'
 
 
-# Burn line (Rajiv C0ALZJHGE49 thread 1794746097.575959, 2026-11-15): the hourly shows Claude and
-# Codex burn against budget. Same snapshot file and formula as the launcher burn gate
-# (proxy-burn-shadow.py, MoP release 1e4787ff). Read-only: no paid calls.
+# Burn section (Rajiv C0ALZJHGE49 thread 1794746097.575959, 2026-11-15; reworked 1794851199.275299, 2026-11-16):
+# the hourly shows per-account Claude and Codex burn, budget and signed headroom against a per-pool pacing
+# horizon, then one pool decision. Same snapshot file, horizon config and formulas as the launcher burn gate
+# and the burn dial (proxy-burn-shadow.py). Read-only: no paid calls.
 BURN_SCOPE_NOTE = "Claude and Codex only; Grok not metered"
 
 
@@ -2262,12 +2263,66 @@ def _burn_module(path: Path = PROXY_BURN_SHADOW):
     return mod
 
 
-def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = PROXY_CONFIG, shadow=None) -> tuple[str, dict[str, str]]:
-    """Return (line, modes). modes maps each route family label to 'NORMAL' or 'P0-ONLY'.
+def _pct(value) -> str:
+    return f"{value:g}%" if isinstance(value, (int, float)) and not isinstance(value, bool) else "UNKNOWN"
 
-    Mode is scoped per family: an over-budget, exhausted or unknown account, or a pool whose
-    accounts cannot be bound, sets only its own family to P0-ONLY (same per-account rule as
-    the launcher gate). Failure of the check itself sets every family to P0-ONLY.
+
+def _rate(value, signed: bool = False) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:+.2f}" if signed else f"{value:.2f}"
+
+
+def _ist(epoch: float, fmt: str = "%a %H:%M") -> str:
+    return datetime.fromtimestamp(epoch, IST).strftime(fmt) + " IST"
+
+
+def _session_state(rows: dict, pool: str, acct: str, ts_now: float) -> str:
+    """Claude 5h session-cap state from the latest session sample; Codex has no session meter."""
+    if pool != "claude":
+        return ""
+    row = rows.get(f"{pool}:{acct}:session") or {}
+    pct, reset, sampled = row.get("pct"), row.get("reset"), row.get("ts")
+    nums = [v for v in (pct, reset, sampled) if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if len(nums) != 3:
+        return " · session n/a"
+    if ts_now - sampled > USAGE_SAMPLE_MAX_AGE or reset <= ts_now:
+        return " · session stale"
+    state = "CAPPED" if pct >= 100 else f"{pct:g}%"
+    return f" · session {state} (resets {_ist(reset, '%H:%M')})"
+
+
+def _burn_account_row(label: str, acct: str, d: dict, session: str, ts_now: float, horizon) -> str:
+    used = _pct(d.get("pct"))
+    decision = d.get("decision")
+    if decision == "exhausted":
+        reset = d.get("reset")
+        if d.get("target") == "reset" and d.get("after") is not None:
+            tail = f"budget 0 until reset {_ist(reset)}, then {_rate(d['after'])}%/h"
+        elif horizon is not None and reset is not None and abs(reset - horizon) <= 1800:
+            tail = f"budget 0, resets {_ist(reset)} (at the horizon)"
+        elif horizon is not None and reset is not None and reset > horizon:
+            tail = f"budget 0, resets {_ist(reset)} (after the {_ist(horizon)} horizon)"
+        else:
+            tail = f"budget 0, resets {_ist(reset)}" if reset else "budget 0"
+        return f"{label} {acct}: {used} used · EXHAUSTED · {tail}{session}"
+    if decision in ("allow", "over_budget"):
+        extra = f" (then {_rate(d['after'])}%/h)" if d.get("target") == "reset" and d.get("after") is not None else ""
+        return (f"{label} {acct}: {used} used · burn {_rate(d['burn'])} · budget {_rate(d['budget'])}{extra} · "
+                f"headroom {_rate(d['headroom'], signed=True)} %/h{session}")
+    sampled = d.get("ts")
+    age = f", sampled {max(0, round((ts_now - sampled) / 60))}m ago" if isinstance(sampled, (int, float)) else ", sample missing"
+    return f"{label} {acct}: {used} used · burn n/a{age} · {UNKNOWN_DENY}{session}"
+
+
+def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = PROXY_CONFIG, shadow=None) -> tuple[str, dict[str, str]]:
+    """Return (section, modes). section is multi-line; modes maps each route family label to 'NORMAL' or 'P0-ONLY'.
+
+    Rajiv C0ALZJHGE49 thread 1794851199.275299 (2026-11-16): per-account used%, burn, budget and signed
+    headroom against a per-pool pacing horizon, then ONE pool decision. A family is P0-ONLY only when its
+    POOL burn exceeds its POOL budget (or the pool is exhausted/unmeasurable); headroom on any account counts
+    toward the pool, and an exhausted account contributes neither burn nor budget. Failure of the check
+    itself sets every family to P0-ONLY.
     """
     fail_modes = {label: "P0-ONLY" for label, _, _ in BURN_MODELS}
     try:
@@ -2278,46 +2333,37 @@ def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = 
             rows = shadow.read_latest(str(snapshot))
         except (OSError, ValueError, json.JSONDecodeError):
             rows = {}
-        segments: list[str] = []
-        verdicts: list[str] = []
+        horizons = shadow.load_horizons()
+        try:
+            conf = shadow.read_config(str(config))
+        except Exception:
+            conf = {}
+        pace: list[str] = []
+        blocks: list[str] = []
         modes: dict[str, str] = {}
         for label, pool, model in BURN_MODELS:
+            horizon = shadow.active_horizon(pool, horizons, ts_now)
+            pace.append(f"{label} " + (f"{_ist(horizon)} ({(horizon - ts_now) / 3600:.1f}h)" if horizon else "own weekly reset"))
             try:
-                _, accounts = shadow.bindings(model, shadow.read_config(str(config)))
+                _, accounts = shadow.bindings(model, conf)
             except Exception:
                 accounts = None
             if not accounts:
-                segments.append(f"{label} accounts {UNKNOWN_DENY}")
-                verdicts.append(f"{label} {UNKNOWN_DENY}")
+                blocks.append(f"{label} pool: accounts {UNKNOWN_DENY} → {label} routes: P0-ONLY")
                 modes[label] = "P0-ONLY"
                 continue
-            states = []
-            for acct in accounts:
-                key = f"{pool}:{acct}:weekly"
-                decision, burn, budget = shadow.account_decision(key, rows, pool, ts_now)
-                state = BURN_STATE.get(decision, UNKNOWN_DENY)
-                states.append(state)
-                used = rows.get(key, {}).get("pct")
-                used_txt = f"{used:g}%" if isinstance(used, (int, float)) and not isinstance(used, bool) else "UNKNOWN"
-                sampled = rows.get(key, {}).get("ts")
-                if isinstance(sampled, (int, float)) and not isinstance(sampled, bool):
-                    age_txt = f"sampled {max(0, round((ts_now - sampled) / 60))}m ago"
-                else:
-                    age_txt = "sample missing"
-                fmt = lambda v: "n/a" if v is None else f"{v:.2f}%/h"
-                segments.append(f"{acct} used {used_txt} burn {fmt(burn)} budget {fmt(budget)} {age_txt} {state}")
-            # Measured over-budget/exhausted wins; otherwise an unknown account is UNKNOWN (deny), never OVER.
-            if all(s == "OK" for s in states):
-                verdict, mode = "OK", "NORMAL"
-            elif any(s not in ("OK", UNKNOWN_DENY) for s in states):
-                verdict, mode = "OVER", "P0-ONLY"
-            else:
-                verdict, mode = UNKNOWN_DENY, "P0-ONLY"
-            verdicts.append(f"{label} {verdict}")
-            modes[label] = mode
-        routes = " | ".join(f"{label} routes: {modes[label]}" for label, _, _ in BURN_MODELS)
-        line = "*Burn:* " + " · ".join(segments) + " → " + ", ".join(verdicts) + f" → {routes} ({BURN_SCOPE_NOTE})"
-        return line, modes
+            status = shadow.pool_status(pool, accounts, rows, ts_now, horizons)
+            names = shadow.account_labels(pool, conf)
+            verdict = BURN_STATE.get(status["decision"], UNKNOWN_DENY)
+            modes[label] = "NORMAL" if status["decision"] == "allow" else "P0-ONLY"
+            blocks.append(f"{label} pool: burn {_rate(status['burn'])} vs budget {_rate(status['budget'])} %/h → "
+                          f"headroom {_rate(status['headroom'], signed=True)} → {verdict} → {label} routes: {modes[label]}")
+            for acct, detail in status["accounts"]:
+                blocks.append(_burn_account_row(label, names.get(acct, acct), detail,
+                                                _session_state(rows, pool, acct, ts_now), ts_now, horizon))
+        head = (f"*Burn:* pace to {' · '.join(pace)}; headroom = budget - burn, %/h; "
+                f"mode is per pool ({BURN_SCOPE_NOTE})")
+        return "\n".join([head, *blocks]), modes
     except Exception as exc:
         routes = " | ".join(f"{label} routes: P0-ONLY" for label, _, _ in BURN_MODELS)
         return f"*Burn:* {UNKNOWN_DENY} ({type(exc).__name__}) → {routes} ({BURN_SCOPE_NOTE})", fail_modes
@@ -2415,7 +2461,7 @@ def compose(
         mention = f"{CTO} " if asks else ""
         first = f"{mention}*Hourly — {stamp}* — TL;DR: {tldr}"
     burn_line, burn_modes = burn if (burn and mode == "1h") else (None, None)
-    lines = [first, *([burn_line] if burn_line else []), *body]
+    lines = [first, *(burn_line.splitlines() if burn_line else []), *body]
     if asks:
         lines += ["", "*Asks:* " + " | ".join(asks)]
     pm_actions = [] if mode == "3h" else [a for r in (prs or []) for a in r.get("actions") or []]
@@ -2430,7 +2476,10 @@ def compose(
         timed_out = [f for f in failures if "UNAVAILABLE (timeout " in f]
         shown = timed_out + [f for f in failures if f not in timed_out]
         lines.append(f"_Ops:_ {len(failures)} failed — " + "; ".join(f[:100] for f in shown[:4]))
-    report = cap_lines(compact_report(lines, 23 if mode == "3h" else 20, cadence=mode),
+    # The burn section is one row per account (Rajiv 2026-11-16); widen the 1h budget by its extra rows
+    # so the other sections are not folded to make room for it.
+    burn_extra = max(0, len(burn_line.splitlines()) - 1) if burn_line else 0
+    report = cap_lines(compact_report(lines, 23 if mode == "3h" else 20 + burn_extra, cadence=mode),
                        MAX_LINE_CHARS - LINE_NOTE_RESERVE)
     if mode == "3h":
         report = '\n'.join(line for line in report.splitlines() if line.strip()).replace(CTO, '')

@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Shadow-only weekly provider burn decisions. Never authorizes or refuses a launch."""
+"""Weekly provider burn decisions, shared by the launcher gate, the hourly burn section and the burn dial.
+
+Pacing (Rajiv C0ALZJHGE49 thread 1794851199.275299, ts 1794852497.756029: "Claude account has to last till wed
+9:30 am and codex till 3d 13h ... Use up any free headroom"):
+  * One horizon per pool, configured in ONE file (burn-horizons.json). After a horizon passes, or when none is
+    configured, an account paces to its own weekly reset.
+  * Per-account budget %/h = (100 - weekly used%) / hours to the horizon. An account whose weekly resets BEFORE
+    the horizon is paced to that reset, then gets 100 / hours(reset -> horizon) after it.
+  * The launch decision is per POOL: pool burn vs pool budget (exhausted accounts contribute neither), so one
+    exhausted or over-pace account no longer hides free headroom on the others.
+"""
+import datetime as dt
 import glob
 import hashlib
 import json
@@ -13,6 +24,11 @@ import time
 HOME = os.path.expanduser('~')
 LOG = os.path.join(HOME, '.claude/state/usage-snapshots.jsonl')
 NOW = time.time()
+# The ONE place pacing horizons are configured: {"claude": "<ISO-8601 with offset>", "codex": "..."}; keys that
+# start with "_" are comments. A missing/unreadable file or a passed horizon means "pace to each account's own reset".
+HORIZON_FILE = os.path.join(HOME, '.claude/state/burn-horizons.json')
+# A weekly reset within 30 min of the horizon IS the horizon (resets are reported to the minute, horizons are set by hand).
+HORIZON_SLACK = 1800
 
 # Kept identical to usage-snapshot.py: latest log record over one hour old.
 def prev(key):
@@ -43,16 +59,73 @@ def meter(latest, field):
     return float(value)
 
 
-def account_decision(key, rows, pool, now):
+def load_horizons(path=None):
+    """pool -> horizon (epoch seconds). Missing, unreadable or malformed entries are ignored, which paces that
+    pool to each account's own weekly reset."""
+    path = path or os.environ.get('PROXY_BURN_HORIZONS') or HORIZON_FILE
+    try:
+        with open(path) as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    if isinstance(raw, dict):
+        for pool, stamp in raw.items():
+            if not isinstance(pool, str) or pool.startswith('_') or not isinstance(stamp, str):
+                continue
+            try:
+                parsed = dt.datetime.fromisoformat(stamp.strip().replace('Z', '+00:00'))
+            except ValueError:
+                continue
+            if parsed.tzinfo is not None:  # an offset-less stamp is ambiguous, so it is ignored
+                out[pool] = parsed.timestamp()
+    return out
+
+
+def active_horizon(pool, horizons, now):
+    horizon = (horizons or {}).get(pool)
+    return horizon if isinstance(horizon, (int, float)) and not isinstance(horizon, bool) and horizon > now else None
+
+
+def pace_budget(pct, reset, now, horizon):
+    """Allowed burn in %/h as (budget_now, budget_after_reset, target).
+
+    target 'own'     : no active horizon, paced to this account's own weekly reset
+           'horizon' : the weekly reset is at or after the horizon, paced to the horizon
+           'reset'   : the weekly reset comes first; budget_after_reset is the pace from that reset to the horizon
+    """
+    left = max(0.0, 100 - pct)
+    floor = 1 / 60  # never divide by less than a minute
+    if horizon is None:
+        return left / max((reset - now) / 3600, floor), None, 'own'
+    if reset >= horizon - HORIZON_SLACK:
+        return left / max((horizon - now) / 3600, floor), None, 'horizon'
+    return left / max((reset - now) / 3600, floor), 100 / max((horizon - reset) / 3600, floor), 'reset'
+
+
+def account_detail(key, rows, pool, now, horizons=None):
+    """Everything the gate, the report and the dial need about one account's weekly window.
+
+    decision: allow | over_budget | exhausted | unknown. burn/budget/headroom are %/h; headroom = budget - burn
+    (signed) and is None for exhausted and unknown accounts. 'after' is the budget once a pre-horizon reset lands.
+    """
+    horizons = load_horizons() if horizons is None else horizons
+    d = {'decision': 'unknown', 'pct': None, 'reset': None, 'ts': None, 'burn': None, 'budget': None,
+         'headroom': None, 'after': None, 'target': None}
     latest = rows.get(key)
     if not latest:
-        return 'unknown', None, None
+        return d
     try:
         ts, pct, reset = (meter(latest, k) for k in ('ts', 'pct', 'reset'))
+        if all(map(math.isfinite, (ts, pct, reset))) and 0 <= pct <= 100:
+            d.update(pct=pct, reset=reset, ts=ts)  # kept for display even when the sample is unusable
         if not all(map(math.isfinite, (ts, pct, reset))) or not 0 <= pct <= 100 or not 0 <= now - ts <= 7200 or reset <= now:
-            return 'unknown', None, None
+            return d
+        budget, after, target = pace_budget(pct, reset, now, active_horizon(pool, horizons, now))
+        d.update(budget=budget, after=after, target=target)
         if pct >= 100:
-            return 'exhausted', None, 0.0
+            d.update(decision='exhausted', budget=0.0)
+            return d
         # Collector uses NOW as the timestamp of its current observation. For an
         # existing snapshot, use the collector timestamp, not launch time.
         global NOW
@@ -63,14 +136,46 @@ def account_decision(key, rows, pool, now):
         finally:
             NOW = old
         if burn is None or not math.isfinite(burn) or burn < 0:
-            return 'unknown', None, None
-        hours = (reset - now) / 3600
-        if pool == 'claude':
-            hours = min(hours, 84)
-        budget = (100 - pct) / hours
-        return ('over_budget' if burn > budget else 'allow'), burn, budget
+            d['budget'] = d['after'] = None
+            return d
+        d.update(burn=burn, headroom=budget - burn, decision='over_budget' if burn > budget else 'allow')
+        return d
     except (KeyError, TypeError, ValueError, ZeroDivisionError, OSError, json.JSONDecodeError):
+        return {'decision': 'unknown', 'pct': None, 'reset': None, 'ts': None, 'burn': None, 'budget': None,
+                'headroom': None, 'after': None, 'target': None}
+
+
+def account_decision(key, rows, pool, now, horizons=None):
+    """(decision, burn, budget) for one account; same contract the gate and its tests always had."""
+    d = account_detail(key, rows, pool, now, horizons)
+    if d['decision'] == 'unknown':
         return 'unknown', None, None
+    return d['decision'], d['burn'], d['budget']
+
+
+def pool_status(pool, accounts, rows, now, horizons=None):
+    """Pool-level decision over bound accounts. Exhausted accounts contribute no burn and no budget.
+
+    decision: allow     pool burn within pool budget
+              over_budget  pool burn above pool budget (wins over unknown: it is measured)
+              unknown   an account is unmeasured and the measured rest is within budget (fail closed)
+              exhausted every bound account is at 100%
+    """
+    horizons = load_horizons() if horizons is None else horizons
+    details = [(a, account_detail(f'{pool}:{a}:weekly', rows, pool, now, horizons)) for a in accounts]
+    live = [d for _, d in details if d['decision'] in ('allow', 'over_budget')]
+    burn = sum(d['burn'] for d in live)
+    budget = sum(d['budget'] for d in live)
+    if live and burn > budget:
+        decision = 'over_budget'
+    elif any(d['decision'] == 'unknown' for _, d in details):
+        decision = 'unknown'
+    elif not live:
+        decision = 'exhausted'
+    else:
+        decision = 'allow'
+    return {'pool': pool, 'decision': decision, 'burn': burn, 'budget': budget, 'headroom': budget - burn,
+            'horizon': active_horizon(pool, horizons, now), 'accounts': details}
 
 
 def read_config(path):
@@ -130,6 +235,25 @@ def bindings(model, config):
     return pool, sorted(accounts)
 
 
+def account_labels(pool, config):
+    """identity -> email for display (Codex accounts are bound by account_id, which reads poorly in a report)."""
+    auth = config.get('auth-dir')
+    if not isinstance(auth, str) or not auth:
+        return {}
+    labels = {}
+    for path in glob.glob(os.path.join(os.path.expanduser(auth), '*.json')):
+        try:
+            with open(path) as f:
+                d = json.load(f)
+        except (OSError, ValueError):
+            continue
+        typ = {'xai': 'grok'}.get(d.get('type'), d.get('type'))
+        ident = d.get('account_id') if pool == 'codex' else d.get('email')
+        if typ == pool and isinstance(ident, str) and isinstance(d.get('email'), str):
+            labels[ident] = d['email']
+    return labels
+
+
 def read_latest(path):
     rows = {}
     with open(path) as f:
@@ -153,17 +277,21 @@ def shadow(model, role, override, config_path, snapshot_path, now):
     try:
         pool, accounts = bindings(model, read_config(config_path))
         rows = read_latest(snapshot_path)
-        results = []
-        for account in accounts:
-            tag = hashlib.sha256(account.encode()).hexdigest()[:12]
-            if pool == 'grok':
-                decision, burn, budget = 'unknown', None, None
-            else:
-                decision, burn, budget = account_decision(f'{pool}:{account}:weekly', rows, pool, now)
-            results.append(decision)
-            fmt = lambda v: 'unknown' if v is None else f'{v:.4f}'
-            print(f'{prefix} account={tag} decision={decision} burn={fmt(burn)} budget={fmt(budget)}')
-        verdict = 'allow' if all(r == 'allow' for r in results) else 'would_refuse'
+        horizons = load_horizons()
+        fmt = lambda v: 'unknown' if v is None else f'{v:.4f}'
+        if pool == 'grok':
+            for account in accounts:
+                tag = hashlib.sha256(account.encode()).hexdigest()[:12]
+                print(f'{prefix} account={tag} decision=unknown burn=unknown budget=unknown')
+            status = {'decision': 'unknown', 'burn': 0.0, 'budget': 0.0, 'horizon': None}
+        else:
+            status = pool_status(pool, accounts, rows, now, horizons)
+            for account, d in status['accounts']:
+                tag = hashlib.sha256(account.encode()).hexdigest()[:12]
+                print(f'{prefix} account={tag} decision={d["decision"]} burn={fmt(d["burn"])} budget={fmt(d["budget"])}')
+        print(f'{prefix} pool_decision={status["decision"]} pool_burn={fmt(status["burn"])} pool_budget={fmt(status["budget"])} '
+              f'horizon={"own-reset" if status["horizon"] is None else dt.datetime.fromtimestamp(status["horizon"], dt.timezone.utc).strftime("%Y-%m-%dT%H:%MZ")}')
+        verdict = 'allow' if status['decision'] == 'allow' else 'would_refuse'
         reason = 'exempt' if exemption else ('override' if override_ok else verdict)
         print(f'{prefix} decision={verdict} effective={reason} override={override if override_ok else "none"}')
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError, subprocess.SubprocessError):

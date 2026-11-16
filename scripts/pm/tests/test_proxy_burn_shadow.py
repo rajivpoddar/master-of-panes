@@ -37,16 +37,98 @@ def test_budget_and_unknown(tmp_path):
     path.write_text(json.dumps(previous) + '\n')
     rows = {key: dict(previous, ts=now, pct=32)}
     with mock.patch.object(burn, 'LOG', str(path)):
-        result, rate, budget = burn.account_decision(key, rows, 'claude', now)
-        assert result == 'over_budget' and rate == 1 and budget == 68 / 84
-        assert burn.account_decision(key, rows, 'codex', now)[2] == 68 / 100
-        assert burn.account_decision(key, {key: dict(rows[key], ts=now-7201)}, 'claude', now)[0] == 'unknown'
-        assert burn.account_decision(key, {key: dict(rows[key], pct=100)}, 'claude', now)[0] == 'exhausted'
-        assert burn.account_decision('missing', rows, 'claude', now)[0] == 'unknown'
+        # No active horizon: each account paces to its own weekly reset, (100 - used) / hours-to-reset.
+        result, rate, budget = burn.account_decision(key, rows, 'claude', now, {})
+        assert result == 'over_budget' and rate == 1 and budget == 68 / 100
+        assert burn.account_decision(key, rows, 'codex', now, {})[2] == 68 / 100
+        # A horizon before the reset tightens the pace to the horizon, so the same burn is within budget.
+        horizons = {'claude': now + 50 * 3600}
+        result, rate, budget = burn.account_decision(key, rows, 'claude', now, horizons)
+        assert result == 'allow' and budget == 68 / 50
+        assert burn.account_decision(key, {key: dict(rows[key], ts=now-7201)}, 'claude', now, {})[0] == 'unknown'
+        assert burn.account_decision(key, {key: dict(rows[key], pct=100)}, 'claude', now, {})[0] == 'exhausted'
+        assert burn.account_decision('missing', rows, 'claude', now, {})[0] == 'unknown'
         path.write_text(json.dumps(dict(previous, reset=previous['reset'] + 600)) + '\n')
-        assert burn.account_decision(key, rows, 'claude', now)[0] == 'unknown'
+        assert burn.account_decision(key, rows, 'claude', now, {})[0] == 'unknown'
         path.write_text('')
-        assert burn.account_decision(key, rows, 'claude', now)[0] == 'unknown'
+        assert burn.account_decision(key, rows, 'claude', now, {})[0] == 'unknown'
+
+
+def test_load_horizons_is_the_one_config(tmp_path, monkeypatch):
+    cfg = tmp_path / 'burn-horizons.json'
+    cfg.write_text(json.dumps({'_comment': 'ignored', 'claude': '2026-11-18T04:00:00Z',
+                               'codex': '2026-11-20T13:06:00+05:30', 'grok': 'not-a-date', 'bad': 5,
+                               'naive': '2026-11-20T13:06:00'}))
+    got = burn.load_horizons(str(cfg))
+    assert got == {'claude': 1794974400.0, 'codex': 1795160160.0}
+    monkeypatch.setenv('PROXY_BURN_HORIZONS', str(cfg))
+    assert burn.load_horizons() == got
+    cfg.write_text('not json')
+    assert burn.load_horizons(str(cfg)) == {}
+    assert burn.load_horizons(str(tmp_path / 'missing.json')) == {}
+
+
+def test_horizon_passed_falls_back_to_own_reset():
+    now = 2000
+    assert burn.active_horizon('claude', {'claude': now - 1}, now) is None
+    assert burn.active_horizon('claude', {'claude': now + 1}, now) == now + 1
+    assert burn.active_horizon('claude', {}, now) is None
+    reset = now + 10 * 3600
+    assert burn.pace_budget(50, reset, now, None) == (5.0, None, 'own')
+
+
+def test_pace_budget_two_phase_when_reset_precedes_horizon():
+    now = 0
+    # Resets in 10h, horizon in 40h: budget now = left / 10h; after the reset the full 100% spreads over 30h.
+    budget, after, target = burn.pace_budget(60, 10 * 3600, now, 40 * 3600)
+    assert target == 'reset' and budget == 4.0 and after == pytest.approx(100 / 30)
+    # A reset within the slack of the horizon IS the horizon.
+    budget, after, target = burn.pace_budget(60, 40 * 3600 - 600, now, 40 * 3600)
+    assert target == 'horizon' and after is None and budget == pytest.approx(40 / 40)
+    # Exhausted accounts keep the after-reset budget so the report can show it.
+    assert burn.pace_budget(100, 10 * 3600, now, 40 * 3600)[0] == 0.0
+
+
+def _rows(now, spec):
+    """spec: acct -> (pct, reset_in_hours); every row is a fresh sample."""
+    return {f'claude:{a}:weekly': {'key': f'claude:{a}:weekly', 'ts': now, 'pct': pct, 'reset': now + h * 3600}
+            for a, (pct, h) in spec.items()}
+
+
+def test_pool_status_headroom_offsets_overspend_and_exhausted_adds_nothing():
+    now = 1000000
+    rows = _rows(now, {'a': (20, 100), 'b': (50, 100), 'dead': (100, 100)})
+    burns = {'claude:a:weekly': 0.2, 'claude:b:weekly': 0.3, 'claude:dead:weekly': 9.0}
+    with mock.patch.object(burn, 'burn_for', side_effect=lambda key, pct, reset: burns[key]):
+        status = burn.pool_status('claude', ['a', 'b', 'dead'], rows, now, {})
+    by = dict(status['accounts'])
+    assert by['dead']['decision'] == 'exhausted' and by['dead']['headroom'] is None
+    # a is far under its own budget (0.8) and b is over (0.5): the pool nets out within budget.
+    assert by['a']['headroom'] == pytest.approx(0.8 - 0.2) and by['b']['headroom'] == pytest.approx(0.5 - 0.3)
+    assert status['burn'] == pytest.approx(0.5) and status['budget'] == pytest.approx(1.3)
+    assert status['decision'] == 'allow' and status['headroom'] == pytest.approx(0.8)
+
+
+def test_pool_status_over_budget_wins_over_unknown_and_unknown_blocks_otherwise():
+    now = 1000000
+    rows = _rows(now, {'a': (80, 10), 'b': (10, 100)})
+    del rows['claude:b:weekly']  # unmeasured account
+    with mock.patch.object(burn, 'burn_for', return_value=5.0):  # a: budget 2.0, burn 5.0
+        assert burn.pool_status('claude', ['a', 'b'], rows, now, {})['decision'] == 'over_budget'
+    with mock.patch.object(burn, 'burn_for', return_value=0.1):
+        assert burn.pool_status('claude', ['a', 'b'], rows, now, {})['decision'] == 'unknown'
+        assert burn.pool_status('claude', ['a'], rows, now, {})['decision'] == 'allow'
+    rows_all_dead = _rows(now, {'a': (100, 10)})
+    assert burn.pool_status('claude', ['a'], rows_all_dead, now, {})['decision'] == 'exhausted'
+
+
+def test_pool_status_pre_horizon_reset_reports_after_budget():
+    now = 1000000
+    rows = _rows(now, {'qa': (100, 8.7)})
+    status = burn.pool_status('claude', ['qa'], rows, now, {'claude': now + 33.8 * 3600})
+    detail = dict(status['accounts'])['qa']
+    assert detail['decision'] == 'exhausted' and detail['budget'] == 0.0
+    assert detail['target'] == 'reset' and detail['after'] == pytest.approx(100 / (33.8 - 8.7))
 
 
 def test_bindings_require_enabled_known_accounts(tmp_path):
@@ -59,22 +141,43 @@ def test_bindings_require_enabled_known_accounts(tmp_path):
         burn.bindings('claude-haiku-5-5', config)
 
 
-def test_shadow_per_account_and_exempt_override():
+def test_shadow_pool_decision_and_exempt_override():
     config = {'auth-dir': '/not-used'}
     rows = {'codex:a:weekly': {'ts': 10000, 'pct': 10, 'reset': 50000},
             'codex:b:weekly': {'ts': 10000, 'pct': 100, 'reset': 50000}}
     with mock.patch.object(burn, 'read_config', return_value=config), \
          mock.patch.object(burn, 'bindings', return_value=('codex', ['a', 'b'])), \
          mock.patch.object(burn, 'read_latest', return_value=rows), \
+         mock.patch.object(burn, 'load_horizons', return_value={}), \
          mock.patch.object(burn, 'burn_for', return_value=0):
-        for role, override, effective in [('hd-builder', '', 'would_refuse'),
+        # One account is exhausted, but a is under budget, so the pool allows launches (free headroom is used).
+        for role, override, effective in [('hd-builder', '', 'allow'),
                                            ('ci-repair', '', 'exempt'),
                                            ('hd-builder', 'P0:123', 'override')]:
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
-                burn.shadow('gpt-6-luna', role, override, 'unused', 'unused', 10000)
-            assert 'decision=exhausted' in out.getvalue()
-            assert 'effective=' + effective in out.getvalue()
+                assert burn.shadow('gpt-6-luna', role, override, 'unused', 'unused', 10000) == effective
+            text = out.getvalue()
+            assert 'decision=exhausted' in text  # per-account line for b
+            assert 'pool_decision=allow' in text and 'horizon=own-reset' in text
+            assert 'effective=' + effective in text
+
+
+def test_shadow_refuses_when_pool_burn_exceeds_pool_budget():
+    config = {'auth-dir': '/not-used'}
+    rows = {'codex:a:weekly': {'ts': 10000, 'pct': 90, 'reset': 50000}}
+    with mock.patch.object(burn, 'read_config', return_value=config), \
+         mock.patch.object(burn, 'bindings', return_value=('codex', ['a'])), \
+         mock.patch.object(burn, 'read_latest', return_value=rows), \
+         mock.patch.object(burn, 'load_horizons', return_value={}), \
+         mock.patch.object(burn, 'burn_for', return_value=5.0):
+        for role, override, effective in [('hd-builder', '', 'would_refuse'),
+                                           ('ci-repair', '', 'exempt'),
+                                           ('hd-builder', 'rajiv:1794.5', 'override')]:
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                assert burn.shadow('gpt-6-luna', role, override, 'unused', 'unused', 10000) == effective
+            assert 'pool_decision=over_budget' in out.getvalue()
 
 
 def test_unmapped_and_grok_unknown():
