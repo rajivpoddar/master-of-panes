@@ -2251,7 +2251,9 @@ USAGE_SNAPSHOT_SCRIPT = Path.home() / ".claude/scripts/usage-snapshot.py"
 # Same freshness bound as proxy-burn-shadow's per-sample check; the 3h reader enforces it too.
 USAGE_SAMPLE_MAX_AGE = 7200
 UNKNOWN_DENY = "UNKNOWN (deny)"
-BURN_STATE = {"allow": "OK", "over_budget": "OVER", "exhausted": "EXHAUSTED", "unknown": UNKNOWN_DENY}
+NO_USABLE_DENY = "NO USABLE ACCOUNT (deny)"
+BURN_STATE = {"allow": "OK", "over_budget": "OVER", "exhausted": "EXHAUSTED", "unknown": UNKNOWN_DENY,
+              "unavailable": NO_USABLE_DENY}
 
 
 def _burn_module(path: Path = PROXY_BURN_SHADOW):
@@ -2283,10 +2285,12 @@ def _session_state(rows: dict, pool: str, acct: str, ts_now: float) -> str:
         return ""
     row = rows.get(f"{pool}:{acct}:session") or {}
     pct, reset, sampled = row.get("pct"), row.get("reset"), row.get("ts")
-    nums = [v for v in (pct, reset, sampled) if isinstance(v, (int, float)) and not isinstance(v, bool)]
-    if len(nums) != 3:
+    nums = [v for v in (pct, reset, sampled)
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
+    if len(nums) != 3 or not 0 <= pct <= 100:
         return " · session n/a"
-    if ts_now - sampled > USAGE_SAMPLE_MAX_AGE or reset <= ts_now:
+    # Same reading as proxy-burn-shadow.session_state(): an old, future-dated or reset-passed sample is not current.
+    if not 0 <= ts_now - sampled <= USAGE_SAMPLE_MAX_AGE or reset <= ts_now:
         return " · session stale"
     state = "CAPPED" if pct >= 100 else f"{pct:g}%"
     return f" · session {state} (resets {_ist(reset, '%H:%M')})"
@@ -2308,8 +2312,10 @@ def _burn_account_row(label: str, acct: str, d: dict, session: str, ts_now: floa
         return f"{label} {acct}: {used} used · EXHAUSTED · {tail}{session}"
     if decision in ("allow", "over_budget"):
         extra = f" (then {_rate(d['after'])}%/h)" if d.get("target") == "reset" and d.get("after") is not None else ""
+        # Weekly figures stay theoretical; a capped/stale/unknown session means this budget is not usable now.
+        unusable = " · not usable now" if d.get("usable") is False else ""
         return (f"{label} {acct}: {used} used · burn {_rate(d['burn'])} · budget {_rate(d['budget'])}{extra} · "
-                f"headroom {_rate(d['headroom'], signed=True)} %/h{session}")
+                f"headroom {_rate(d['headroom'], signed=True)} %/h{session}{unusable}")
     sampled = d.get("ts")
     age = f", sampled {max(0, round((ts_now - sampled) / 60))}m ago" if isinstance(sampled, (int, float)) else ", sample missing"
     return f"{label} {acct}: {used} used · burn n/a{age} · {UNKNOWN_DENY}{session}"
@@ -2320,9 +2326,10 @@ def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = 
 
     Rajiv C0ALZJHGE49 thread 1794851199.275299 (2026-11-16): per-account used%, burn, budget and signed
     headroom against a per-pool pacing horizon, then ONE pool decision. A family is P0-ONLY only when its
-    POOL burn exceeds its POOL budget (or the pool is exhausted/unmeasurable); headroom on any account counts
-    toward the pool, and an exhausted account contributes neither burn nor budget. Failure of the check
-    itself sets every family to P0-ONLY.
+    POOL burn exceeds its USABLE POOL budget (or the pool is exhausted/unmeasurable/has no usable account);
+    an exhausted account contributes neither burn nor budget, and a Claude account whose session is capped, stale
+    or unknown keeps its theoretical weekly row but adds nothing to the usable budget (CTO REVISE of 35df934,
+    ts 1794854782.620999). Failure of the check itself sets every family to P0-ONLY.
     """
     fail_modes = {label: "P0-ONLY" for label, _, _ in BURN_MODELS}
     try:
@@ -2356,7 +2363,15 @@ def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = 
             names = shadow.account_labels(pool, conf)
             verdict = BURN_STATE.get(status["decision"], UNKNOWN_DENY)
             modes[label] = "NORMAL" if status["decision"] == "allow" else "P0-ONLY"
-            blocks.append(f"{label} pool: burn {_rate(status['burn'])} vs budget {_rate(status['budget'])} %/h → "
+            weekly = status.get("weekly_budget")
+            if isinstance(weekly, (int, float)) and abs(weekly - status["budget"]) > 1e-9:
+                skipped = sum(1 for _, d in status["accounts"]
+                              if d.get("decision") in ("allow", "over_budget") and d.get("usable") is False)
+                budget_text = (f"vs usable budget {_rate(status['budget'])} %/h "
+                               f"(weekly budget {_rate(weekly)}, {skipped} account(s) not usable now)")
+            else:
+                budget_text = f"vs budget {_rate(status['budget'])} %/h"
+            blocks.append(f"{label} pool: burn {_rate(status['burn'])} {budget_text} → "
                           f"headroom {_rate(status['headroom'], signed=True)} → {verdict} → {label} routes: {modes[label]}")
             for acct, detail in status["accounts"]:
                 blocks.append(_burn_account_row(label, names.get(acct, acct), detail,

@@ -9,6 +9,11 @@ Pacing (Rajiv C0ALZJHGE49 thread 1794851199.275299, ts 1794852497.756029: "Claud
     the horizon is paced to that reset, then gets 100 / hours(reset -> horizon) after it.
   * The launch decision is per POOL: pool burn vs pool budget (exhausted accounts contribute neither), so one
     exhausted or over-pace account no longer hides free headroom on the others.
+  * The pool budget the gate and the dial decide on counts only USABLE accounts (CTO REVISE of 35df934,
+    C0ALZJHGE49 thread 1794851199.275299, ts 1794854782.620999: "Capped or unknown session capacity must not
+    subsidize ordinary admission or a dial increase"). A Claude account is usable now only with a fresh session
+    sample below 100%; a capped, stale or unknown session sample is not. Disabled auth files are never bound
+    (bindings()). The theoretical weekly budget (every measured account) is still reported as weekly_budget.
 """
 import datetime as dt
 import glob
@@ -29,6 +34,10 @@ NOW = time.time()
 HORIZON_FILE = os.path.join(HOME, '.claude/state/burn-horizons.json')
 # A weekly reset within 30 min of the horizon IS the horizon (resets are reported to the minute, horizons are set by hand).
 HORIZON_SLACK = 1800
+# A session (5h) sample older than this, from the future, or whose reset already passed says nothing about capacity now.
+SESSION_MAX_AGE = 7200
+# Session states that count as usable capacity. 'n/a' = the pool has no session meter (Codex, Grok): weekly decides alone.
+USABLE_SESSION = ('n/a', 'open')
 
 # Kept identical to usage-snapshot.py: latest log record over one hour old.
 def prev(key):
@@ -153,28 +162,77 @@ def account_decision(key, rows, pool, now, horizons=None):
     return d['decision'], d['burn'], d['budget']
 
 
+def session_state(pool, account, rows, now):
+    """Presently usable session capacity of one account, from the latest ':session' sample.
+
+    state: n/a      the pool has no session meter (Codex, Grok); the weekly window alone decides
+           open     fresh sample below 100% with its reset still ahead: usable now
+           capped   fresh sample at 100% with its reset still ahead: not usable until it resets
+           stale    sample older than SESSION_MAX_AGE, dated in the future, or its reset has passed: unknown now
+           unknown  no sample, or an unreadable one
+    Only 'n/a' and 'open' are usable. A sample is never promoted: a cap is cleared only by a FRESH sample below 100%.
+    """
+    out = {'state': 'unknown', 'pct': None, 'reset': None, 'ts': None}
+    if pool != 'claude':
+        out['state'] = 'n/a'
+        return out
+    try:
+        row = (rows or {}).get(f'{pool}:{account}:session')
+        ts, pct, reset = (meter(row, k) for k in ('ts', 'pct', 'reset'))
+    except (KeyError, TypeError, ValueError):
+        return out
+    if not all(map(math.isfinite, (ts, pct, reset))) or not 0 <= pct <= 100:
+        return out
+    out.update(pct=pct, reset=reset, ts=ts)
+    if not 0 <= now - ts <= SESSION_MAX_AGE or reset <= now:
+        out['state'] = 'stale'
+    else:
+        out['state'] = 'capped' if pct >= 100 else 'open'
+    return out
+
+
 def pool_status(pool, accounts, rows, now, horizons=None):
     """Pool-level decision over bound accounts. Exhausted accounts contribute no burn and no budget.
 
-    decision: allow     pool burn within pool budget
-              over_budget  pool burn above pool budget (wins over unknown: it is measured)
-              unknown   an account is unmeasured and the measured rest is within budget (fail closed)
-              exhausted every bound account is at 100%
+    Two budgets (all %/h). weekly_budget is the THEORETICAL pace of every measured account. budget is the USABLE
+    pace: only accounts that can take traffic now (a fresh session sample below 100% on Claude) contribute.
+    burn is the pool's whole measured demand, because a capped account's traffic lands on the others. The
+    decision, headroom and every consumer's default use the usable budget; weekly_budget/weekly_headroom are
+    kept so the report can still show what the weekly windows would allow.
+
+    decision: allow       pool burn within the usable pool budget
+              over_budget  pool burn above the usable pool budget (wins over unknown: it is measured)
+              unknown     an account is unmeasured and the measured rest is within budget (fail closed)
+              exhausted   every bound account is at 100% weekly
+              unavailable measured accounts exist but none can take traffic now (capped/stale/unknown session)
+    Each account detail gains session (state), session_reset and usable.
     """
     horizons = load_horizons() if horizons is None else horizons
-    details = [(a, account_detail(f'{pool}:{a}:weekly', rows, pool, now, horizons)) for a in accounts]
+    details = []
+    for a in accounts:
+        d = account_detail(f'{pool}:{a}:weekly', rows, pool, now, horizons)
+        s = session_state(pool, a, rows, now)
+        d.update(session=s['state'], session_reset=s['reset'],
+                 usable=d['decision'] in ('allow', 'over_budget') and s['state'] in USABLE_SESSION)
+        details.append((a, d))
     live = [d for _, d in details if d['decision'] in ('allow', 'over_budget')]
+    usable = [d for d in live if d['usable']]
     burn = sum(d['burn'] for d in live)
-    budget = sum(d['budget'] for d in live)
-    if live and burn > budget:
+    weekly_budget = sum(d['budget'] for d in live)
+    budget = sum(d['budget'] for d in usable)
+    if usable and burn > budget:
         decision = 'over_budget'
     elif any(d['decision'] == 'unknown' for _, d in details):
         decision = 'unknown'
     elif not live:
         decision = 'exhausted'
+    elif not usable:
+        decision = 'unavailable'
     else:
         decision = 'allow'
     return {'pool': pool, 'decision': decision, 'burn': burn, 'budget': budget, 'headroom': budget - burn,
+            'weekly_budget': weekly_budget, 'weekly_headroom': weekly_budget - burn,
+            'live': len(live), 'usable': len(usable),
             'horizon': active_horizon(pool, horizons, now), 'accounts': details}
 
 
@@ -283,13 +341,16 @@ def shadow(model, role, override, config_path, snapshot_path, now):
             for account in accounts:
                 tag = hashlib.sha256(account.encode()).hexdigest()[:12]
                 print(f'{prefix} account={tag} decision=unknown burn=unknown budget=unknown')
-            status = {'decision': 'unknown', 'burn': 0.0, 'budget': 0.0, 'horizon': None}
+            status = {'decision': 'unknown', 'burn': 0.0, 'budget': 0.0, 'weekly_budget': 0.0, 'live': 0, 'usable': 0,
+                      'horizon': None}
         else:
             status = pool_status(pool, accounts, rows, now, horizons)
             for account, d in status['accounts']:
                 tag = hashlib.sha256(account.encode()).hexdigest()[:12]
-                print(f'{prefix} account={tag} decision={d["decision"]} burn={fmt(d["burn"])} budget={fmt(d["budget"])}')
+                print(f'{prefix} account={tag} decision={d["decision"]} burn={fmt(d["burn"])} budget={fmt(d["budget"])} '
+                      f'session={d["session"]} usable={"yes" if d["usable"] else "no"}')
         print(f'{prefix} pool_decision={status["decision"]} pool_burn={fmt(status["burn"])} pool_budget={fmt(status["budget"])} '
+              f'pool_weekly_budget={fmt(status["weekly_budget"])} usable_accounts={status["usable"]}/{status["live"]} '
               f'horizon={"own-reset" if status["horizon"] is None else dt.datetime.fromtimestamp(status["horizon"], dt.timezone.utc).strftime("%Y-%m-%dT%H:%MZ")}')
         verdict = 'allow' if status['decision'] == 'allow' else 'would_refuse'
         reason = 'exempt' if exemption else ('override' if override_ok else verdict)

@@ -89,10 +89,18 @@ def test_pace_budget_two_phase_when_reset_precedes_horizon():
     assert burn.pace_budget(100, 10 * 3600, now, 40 * 3600)[0] == 0.0
 
 
-def _rows(now, spec):
-    """spec: acct -> (pct, reset_in_hours); every row is a fresh sample."""
-    return {f'claude:{a}:weekly': {'key': f'claude:{a}:weekly', 'ts': now, 'pct': pct, 'reset': now + h * 3600}
+def _rows(now, spec, session=True):
+    """spec: acct -> (pct, reset_in_hours); every row is a fresh sample.
+
+    Claude capacity is usable only with a fresh session sample below 100% (CTO REVISE of 35df934), so each account
+    also gets an open 5h-session sample; session=False omits them. The capped/stale/unknown cases live in
+    test_burn_usable_capacity.py."""
+    rows = {f'claude:{a}:weekly': {'key': f'claude:{a}:weekly', 'ts': now, 'pct': pct, 'reset': now + h * 3600}
             for a, (pct, h) in spec.items()}
+    if session:
+        rows.update({f'claude:{a}:session': {'key': f'claude:{a}:session', 'ts': now, 'pct': 20, 'reset': now + 3 * 3600}
+                     for a in spec})
+    return rows
 
 
 def test_pool_status_headroom_offsets_overspend_and_exhausted_adds_nothing():
@@ -120,6 +128,20 @@ def test_pool_status_over_budget_wins_over_unknown_and_unknown_blocks_otherwise(
         assert burn.pool_status('claude', ['a'], rows, now, {})['decision'] == 'allow'
     rows_all_dead = _rows(now, {'a': (100, 10)})
     assert burn.pool_status('claude', ['a'], rows_all_dead, now, {})['decision'] == 'exhausted'
+
+
+def test_pool_status_capped_session_is_not_usable_budget():
+    now = 1000000
+    rows = _rows(now, {'a': (20, 100), 'b': (99, 100)})
+    rows['claude:a:session'] = {'key': 'claude:a:session', 'ts': now, 'pct': 100, 'reset': now + 4 * 3600}
+    burns = {'claude:a:weekly': 0.0, 'claude:b:weekly': 0.5}
+    horizons = {'claude': now + 10 * 3600}
+    with mock.patch.object(burn, 'burn_for', side_effect=lambda key, pct, reset: burns[key]):
+        status = burn.pool_status('claude', ['a', 'b'], rows, now, horizons)
+    # a has 8.0 %/h of weekly headroom but is session-capped; only b's 0.1 %/h is usable, so 0.5 %/h is over budget.
+    assert status['weekly_budget'] == pytest.approx(8.1) and status['budget'] == pytest.approx(0.1)
+    assert status['decision'] == 'over_budget'
+    assert dict(status['accounts'])['a']['session'] == 'capped' and not dict(status['accounts'])['a']['usable']
 
 
 def test_pool_status_pre_horizon_reset_reports_after_budget():
