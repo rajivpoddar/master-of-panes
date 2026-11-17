@@ -2686,38 +2686,75 @@ def claude_memory_line(arm: bool, now: datetime) -> str:
     return module.hourly_line(arm=arm, now=now)
 
 
-# OpenCode Go line (OpenCode Go pool, Rajiv D0AMF0XE6TS thread 1794926930.078169): one hourly line, COUNTS ONLY (no cost, no
-# rate). It shows the pool cap, how many OpenCode runs are live now and how many were launched in the last hour (both per
-# model id), and how many emergency Muse Spark launches the launcher logged in the last hour. Read-only. A source that cannot
-# be read renders UNAVAILABLE for its own field; it is never rendered as 0.
+# OpenCode Go line (OpenCode Go pool, Rajiv D0AMF0XE6TS thread 1794926930.078169; revised per CTO re-review, C0ALZJHGE49 thread
+# 1794932691.512539, ts 1794933244.444789): one hourly line, COUNTS ONLY (no cost, no rate, no quota). Every field is labelled
+# with what its source can and cannot prove:
+#   - cap: the value the launcher would enforce, plus WHICH source supplied it (inherited env, cap file, default, fallback).
+#   - live: running PRIMARY-model `claude -p` processes. Nested OpenCode requests (alias model slots) are not processes here.
+#   - registrations: the run-state writer keeps ONE manifest per run name (model + started_at written before the tmux launch,
+#     replaced by a later start/resume of the same name, kept with reason=launch_failed if the launch fails). That is
+#     latest-per-name registration evidence, never a complete count of successful launches.
+#   - Muse: the launcher's selection log (primary and nested alias selections). Selection records only: not issued or successful
+#     use, and zero records does not prove zero use.
+# Read-only. A source that cannot be read renders UNAVAILABLE, or PARTIAL with the observed minimum, for its own field only;
+# it is never rendered as 0.
 OPENCODE_MODELS = ("hy4-flash-free", "deepseek-v4.1-flash", "muse-spark-1.3-contributor")
 OPENCODE_CAP_DEFAULT = 2
 OPENCODE_WINDOW_S = 3600
+OPENCODE_FUTURE_SKEW_S = 60  # a stamp this far past "now" is malformed, not a record inside the reporting window
 PROXY_CAPS_FILE = Path.home() / ".claude/state/proxy-caps.env"
 PROXY_RUN_STATE = Path(os.environ.get("PROXY_AGENT_RUN_STATE_DIR") or Path.home() / ".local/state/proxy-agent-runs")
 MUSE_EMERGENCY_LOG = Path.home() / ".claude/state/proxy-emergency-muse.log"
 # Same process shape the launcher's per-pool live count uses (proxy-agent.sh proxy_agent_pool_live).
 _OPENCODE_PS = re.compile(r"(?:^|\s)\S*/claude\s+-p\s+--name\s+\S+\s+--model\s+(\S+)")
 # proxy-agent.sh proxy_agent_log_emergency_muse: "<UTC stamp> EMERGENCY_MUSE role=.. name=.. type=.. tier=.. model=.. reason=..".
-_MUSE_LOG_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) EMERGENCY_MUSE\b.*?\sname=(\S+)")
+_MUSE_LOG_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) EMERGENCY_MUSE\b")
+_MUSE_LOG_ROLE = re.compile(r"\srole=(\S+)")
+_MUSE_ALIAS_ROLES = ("haiku", "sonnet", "opus")
 
 
-def opencode_cap(path: Path = PROXY_CAPS_FILE) -> tuple[int, bool]:
-    """(cap, is_default). Reads OPENCODE_PROXY_CAP the way proxy-agent.sh does: the first NAME=digits line wins, any other
-    line is skipped, and a missing or unreadable file is the default."""
+def opencode_cap(path: Path = PROXY_CAPS_FILE, environ: dict | None = None) -> tuple[int | None, str]:
+    """(effective cap or None, source label), following proxy-agent.sh exactly:
+    1. a NONEMPTY inherited OPENCODE_PROXY_CAP wins over the file. If it is not all digits the launcher enforces no OpenCode cap
+       (proxy_agent_pool_blocked returns "not blocked"), so the effective cap is unestablished: (None, label), never a number;
+    2. otherwise the first terminated `OPENCODE_PROXY_CAP=<digits>` line of the caps file wins (an unterminated final line is
+       skipped by the launcher's `while read` loop, so it is skipped here too);
+    3. otherwise the launcher uses 2. The label says why: key absent, file unreadable, or only invalid values in the file."""
+    env = os.environ if environ is None else environ
+    inherited = env.get("OPENCODE_PROXY_CAP", "")
+    if inherited:
+        if re.fullmatch(r"[0-9]+", inherited):
+            try:
+                return int(inherited), "inherited env OPENCODE_PROXY_CAP"
+            except ValueError:
+                pass
+        return None, "inherited env OPENCODE_PROXY_CAP invalid; launcher enforces no OpenCode cap"
     try:
         text = path.read_text(errors="replace")
+    except FileNotFoundError:
+        return OPENCODE_CAP_DEFAULT, "default: key absent, no cap file"
     except OSError:
-        return OPENCODE_CAP_DEFAULT, True
-    for raw in text.splitlines():
+        return OPENCODE_CAP_DEFAULT, "fallback: cap file unreadable"
+    invalid = False
+    for raw in text.split("\n")[:-1]:
         key, sep, value = raw.partition("=")
-        if sep and key == "OPENCODE_PROXY_CAP" and re.fullmatch(r"[0-9]+", value):
-            return int(value), False
-    return OPENCODE_CAP_DEFAULT, True
+        if not sep or key != "OPENCODE_PROXY_CAP":
+            continue
+        if re.fullmatch(r"[0-9]+", value):
+            try:
+                return int(value), "cap file"
+            except ValueError:
+                pass
+        invalid = True
+    if invalid:
+        return OPENCODE_CAP_DEFAULT, "fallback: cap file value invalid"
+    return OPENCODE_CAP_DEFAULT, "default: key absent"
 
 
 def opencode_live(ps_text: str | None = None) -> dict[str, int]:
-    """Running `claude -p --name X --model <id>` processes per OpenCode model id. Raises OSError/SubprocessError if ps fails."""
+    """Running PRIMARY-model `claude -p --name X --model <id>` processes per OpenCode model id (the launcher's own pool count).
+    Nested OpenCode requests made through alias model slots are not processes of their own and are not counted here.
+    Raises OSError/SubprocessError if ps fails."""
     if ps_text is None:
         ps_text = subprocess.run(["/bin/ps", "-axo", "command="], capture_output=True, text=True,
                                  timeout=5, check=True).stdout
@@ -2729,94 +2766,146 @@ def opencode_live(ps_text: str | None = None) -> dict[str, int]:
     return counts
 
 
-def opencode_launches(now: datetime, root: Path = PROXY_RUN_STATE,
-                      window_s: int = OPENCODE_WINDOW_S) -> tuple[dict[str, int], int]:
-    """(launches per OpenCode model id, unreadable manifest count). A launch is a run manifest whose model is an OpenCode id
-    and whose started_at is inside the window. Raises OSError when the run registry itself cannot be listed."""
-    cutoff = now.timestamp() - window_s
+def opencode_registrations(now: datetime, root: Path = PROXY_RUN_STATE,
+                           window_s: int = OPENCODE_WINDOW_S) -> tuple[dict[str, int], int]:
+    """(registrations per OpenCode model id, partial count). Counts run manifests whose model is an OpenCode id and whose
+    started_at lies inside the reporting window [now - window, now + skew]. The writer (proxy-run-state.py `start`) keeps ONE
+    manifest per run name and replaces it on a later start/resume, so this is latest-per-name registration evidence: it can
+    miss an earlier launch of a re-registered name, and it includes a registration whose launch then failed. It is not a count
+    of successful launches.
+    `partial` counts manifests that could hide a registration: unreadable or malformed JSON, no usable started_at, a started_at
+    stamped past now, or an in-window record with no model. Those are never read as "no activity"; the caller renders PARTIAL
+    with the observed minimum. Raises OSError when the run registry itself cannot be listed."""
+    ts_now = now.timestamp()
+    cutoff = ts_now - window_s
+    latest = ts_now + OPENCODE_FUTURE_SKEW_S
     counts = dict.fromkeys(OPENCODE_MODELS, 0)
-    unreadable = 0
+    partial = 0
     for entry in root.iterdir():
         manifest = entry / "manifest.json"
         try:
-            # The manifest is written at launch, so one last modified long before the window cannot hold a launch in it.
+            # The writer stamps started_at at write time, so a manifest last modified long before the window cannot hold a
+            # registration inside it. Anything modified since is read in full and checked strictly below.
             if manifest.stat().st_mtime < cutoff - 300:
                 continue
             data = json.loads(manifest.read_text())
         except (FileNotFoundError, NotADirectoryError):
             continue  # not a run directory, or removed while scanning
         except (OSError, ValueError):
-            unreadable += 1
+            partial += 1
             continue
         if not isinstance(data, dict):
-            unreadable += 1
+            partial += 1
             continue
         model = data.get("model")
-        if not isinstance(model, str) or model not in counts:
-            continue
+        if isinstance(model, str) and model and model not in counts:
+            continue  # a different, named model: not an OpenCode registration whatever its timestamp
         started = _parse_ts(data.get("started_at"))
         if started is None:
-            unreadable += 1
-        elif started.timestamp() >= cutoff:
-            counts[model] += 1
-    return counts, unreadable
+            partial += 1  # cannot tell whether it falls inside the window
+            continue
+        ts = started.timestamp()
+        if ts < cutoff:
+            continue  # registered before the window
+        if ts > latest:
+            partial += 1  # stamped after the report: outside the reporting window, so malformed rather than counted
+            continue
+        if not (isinstance(model, str) and model in counts):
+            partial += 1  # in-window record with missing or non-string model metadata
+            continue
+        counts[model] += 1
+    return counts, partial
 
 
-def muse_emergency_launches(now: datetime, path: Path = MUSE_EMERGENCY_LOG, window_s: int = OPENCODE_WINDOW_S) -> int:
-    """Emergency Muse Spark launches in the window, from the launcher's log. One launch writes up to four lines (the primary
-    plus the nested haiku/sonnet/opus aliases) under one name, so lines with the same name within 60s are ONE launch. A missing
-    log is 0 (the launcher creates it on the first emergency launch); any other read failure raises OSError."""
+def muse_selection_records(now: datetime, path: Path = MUSE_EMERGENCY_LOG,
+                           window_s: int = OPENCODE_WINDOW_S) -> tuple[dict[str, int], int, bool]:
+    """(records by role {primary, alias, other}, malformed count, log_absent). Counts the launcher's EMERGENCY_MUSE selection
+    records whose stamp is inside [now - window, now + skew], one per logged line: the primary selection and each nested
+    haiku/sonnet/opus alias selection are separate records, and there is NO dedupe or time-based launch grouping. A record
+    shows a model was SELECTED; it does not show a request was issued or succeeded, and zero records does not prove zero use.
+    A line carrying EMERGENCY_MUSE with an unparsable or future stamp is `malformed` (the caller renders PARTIAL). A missing
+    log is zero records with log_absent set (the launcher creates it on the first selection); any other failure raises OSError."""
     try:
         text = path.read_text(errors="replace")
     except FileNotFoundError:
-        return 0
+        return {"primary": 0, "alias": 0, "other": 0}, 0, True
     ts_now = now.timestamp()
-    entries = []
+    counts = {"primary": 0, "alias": 0, "other": 0}
+    malformed = 0
     for line in text.splitlines():
+        if "EMERGENCY_MUSE" not in line:
+            continue
         match = _MUSE_LOG_LINE.match(line)
         if not match:
+            malformed += 1
             continue
         try:
             ts = datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
         except ValueError:
+            malformed += 1
             continue
-        if ts_now - window_s <= ts <= ts_now + 60:
-            entries.append((ts, match.group(2)))
-    launches = 0
-    started: dict[str, float] = {}
-    for ts, name in sorted(entries):
-        if name not in started or ts - started[name] > 60:
-            started[name] = ts
-            launches += 1
-    return launches
+        if ts < ts_now - window_s:
+            continue
+        if ts > ts_now + OPENCODE_FUTURE_SKEW_S:
+            malformed += 1
+            continue
+        role = _MUSE_LOG_ROLE.search(line)
+        role_name = role.group(1) if role else ""
+        counts["primary" if role_name == "primary" else "alias" if role_name in _MUSE_ALIAS_ROLES else "other"] += 1
+    return counts, malformed, False
 
 
 def opencode_line(now: datetime, caps: Path = PROXY_CAPS_FILE, root: Path = PROXY_RUN_STATE,
-                  log: Path = MUSE_EMERGENCY_LOG, ps_text: str | None = None) -> str:
-    """The hourly *OpenCode Go:* line. Never raises: an unreadable source reads UNAVAILABLE for its own field only."""
-    cap, is_default = opencode_cap(caps)
+                  log: Path = MUSE_EMERGENCY_LOG, ps_text: str | None = None, environ: dict | None = None) -> str:
+    """The hourly *OpenCode Go:* line. Never raises: each source (cap, live, registrations, Muse log) fails independently and
+    reads UNAVAILABLE / UNVERIFIED / PARTIAL for its own field only, never a confirmed-looking 0."""
+    try:
+        cap, cap_label = opencode_cap(caps, environ)
+    except Exception:
+        cap, cap_label = None, "cap source failed"
     try:
         live = opencode_live(ps_text)
     except (OSError, subprocess.SubprocessError):
         live = None
-    unreadable = 0
+    partial = 0
     try:
-        launched, unreadable = opencode_launches(now, root)
+        registered, partial = opencode_registrations(now, root)
     except OSError:
-        launched = None
+        registered = None
     try:
-        muse = str(muse_emergency_launches(now, log))
+        muse = muse_selection_records(now, log)
     except OSError:
-        muse = "UNAVAILABLE"
+        muse = None
 
-    def cell(counts: dict[str, int] | None, models) -> str:
-        return "UNAVAILABLE" if counts is None else str(sum(counts[m] for m in models))
+    def cells(counts: dict[str, int] | None) -> str:
+        if counts is None:
+            return "UNAVAILABLE"
+        return " · ".join([f"pool {sum(counts.values())}", *(f"{m} {counts[m]}" for m in OPENCODE_MODELS)])
 
-    pool = f"pool {cell(live, OPENCODE_MODELS)}/{cell(launched, OPENCODE_MODELS)}"
-    per_model = [f"{m} {cell(live, (m,))}/{cell(launched, (m,))}" for m in OPENCODE_MODELS]
-    note = f" · {unreadable} run manifests unreadable" if unreadable else ""
-    return (f"*OpenCode Go:* cap {cap}{' (default)' if is_default else ''} · live now/launched last 1h: "
-            f"{' · '.join([pool, *per_model])} · Muse emergency launches last 1h: {muse}{note}")
+    cap_text = f"cap {cap} ({cap_label})" if cap is not None else f"cap UNVERIFIED ({cap_label})"
+    live_text = f"live primary procs now (nested alias requests not counted): {cells(live)}"
+    registered_text = "run registrations last 1h (latest per run name, may include failed launches): "
+    if registered is not None and partial:
+        registered_text += (f"PARTIAL, observed minimum {cells(registered)} ({partial} manifest{'' if partial == 1 else 's'} "
+                            "unreadable, malformed or missing model/start time)")
+    else:
+        registered_text += cells(registered)
+    if muse is None:
+        muse_text = "Muse selection records logged last 1h: UNAVAILABLE"
+    else:
+        by_role, malformed, absent = muse
+        total = sum(by_role.values())
+        detail = [f"primary {by_role['primary']}", f"alias {by_role['alias']}"]
+        if by_role["other"]:
+            detail.append(f"other {by_role['other']}")
+        if absent:
+            detail.append("log file absent")
+        if malformed:
+            detail.append(f"{malformed} malformed log line{'' if malformed == 1 else 's'}")
+        prefix = f"PARTIAL, observed minimum {total}" if malformed else str(total)
+        muse_text = (f"Muse selection records logged last 1h: {prefix} ({' · '.join(detail)}; "
+                     "selection log only, not proof of use or of no use)")
+    return f"*OpenCode Go:* {cap_text} | {live_text} | {registered_text} | {muse_text}"
 
 
 def compose(
