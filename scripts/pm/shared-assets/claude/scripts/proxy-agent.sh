@@ -12,7 +12,7 @@
 #                 definition file exists; list those directories for currently valid types.
 #   <prompt-file> complete one-shot brief (native named-peer steering remains available)
 #   --model M     auto: *-reviewer REVIEW (fable -> astra); hd-planner / hd-investigator PLAN ladder; hd-builder BUILD1-3; hd-proof-qa PROOF1-2; other roles MID
-#                 aliases: luna/haiku LIGHT (hd-builder BUILD1), terra/sonnet MID (hd-builder BUILD2, hd-proof-qa PROOF1), sol/opus TOP (hd-builder BUILD3, hd-proof-qa PROOF2); fable, astra exact
+#                 aliases: luna/haiku LIGHT (hd-builder BUILD1), terra/sonnet MID (hd-builder BUILD2, hd-proof-qa PROOF1), opus TOP (hd-builder BUILD3, hd-proof-qa PROOF2); sol = exact gpt-6.2-sol (S149, no tier picker); fable, astra exact
 #                 Escalate a stalled run with --rung N or --model; raw model ids pass through unchanged.
 #                 or any raw CLIProxyAPI model id (unknown ids get a 200k window + stderr warning)
 #   --rung N      hd-builder 1-3, hd-proof-qa 1-2 (auto only; Rajiv D0AMF0XE6TS thread 1794624936.567599, ts 1794639918.387399)
@@ -1362,9 +1362,10 @@ proxy_agent_tier_models() {
     # Dev ladder (Rajiv C0ALZJHGE49 thread 1794665799.784789, ts 1794665970.826379): haiku/luna → sonnet/terra → opus/sol. No Grok on dev rungs.
     BUILD1) models="claude-haiku-5-5 gpt-6-luna muse-spark-1.3-contributor";;
     BUILD2) models="claude-sonnet-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
-    BUILD3) models="claude-opus-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
+    # S149 (Rajiv ts 1794941131.743129 "6.1 terra should stay. 6.2 sol should replace 6.1 sol"): gpt-6.2-sol follows terra on the top conveyor rungs only; never MID/TOP/PLAN (ts 1794720589.429929).
+    BUILD3) models="claude-opus-5-5 gpt-6.1-terra gpt-6.2-sol muse-spark-1.3-contributor";;
     PROOF1) models="claude-sonnet-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
-    PROOF2) models="claude-opus-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
+    PROOF2) models="claude-opus-5-5 gpt-6.1-terra gpt-6.2-sol muse-spark-1.3-contributor";;
     # 12b reviews: carbon -> fable -> astra (Rajiv D0AMF0XE6TS thread 1794624936.567599, ts 1794640502.657479 "the 12b reviewer ladder can be carbon/fable/astra").
     # Supersedes the earlier fable-first list (thread 1794573312.657559, ts 1794623641.572859). Reviews never skip claude-* at the cap (see below).
     REVIEW) models="claude-fable-5-2 gpt-6-astra muse-spark-1.3-contributor";;
@@ -1646,7 +1647,9 @@ proxy_agent_select() {
     # Explicit aliases are the S131 escalation levers: on the conveyor roles they land on that role's rung.
     luna|haiku) case "$TYPE" in hd-builder) tier=BUILD1;; *) tier=LIGHT;; esac;;
     terra|sonnet) case "$TYPE" in hd-builder) tier=BUILD2;; hd-proof-qa) tier=PROOF1;; *) tier=MID;; esac;;
-    sol|opus) case "$TYPE" in hd-builder) tier=BUILD3;; hd-proof-qa) tier=PROOF2;; *) tier=TOP;; esac;;
+    opus) case "$TYPE" in hd-builder) tier=BUILD3;; hd-proof-qa) tier=PROOF2;; *) tier=TOP;; esac;;
+    # S149: --model sol is the exact gpt-6.2-sol id (tier stays RAW, like astra). A tier here would let the picker return claude-opus-5-5 and override the alias.
+    sol) ;;
   esac
   if [[ -n "${RUNG:-}" && ( "$requested" != auto || "$max_rung" -eq 0 ) ]]; then
     printf 'proxy-agent: --rung %s ignored (%s)\n' "$RUNG" "$([[ "$requested" != auto ]] && echo "explicit --model $requested" || echo "type $TYPE has no rungs")" >&2
@@ -1654,6 +1657,8 @@ proxy_agent_select() {
   SELECT_TIER="$tier"; SELECT_REASON=first_usable
   # Effective rung for the run state (auto-escalation reads it back): BUILD1-3 / PROOF1-2 only; empty for raw models and other roles.
   case "$tier" in BUILD[123]|PROOF[12]) SELECT_RUNG="${tier: -1}";; *) SELECT_RUNG="";; esac
+  # Exact sol on a conveyor role is that role's top rung (BUILD3 / PROOF2), so auto-escalation still reports top_rung instead of rung_unknown.
+  if [[ "$requested" == sol && "$max_rung" -gt 0 ]]; then SELECT_RUNG="$max_rung"; fi
   if [[ "$tier" != RAW ]]; then
     proxy_agent_pick_tier "$tier" || return 75
     MODEL="$PICK_MODEL"; SELECT_REASON="$PICK_REASON"
