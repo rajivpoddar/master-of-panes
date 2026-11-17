@@ -2686,6 +2686,139 @@ def claude_memory_line(arm: bool, now: datetime) -> str:
     return module.hourly_line(arm=arm, now=now)
 
 
+# OpenCode Go line (OpenCode Go pool, Rajiv D0AMF0XE6TS thread 1794926930.078169): one hourly line, COUNTS ONLY (no cost, no
+# rate). It shows the pool cap, how many OpenCode runs are live now and how many were launched in the last hour (both per
+# model id), and how many emergency Muse Spark launches the launcher logged in the last hour. Read-only. A source that cannot
+# be read renders UNAVAILABLE for its own field; it is never rendered as 0.
+OPENCODE_MODELS = ("hy4-flash-free", "deepseek-v4.1-flash", "muse-spark-1.3-contributor")
+OPENCODE_CAP_DEFAULT = 2
+OPENCODE_WINDOW_S = 3600
+PROXY_CAPS_FILE = Path.home() / ".claude/state/proxy-caps.env"
+PROXY_RUN_STATE = Path(os.environ.get("PROXY_AGENT_RUN_STATE_DIR") or Path.home() / ".local/state/proxy-agent-runs")
+MUSE_EMERGENCY_LOG = Path.home() / ".claude/state/proxy-emergency-muse.log"
+# Same process shape the launcher's per-pool live count uses (proxy-agent.sh proxy_agent_pool_live).
+_OPENCODE_PS = re.compile(r"(?:^|\s)\S*/claude\s+-p\s+--name\s+\S+\s+--model\s+(\S+)")
+# proxy-agent.sh proxy_agent_log_emergency_muse: "<UTC stamp> EMERGENCY_MUSE role=.. name=.. type=.. tier=.. model=.. reason=..".
+_MUSE_LOG_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) EMERGENCY_MUSE\b.*?\sname=(\S+)")
+
+
+def opencode_cap(path: Path = PROXY_CAPS_FILE) -> tuple[int, bool]:
+    """(cap, is_default). Reads OPENCODE_PROXY_CAP the way proxy-agent.sh does: the first NAME=digits line wins, any other
+    line is skipped, and a missing or unreadable file is the default."""
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return OPENCODE_CAP_DEFAULT, True
+    for raw in text.splitlines():
+        key, sep, value = raw.partition("=")
+        if sep and key == "OPENCODE_PROXY_CAP" and re.fullmatch(r"[0-9]+", value):
+            return int(value), False
+    return OPENCODE_CAP_DEFAULT, True
+
+
+def opencode_live(ps_text: str | None = None) -> dict[str, int]:
+    """Running `claude -p --name X --model <id>` processes per OpenCode model id. Raises OSError/SubprocessError if ps fails."""
+    if ps_text is None:
+        ps_text = subprocess.run(["/bin/ps", "-axo", "command="], capture_output=True, text=True,
+                                 timeout=5, check=True).stdout
+    counts = dict.fromkeys(OPENCODE_MODELS, 0)
+    for line in ps_text.splitlines():
+        match = _OPENCODE_PS.search(line)
+        if match and match.group(1) in counts:
+            counts[match.group(1)] += 1
+    return counts
+
+
+def opencode_launches(now: datetime, root: Path = PROXY_RUN_STATE,
+                      window_s: int = OPENCODE_WINDOW_S) -> tuple[dict[str, int], int]:
+    """(launches per OpenCode model id, unreadable manifest count). A launch is a run manifest whose model is an OpenCode id
+    and whose started_at is inside the window. Raises OSError when the run registry itself cannot be listed."""
+    cutoff = now.timestamp() - window_s
+    counts = dict.fromkeys(OPENCODE_MODELS, 0)
+    unreadable = 0
+    for entry in root.iterdir():
+        manifest = entry / "manifest.json"
+        try:
+            # The manifest is written at launch, so one last modified long before the window cannot hold a launch in it.
+            if manifest.stat().st_mtime < cutoff - 300:
+                continue
+            data = json.loads(manifest.read_text())
+        except (FileNotFoundError, NotADirectoryError):
+            continue  # not a run directory, or removed while scanning
+        except (OSError, ValueError):
+            unreadable += 1
+            continue
+        if not isinstance(data, dict):
+            unreadable += 1
+            continue
+        model = data.get("model")
+        if not isinstance(model, str) or model not in counts:
+            continue
+        started = _parse_ts(data.get("started_at"))
+        if started is None:
+            unreadable += 1
+        elif started.timestamp() >= cutoff:
+            counts[model] += 1
+    return counts, unreadable
+
+
+def muse_emergency_launches(now: datetime, path: Path = MUSE_EMERGENCY_LOG, window_s: int = OPENCODE_WINDOW_S) -> int:
+    """Emergency Muse Spark launches in the window, from the launcher's log. One launch writes up to four lines (the primary
+    plus the nested haiku/sonnet/opus aliases) under one name, so lines with the same name within 60s are ONE launch. A missing
+    log is 0 (the launcher creates it on the first emergency launch); any other read failure raises OSError."""
+    try:
+        text = path.read_text(errors="replace")
+    except FileNotFoundError:
+        return 0
+    ts_now = now.timestamp()
+    entries = []
+    for line in text.splitlines():
+        match = _MUSE_LOG_LINE.match(line)
+        if not match:
+            continue
+        try:
+            ts = datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+        except ValueError:
+            continue
+        if ts_now - window_s <= ts <= ts_now + 60:
+            entries.append((ts, match.group(2)))
+    launches = 0
+    started: dict[str, float] = {}
+    for ts, name in sorted(entries):
+        if name not in started or ts - started[name] > 60:
+            started[name] = ts
+            launches += 1
+    return launches
+
+
+def opencode_line(now: datetime, caps: Path = PROXY_CAPS_FILE, root: Path = PROXY_RUN_STATE,
+                  log: Path = MUSE_EMERGENCY_LOG, ps_text: str | None = None) -> str:
+    """The hourly *OpenCode Go:* line. Never raises: an unreadable source reads UNAVAILABLE for its own field only."""
+    cap, is_default = opencode_cap(caps)
+    try:
+        live = opencode_live(ps_text)
+    except (OSError, subprocess.SubprocessError):
+        live = None
+    unreadable = 0
+    try:
+        launched, unreadable = opencode_launches(now, root)
+    except OSError:
+        launched = None
+    try:
+        muse = str(muse_emergency_launches(now, log))
+    except OSError:
+        muse = "UNAVAILABLE"
+
+    def cell(counts: dict[str, int] | None, models) -> str:
+        return "UNAVAILABLE" if counts is None else str(sum(counts[m] for m in models))
+
+    pool = f"pool {cell(live, OPENCODE_MODELS)}/{cell(launched, OPENCODE_MODELS)}"
+    per_model = [f"{m} {cell(live, (m,))}/{cell(launched, (m,))}" for m in OPENCODE_MODELS]
+    note = f" · {unreadable} run manifests unreadable" if unreadable else ""
+    return (f"*OpenCode Go:* cap {cap}{' (default)' if is_default else ''} · live now/launched last 1h: "
+            f"{' · '.join([pool, *per_model])} · Muse emergency launches last 1h: {muse}{note}")
+
+
 def compose(
     mode: str,
     now: datetime,
@@ -2719,6 +2852,7 @@ def compose(
     burn: tuple[str, str] | None = None,
     pace: str | None = None,  # pace_table() block, rendered directly under the *Hourly line
     memory: str | None = None,  # PM Claude RSS line; 1h only
+    opencode: str | None = None,  # opencode_line(): OpenCode Go counts, rendered under the Burn block; 1h only
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -2783,7 +2917,8 @@ def compose(
     burn_line, burn_modes = burn if (burn and mode == "1h") else (None, None)
     pace_lines = pace.splitlines() if (pace and mode == "1h") else []
     memory_lines = [memory] if (memory and mode == "1h") else []
-    lines = [first, *pace_lines, *memory_lines, *(burn_line.splitlines() if burn_line else []), *body]
+    opencode_lines = [opencode] if (opencode and mode == "1h") else []
+    lines = [first, *pace_lines, *memory_lines, *(burn_line.splitlines() if burn_line else []), *opencode_lines, *body]
     if asks:
         lines += ["", "*Asks:* " + " | ".join(asks)]
     pm_actions = [] if mode == "3h" else [a for r in (prs or []) for a in r.get("actions") or []]
@@ -2804,7 +2939,9 @@ def compose(
     # The pace table is the same kind of multi-line block and gets the same allowance.
     pace_extra = len(pace_lines)
     memory_extra = len(memory_lines)
-    report = cap_lines(compact_report(lines, 23 if mode == "3h" else 20 + burn_extra + pace_extra + memory_extra, cadence=mode),
+    opencode_extra = len(opencode_lines)
+    report = cap_lines(compact_report(lines, 23 if mode == "3h" else 20 + burn_extra + pace_extra + memory_extra + opencode_extra,
+                                      cadence=mode),
                        MAX_LINE_CHARS - LINE_NOTE_RESERVE)
     if mode == "3h":
         # compact_report already placed exactly one empty line before each
@@ -3427,6 +3564,14 @@ def main() -> int:
         except Exception as exc:
             failures.append(f"claude-rss: {type(exc).__name__}")
             memory_line = "*Claude RSS:* UNAVAILABLE"
+    opencode = None
+    if args.mode == "1h":
+        # Read-only counts; opencode_line never raises, this is only the last backstop.
+        try:
+            opencode = opencode_line(datetime.now(timezone.utc))
+        except Exception as exc:
+            failures.append(f"opencode-go: {type(exc).__name__}")
+            opencode = "*OpenCode Go:* UNAVAILABLE"
     report = compose(
         args.mode, datetime.now(timezone.utc), axiom, mapping_doc.get("mapping", {}), prs,
         support=support, failures=failures, escalations=args.escalation,
@@ -3441,7 +3586,7 @@ def main() -> int:
                       + "\n" + (hourly.get("mac-box") or {}).get("line", "• Mac test box: UNKNOWN (collector deadline)")) if args.mode == "1h" else None,
         pending_actions=(pending_obligations(PM_OPS_DB, now), hourly.get("pending-github") or {"error": "UNAVAILABLE (no recent successful probe)"}) if args.mode == "1h" else None,
         proxies=hourly.get("proxies") if args.mode == "1h" else None,
-        burn=burn, pace=pace, memory=memory_line,
+        burn=burn, pace=pace, memory=memory_line, opencode=opencode,
     )
     labels = {"axiom": "*Axiom errors", "active": "*Active users", "prs": "open non-draft PRs",
               "slots": "*Slots", "priority": "*Slots",
