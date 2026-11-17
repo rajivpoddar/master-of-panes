@@ -27,6 +27,19 @@ automatically; only the next policy-due window (after the 6h throttle) can alert
 If the intent cannot be persisted the alert is skipped and the hourly fails open. This
 never touches an existing exit-pending episode: the alert is not a second arm.
 
+Single winner (CTO REVISE of bb561de1, C0ALZJHGE49 thread 1794923203.112819, ts
+1794926555.931559): "Use the same small non-blocking state-claim pattern already added to
+self-clear: re-read and decide the window under the lock, persist one winning intent, then send
+only for that winner. A contending caller or unreadable/unpersistable claim skips the alert and
+leaves PM work running. Reuse the existing state; do not reset its timestamp or UNKNOWN attempt."
+The window is claimed under a non-blocking exclusive flock on a sidecar lock file next to the
+existing state file: the claim re-reads the state and re-decides the window UNDER the lock, and
+only the caller that finds the window due persists its intent (fsynced atomic write, with an
+attempt id), before the arm POST and before any dispatch. Only that winner arms or alerts. A
+caller that finds the window already consumed answers cooldown and leaves the stored timestamp
+and any issued/UNKNOWN attempt untouched; a contended lock, or a state that cannot be read or
+written, arms nothing and sends nothing and never gates PM.
+
 Unavailable is never reported as none: when the process snapshot cannot be read
 the px part says unavailable.
 
@@ -35,12 +48,14 @@ Fail open. Never gates PM input, never touches hooks or settings.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import subprocess
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -82,6 +97,8 @@ NOTES = {
     "unknown": "",
     "would_arm": "; exit-pending dry-run would arm",
     "cooldown": "; exit-pending cooldown",
+    # Another run holds the window claim right now: this caller arms nothing and alerts nothing.
+    "contended": "; exit-pending claimed by another run",
     "unreachable": "; exit-pending not armed (MoP unreachable)",
     "refused": "; exit-pending refused (fail open)",
     **OUTCOME_NOTES,
@@ -204,10 +221,69 @@ def _load_state(path: Path) -> dict:
 
 
 def _atomic(path: Path, payload: dict) -> None:
+    """Durable atomic write (fsynced temp file, then replace). Raises OSError."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + f".{os.getpid()}.new")
-    temporary.write_text(json.dumps(payload))
-    os.replace(temporary, path)
+    try:
+        with temporary.open("w") as handle:
+            handle.write(json.dumps(payload))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except OSError:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _read_window(path: Path) -> dict | None:
+    """The stored throttle window, read under the claim lock.
+
+    {} when the file is absent or holds no JSON object; None when it exists but cannot be read:
+    unknown is not absence, so the window cannot be proven and nothing is claimed.
+    """
+    try:
+        payload = json.loads(path.read_text())
+    except FileNotFoundError:
+        return {}
+    except ValueError:
+        return {}
+    except OSError:
+        return None
+    return payload if isinstance(payload, dict) else {}
+
+
+def _claim_window(
+    state_path: Path, record: dict, *, rss_bytes: int, now_epoch: float, threshold: int, cooldown_s: int,
+) -> str:
+    """Single-winner claim of the throttle window: "won", "held", "contended" or "unpersisted".
+
+    Takes a NON-BLOCKING exclusive flock on a sidecar lock file, re-reads the existing state and
+    re-decides the window UNDER the lock, and persists record (the one winning intent) only when the
+    window is still due. The lock is released once the intent is on disk: a later caller re-reads it
+    and finds the window consumed. "held": the window was already consumed by another run, so the
+    stored timestamp and any issued/UNKNOWN attempt are left exactly as they are. "contended": another
+    run holds the claim right now. "unpersisted": the state cannot be read, locked or written. Only
+    "won" may arm or send; every other answer arms nothing, sends nothing and never gates PM.
+    """
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        with state_path.with_name(state_path.name + ".lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return "contended"
+            saved = _read_window(state_path)
+            if saved is None:
+                return "unpersisted"
+            if decide(rss_bytes, now_epoch, saved, threshold, cooldown_s) != "arm":
+                return "held"
+            _atomic(state_path, record)
+    except OSError:
+        return "unpersisted"
+    return "won"
 
 
 def _log(path: Path, message: str) -> None:
@@ -342,8 +418,14 @@ def arm_if_needed(
     already exists and nothing was changed. Whatever the arm's outcome (armed, uncertain, an
     already-pending episode, or a preserved owner), the PM is asked once to do restart
     housekeeping, and the 6h throttle starts, so there is never more than one message per window.
-    MoP unreachable posts nothing and starts nothing (retried at the next hourly). Intent is
-    persisted before the POST. notifier posts the message; None (the default) posts nothing.
+    MoP unreachable posts nothing and starts nothing (retried at the next hourly). notifier posts
+    the message; None (the default) posts nothing.
+
+    Single winner: the window is claimed through _claim_window BEFORE the arm POST and before any
+    dispatch (re-read and re-decided under a non-blocking lock, one winning intent persisted).
+    Only the winner arms and alerts. A caller that finds the window already consumed answers
+    "cooldown" and leaves the stored state untouched; a contended claim answers "contended"; an
+    unreadable or unpersistable claim arms nothing and alerts nothing. None of these gates PM.
 
     The alert's send intent (alert=issued, with the window start) is persisted BEFORE every
     dispatch, including the already-pending branch. A dispatch without a confirmed receipt stays
@@ -353,28 +435,51 @@ def arm_if_needed(
     state = _load_state(state_path)
     decision = decide(rss_bytes, now_epoch, state, threshold, cooldown_s)
     if decision != "arm":
-        return decision
+        return decision  # cheap unlocked pre-check; the claim below decides authoritatively
     log_path = log_path or state_path.with_name(LOG_NAME)
     try:
         status = status_get()
     except (OSError, urllib.error.URLError, TimeoutError, ValueError, RuntimeError, json.JSONDecodeError):
         _log(log_path, f"unreachable rss={rss_bytes}")
         return "unreachable"
-    attempted = {"last_attempt_epoch": now_epoch, "last_rss_bytes": rss_bytes, "status": "attempted"}
+    pending = isinstance(status, dict) and status.get("pending") is True
+    attempted = {
+        "attempt": uuid.uuid4().hex,
+        "last_attempt_epoch": now_epoch,
+        "last_rss_bytes": rss_bytes,
+        "status": "already_pending" if pending else "attempted",
+    }
+    if pending and notifier is not None:
+        attempted["alert"] = "issued"  # the already-pending winner's send intent is the claim itself
+    claim = _claim_window(
+        state_path, attempted, rss_bytes=rss_bytes, now_epoch=now_epoch, threshold=threshold, cooldown_s=cooldown_s,
+    )
+    if claim == "held":
+        _log(log_path, f"claim_held rss={rss_bytes}")
+        return "cooldown"  # another run consumed this window; its state is left exactly as it is
+    if claim == "contended":
+        _log(log_path, f"claim_contended rss={rss_bytes}")
+        return "contended"
+    if claim == "unpersisted":
+        _log(log_path, f"claim_unpersisted rss={rss_bytes}")
+        if pending:
+            return "already_pending_skipped" if notifier is not None else "already_pending"
+        return "uncertain"  # nothing was armed and nothing was sent; fail open
 
-    def settle(outcome: str) -> str:
+    def settle(outcome: str, intent_persisted: bool = False) -> str:
         attempted["status"] = outcome
         alerted = outcome
         if notifier is not None:
-            # Guarded send intent, persisted BEFORE the dispatch: it consumes this window, so a lost
-            # receipt, a crash or a failed write afterwards can never lead to an automatic resend.
-            attempted["alert"] = "issued"
-            try:
-                _atomic(state_path, attempted)
-            except OSError:
-                _log(log_path, f"alert_skipped intent_unwritable rss={rss_bytes}")
-                _log(log_path, f"{outcome} rss={rss_bytes}")
-                return f"{outcome}_skipped"  # nothing was issued; fail open
+            if not intent_persisted:
+                # Guarded send intent, persisted BEFORE the dispatch: it consumes this window, so a lost
+                # receipt, a crash or a failed write afterwards can never lead to an automatic resend.
+                attempted["alert"] = "issued"
+                try:
+                    _atomic(state_path, attempted)
+                except OSError:
+                    _log(log_path, f"alert_skipped intent_unwritable rss={rss_bytes}")
+                    _log(log_path, f"{outcome} rss={rss_bytes}")
+                    return f"{outcome}_skipped"  # nothing was issued; fail open
             try:
                 sent = bool(notifier(alert_text(outcome, rss_bytes, threshold)))
             except Exception:  # fail open: a sender fault never gates PM or the hourly
@@ -391,13 +496,8 @@ def arm_if_needed(
         _log(log_path, f"{outcome} rss={rss_bytes}")
         return alerted
 
-    if isinstance(status, dict) and status.get("pending") is True:
-        return settle("already_pending")
-    try:
-        _atomic(state_path, attempted)
-    except OSError:
-        _log(log_path, f"state_unwritable rss={rss_bytes}")
-        return "uncertain"
+    if pending:
+        return settle("already_pending", intent_persisted=True)
     payload = {
         "enabled": True,
         "pm_only": True,

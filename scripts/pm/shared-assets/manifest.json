@@ -816,7 +816,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "5afbb23250a0e97a392a08f8143f45a21dc79fa49a47ea4b3f667f4ec47808ae",
+      "sha256": "580f36771b7e41523ea8b91608d2566dbd953843b5bff4640dfb861cf2266813",
       "source_path": "claude/scripts/pm/heartbeat/pm-claude-memory.py"
     },
     {

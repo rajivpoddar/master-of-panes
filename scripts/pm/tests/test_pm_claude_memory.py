@@ -5,12 +5,17 @@ The shared deterministic trace is test/fixtures/pm-rss-arm-trace.json (client_st
 Alert send custody (CTO REVISE of da450c5, C0ALZJHGE49 thread 1794923203.112819, ts 1794925523.128429): the
 guarded send intent is persisted BEFORE every dispatch, including already-pending; an unconfirmed issued send
 stays consumed/UNKNOWN for the window and is never resent. Added, NOT executed (MoP changes need no local proof).
+Single winner (CTO REVISE of bb561de1, C0ALZJHGE49 thread 1794923203.112819, ts 1794926555.931559): the window is
+claimed under a non-blocking lock with the state re-read and re-decided under it; one winning intent is persisted,
+and only that winner arms or alerts. Two callers at the same expired window yield one notifier call.
 """
 
+import fcntl
 import importlib.util
 import io
 import json
 import subprocess
+import threading
 import types
 import urllib.error
 from datetime import datetime, timezone
@@ -434,3 +439,171 @@ def test_alert_never_touches_an_existing_exit_pending_episode(tmp_path):
     assert note == "already_pending_unconfirmed"
     assert arms == [], "no POST /exit-pending, no clear, no re-arm of the existing episode"
     assert len(sent) == 1
+
+
+# ---- Single-winner claim (CTO REVISE of bb561de1, ts 1794926555.931559). Added, NOT executed. ----
+
+
+def test_two_callers_at_the_same_expired_window_yield_one_notifier_call(tmp_path):
+    """Caller A has read the expired window and the pending status when caller B runs to completion."""
+    state = tmp_path / "state.json"
+    sent, inner = [], []
+    notifier = lambda text: sent.append(text) or True  # noqa: E731
+
+    def status_while_rival_completes():
+        if not inner:
+            inner.append(arm(state, now_epoch=T0, notifier=notifier, opener=never_opens))
+        return {"pending": True}
+
+    outer = arm(state, now_epoch=T0, notifier=notifier, status=status_while_rival_completes, opener=never_opens)
+    assert inner == ["already_pending_alerted"]
+    assert outer == "cooldown", "the stale caller re-reads the window under the lock and finds it consumed"
+    assert len(sent) == 1
+    saved = json.loads(state.read_text())
+    assert saved["alert"] == "posted" and saved["last_attempt_epoch"] == T0
+
+
+def test_racing_callers_on_the_arm_path_open_and_alert_once(tmp_path):
+    state = tmp_path / "state.json"
+    opened, sent, inner = [], [], []
+    opener = lambda payload: opened.append(payload) or ARMED_OK  # noqa: E731
+    notifier = lambda text: sent.append(text) or True  # noqa: E731
+
+    def status_while_rival_completes():
+        if not inner:
+            inner.append(arm(state, now_epoch=T0, status=lambda: {"pending": False}, opener=opener, notifier=notifier))
+        return {"pending": False}
+
+    outer = arm(state, now_epoch=T0, status=status_while_rival_completes, opener=opener, notifier=notifier)
+    assert inner == ["armed_alerted"]
+    assert outer == "cooldown"
+    assert len(opened) == 1, "the loser never POSTs /exit-pending"
+    assert len(sent) == 1
+
+
+def test_concurrent_callers_released_together_produce_exactly_one_winner(tmp_path):
+    """Real threads, each on its own lock file description, all past the unlocked pre-check before any claims."""
+    state = tmp_path / "state.json"
+    callers = 4
+    barrier = threading.Barrier(callers, timeout=10)
+    sent, results = [], []
+    guard = threading.Lock()
+
+    def status_at_the_barrier():
+        barrier.wait()  # every caller has read the expired window before any caller claims it
+        return {"pending": True}
+
+    def notifier(text):
+        with guard:
+            sent.append(text)
+        return True
+
+    def caller():
+        note = arm(state, now_epoch=T0, notifier=notifier, status=status_at_the_barrier, opener=never_opens)
+        with guard:
+            results.append(note)
+
+    threads = [threading.Thread(target=caller) for _ in range(callers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+    assert len(results) == callers
+    assert results.count("already_pending_alerted") == 1, results
+    assert all(note in ("cooldown", "contended") for note in results if note != "already_pending_alerted"), results
+    assert len(sent) == 1
+    assert json.loads(state.read_text())["alert"] == "posted"
+
+
+def test_a_caller_that_cannot_take_the_claim_lock_arms_nothing_and_sends_nothing(tmp_path):
+    state = tmp_path / "state.json"
+    sent, opened = [], []
+    notifier = lambda text: sent.append(text) or True  # noqa: E731
+    opener = lambda payload: opened.append(payload) or ARMED_OK  # noqa: E731
+    with state.with_name("state.json.lock").open("a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)  # another run is claiming the same window
+        pending = arm(state, now_epoch=T0, notifier=notifier, opener=never_opens)
+        fresh = arm(state, now_epoch=T0, status=lambda: {"pending": False}, opener=opener, notifier=notifier)
+    assert pending == "contended" and fresh == "contended"
+    assert sent == [] and opened == []
+    assert not state.exists(), "a contended claim persists nothing"
+    assert "exit-pending claimed by another run" in memory.format_line((20, RSS), [], pending)
+    # With the lock free the next caller wins the same window: contention never consumed it.
+    assert arm(state, now_epoch=T0 + 60, notifier=notifier, opener=never_opens) == "already_pending_alerted"
+    assert len(sent) == 1
+
+
+def test_claim_rereads_under_the_lock_and_preserves_a_rivals_unknown_attempt(tmp_path):
+    state = tmp_path / "state.json"
+    rival = {
+        "attempt": "rival", "last_attempt_epoch": T0 - 5, "last_rss_bytes": RSS,
+        "status": "already_pending", "alert": "issued",
+    }
+
+    def status_after_the_rival_claims():
+        state.write_text(json.dumps(rival))  # the rival won after this caller's unlocked pre-check
+        return {"pending": True}
+
+    sent = []
+    note = arm(state, now_epoch=T0, notifier=lambda text: sent.append(text) or True,
+               status=status_after_the_rival_claims, opener=never_opens)
+    assert note == "cooldown"
+    assert sent == [], "the rival's issued send stays consumed/UNKNOWN and is not resent"
+    assert json.loads(state.read_text()) == rival, "its timestamp and UNKNOWN attempt are not reset"
+
+
+def test_unreadable_or_unpersistable_claim_skips_the_alert_and_arms_nothing(tmp_path):
+    sent, opened = [], []
+    notifier = lambda text: sent.append(text) or True  # noqa: E731
+    opener = lambda payload: opened.append(payload) or ARMED_OK  # noqa: E731
+    unreadable = tmp_path / "state.json"
+    unreadable.mkdir()  # exists but cannot be read as a file: the window cannot be proven
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("x")
+    for state in (unreadable, blocker / "state.json"):
+        assert arm(state, now_epoch=T0, notifier=notifier, opener=never_opens) == "already_pending_skipped"
+        assert arm(state, now_epoch=T0, status=lambda: {"pending": False}, opener=opener, notifier=notifier) == "uncertain"
+    assert sent == [] and opened == [], "no claim on disk means nothing is armed and nothing is dispatched"
+    assert unreadable.is_dir(), "the unreadable state is left untouched"
+
+
+def test_winning_claim_is_durable_before_the_arm_post_and_carries_an_attempt_id(tmp_path):
+    state = tmp_path / "state.json"
+    at_post = []
+
+    def opener(_payload):
+        at_post.append(json.loads(state.read_text()))
+        return ARMED_OK
+
+    assert arm(state, now_epoch=T0, status=lambda: {"pending": False}, opener=opener,
+               notifier=lambda _text: True) == "armed_alerted"
+    assert len(at_post) == 1
+    assert at_post[0]["status"] == "attempted" and at_post[0]["last_attempt_epoch"] == T0
+    assert at_post[0]["attempt"], "the winning intent names its attempt"
+    assert json.loads(state.read_text())["attempt"] == at_post[0]["attempt"], "later writes keep the same attempt"
+
+
+def test_a_later_due_window_alerts_once_when_two_callers_race_it(tmp_path):
+    """The UNKNOWN send of the first window is never retried; the next policy-due window is one new reminder."""
+    state = tmp_path / "state.json"
+    sent, inner = [], []
+
+    def lost_receipt(text):
+        sent.append(text)
+        return False
+
+    assert arm(state, now_epoch=T0, notifier=lost_receipt, opener=never_opens) == "already_pending_unconfirmed"
+    assert json.loads(state.read_text())["alert"] == "issued"
+    due = T0 + memory.COOLDOWN_S
+
+    def status_while_rival_completes():
+        if not inner:
+            inner.append(arm(state, now_epoch=due, notifier=lost_receipt, opener=never_opens))
+        return {"pending": True}
+
+    outer = arm(state, now_epoch=due, notifier=lost_receipt, status=status_while_rival_completes, opener=never_opens)
+    assert inner == ["already_pending_unconfirmed"]
+    assert outer == "cooldown"
+    assert len(sent) == 2, "one reminder per policy-due window, never a second send in the same window"
+    saved = json.loads(state.read_text())
+    assert saved["last_attempt_epoch"] == due and saved["alert"] == "issued"
