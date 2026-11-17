@@ -178,6 +178,12 @@ Source: Rajiv D0AMF0XE6TS ts 1794290954.291729 ("add prodcut rule for fewest cli
 - Required: primary actions complete in one click; protect data automatically (e.g. silent backup download) and report via toast (title + body).
 - Plans state the click count per changed user path. Tests: one-click completion, no dialog rendered, automatic protective side effect fires.
 
+## No-mixed-frontend-backend-PR gate
+Source: Rajiv C0ALZJHGE49 ts 1794900575.602869 ("avoid mixing frontend and backend in same pr. it should require a waiver."). Rule: ~/.claude/rules/57-heydonna-separate-frontend-backend-prs.md.
+- A plan/PR is backend (modal/, convex/, app/api/, app/actions/, pipeline) OR frontend (components/, app/(pages)/, hooks/, client lib/editor/, its docs-site page), not both.
+- Both sides without a quoted Rajiv waiver (ts) → BLOCK / REQUEST_CHANGES; required pattern: backend issue+PR first, frontend child issue blocked-by it.
+- Tests/fixtures/inventories of one side don't count as mixing.
+
 ## Review Source Invariant
 
 Before reading the plan file, adjudicating the plan, or writing a `/tmp` plan

@@ -198,6 +198,22 @@ qa_put() {  # LOCAL REMOTE_ABS
 qa_rsh() {  # CMD (bash -c); stdin forwarded
   if [ -n "$pool_lane" ]; then "$rtb" run "$box" -- bash -c "$1"; else ssh "${ssho[@]}" "root@$ip" "$1"; fi
 }
+qa_ssh_retry_used=0
+# One bounded retry of a refused SSH/scp (sshd not yet stable after cloud-init). Not a loop; budget is per run.
+# Same helper as remote-qa-capture.sh. --extra-secret setup calls it; without this definition bash exits 127
+# (qa_net: command not found) before Playwright. Does not change what qa_put/qa_rsh send.
+qa_net() {
+  local rc
+  "$@" 2>"$out/ssh-retry.err" && rc=0 || rc=$?
+  if [ "$rc" = 255 ] && [ "$qa_ssh_retry_used" = 0 ] && grep -q 'Connection refused' "$out/ssh-retry.err"; then
+    qa_ssh_retry_used=1
+    echo "QA_SSH_RETRY reason=connection_refused backoff_seconds=30 command=$1" | tee -a "$out/retries.log" >&2
+    sleep 30
+    "$@" 2>"$out/ssh-retry.err" && rc=0 || rc=$?
+  fi
+  [ ! -s "$out/ssh-retry.err" ] || cat "$out/ssh-retry.err" >&2
+  return "$rc"
+}
 # onmiss_label OUT RC -> sets ONMISS_{LABEL,VERDICT,REASON,RC,CAPTURES,BOUND}. Pure over <out>/llm-onmiss.txt + <out>/out/llm-ledger.json
 # (the controller's capture-report). A run with any live capture is ON_MISS_CAPTURED, never a strict-replay pass; a typed
 # QA_ONMISS_* terminal or a missing/unreadable report fails closed. (ONMISS_LABEL_BEGIN/END delimit it for the stub proof.)

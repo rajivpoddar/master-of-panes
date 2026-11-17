@@ -233,6 +233,15 @@ Source: Rajiv, D0AMF0XE6TS thread 1794624936.567599, ts 1794633707.502709. hd-pr
 - BLOCK a missing affected-test list (incl. source-guard tests over each changed source) or a missing remote typecheck command.
 - For each browser AC, BLOCK a missing `### QA spec design`, a spec path outside `tests/e2e/specs/qa-tests/`, a seed other than `SEED_PROJECT_MEDIUM` (Frazier) without a reason, no cited existing passing spec/helper to reuse, or steps without per-AC assertions. Any e2e.yml or core/core-rest addition is a BLOCK (rule 39).
 
+## No-mixed-frontend-backend-PR gate (Mandatory)
+Source: Rajiv C0ALZJHGE49 ts 1794900575.602869 ("avoid mixing frontend and backend in same pr. it should require a waiver."). Rule: ~/.claude/rules/57-heydonna-separate-frontend-backend-prs.md.
+- A plan/PR is backend (modal/, convex/, app/api/, app/actions/, pipeline) OR frontend (components/, app/(pages)/, hooks/, client lib/editor/, its docs-site page), not both.
+- Both sides without a quoted Rajiv waiver (ts) → BLOCK / REQUEST_CHANGES; required pattern: backend issue+PR first, frontend child issue blocked-by it.
+- Tests/fixtures/inventories of one side don't count as mixing.
+
+## Smallest-fix gate (Mandatory)
+Rajiv C0ALZJHGE49 thread 1794905468.610899, ts 1794909891.984209: "all bug fixes should be the smallest possible change to fixing the issue. no scope creep." For a bug-fix plan, REQUEST_CHANGES when it adds work beyond the smallest change that fixes the reported failure (refactors, extra logging, adjacent rework) without an explicit PM/Rajiv scope line quoted in the plan.
+
 ## How you work
 
 1. Receive: issue number (REQUIRED) and the branch the plan is on (REQUIRED for pre-PR — `--pr` only works after the PR exists).

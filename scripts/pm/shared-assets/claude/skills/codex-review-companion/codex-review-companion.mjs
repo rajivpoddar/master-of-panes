@@ -2693,6 +2693,19 @@ function blockerFingerprint(blocker) {
   return crypto.createHash("sha256").update(canonical).digest("hex");
 }
 
+// Rajiv 2026-11-17 (C0ALZJHGE49 thread 1794905468.610899, ts 1794915485.918919):
+// "Remove the rule. It runs in e2e directly". The old QA check 6 told the
+// reviewer to demand browser project-creation → auto-process proof whenever a
+// diff touched modal/**. Models still emit that sentence, and the legacy
+// fallback below then stamps it origin=legacy_synthesized. Drop that retired
+// proof class for every PR. Check 9 (named-property assertion vs path) stays.
+function isRetiredModalBrowserE2eProof(description) {
+  const text = String(description || "");
+  return /modal browser testing is missing|browser-based project creation|mandatory review rule requires browser|browser-based end-to-end pipeline|check\s*#?\s*6\s+requires browser|end-to-end regression assertion missing|modal-browser-001|missing browser\/pipeline test|browser-based e2e pipeline testing missing/i.test(
+    text,
+  );
+}
+
 function parseBlockers(text, findings, verdict) {
   const blockers = [];
   let current = null;
@@ -3067,7 +3080,41 @@ function parseVerdict(reviewType, text) {
       `a P0/P1 override or open blocker is always blocking; refusing to publish a passing marker.`;
     verdict = "REQUEST_CHANGES";
   }
-  const blockers = parseBlockers(text, findings, verdict);
+  let blockers = parseBlockers(text, findings, verdict);
+  if (reviewType === "qa") {
+    const droppedRetiredProof =
+      findings.some((finding) =>
+        isRetiredModalBrowserE2eProof(finding.description),
+      ) ||
+      blockers.some((blocker) =>
+        isRetiredModalBrowserE2eProof(blocker.description),
+      );
+    for (let i = findings.length - 1; i >= 0; i -= 1) {
+      if (isRetiredModalBrowserE2eProof(findings[i].description)) {
+        findings.splice(i, 1);
+      }
+    }
+    blockers = blockers.filter(
+      (blocker) => !isRetiredModalBrowserE2eProof(blocker.description),
+    );
+    // A QA block whose only substance was the retired browser/E2E-layer proof
+    // rule is not a blocker. Leave a real remaining finding or OPEN blocker,
+    // and leave a prose-only block that did not match this class, alone.
+    if (
+      droppedRetiredProof &&
+      findings.length === 0 &&
+      !blockers.some((blocker) => blocker.status === "OPEN") &&
+      ["NEEDS_REVISION", "REVISE", "REQUEST_CHANGES"].includes(verdict)
+    ) {
+      verdict = "VERIFIED";
+      if (
+        headerBodyDisagreement &&
+        headerBodyDisagreement.includes("an OPEN blocker")
+      ) {
+        headerBodyDisagreement = null;
+      }
+    }
+  }
 
   // Exit code mapping
   const exitCode = {

@@ -574,6 +574,12 @@ severity labels or made warning UI smaller while non-catastrophic states still
 reserved editor chrome. The final contract was "no persistent editor banner
 unless catastrophic", not "less prominent warnings".
 
+## No-mixed-frontend-backend-PR gate (Mandatory)
+Source: Rajiv C0ALZJHGE49 ts 1794900575.602869 ("avoid mixing frontend and backend in same pr. it should require a waiver."). Rule: ~/.claude/rules/57-heydonna-separate-frontend-backend-prs.md.
+- A plan/PR is backend (modal/, convex/, app/api/, app/actions/, pipeline) OR frontend (components/, app/(pages)/, hooks/, client lib/editor/, its docs-site page), not both.
+- Both sides without a quoted Rajiv waiver (ts) → BLOCK / REQUEST_CHANGES; required pattern: backend issue+PR first, frontend child issue blocked-by it.
+- Tests/fixtures/inventories of one side don't count as mixing.
+
 ## No-disabled-button gate (Mandatory - Rajiv product rule 2026-09-26)
 
 UI RULE (Rajiv 2026-09-26): Do not gate actions with disabled buttons. Buttons stay enabled; on click, validate and render an error state on the offending control (checkbox/field error styling + inline message) and do not proceed. The only allowed disabled state is the action's own in-flight/double-submit guard. Plans and reviews must call out any new `disabled=` on a button that encodes a precondition and require the error-state pattern instead.

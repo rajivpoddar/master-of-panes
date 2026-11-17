@@ -60,6 +60,64 @@ def burn_for(key, pct, reset):
     return burn
 
 
+# Pace-clause measure (heartbeat-compose.py pace_status / pace_table): the rate is a ROLLING average since the first
+# sample on or after the account's baseline_from in hourly-pace.json, within the same weekly window. Whole-percent
+# samples make a one-hour anchor read 0 or 1 %/h, so the pool decision uses this measure for accounts that have a
+# pace baseline (Rajiv hourly 2026-11-17 16:17: table 0.50 vs pool 1.00 for the same Codex account).
+PACE_CONFIG = os.path.join(HOME, '.claude/state/hourly-pace.json')
+ROLLING_MIN_HOURS = 0.25  # same floor as the pace clause: a baseline this young carries no rate
+
+
+def pace_baseline_from(key, path=None):
+    """Epoch of the account's pace baseline_from, or None when the key has no usable baseline."""
+    path = path or os.environ.get('HOURLY_PACE_CONFIG') or PACE_CONFIG
+    try:
+        with open(path) as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return None
+    for a in (raw.get('accounts') if isinstance(raw, dict) else None) or []:
+        if isinstance(a, dict) and a.get('key') == key and isinstance(a.get('baseline_from'), str):
+            try:
+                parsed = dt.datetime.fromisoformat(a['baseline_from'].strip().replace('Z', '+00:00'))
+            except ValueError:
+                return None
+            return parsed.timestamp() if parsed.tzinfo is not None else None
+    return None
+
+
+def rolling_burn(key, pct, reset, ts):
+    """%/h since the pace baseline: (pct - pct at first sample on/after baseline_from) / hours, same weekly window.
+    None when there is no baseline, the window changed, usage fell, or the window is under ROLLING_MIN_HOURS."""
+    base_from = pace_baseline_from(key)
+    if base_from is None or not math.isfinite(ts):
+        return None
+    first = None
+    try:
+        with open(LOG) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(r, dict) or r.get('key') != key:
+                    continue
+                r_ts, r_pct, r_reset = r.get('ts'), r.get('pct'), r.get('reset')
+                if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+                       for v in (r_ts, r_pct, r_reset)):
+                    continue
+                if r_ts >= base_from and abs(reset - r_reset) < 60 and (first is None or r_ts < first['ts']):
+                    first = {'ts': r_ts, 'pct': r_pct}
+    except OSError:
+        return None
+    if first is None:
+        return None
+    hours = (ts - first['ts']) / 3600
+    if hours < ROLLING_MIN_HOURS or pct < first['pct']:
+        return None
+    return (pct - first['pct']) / hours
+
+
 def meter(latest, field):
     # Type-check BEFORE float(): float(False) == 0.0 would turn a bad reading into an allow.
     value = latest[field]
@@ -214,6 +272,13 @@ def pool_status(pool, accounts, rows, now, horizons=None):
         s = session_state(pool, a, rows, now)
         d.update(session=s['state'], session_reset=s['reset'],
                  usable=d['decision'] in ('allow', 'over_budget') and s['state'] in USABLE_SESSION)
+        # The pool verdict and the per-account row use the same pace-clause rate as the hourly table when a baseline
+        # exists; accounts without one keep the one-hour anchor. The launcher gate (account_detail) is unchanged.
+        if d['decision'] in ('allow', 'over_budget') and d.get('ts') is not None:
+            roll = rolling_burn(f'{pool}:{a}:weekly', d['pct'], d['reset'], d['ts'])
+            if roll is not None:
+                d.update(burn=roll, headroom=d['budget'] - roll, burn_measure='rolling',
+                         decision='over_budget' if roll > d['budget'] else 'allow')
         details.append((a, d))
     live = [d for _, d in details if d['decision'] in ('allow', 'over_budget')]
     usable = [d for d in live if d['usable']]

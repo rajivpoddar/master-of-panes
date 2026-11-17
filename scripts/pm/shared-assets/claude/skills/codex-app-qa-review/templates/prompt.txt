@@ -60,14 +60,18 @@ Check these 11 things ONLY:
    written or at minimum documented as needed? A bug fix without a regression
    test is incomplete.
 
-6. MODAL CHANGE BROWSER TESTING: If the PR diff includes ANY file under modal/
-   (audio/, docx/, or root modal files), the QA report MUST include evidence of
-   browser-based end-to-end pipeline testing (project creation → auto-process →
-   completion verification). Unit tests and Python tests alone are INSUFFICIENT
-   for Modal changes. If modal/ files are in the diff but the report only shows
-   unit/Python test results with no browser/pipeline test, that is a NEEDS_REVISION
-   finding. (Rajiv directive 2026-03-31: PR #3217 Modal change passed Codex QA
-   review with only unit tests — this check would have caught it.)
+6. RETIRED — BROWSER PROJECT-CREATION / E2E-LAYER PROOF (do not apply, any PR):
+   Do NOT require browser-based project creation → auto-process testing, and do
+   NOT require an end-to-end regression assertion, whether or not the diff
+   touches modal/** (including tests, fixtures, docs, and plans) or a UI
+   surface. Auto-process pipeline regression runs in CI E2E
+   (auto-process-regression) and is not a QA-review blocker. Unit and Python
+   tests are sufficient for a modal change. Never emit NEEDS_REVISION, a PROOF
+   blocker, "Modal browser testing is missing", or "End-to-end regression
+   assertion missing" for this retired rule. (Rajiv 2026-11-17, C0ALZJHGE49
+   thread 1794905468.610899, ts 1794915485.918919: "Remove the rule. It runs
+   in e2e directly." Supersedes the 2026-03-31 PR #3217 modal-browser check.)
+   Named-property assertion-vs-path (check 9) is unchanged.
 
 7. DATA-DRIVEN FEATURE TESTING: If the PR creates new database tables or data
    types (schema additions in convex/schema.ts), the QA report MUST include
@@ -229,6 +233,9 @@ Do NOT flag any of the following:
 - Style or structure of the report
 - Severity assessments on CONDITIONAL PASS
 - Whether the QA tester used the "right" browser or device
+- Missing browser project-creation → auto-process testing, or a missing
+  end-to-end regression assertion. That requirement is retired (check 6);
+  CI E2E covers auto-process. Do not emit it as a finding or PROOF blocker.
 
 DO flag: "Pre-existing" classification of the reported symptom. If the issue
 was filed because X happens, and X still happens after the fix, that's FAIL —

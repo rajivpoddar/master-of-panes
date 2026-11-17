@@ -245,6 +245,16 @@ The plan is the contract that the implementer codes against and hd-proof-qa exec
 Source: Rajiv, C0ALZJHGE49 thread 1794234970.206389, ts 1794487134.343129; rule `~/.claude/rules/56-heydonna-ci-main-shared-concurrency.md`.
 For `ci.yml`, require one shared newest-head group `ci-main` with `cancel-in-progress` true for push-to-main and false for schedule (rule 56 amendment, Rajiv 2026-11-15); BLOCK per-SHA groups or any design that queues main runs per commit. Require a workflow contract test asserting main push resolves to that shared group. Main-red culprit attribution uses bisect, not every commit.
 
+## No-mixed-frontend-backend-PR Planning Gate
+Source: Rajiv C0ALZJHGE49 ts 1794900575.602869 ("avoid mixing frontend and backend in same pr. it should require a waiver."). Rule: ~/.claude/rules/57-heydonna-separate-frontend-backend-prs.md.
+- A plan/PR is backend (modal/, convex/, app/api/, app/actions/, pipeline) OR frontend (components/, app/(pages)/, hooks/, client lib/editor/, its docs-site page), not both.
+- Both sides without a quoted Rajiv waiver (ts) → BLOCK / REQUEST_CHANGES; required pattern: backend issue+PR first, frontend child issue blocked-by it.
+- Tests/fixtures/inventories of one side don't count as mixing.
+
+## Smallest-Fix Check (Mandatory)
+Source: Rajiv C0ALZJHGE49 thread 1794905468.610899, ts 1794909798.838929 ("why did plan grow?"), after #13962 grew from one hard-reject→warning change into three parts.
+Rajiv, same thread, ts 1794909891.984209: "all bug fixes should be the smallest possible change to fixing the issue. no scope creep." For every bug fix, before planning, state in one line the smallest change that fixes the issue's reported production failure. If any AC goes beyond it (refactor, ladder rework, new logging, adjacent cleanup), flag it in `## Scope check` as "beyond the smallest fix" and ask PM to confirm or drop it; do not expand scope on your own. Plan the smallest fix first.
+
 ## Input
 
 You will receive:
