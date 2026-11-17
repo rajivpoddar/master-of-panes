@@ -2383,6 +2383,7 @@ export class TmuxRelay {
       const tmpFile = `/tmp/mop-guarded-${slotNum}-${Date.now()}.txt`;
       const bufName = `mop-guarded-${slotNum}`;
       let enterSent = 0;
+      let deliveryConfirmed = false;
       let preEnterRefusal: string | null = null;
       // A native queued banner observed before the paste/Enter is pre-existing
       // state, never evidence that THIS send was queued.
@@ -2464,6 +2465,7 @@ export class TmuxRelay {
           && (submit.cleared === true || (submit.queued === true && !(opts.allowNativeQueuedInput && nativeQueueSeen)))
           && (submit.enterPresses === 1 || (slash && submit.enterPresses === 2));
         if (confirmed) {
+          deliveryConfirmed = true;
           if (attempt && this.db) { attempt.phase = "delivered"; this.db.saveExitAttempt(slotNum, attempt); }
           return { outcome: "delivered", paneId };
         }
@@ -2516,11 +2518,19 @@ export class TmuxRelay {
           attempt.phase = "unknown";
           this.db.saveExitAttempt(slotNum, attempt);
         }
-        if (slotNum === 0 && command !== "/exit" && opts.continuationDraft && effectAttempted && enterSent === 0) {
-          // The continuation was pasted and its Enter withheld or never reached: same custody boundary as the /exit draft,
-          // inside this same send lock. The consumed attempt (caller-owned) is never touched here.
-          await this.reconcileUnsubmittedContinuationDraft(paneId, command, opts.continuationDraft, prePasteComposer,
-            opts.bracketedPaste === true, capture);
+        if (slotNum === 0 && command !== "/exit" && opts.continuationDraft && effectAttempted) {
+          if (enterSent === 0) {
+            // The continuation was pasted and its Enter withheld or never reached: same custody boundary as the /exit draft,
+            // inside this same send lock. The consumed attempt (caller-owned) is never touched here.
+            await this.reconcileUnsubmittedContinuationDraft(paneId, command, opts.continuationDraft, prePasteComposer,
+              opts.bracketedPaste === true, capture);
+          } else if (!deliveryConfirmed) {
+            // Enter was marked attempted before tmux, so a lost acknowledgement or a failed key leaves the outcome
+            // unresolved (CTO REVISE ts 1794951624.218829, item 2): the draft may still be in the composer. The attempt
+            // stays consumed (never retried), no cleanup runs and NO Ctrl-U is sent here; the hold alone keeps the next
+            // queued message out of that draft until injectDirectNow observes an empty composer.
+            this.holdUnresolvedContinuationEnter(paneId);
+          }
         }
         await fs.unlink(tmpFile).catch(() => undefined);
         if (enterSent > 0 && opts.exitEpisode && exitProcess) {
@@ -2535,6 +2545,20 @@ export class TmuxRelay {
   }
 
   /**
+   * The continuation's Enter was marked attempted but its outcome is unresolved (lost acknowledgement, failed or
+   * unconfirmed key): the draft may still sit in the composer, and the next queued message must not be pasted into it
+   * (CTO REVISE C0ALZJHGE49/1794941233.245629, ts 1794951624.218829, item 2). Hold only, never a clearing key: whether
+   * the Enter reached the pane is unknown, so nothing here may delete text. `injectDirectNow` releases the hold once it
+   * observes an empty composer. The consumed attempt is caller-owned and untouched; the continuation is never resent.
+   */
+  private holdUnresolvedContinuationEnter(paneId: string): void {
+    this.db?.setConfig("pm_exit_cleanup_pending", JSON.stringify({ paneId, kind: "pm_restart_continuation_enter_unresolved" }));
+    this.db?.logEvent(0, "pm_restart_continuation_draft", null, null, {
+      pane_id: paneId, removed: false, reason: "enter_unresolved_hold_only", held: true,
+    });
+  }
+
+  /**
    * A PM restart continuation was pasted but its Enter was withheld or never reached (PM inbound or real input arrived
    * after the paste, the composer stopped being provably ours, ...). Its text is still in the composer, and the next
    * queued message must never be pasted into it and submitted alongside it (CTO REVISE C0ALZJHGE49/1794941233.245629,
@@ -2542,10 +2566,11 @@ export class TmuxRelay {
    * by injectDirectNow), run inside the caller's slot send lock. It is a paste-safety hold on MoP's own automated paste,
    * not an input or tool admission gate: PM hooks and tools are untouched and every held message stays queued.
    * - The hold is written FIRST and cleared only once the draft is proven gone (removed by us, or already empty).
-   * - Removal needs the same pane, boot and owned process (awaited proof, then a fresh composer read, then a synchronous
-   *   boot fence right before each key) and a composer that holds exactly this payload: whitespace reflow tolerated,
-   *   nothing else. Human text, a changed or unreadable composer, a thrown probe or an unconfirmed Ctrl-U retain the
-   *   draft and the hold.
+   * - Removal needs the same pane, boot and owned process (awaited proof, then a fresh composer read that must equal the
+   *   last verified owned text, then a synchronous boot fence, all immediately before EVERY key, not only the first) and
+   *   a composer that holds exactly this payload: whitespace reflow tolerated, nothing else. Human text, a changed or
+   *   unreadable composer (including text typed while a later ownership probe was in flight), a thrown probe or an
+   *   unconfirmed Ctrl-U retain the draft and the hold.
    * - The consumed continuation attempt is never reset and the continuation is never resent (both caller-owned).
    */
   private async reconcileUnsubmittedContinuationDraft(
@@ -2579,24 +2604,30 @@ export class TmuxRelay {
         })) {
           reason = "composer_not_exact_draft";
         } else {
-          let presses = 0;
+          // Why a key was refused, so the typed event names it (the helper only reports a generic stop).
+          const key: { refusal: string | null } = { refusal: null };
+          const refuseKey = (why: string): string => { key.refusal = why; return why; };
           const cleanup = await clearOwnedRefusedPasteComposer(payload, {
             prePasteComposer,
             lastObservedComposer: first,
             enterPresses: 0,
             capture,
-            clearComposer: async () => {
-              if (!(await owns())) return "ownership_lost";
-              if (presses === 0 && composerText(await capture()) !== first) return "draft_changed";
-              if (!draft.sameBoot()) return "boot_changed";
-              presses++;
+            // EVERY Ctrl-U (not only the first): the ownership probe below is an await a person can type during
+            // (CTO REVISE ts 1794951624.218829). So after it, re-read the composer and require exactly the owned text
+            // the helper last verified (the draft for the first key, the validated remainder after each press), then a
+            // synchronous boot fence, then the key. Any difference stops the clear and retains the draft and the hold.
+            // The only await left between that read and the key is the tmux call itself.
+            clearComposer: async (expectedComposer) => {
+              if (!(await owns())) return refuseKey("ownership_lost");
+              if (composerText(await capture()) !== expectedComposer) return refuseKey("draft_changed");
+              if (!draft.sameBoot()) return refuseKey("boot_changed");
               await this.runShell(`tmux send-keys -t ${paneId} C-u`, { timeout: 3_000 });
               return true;
             },
             sleep,
           });
           removed = cleanup.cleared;
-          reason = cleanup.reason;
+          reason = !removed && key.refusal ? key.refusal : cleanup.reason;
         }
       }
     } catch {

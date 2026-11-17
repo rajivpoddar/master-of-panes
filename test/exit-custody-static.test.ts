@@ -67,14 +67,32 @@ test("an unsubmitted PM continuation draft is held and cleaned only on the exact
   assert.ok(body.includes("composerOwnsOnlyPayload(first, payload"));
   assert.ok(body.indexOf("if (!(await owns())) return") < body.lastIndexOf("draft.sameBoot()"));
   assert.ok(body.lastIndexOf("draft.sameBoot()") < body.indexOf("C-u"), "the last fence is synchronous and right before the key");
+  // EVERY key (CTO REVISE ts 1794951624.218829): the composer is re-read AFTER the ownership await and must equal the text
+  // the helper last verified as owned, in the same callback that sends the key (no per-first-press special case).
+  const keyCb = body.slice(body.indexOf("clearComposer: async (expectedComposer)"), body.indexOf("sleep,", body.indexOf("clearComposer: async (expectedComposer)")));
+  assert.ok(keyCb.indexOf("await owns()") < keyCb.indexOf("composerText(await capture()) !== expectedComposer"));
+  assert.ok(keyCb.indexOf("!== expectedComposer") < keyCb.indexOf("draft.sameBoot()"));
+  assert.ok(keyCb.indexOf("draft.sameBoot()") < keyCb.indexOf("C-u"));
+  assert.ok(!keyCb.includes("presses === 0"), "no first-press-only composer recheck");
   // Called from the guarded writer's finally (same lock), never after an Enter, never for /exit (its own block).
   const call = relay.indexOf("this.reconcileUnsubmittedContinuationDraft(paneId, command");
-  assert.ok(relay.includes('slotNum === 0 && command !== "/exit" && opts.continuationDraft && effectAttempted && enterSent === 0'));
+  assert.ok(relay.includes('slotNum === 0 && command !== "/exit" && opts.continuationDraft && effectAttempted'));
+  assert.ok(relay.indexOf("if (enterSent === 0) {", relay.indexOf("opts.continuationDraft && effectAttempted")) < call);
   assert.ok(call > relay.indexOf('command === "/exit" && effectAttempted && enterSent === 0'));
   assert.ok(call < relay.indexOf("await fs.unlink(tmpFile)", call));
   // The consumed attempt is never reset here and the continuation is never resent.
   assert.ok(!body.includes("exit_pending_continuation_delivery"));
   assert.ok(!body.includes("Enter"));
+});
+test("an unresolved continuation Enter holds automated paste only: no clearing key, the consumed attempt stays consumed (CTO REVISE ts 1794951624.218829)", () => {
+  const branch = relay.slice(relay.indexOf("} else if (!deliveryConfirmed) {"), relay.indexOf("await fs.unlink(tmpFile)", relay.indexOf("} else if (!deliveryConfirmed) {")));
+  assert.ok(branch.includes("this.holdUnresolvedContinuationEnter(paneId)"));
+  assert.ok(!branch.includes("C-u") && !branch.includes("reconcileUnsubmittedContinuationDraft") && !branch.includes("runShell"));
+  const hold = relay.slice(relay.indexOf("private holdUnresolvedContinuationEnter"), relay.indexOf("private async reconcileUnsubmittedContinuationDraft"));
+  assert.ok(hold.includes('setConfig("pm_exit_cleanup_pending", JSON.stringify'));
+  assert.ok(!hold.includes("C-u") && !hold.includes("send-keys") && !hold.includes("exit_pending_continuation_delivery"));
+  // Only an unconfirmed delivery holds: the flag is set exactly where the send is confirmed.
+  assert.ok(relay.includes("deliveryConfirmed = true;"));
 });
 test("continuation draft ownership is physical (same boot + owned process), never the input fence", () => {
   const owner = health.slice(health.indexOf("const sameBoot ="), health.indexOf("const result = await this.relay.deliverGuardedToSlot(0, prompt"));

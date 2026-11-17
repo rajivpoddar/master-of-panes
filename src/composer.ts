@@ -430,8 +430,14 @@ export type RefusedPasteCleanupDeps = {
   /**
    * Return true after sending C-u; false (or a refusal string) when the pane
    * mode or the operation generation changed and C-u must not be sent.
+   * `expectedComposer` is the exact composer text this helper last verified as
+   * owned (the verified draft for the first key, the validated remainder for
+   * every later key). A caller that awaits anything (an ownership probe)
+   * before its key must re-read the composer AFTER that await and send C-u
+   * only when it still equals `expectedComposer`: a person may have typed
+   * meanwhile (CTO REVISE C0ALZJHGE49/1794941233.245629, ts 1794951624.218829).
    */
-  clearComposer: () => Promise<boolean | string>;
+  clearComposer: (expectedComposer: string) => Promise<boolean | string>;
   sleep: (ms: number) => Promise<void>;
   stableMs?: number;
   timeoutMs?: number;
@@ -516,10 +522,12 @@ export async function clearOwnedRefusedPasteComposer(
       ? Math.max(1, payload.trim().split("\n").length)
       : owned.ids.size + currentComposer.split("\n").length,
   );
+  // The composer text the next key may act on: verified above for press 0, then the remainder validated after each press.
+  let expectedComposer = currentComposer;
   for (let presses = 0; ; presses++) {
     let clearSent: boolean | string;
     try {
-      clearSent = await deps.clearComposer();
+      clearSent = await deps.clearComposer(expectedComposer);
     } catch {
       return { attempted: true, cleared: false, reason: "clear_key_outcome_unknown" };
     }
@@ -545,6 +553,7 @@ export async function clearOwnedRefusedPasteComposer(
     ) {
       return { attempted: true, cleared: false, reason: "composer_empty_not_confirmed" };
     }
+    expectedComposer = remaining;
   }
 }
 
