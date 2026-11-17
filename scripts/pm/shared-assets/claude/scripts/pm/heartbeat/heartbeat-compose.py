@@ -2157,6 +2157,10 @@ def compact_report(lines: list[str], limit: int, cadence: str | None = None) -> 
                 in_proxies = True
             elif row.startswith('*') or row.startswith('_Ops:_'):
                 in_proxies = False
+            # 3h keeps every bullet on its own line. Joining them with "; " is what
+            # made the heartbeat unreadable (Rajiv ts 1794919016.184639). 1h still folds.
+            if cadence == "3h" and row.lstrip().startswith(("•", "- ", "  ")):
+                continue
             if not in_proxies and row.lstrip().startswith(("•", "- ", "  ")) and i:
                 start = i
                 while start > 0 and rows[start - 1].lstrip().startswith(("•", "- ")):
@@ -2721,14 +2725,13 @@ def compose(
         sup_lines, sup_tldr = support_block(support, window)
         parts.append(sup_tldr)
         body += ["", *sup_lines]
-    # 3h heartbeat: no open-PR or slots report; Claude + Codex usage always
-    # (Rajiv 2026-10-07 12:25 IST, C0ALZJHGE49 thread 1791355967.794539).
+    # 3h heartbeat: no open-PR or slots report (Rajiv 2026-10-07 12:25 IST,
+    # C0ALZJHGE49 thread 1791355967.794539) and no Claude/Codex usage block
+    # (Rajiv 2026-11-17, C0ALZJHGE49 thread 1794918927.001059, ts 1794919016.184639).
+    # The 1h Pace table and burn rows are not rendered on this path.
     if mode == "3h":
         include_slots = False
         merge_asks = []
-        ul = account_usage_lines(usage_lines, missing_reason=usage_error or "not reported")
-        body += ["", "*Usage (Claude + Codex):*", *["• " + u for u in ul]]
-        parts.append(_usage_tldr(ul))
         # Email digest lives only in the 3h heartbeat; the DM is removed (Rajiv 2026-10-09 12:06 IST,
         # DM D0AMF0XE6TS 1791527801.053979). Shared channel: sender + subject only, previews stripped.
         body += ["", *email_block(email_doc)]
@@ -2790,7 +2793,9 @@ def compose(
     report = cap_lines(compact_report(lines, 23 if mode == "3h" else 20 + burn_extra + pace_extra, cadence=mode),
                        MAX_LINE_CHARS - LINE_NOTE_RESERVE)
     if mode == "3h":
-        report = '\n'.join(line for line in report.splitlines() if line.strip()).replace(CTO, '')
+        # compact_report already placed exactly one empty line before each
+        # *section* and _Ops:_ header. Do not strip those (Rajiv ts 1794919016.184639).
+        report = report.replace(CTO, '')
         return report + f"\n_MoP composer release: {composer_release_sha()}_"
     return report + f"\n\n_MoP composer release: {composer_release_sha()}_"
 
@@ -3373,14 +3378,11 @@ def main() -> int:
             (out / f"{name}.json").write_text(json.dumps(value, indent=2))
 
     # Usage is sampled once per hour, only by the claimed normal 1h producer (collect_hourly with a live
-    # --sample-usage-claim). The 3h heartbeat and every unclaimed 1h render read that cache and never run
-    # the collector, so the hours do not double-sample.
+    # --sample-usage-claim). Unclaimed 1h renders read that cache and never run the collector.
+    # 3h no longer renders Claude/Codex usage, so it must not sample it or
+    # append a usage failure to _Ops:_ (Rajiv ts 1794919016.184639).
     usage_lines = None
     usage_error = None
-    if args.mode == "3h":
-        usage_lines, usage_error = read_hourly_usage()
-        if usage_error:
-            failures.append(f"usage: {usage_error}")
     email_doc = None
     if args.mode == "3h":
         try:

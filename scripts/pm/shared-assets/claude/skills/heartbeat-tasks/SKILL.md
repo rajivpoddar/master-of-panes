@@ -3,7 +3,7 @@ name: heartbeat-tasks
 description: |
   3h Sakshi heartbeat, triggered by MoP every 3 hours. PM launches one
   background agent. The agent composes a product-signal post (Axiom errors,
-  support inbox, active users, Claude + Codex usage), posts it as one new top-level message in
+  support inbox, active users), posts it as one new top-level message in
   #heydonna-dev, and runs the remaining housekeeping silently.
   Use when: MoP asks PM to invoke `Skill(heartbeat-tasks)`, or a heartbeat is
   requested manually.
@@ -113,8 +113,7 @@ Scripts are MoP-installed at `~/.claude/scripts/pm/heartbeat/` (Axiom queries in
 | Axiom errors | `axiom-activity-report.py --hours 3 --errors-by-code --compare` (codes, distinct users, prior 3h, 7-day same-slot median) |
 | Code → issue | `heartbeat-error-map.py` (open GitHub issues/PRs, open pm-ops rows, `docs/investigations/`); unmapped = `NEW` |
 | Support | `support-inbox-snapshot.py` (C0A56RX6FNW + C0AGWPQFKHA via the PM bot token; in-app `feedback` via `npx convex data feedback --prod`, PM-only per rule 11c) |
-| Usage | `~/.claude/scripts/usage-snapshot.py` (Claude + Codex weekly %, reset, burn/ETA). Sampled ONCE PER HOUR, only by the claimed normal 1h producer (`pm-hourly-post.sh` claims the bucket, then passes `--sample-usage-claim` so `collect_hourly` registers the sampler); bare/saved-input 1h renders and the 3h post read that cache (≤7200 s old, else UNAVAILABLE); ALWAYS in the 3h post |
-| Open PRs / slots | NOT in the 3h post (Rajiv 2026-10-07 12:25 IST, C0ALZJHGE49 thread 1791355967.794539: "drop the open pr and slots report from 3h weekly hearbeat. make sure that codex and claude usage are always there."). They stay in the hourly report. Routine PR status does not create obligation mirrors (Rajiv 2026-11-05/1793882883.242249). |
+| Open PRs / slots | NOT in the 3h post (Rajiv 2026-10-07 12:25 IST, C0ALZJHGE49 thread 1791355967.794539). They stay in the hourly report. Routine PR status does not create obligation mirrors (Rajiv 2026-11-05/1793882883.242249). Claude + Codex usage is also not in the 3h post (Rajiv 2026-11-17, ts 1794919016.184639); the hourly Pace table is unchanged. |
 
 Rules the composer enforces:
 - One-sentence TL;DR on line 1, after the CTO mention.
@@ -185,7 +184,7 @@ the agent must copy into its return value, not just post text.
 ## Proof of done
 
 A run is done when: the post is ≤ ~24 lines, has its blocks (Axiom
-errors, support inbox, active users, Claude + Codex usage; no open PRs or slots), starts with
+errors, support inbox, active users; no open PRs, slots, or Claude + Codex usage), starts with
 the CTO mention, contains no housekeeping lines, and the `OK ts=` readback is
 recorded. Target: zero CTO "heartbeat correction" replies over 4 runs.
 

@@ -460,9 +460,10 @@ def test_3h_full_post_shape():
     assert "|---" not in out  # no tables
     assert "NEW → launch customer-artifact-investigator" in out
     assert "NEEDS REPLY (95m) ⚠" in out
-    # Rajiv 2026-10-07 12:25 IST (thread 1791355967.794539): the 3h post drops
-    # open PRs/slots and always carries Claude + Codex usage.
-    assert "*Usage (Claude + Codex):*" in out
+    # Rajiv 2026-11-17 (ts 1794919016.184639): the 3h post drops Claude + Codex usage.
+    # Open PRs/slots stay out (Rajiv 2026-10-07, thread 1791355967.794539).
+    assert "*Usage (Claude + Codex):*" not in out
+    assert "usage ok" not in out and "usage WARN" not in out and "usage UNAVAILABLE" not in out
     assert "#8425" not in out and "merge ask" not in out
 
 
@@ -490,6 +491,52 @@ def test_pr_list_is_capped(n):
 
 
 @pytest.mark.parametrize("mode", ["1h", "3h"])
+def test_3h_blank_lines_separate_sections_and_bullets_stay_unjoined():
+    """Rajiv ts 1794919016.184639: one empty line between 3h sections, bullets not folded with '; '."""
+    emails = {"status": "ok", "total": 8, "items": [
+        {"name": f"Sender {i}", "subject": f"Subject {i}"} for i in range(8)
+    ]}
+    decisions = {"items": [
+        {"id": i, "pr": 8000 + i, "title": f"Decision {i}", "owner": "rajiv", "created_at": "2026-11-17T00:00:00+00:00"}
+        for i in range(6)
+    ]}
+    out = compose.compose(
+        "3h", NOW, AXIOM, MAP, PRS, support=SUPPORT, include_active=True,
+        active={"count": 2, "users": [{"user": "ada@law.com", "actions": 3, "files": 1}]},
+        email_doc=emails, decisions=decisions,
+        usage_lines=["Claude rajiv@scribie.com (keychain) weekly: 10% used, resets 21:30 IST"],
+        failures=["axiom: rc=1"],
+    )
+    assert "*Usage (Claude + Codex):*" not in out
+    lines = out.splitlines()
+    headers = [i for i, line in enumerate(lines) if line.startswith(("*Active users", "*Axiom errors", "*Support", "*Email digest", "*Decisions pending", "_Ops:_"))]
+    assert [lines[i].split(":")[0] for i in headers] == [
+        "*Active users (3h)", "*Axiom errors (3h)", "*Support (3h)",
+        "*Email digest (last 3h)", "*Decisions pending on Rajiv", "_Ops",
+    ]
+    assert all(lines[i - 1] == "" and lines[i - 2] != "" for i in headers)
+    bullets = [line for line in lines if line.startswith("• ")]
+    assert len(bullets) >= 8
+    assert all("; " not in line for line in bullets)
+    assert not any(line.startswith("↳ ") for line in lines)
+
+
+def test_1h_pace_table_is_unchanged_when_3h_drops_usage():
+    pace = "\n".join([
+        "| Account | Used | Burn %/h | Target %/h | Runs out at |",
+        "|---|---|---|---|---|",
+        "| Claude rajiv | 10% | 0.20 ✅ | ≤1.00 to Wed | Friday |",
+    ])
+    out = compose.compose(
+        "1h", NOW, AXIOM, MAP, PRS, pace=pace, burn=("*Burn:* Claude rajiv 0.20%/h", {}),
+        usage_lines=["Claude rajiv@scribie.com (keychain) weekly: 10% used"],
+    )
+    assert "| Account | Used | Burn %/h | Target %/h | Runs out at |" in out
+    assert "Claude rajiv | 10%" in out
+    assert "*Burn:* Claude rajiv 0.20%/h" in out
+    assert "*Usage (Claude + Codex):*" not in out
+
+
 def test_sections_have_one_blank_separator(mode):
     out = compose.compose(mode, NOW, AXIOM, MAP, PRS, support=SUPPORT,
                           training=("*Training:* healthy", []),

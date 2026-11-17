@@ -78,7 +78,9 @@ def test_3h_fold_always_reports_overflow_and_hourly_compaction_is_unchanged():
     rows = [f"• actionable_{i} — 1 ev / 1 users → owner-{i}" for i in range(4)]
     rows += ["• generic detail"] * 4
     folded_3h = composer.compact_report(["*Axiom errors (3h):*", *rows], limit=1, cadence="3h")
-    assert "+4 more" in folded_3h
+    # The 23-line 3h fold must not join bullets with "; " (Rajiv ts 1794919016.184639).
+    assert "+4 more" not in folded_3h and "; " not in folded_3h
+    assert folded_3h.splitlines() == ["*Axiom errors (3h):*", *rows]
     folded_1h = composer.compact_report(["*Axiom errors (1h):*", *rows], limit=1, cadence="1h")
     assert "+7 more" in folded_1h
 
