@@ -2565,8 +2565,12 @@ def _pace_clause(acct: dict, found: dict, stored, ts_now: float) -> tuple[str, d
                else f"ETA 100% {_ist(sampled + eta_hours * 3600, '%a %m-%d %H:%M')}")
         runs_out = ("not at this rate" if eta_hours > PACE_MAX_ETA_HOURS
                     else _ist(sampled + eta_hours * 3600, "%a %d %b %H:%M"))
+    # Same sample already used for the clause. The table burn cell quotes it; this is not a new measurement.
+    age_s = max(0.0, ts_now - sampled)
+    age = f"{round(age_s / 60)}m old" if age_s < 3600 else f"{age_s / 3600:.1f}h old"
+    observed = f"as of {datetime.fromtimestamp(sampled, IST).strftime('%H:%M')}, {age}"
     cells = {"used": used, "rate": rate, "hours": hours, "verdict": verdict, "runs_out": runs_out,
-             "ceiling": ceiling, "to": _ist(horizon, "%a %d %b %H:%M")}
+             "ceiling": ceiling, "to": _ist(horizon, "%a %d %b %H:%M"), "observed": observed}
     return f"{head}, measured {measured} vs ceiling {ceiling:.2f} %/h (to {to}) → {verdict}, {eta}", cache, cells
 
 
@@ -2640,8 +2644,9 @@ def _pace_table_lines(resolved: list[tuple]) -> list[str]:
             notes.append("• " + clause.replace(f"{acct['label']} {acct['name']}", display, 1))
         else:
             marker = "✅" if cells["verdict"] == "BELOW" else "⚠️"
-            thin = f", thin" if cells["hours"] < PACE_THIN_HOURS else ""
-            burn_cell = f"{rate:.2f} {marker}" + (f" ({cells['hours']:.0f}h{thin})" if thin else "")
+            # One decimal always, including a non-thin window. .0f rounded a short window to 0h and hid >=2h.
+            thin = ", thin" if cells["hours"] < PACE_THIN_HOURS else ""
+            burn_cell = f"{rate:.2f} {marker} ({cells['hours']:.1f}h window{thin}, {cells['observed']})"
             target_cell = f"≤{cells['ceiling']:.2f} to {cells['to']}"
             runs_cell = cells["runs_out"]
         rows.append([display, used_cell, burn_cell, target_cell, runs_cell])

@@ -271,3 +271,35 @@ def test_pace_table_unknown_row_reads_unknown_with_a_note_and_no_zero(tmp_path):
     assert 'UNKNOWN' in codex_row and '0.00' not in codex_row
     assert any(l.startswith('• Codex: ') and 'no usage sample' in l for l in table.splitlines())
     assert '@' not in table
+
+
+def test_pace_table_numeric_row_keeps_sample_age_and_one_decimal_window(tmp_path):
+    """Extraction to table. CTO REVISE ts 1794881751.339589: a numeric burn cell keeps the sample age and the
+    rolling-window length to one decimal, including a non-thin (>=2h) window. UNKNOWN and thin stay as they are."""
+    window_s = 2 * H + 18 * 60                                   # 2.3h, non-thin, not a whole hour
+    sample = BASE + window_s
+    now = sample + 12 * 60                                       # accepted sample, 12m old
+    thin_key = 'grok:local:weekly'
+    cfg = tmp_path / 'cfg.json'
+    cfg.write_text(json.dumps({'accounts': [
+        {'label': 'Claude', 'name': 'rajiv-scribie', 'key': CLAUDE, 'horizon': CLAUDE_HORIZON,
+         'baseline_from': '2026-11-17T00:45:00Z', 'display': 'Claude: PM pane (keychain)'},
+        {'label': 'Grok', 'name': 'local', 'key': thin_key, 'horizon': CLAUDE_HORIZON,
+         'baseline_from': '2026-11-17T00:45:00Z', 'display': 'Grok: local'},
+        {'label': 'Codex', 'name': 'rajiv-scribie', 'key': CODEX, 'horizon': CODEX_HORIZON,
+         'baseline_from': '2026-11-17T00:45:00Z', 'display': 'Codex: rajiv-scribie CLI'},
+    ]}))
+    log = _write_log(tmp_path / 'log.jsonl', [
+        (BASE, CLAUDE, 40), (sample, CLAUDE, 41),                 # 1 point / 2.3h, aged 12m
+        (sample - H, thin_key, 10), (sample, thin_key, 11),       # 1.0h, still thin
+    ])
+    table = composer.pace_table(_at(now), snapshot=log, config=cfg, state=tmp_path / 'state.json', persist=False)
+    claude_row = next(l for l in table.splitlines() if l.startswith('Claude: PM pane (keychain)'))
+    assert '2.3h window' in claude_row and 'as of 08:33, 12m old' in claude_row
+    assert ', thin' not in claude_row and '0h' not in claude_row
+    thin_row = next(l for l in table.splitlines() if l.startswith('Grok: local'))
+    assert '1.0h window, thin' in thin_row and '12m old' in thin_row and 'UNKNOWN' not in thin_row
+    codex_row = next(l for l in table.splitlines() if l.startswith('Codex: '))
+    assert 'UNKNOWN' in codex_row and '0.00' not in codex_row
+    assert any(l.startswith('• Codex: ') and 'no usage sample' in l for l in table.splitlines())
+    assert '@' not in table
