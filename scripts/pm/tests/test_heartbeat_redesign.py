@@ -490,7 +490,6 @@ def test_pr_list_is_capped(n):
     assert len([line for line in out.splitlines() if line.strip()]) <= 22
 
 
-@pytest.mark.parametrize("mode", ["1h", "3h"])
 def test_3h_blank_lines_separate_sections_and_bullets_stay_unjoined():
     """Rajiv ts 1794919016.184639: one empty line between 3h sections, bullets not folded with '; '."""
     emails = {"status": "ok", "total": 8, "items": [
@@ -537,6 +536,7 @@ def test_1h_pace_table_is_unchanged_when_3h_drops_usage():
     assert "*Usage (Claude + Codex):*" not in out
 
 
+@pytest.mark.parametrize("mode", ["1h", "3h"])
 def test_sections_have_one_blank_separator(mode):
     out = compose.compose(mode, NOW, AXIOM, MAP, PRS, support=SUPPORT,
                           training=("*Training:* healthy", []),
