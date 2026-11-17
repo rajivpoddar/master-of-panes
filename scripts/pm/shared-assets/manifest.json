@@ -375,7 +375,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-buddhi",
-      "sha256": "0a2b60181fbe1c86d4eb04976c581d77e9176fda54b7404c85d5735cf3b5ba92",
+      "sha256": "8f97438ebb693dc984e82347184eb6fbbee8d86729d3f53e2fa4ba9d0941a824",
       "source_path": "claude/rules/20-buddhi-pm.md"
     },
     {
@@ -861,7 +861,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "037a3a06538ae510be4be47253a800c3ace05047746a7b1ecdb0a390d5678fc7",
+      "sha256": "298708168dffe39a44085bdd634faeb306f315ecf1854e2216a5e08aeb59a5de",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -1376,7 +1376,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-skill",
-      "sha256": "f992a6bc9b02703f6825e0eaac8a1c834187cfb1bd8f379a354e9e095d388585",
+      "sha256": "e5c9f57110f4de6ede2bc4378dd9d5a726400e63da0942815d1307f3c4281f0e",
       "source_path": "claude/skills/proxy-agent/SKILL.md"
     },
     {

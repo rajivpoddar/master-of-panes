@@ -1314,7 +1314,7 @@ _PROXY_TOTAL_CAP_ENV="${PROXY_AGENT_TOTAL_CAP:-}"
 if [[ -r "$HOME/.claude/state/proxy-caps.env" ]]; then
   while IFS== read -r _k _v; do
     case "$_k" in
-      PROXY_AGENT_TOTAL_CAP|PROXY_AGENT_CLAUDE_CAP) [[ -z "${!_k:-}" && "$_v" =~ ^[0-9]+$ ]] && printf -v "$_k" %s "$_v";;
+      PROXY_AGENT_TOTAL_CAP|PROXY_AGENT_CLAUDE_CAP|PM_SUBAGENT_CAP|CODEX_PROXY_CAP|CLAUDE_PROXY_CAP|GROK_PROXY_CAP) [[ -z "${!_k:-}" && "$_v" =~ ^[0-9]+$ ]] && printf -v "$_k" %s "$_v";;
       PROXY_BURN_GATE) [[ -z "${!_k:-}" && ( "$_v" == enforce || "$_v" == shadow ) ]] && printf -v "$_k" %s "$_v";;
     esac
   done < "$HOME/.claude/state/proxy-caps.env"
@@ -1374,6 +1374,13 @@ proxy_agent_pick_tier() {
       skipped="${skipped:+$skipped,}$id:burn_refused"
       continue
     fi
+    # Per-pool concurrency. A Claude deny skips only Claude ids; Grok and Codex keep their own caps.
+    # Exempt roles (and a P0 override) are telemetry-only: never skipped here. pm-triage-agent is not exempt.
+    if proxy_agent_pool_blocked "$id"; then
+      skipped="${skipped:+$skipped,}$id:pool_cap"
+      printf 'proxy-agent: pool_cap skip model=%s\n' "$id" >&2
+      continue
+    fi
     if proxy_agent_sub_usable "$id"; then
       PICK_MODEL="$id"
       PICK_REASON="${skipped:+cooled:$skipped}"
@@ -1405,8 +1412,78 @@ proxy_agent_burn_enforced() {
 # Returns 0 when the burn gate refuses the model id, 1 when it allows it or does not apply.
 proxy_agent_burn_refused() {
   proxy_agent_burn_enforced || return 1
+  # Grok has no %/h budget. GROK_PROXY_CAP and a 402 cooldown decide; a weekly "unknown" must not queue it.
+  case "$1" in
+    grok-4.7|grok) return 1;;
+  esac
   python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$1" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >&2 && return 1
   return 0
+}
+
+# Caps do not apply to these launches (Rajiv C0ALZJHGE49 thread 1794919743.223239, ts 1794920944.182879,
+# triage removed at ts 1794921123.696379). They still take the first non-cooled model.
+proxy_agent_cap_exempt() {
+  # A P0 override exempts even a role that is otherwise capped (triage included).
+  if [[ "${PROXY_AGENT_CAP_OVERRIDE:-}" =~ ^P0:[0-9]+$ ]]; then
+    return 0
+  fi
+  case "$1" in
+    ci-repair-agent|e2e-failure-investigator|main-red-skip|pm-admission-reviewer|cleanup-pr-runner|pm-ops-tooling|mop-main-repair|autoscaler-main-repair|growth)
+      return 0;;
+  esac
+  if [[ -r "${ROLE_BRIEF:-}" ]]; then
+    local first=""
+    IFS= read -r first < "$ROLE_BRIEF" || true
+    if [[ "$1" == claude && "$first" =~ ^MODE:[[:space:]]*(heartbeat|digest)($|[[:space:]]) ]]; then
+      return 0
+    fi
+    if [[ "$first" =~ ^[[:space:]]*(PRIORITY|priority)[[:space:]]*:[[:space:]]*P0($|[[:space:]]) ]]; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+proxy_agent_pool_live() {
+  if [[ -n "${PROXY_AGENT_STUB_POOL_LIVE:-}" ]]; then
+    printf '%s\n' "$PROXY_AGENT_STUB_POOL_LIVE"
+    return 0
+  fi
+  python3 -I - "$1" <<'PY'
+import subprocess, sys
+pool = sys.argv[1]
+try:
+    out = subprocess.check_output(["/bin/ps", "-axo", "command="], text=True, timeout=5)
+except Exception:
+    raise SystemExit(1)
+n = 0
+for line in out.splitlines():
+    if " --model " not in line:
+        continue
+    model = line.split(" --model ", 1)[1].split(None, 1)[0]
+    kind = "claude" if model.startswith("claude-") else "codex" if model.startswith("gpt-") else "grok" if model.startswith("grok") else ""
+    if kind == pool:
+        n += 1
+print(n)
+PY
+}
+
+# 0 when this model id is at or over its own pool cap. Exempt launches and an unreadable count are not blocked.
+proxy_agent_pool_blocked() {
+  proxy_agent_cap_exempt "$TYPE" && return 1
+  local id="$1" pool cap live
+  case "$id" in
+    claude-*) pool=claude; cap="${CLAUDE_PROXY_CAP:-${PROXY_AGENT_CLAUDE_CAP:-5}}";;
+    gpt-*) pool=codex; cap="${CODEX_PROXY_CAP:-8}";;
+    grok-4.7|grok) pool=grok; cap="${GROK_PROXY_CAP:-8}";;
+    *) return 1;;
+  esac
+  case "$cap" in ''|*[!0-9]*) return 1;; esac
+  if ! live="$(proxy_agent_pool_live "$pool")"; then
+    printf 'proxy-agent: pool_cap UNAVAILABLE pool=%s\n' "$pool" >&2
+    return 1
+  fi
+  [[ "${live:-0}" -ge "$cap" ]]
 }
 # Primary burn check (CTO REVISE 2026-11-15, C0ALZJHGE49 ts 1794754734.596349). Runs in proxy_agent_select right after the
 # PRIMARY pick and BEFORE the nested alias picks, which make usability POSTs. A refused primary (e.g. a raw

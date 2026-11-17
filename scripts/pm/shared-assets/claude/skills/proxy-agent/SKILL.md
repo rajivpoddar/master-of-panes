@@ -38,21 +38,19 @@ The PM runs on direct Claude because PM quality degrades behind cliproxy. In-pro
 
 Source: Rajiv, DM D0AMF0XE6TS thread 1794573312.657559, ts 1794577100.350209: *"enable only dc53c2ad-dev@heydonna.law and dc53c2ad-qa@heydonna.law. disable the rest of the accounts. configure proxy agents to use haiku/sonnet/opus/fable. fable should be used only for planning and P0's which get stuck. update the skill."*
 
-- CLIProxyAPI Claude accounts: ONLY `dc53c2ad-dev@heydonna.law` and `dc53c2ad-qa@heydonna.law` are enabled (`disabled: true` set on dev@scribie.com, rajiv@scribie.com, donna@heydonna.law, rajiv@heydonna.law in `~/.cli-proxy-api/`). Never re-enable without Rajiv.
+- S138's two-account pin is dropped (S142). Claude proxy accounts follow the burn dial (four team accounts). An operator ceiling file, if present, still bounds CLAUDE_PROXY_CAP.
 - Aliases: `haiku`=`claude-haiku-5-5`, `sonnet`=`claude-sonnet-5-5`, `opus`=`claude-opus-5-5`, `fable`=`claude-fable-5-2`. All 200k window / 64k out. Nested subagents always map haiku/sonnet/opus to the same Claude ids.
-- **Ladders (CURRENT, Rajiv D0AMF0XE6TS thread 1794573312.657559, ts 1794577994.799019: "the ladder for dev proxy agents should be luna → haiku → terra → sonnet → sol → opus. ladder for pm agents should be terra → sonnet → sol → opus. ladder for 12b should fable → sol.")**
-  - hd-builder: rung 1 `haiku` → `luna`; rung 2 `sonnet` → `hydrogen` → `terra`; rung 3 `opus` → `sol`. hd-proof-qa: rung 1 `sonnet` → `hydrogen` → `terra`; rung 2 `opus` → `sol`. Escalate with `--rung N`.
-  - PM/admin agents (PM_ROLE or `PM_TERRA_DEFAULT_TYPES`): `terra` → `sonnet` → `sol` → `opus`.
-  - 12b (`pm-admission-reviewer`, now a proxy run): `fable` → `sol`.
-  - Tier selector: `hd-planner` → carbon → grok → opus → sol; `hd-builder` and `hd-proof-qa` use their respective rungs above; reviewers → carbon → fable → astra. `pm-hotfix` and `pm-proof-qa` are compatibility shims only. Escalate with `--rung N`; retain the original clock and custody.
-  - **Subscription first [S140]** (Rajiv D0AMF0XE6TS thread 1794573312.657559, ts 1794578432.554649: "we have to use antrigravity and grok when it's available. i guess grok4.7 is at sol/opus level, gemini hydrogen is sonnet and carbon opus. we should try these first and then fallback to the normal ladder."): before the ladder, `proxy-agent.sh` probes the subscription equivalent and uses it when it returns 200: dev/PM auto → `hydrogen` (gemini-4-hydrogen-xhigh, sonnet-level); planning/12b auto → `grok` (grok-4.7, sol/opus-level); explicit `sonnet` → hydrogen; explicit `sol`/`opus` → grok. A 429/402 records an exhaustion window and falls through to the ladder rung. Carbon (opus-level) has no CLIProxyAPI id yet (400 unknown provider). Add it here when it appears. As of 13 Nov 19:35 IST: grok 402, hydrogen 429 (resets ~14 Nov 12:47Z).
+- **Ladders (CURRENT = buddhi S142/S143; S138/S139/S140 are dropped).** No Gemini, no Antigravity, no Sol (Rajiv ts 1794720589.429929: "apply 4. cut down sol usage on proxies.").
+  - LIGHT: claude-haiku-5-5 → gpt-6-luna. MID: claude-sonnet-5-5 → gpt-6.1-terra. TOP: claude-opus-5-5 → grok-4.7. REVIEW: claude-fable-5-2 → TOP. First model not in 429/402 cooldown wins.
+  - hd-builder rung 1 haiku→luna, rung 2 sonnet→terra, rung 3 opus. hd-proof-qa rung 1 sonnet→terra, rung 2 opus. hd-planner is TOP. Reviewer proxies use REVIEW. Do not pass `--model sol`, `hydrogen`, `carbon`, or `ag-*`.
+  - 12b is not a proxy run. S147: every due 12b is an in-process sonnet PM subagent, cap-exempt.
+  - Caps are four independent numbers (Claude, Codex, Grok, total). A Claude-pool deny never lowers Codex, Grok or total (ts 1794920638.829349). Codex under its Friday horizon takes proxy work. Grok 402 means the balance is exhausted.
   - Rung bounds (PM ops call 2026-11-13, within S131 "3h or earlier accepted checkpoint"): P0/P1 = 1h per rung; P2/P3 = 3h per rung. Worst-case stuck time is about 6h (P0/P1) or 18h (P2/P3) before the CTO decision. A run waiting on an external event (CI, CTO decision, box lease) pauses its clock.
-  - Explicit `luna`/`terra`/`sol` are used as named (no Hydrogen remap); nested subagents always map haiku/sonnet/opus to Claude ids.
-- `--model fable` outside planning and 12b: only for a stuck P0.
-- Legacy aliases (luna/terra/sol/grok/gemini-*/hydrogen/ag-*) still resolve, but are a fallback only when both Claude accounts are rate-limited. Name the reason in the launch note.
-- Watch usage: the two accounts carry up to 20 proxies; the PM pane may share qa@. Check limits with the scratchpad `cliproxy_claude_usage.py` pattern (`/api/oauth/usage` per auth file, no token refresh) at every hourly. If either account passes 85% weekly or 90% session, tell Rajiv the same turn.
+  - Explicit `luna`/`terra` map to LIGHT/MID. `sol` does not. Nested haiku/sonnet/opus stay Claude ids. `fable` is the reviewer tier, not a 12b route.
+- Do not launch `gemini-*`, `hydrogen`, `carbon`, or `ag-*`.
+- Pace from the hourly account line, not a heartbeat usage section.
 
-The sections below are LEGACY (pre-2026-11-13) and apply only to explicit legacy aliases.
+The sections below are LEGACY and must not be followed. S142 dropped S138/S139/S140. S143 removed Gemini/Antigravity. Sol is not routed. 12b is in-process sonnet (S147), not `fable → sol`.
 
 ## LEGACY: Model by urgency (S120 / S129, superseded 2026-11-13)
 
@@ -65,7 +63,7 @@ Hydrogen (`gemini-4-hydrogen-xhigh`) is preferred when available, per Rajiv's 13
 | `gemini-pro` (`gemini-4-argon-high`) / `gemini-flash` (`gemini-3.8-flash-high`) / `grok` (`grok-4.7`) | Subscription models `auto` spends after Antigravity Claude (`gemini-pro` → `gemini-flash` → `grok`): P1 rework, P2/P3, docs/body rework, CI classification/repair, investigations, triage, cleanup, heartbeat, issue filing. Passing an alias explicitly skips the quota selector. Nested subagents inside an explicit launch stay haiku→gemini-3.8-flash-high, sonnet/opus→grok-4.7 (Rajiv ts 1794144618.272919). | pro/flash 1.05M / 64k; grok 500k / 32k |
 | `terra` / `luna` | Explicit GPT aliases, and `auto`'s fallback when the Antigravity, Gemini and Grok subscriptions are unusable. `luna` is gpt-6-luna; nested sonnet/opus falls through to `gpt-6.1-terra`. | 1.05M / 128k |
 
-12b (pm-admission-reviewer) now runs as a proxy: `fable` → `sol` (Rajiv ts 1794577994.799019, superseding the S112 in-process sonnet pin).
+12b does not run as a proxy. S147 (ts 1794919509.795299) restored the S112 in-process sonnet pin for every due review. The `fable → sol` line is dead.
 
 ## Steering
 Each run is a named peer session (`--name`). Find it with `ListAgents` under "Peer sessions" and send it messages with native `SendMessage` (`to: "<PROXY_AGENT_NAME>"`). The message is delivered at the agent's next tool round and treated as authoritative within the task's scope. Use this for CTO rulings or corrections that arrive mid-run. Launch a follow-up run only after the original has exited. Verified 2026-11-08: a probe was received verbatim.
