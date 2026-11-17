@@ -31,7 +31,6 @@ import sqlite3
 import subprocess
 import sys
 import threading
-import unicodedata
 from itertools import islice
 from time import monotonic
 from contextlib import closing
@@ -2619,19 +2618,17 @@ def pace_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = 
         return f"*Pace:* UNKNOWN ({type(exc).__name__}, pace check failed)"
 
 
-def _pace_width(text: str) -> int:
-    """Terminal cell width for Slack monospace: emoji and wide glyphs take two cells, variation selectors none."""
-    width = 0
-    for ch in text:
-        if ch == "️":
-            continue
-        width += 2 if ch in "✅⚠" or unicodedata.east_asian_width(ch) in ("W", "F") else 1
-    return width
+def _pace_cell(text: str) -> str:
+    """A pipe-table cell: slack-send.sh splits rows on '|', so a literal pipe or a newline would shift the columns."""
+    return " ".join(str(text).replace("|", "/").split())
 
 
 def _pace_table_lines(resolved: list[tuple]) -> list[str]:
-    """Fenced, column-aligned table: Account | Used | Burn %/h | Target %/h | Runs out at. Rows with UNKNOWN inputs
-    get one note line each below the fence, with the reason from the clause (login e-mail replaced by display name)."""
+    """Unfenced Markdown pipe table: Account | Used | Burn %/h | Target %/h | Runs out at, then a |---| separator row and
+    one row per account. slack-send.sh converts a pipe table to a native Slack table block, but only outside a code
+    fence (Rajiv 2026-11-17, C0ALZJHGE49 1794890771.399469: "remove the codefence from the burn report so that it shows
+    up as a proper slack table"). Rows with UNKNOWN inputs get one note line each below the table, with the reason from
+    the clause (login e-mail replaced by display name)."""
     header = ["Account", "Used", "Burn %/h", "Target %/h", "Runs out at"]
     rows, notes = [], []
     for acct, clause, cells in resolved:
@@ -2650,12 +2647,11 @@ def _pace_table_lines(resolved: list[tuple]) -> list[str]:
             target_cell = f"≤{cells['ceiling']:.2f} to {cells['to']}"
             runs_cell = cells["runs_out"]
         rows.append([display, used_cell, burn_cell, target_cell, runs_cell])
-    widths = [max(_pace_width(r[i]) for r in [header, *rows]) for i in range(len(header))]
 
-    def fmt(cols: list[str]) -> str:
-        return "  ".join(c + " " * (w - _pace_width(c)) for c, w in zip(cols, widths)).rstrip()
+    def row(cols: list[str]) -> str:
+        return "| " + " | ".join(_pace_cell(c) for c in cols) + " |"
 
-    block = ["```", fmt(header), fmt(["-" * w for w in widths]), *(fmt(r) for r in rows), "```"]
+    block = [row(header), "|" + "|".join("---" for _ in header) + "|", *(row(r) for r in rows)]
     return "\n".join([*block, *notes]).replace("@", "-").splitlines()
 
 

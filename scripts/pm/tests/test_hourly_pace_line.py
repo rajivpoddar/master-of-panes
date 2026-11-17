@@ -244,6 +244,60 @@ def test_pace_is_wired_for_the_1h_mode_only_and_persists_only_under_the_hourly_c
     assert 'burn=burn, pace=pace' in source
 
 
+PACE_HEADER = ['Account', 'Used', 'Burn %/h', 'Target %/h', 'Runs out at']
+
+
+def _pipe_row(table, prefix):
+    """The pipe-table row whose first cell starts with prefix (note lines start with a bullet, never a pipe)."""
+    return next(l for l in table.splitlines() if l.startswith('| ' + prefix))
+
+
+def _slack_send_blocks(text):
+    """Mirror of slack-send.sh has_markdown_table / _split_row / convert_text_to_blocks (the plain-text path used by
+    pm-hourly-post.sh: slack-send.sh -c C0ALZJHGE49 -f). Keep in sync with ~/.claude/scripts/slack-send.sh."""
+    if len([l for l in text.strip().split('\n') if re.match(r'^\s*\|.*\|.*\|', l)]) < 2:
+        return None
+
+    def split_row(line):
+        cells = line.split('|')
+        if cells and cells[0].strip() == '':
+            cells = cells[1:]
+        if cells and cells[-1].strip() == '':
+            cells = cells[:-1]
+        return [c.strip() for c in cells]
+
+    blocks, prose, rows, in_table = [], [], [], False
+
+    def flush_prose():
+        chunk = '\n'.join(prose).strip('\n')
+        if chunk.strip():
+            blocks.append({'type': 'section', 'text': {'type': 'mrkdwn', 'text': chunk}})
+        prose.clear()
+
+    def flush_table():
+        width = max(len(r) for r in rows)
+        blocks.append({'type': 'table', 'rows': [r + [''] * (width - len(r)) for r in rows]})
+        rows.clear()
+
+    for line in text.split('\n'):
+        is_row = bool(re.match(r'^\s*\|[^\n]*\|[^\n]*\|', line))
+        is_sep = bool(re.match(r'^\s*\|[-:\s|]+\|', line))
+        if is_sep and in_table:
+            continue
+        if is_row and not is_sep:
+            if not in_table:
+                flush_prose()
+                in_table = True
+            rows.append(split_row(line))
+        else:
+            if in_table:
+                flush_table()
+                in_table = False
+            prose.append(line)
+    flush_table() if in_table else flush_prose()
+    return blocks
+
+
 def test_pace_table_rows_show_burn_marker_target_and_runs_out_with_no_login_email(tmp_path):
     now = BASE + 4 * H
     cfg = _write_config(tmp_path / 'cfg.json')
@@ -254,23 +308,54 @@ def test_pace_table_rows_show_burn_marker_target_and_runs_out_with_no_login_emai
     table = composer.pace_table(_at(now), snapshot=_write_log(tmp_path / 'log.jsonl',
                                 [(BASE, CLAUDE, 45), (now, CLAUDE, 48), (BASE, CODEX, 29), (now, CODEX, 30)]),
                                 config=cfg, state=tmp_path / 'state.json', persist=False)
-    assert table.startswith('```') and table.endswith('```')
+    lines = table.splitlines()
+    # Rajiv 2026-11-17 (C0ALZJHGE49 1794890771.399469): no code fence, so slack-send.sh renders a native Slack table.
+    assert '```' not in table
+    assert lines[0] == '| ' + ' | '.join(PACE_HEADER) + ' |'
+    assert lines[1] == '|---|---|---|---|---|'
     assert '@' not in table
-    claude_row = next(l for l in table.splitlines() if l.startswith('Claude: PM pane (keychain)'))
+    claude_row = _pipe_row(table, 'Claude: PM pane (keychain)')
     assert '48%' in claude_row and '0.75 ✅' in claude_row and '≤2.24 to Wed 18 Nov 09:30 IST' in claude_row
-    codex_row = next(l for l in table.splitlines() if l.startswith('Codex: rajiv-scribie CLI'))
+    codex_row = _pipe_row(table, 'Codex: rajiv-scribie CLI')
     assert '0.25 ✅' in codex_row and 'not at this rate' not in codex_row
-    assert 'Runs out at' in table.splitlines()[1]
+    assert lines[2] == claude_row and lines[3] == codex_row and len(lines) == 4
+    # Every row has exactly the header's cell count: no stray pipe inside a cell shifts a column.
+    assert all(l.count('|') == len(PACE_HEADER) + 1 for l in lines)
 
 
 def test_pace_table_unknown_row_reads_unknown_with_a_note_and_no_zero(tmp_path):
     now = BASE + 4 * H
     table = composer.pace_table(_at(now), snapshot=_write_log(tmp_path / 'log.jsonl', [(BASE, CLAUDE, 45), (now, CLAUDE, 48)]),
                                 config=_write_config(tmp_path / 'cfg.json'), state=tmp_path / 'state.json', persist=False)
-    codex_row = next(l for l in table.splitlines() if l.startswith('Codex: '))
+    codex_row = _pipe_row(table, 'Codex: ')
     assert 'UNKNOWN' in codex_row and '0.00' not in codex_row
     assert any(l.startswith('• Codex: ') and 'no usage sample' in l for l in table.splitlines())
-    assert '@' not in table
+    assert '```' not in table and '@' not in table
+
+
+def test_pace_table_is_accepted_by_the_slack_send_table_converter_as_one_native_table(tmp_path):
+    """slack-send.sh turns an unfenced pipe table into ONE native `table` block (header row + one row per account) and
+    leaves the UNKNOWN note lines as prose. The old fenced block was space-aligned with no pipes, so the converter never
+    saw a table and Slack showed monospace text."""
+    now = BASE + 4 * H
+    table = composer.pace_table(_at(now), snapshot=_write_log(tmp_path / 'log.jsonl', [(BASE, CLAUDE, 45), (now, CLAUDE, 48)]),
+                                config=_write_config(tmp_path / 'cfg.json'), state=tmp_path / 'state.json', persist=False)
+    body = f"*Hourly — 07:00 IST* — TL;DR: ok\n{table}\n\n*Burn:* pace to Claude Wed 09:30 IST"
+    blocks = _slack_send_blocks(body)
+    assert blocks is not None
+    tables = [b for b in blocks if b['type'] == 'table']
+    assert len(tables) == 1                                       # Slack allows one table block per message
+    rows = tables[0]['rows']
+    assert rows[0] == PACE_HEADER and len(rows) == 3              # header + Claude + Codex; separator row dropped
+    assert all(len(r) == len(PACE_HEADER) for r in rows)
+    assert rows[2][0].startswith('Codex') and rows[2][1] == 'UNKNOWN'
+    prose = ' '.join(b['text']['text'] for b in blocks if b['type'] == 'section')
+    assert '*Hourly' in prose and 'no usage sample' in prose and '|---|' not in prose and '```' not in prose
+
+
+def test_pace_cell_neutralises_pipes_and_newlines_so_columns_cannot_shift():
+    assert composer._pace_cell('a | b\nc') == 'a / b c'
+    assert composer._pace_cell('0.75 ✅ (4.0h window, as of 10:13, 3m old)') == '0.75 ✅ (4.0h window, as of 10:13, 3m old)'
 
 
 def test_pace_table_numeric_row_keeps_sample_age_and_one_decimal_window(tmp_path):
@@ -294,12 +379,12 @@ def test_pace_table_numeric_row_keeps_sample_age_and_one_decimal_window(tmp_path
         (sample - H, thin_key, 10), (sample, thin_key, 11),       # 1.0h, still thin
     ])
     table = composer.pace_table(_at(now), snapshot=log, config=cfg, state=tmp_path / 'state.json', persist=False)
-    claude_row = next(l for l in table.splitlines() if l.startswith('Claude: PM pane (keychain)'))
+    claude_row = _pipe_row(table, 'Claude: PM pane (keychain)')
     assert '2.3h window' in claude_row and 'as of 08:33, 12m old' in claude_row
     assert ', thin' not in claude_row and '0h' not in claude_row
-    thin_row = next(l for l in table.splitlines() if l.startswith('Grok: local'))
+    thin_row = _pipe_row(table, 'Grok: local')
     assert '1.0h window, thin' in thin_row and '12m old' in thin_row and 'UNKNOWN' not in thin_row
-    codex_row = next(l for l in table.splitlines() if l.startswith('Codex: '))
+    codex_row = _pipe_row(table, 'Codex: ')
     assert 'UNKNOWN' in codex_row and '0.00' not in codex_row
     assert any(l.startswith('• Codex: ') and 'no usage sample' in l for l in table.splitlines())
-    assert '@' not in table
+    assert '```' not in table and '@' not in table
