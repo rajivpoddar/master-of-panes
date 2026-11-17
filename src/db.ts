@@ -840,6 +840,21 @@ export class MoPDatabase {
   }
 
   /**
+   * True when a UserPromptSubmit that is NOT a background poll_event was logged for the slot after the
+   * given event id. Claude Code tags the prompt events its background agents fire as source "poll_event";
+   * a prompt without that source is real input (typed, pasted or injected).
+   */
+  hasRealPromptSince(slot: number, afterEventId: number): boolean {
+    const row = this.db.prepare(`
+      SELECT 1 AS hit FROM events
+      WHERE slot = ? AND event_type = 'UserPromptSubmit' AND id > ?
+        AND COALESCE(json_extract(CASE WHEN json_valid(payload) THEN payload END, '$.source'), '') <> 'poll_event'
+      LIMIT 1
+    `).get(slot, afterEventId);
+    return row !== undefined;
+  }
+
+  /**
    * Atomically decide what a keyed send may do. `started` is written here, before the
    * caller performs any pane I/O. Rules: see src/sendCustody.ts.
    */

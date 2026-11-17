@@ -63,6 +63,8 @@ type PendingExitDispatch = {
 /** Shared PM + numbered-slot paste->Enter dwell (see composer.ts). */
 export const PM_INJECT_ENTER_DELAY_MS: number = INJECT_ENTER_DELAY_MS;
 
+const EXIT_DIALOG_TITLE = /^\s*[│┃║]?\s*Background work is running[.!]?\s*$/;
+
 /**
  * Visible Claude exit dialog, not a phrase left in scrollback or a new composer.
  * An EMPTY composer chevron below the dialog is part of the live screen (the
@@ -71,7 +73,7 @@ export const PM_INJECT_ENTER_DELAY_MS: number = INJECT_ENTER_DELAY_MS;
  */
 export function isExitConfirmationDialog(text: string): boolean {
   const lines = text.replace(/\x1b\[[0-9;]*m/g, "").split(/\r?\n/);
-  const title = lines.reduce((last, line, index) => /^\s*[│┃║]?\s*Background work is running[.!]?\s*$/.test(line) ? index : last, -1);
+  const title = lines.reduce((last, line, index) => EXIT_DIALOG_TITLE.test(line) ? index : last, -1);
   if (title < 0) return false;
   const dialog = lines.slice(title + 1);
   return dialog.some(line => /^[\s│┃║❯>]*1[.)]\s+Exit and stop tasks\s*[│┃║]?\s*$/.test(line))
@@ -79,20 +81,52 @@ export function isExitConfirmationDialog(text: string): boolean {
     && !dialog.some(line => /^\s*[❯>]\s*\S/.test(line) && !/^\s*[❯>]\s*[123][.)]\s/.test(line));
 }
 
+/** The numbered PM menu of the LATEST dialog on a captured screen. */
+export type PMExitMenu = {
+  /** Ordered option labels joined by "|": the menu identity across two captures. */
+  shape: string;
+  /** The one option carrying the selection chevron; null when none or several do. */
+  selected: number | null;
+};
+
+// Two shapes of the same dialog exist: the original three choices and the
+// 2026-11-17 two-choice build, whose task list sits between title and choices.
+// Option 1 stops the tasks in both.
+const PM_EXIT_MENU_SHAPES: readonly string[] = [
+  "Exit and stop tasks|Move to background and exit|Stay",
+  "Exit and stop tasks|Stay",
+];
+
 /**
- * Complete numbered PM menu. Two shapes of the same dialog exist: the original
- * three choices (1 Exit and stop tasks / 2 Move to background and exit / 3 Stay)
- * and the 2026-11-17 two-choice build (1 Exit and stop tasks / 2 Stay), whose
- * task list sits between the title and the choices. Option 1 stops the tasks in
- * both; a partial render matches neither.
+ * Parse the ordered numbered options inside the latest title-to-footer block
+ * only. A dialog still visible above (an older "2. Stay") never supplies an
+ * option to a newer, partially rendered one, and a block whose footer has not
+ * rendered, whose numbers are not 1..n in order, or whose labels are not one of
+ * the two known shapes is not a menu. A chevron line with text below the dialog
+ * (a typed or new prompt) disqualifies it as in isExitConfirmationDialog.
  */
-export function isCompletePMExitMenu(text: string): boolean {
+export function parsePMExitMenu(text: string): PMExitMenu | null {
   const plain = text.replace(/\x1b\[[0-9;]*m/g, "");
-  const option = (n: number, label: string) =>
-    new RegExp(`^[\\s│┃║❯>]*${n}\\.\\s+${label}\\s*[│┃║]?\\s*$`, "m").test(plain);
-  return isExitConfirmationDialog(plain) && option(1, "Exit and stop tasks")
-    && ((option(2, "Move to background and exit") && option(3, "Stay"))
-      || (option(2, "Stay") && !/^[\s│┃║❯>]*3\.\s/m.test(plain)));
+  if (!isExitConfirmationDialog(plain)) return null;
+  const lines = plain.split(/\r?\n/);
+  const title = lines.reduce((last, line, index) => EXIT_DIALOG_TITLE.test(line) ? index : last, -1);
+  const footer = lines.findIndex((line, index) => index > title && /Enter to confirm/i.test(line));
+  if (title < 0 || footer < 0) return null;
+  const options: Array<{ n: number; label: string; marked: boolean }> = [];
+  for (const line of lines.slice(title + 1, footer)) {
+    const match = /^\s*[│┃║]?\s*([❯>])?\s*(\d+)\.\s+(.*?)\s*[│┃║]?\s*$/.exec(line);
+    if (match) options.push({ n: Number(match[2]), label: match[3], marked: match[1] !== undefined });
+  }
+  if (options.some((option, index) => option.n !== index + 1)) return null;
+  const shape = options.map(option => option.label).join("|");
+  if (!PM_EXIT_MENU_SHAPES.includes(shape)) return null;
+  const marked = options.filter(option => option.marked);
+  return { shape, selected: marked.length === 1 ? marked[0].n : null };
+}
+
+/** Complete numbered PM menu in the latest dialog block; a partial render matches neither shape. */
+export function isCompletePMExitMenu(text: string): boolean {
+  return parsePMExitMenu(text) !== null;
 }
 
 // v3 (2026-05-09 14:15 IST Rajiv): direct tmux send-keys, no wait-for-idle
@@ -1692,6 +1726,11 @@ export class TmuxRelay {
     });
   }
 
+  /** A PM inbound write is in flight or queued behind a busy PM (the same signals the exit dialog and /exit fences use). */
+  hasPendingPMInbound(): boolean {
+    return this.pmInboundPending > 0 || (this.db?.peekPendingPMEvents().length ?? 0) > 0;
+  }
+
   /** Resolve the owning numbered pane's current Git worktree root. */
   async getSlotCheckoutPath(slotNum: number): Promise<string | null> {
     if (!isValidDevSlot(slotNum)) return null;
@@ -2090,12 +2129,20 @@ export class TmuxRelay {
       && !(slotNum === 0 && (this.pmInboundPending > 0 || db.peekPendingPMEvents().length > 0))
       && (ownerPin ? this.exitOwnerRefusal(slotNum, ownerPin) === null : token() === owner);
     const save = () => db.setConfig(key, JSON.stringify(state));
-    const inspect = async () => {
+    // PM only: the option labels of the latest menu the "1" key is pressed on.
+    let menuShape: string | null = null;
+    const inspect = async (afterOne = false) => {
       if (!current() || await this.exitProcessIdentity(slotNum, paneId, deadline) !== process || !current()) return "changed";
       // Visible screen only: a historical dialog in scrollback is not authority.
       const screen = await this.runShell(`tmux capture-pane -t ${paneId} -p`, { timeout: Math.min(1_000, deadline - Date.now()) });
       if (await this.exitProcessIdentity(slotNum, paneId, deadline) !== process || !current()) return "changed";
-      return (slotNum === 0 ? isCompletePMExitMenu(screen.stdout) : isExitConfirmationDialog(screen.stdout)) ? "dialog" : "absent";
+      if (slotNum !== 0) return isExitConfirmationDialog(screen.stdout) ? "dialog" : "absent";
+      const menu = parsePMExitMenu(screen.stdout);
+      if (!menu) return "absent";
+      if (!afterOne) { menuShape = menu.shape; return "dialog"; }
+      // Enter is authorized only by the SAME latest menu with option 1 visibly
+      // selected; Stay still highlighted after the "1" key authorizes nothing.
+      return menu.shape === menuShape && menu.selected === 1 ? "dialog" : "absent";
     };
     let seen = false;
     let enterPresses = 0;
@@ -2113,7 +2160,7 @@ export class TmuxRelay {
           state.attempts = 1;
           save();
           await this.runShell(`tmux send-keys -t ${paneId} 1`, { timeout: Math.min(1_000, deadline - Date.now()) });
-          if (await inspect() !== "dialog" || !current()) break;
+          if (await inspect(true) !== "dialog" || !current()) break;
           enterPresses++;
           await this.runShell(`tmux send-keys -t ${paneId} Enter`, { timeout: Math.min(1_000, deadline - Date.now()) });
           break;

@@ -23,6 +23,14 @@ const pmTwoChoiceDialog = [
   "Dhruva PM Opus 5.5 · heydonna-app · main · rajiv@scribie.com", "⏵⏵ bypass permissions on · 8 background tasks · /tasks to see subagents",
 ].join("\n");
 
+// The same two-choice screen with Stay highlighted: what the pane shows when the "1" key did not move the selection.
+const pmTwoChoiceStaySelected = pmTwoChoiceDialog.replace("❯ 1. Exit and stop tasks\n  2. Stay", "  1. Exit and stop tasks\n❯ 2. Stay");
+// A complete older dialog (with its own "2. Stay") still visible above a newer dialog whose choices are not rendered yet.
+const pmOlderDialogAboveNewerPartial = pmTwoChoiceStaySelected + "\n" + [
+  "Background work is running", "The following will stop when you exit:", "", "❯ 1. Exit and stop tasks", "",
+  "Enter to confirm · Esc to cancel", rule, "❯ ",
+].join("\n");
+
 function actualHookRoute(db: MoPDatabase, processor: HookProcessor, slot: number) {
   const source = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
   const tree = ts.createSourceFile("server.ts", source, ts.ScriptTarget.Latest, true);
@@ -51,7 +59,8 @@ function harness(slot: number, options: { persistent?: boolean; noDialog?: boole
   const pane = { id: "%40", process: "100 100 S+ Mon Nov 2 00:00:00 2026 claude", composer: "", buffer: "", exitAt: 0, stopRespondedAt: 0,
     showing: !options.noDialog, exitEnters: 0, keys: [] as string[], onVisible: undefined as undefined | (() => void),
     onOne: undefined as undefined | (() => void), onConfirmation: undefined as undefined | (() => void),
-    onIdentity: undefined as undefined | (() => void), onPaste: undefined as undefined | (() => void), failOne: false };
+    onIdentity: undefined as undefined | (() => void), onPaste: undefined as undefined | (() => void), failOne: false,
+    screenOverride: undefined as undefined | string };
   const shell = async (command: string) => {
     let stdout = "";
     if (command.startsWith("tmux display-message")) {
@@ -69,7 +78,7 @@ function harness(slot: number, options: { persistent?: boolean; noDialog?: boole
         // rechecks pane idleness before its single send).
         const renderAt = options.afterStop ? pane.stopRespondedAt : pane.exitAt;
         stdout = !pane.exitAt ? `${rule}\n❯ \n${rule}`
-          : renderAt && pane.showing && Date.now() - renderAt >= (options.delay ?? 0) ? (options.partial ? "Background work is running\n❯ 1. Exit and stop tasks\nEnter to confirm" : options.screen ?? dialog) : "shell $";
+          : renderAt && pane.showing && Date.now() - renderAt >= (options.delay ?? 0) ? (options.partial ? "Background work is running\n❯ 1. Exit and stop tasks\nEnter to confirm" : pane.screenOverride ?? options.screen ?? dialog) : "shell $";
       }
     } else if (command.startsWith("tmux load-buffer")) {
       pane.buffer = await readFile(command.match(/'([^']+)'\s*$/)![1], "utf8");
@@ -325,6 +334,49 @@ test("PM two-choice dialog with a task list and an empty composer is recognized 
     await h.send();
     assert.deepEqual(h.pane.keys, ["1", "Enter"]);
   } finally { h.db.close(); }
+});
+
+test("PM menu options are read from the latest dialog block only", () => {
+  assert.equal(relayExports.isCompletePMExitMenu(pmOlderDialogAboveNewerPartial), false,
+    "an older visible 2. Stay must not complete a newer partial dialog");
+  assert.equal(relayExports.isCompletePMExitMenu(pmTwoChoiceStaySelected + "\nBackground work is running\n❯ 1. Exit and stop tasks"), false,
+    "a newer title whose footer has not rendered is not a menu");
+  assert.deepEqual(relayExports.parsePMExitMenu(pmTwoChoiceDialog), { shape: "Exit and stop tasks|Stay", selected: 1 });
+  assert.deepEqual(relayExports.parsePMExitMenu(pmTwoChoiceStaySelected), { shape: "Exit and stop tasks|Stay", selected: 2 });
+  assert.equal(relayExports.parsePMExitMenu(dialog)?.selected, 1);
+  assert.deepEqual(relayExports.parsePMExitMenu(pmTwoChoiceStaySelected + "\n" + pmTwoChoiceDialog),
+    { shape: "Exit and stop tasks|Stay", selected: 1 }, "selection comes from the latest block, not an older one");
+  assert.equal(relayExports.parsePMExitMenu(pmTwoChoiceDialog.replace("❯ 1. Exit and stop tasks", "❯ 1. Exit and stop tasks\n  1. Exit and stop tasks")), null,
+    "options must be numbered 1..n in order");
+});
+
+test("PM sends no keys while an older dialog's Stay is the only thing completing the newer menu", async () => {
+  const h = harness(0, { screen: pmOlderDialogAboveNewerPartial });
+  try {
+    await h.send();
+    assert.deepEqual(h.pane.keys, []);
+  } finally { h.db.close(); }
+});
+
+test("PM sends Enter only when the same menu shows option 1 selected after the 1 key", async () => {
+  const stay = harness(0, { screen: pmTwoChoiceDialog });
+  stay.pane.onOne = () => { stay.pane.screenOverride = pmTwoChoiceStaySelected; };
+  try {
+    await stay.send();
+    assert.deepEqual(stay.pane.keys, ["1"], "Stay still selected after 1 authorizes no Enter");
+  } finally { stay.db.close(); }
+  const other = harness(0, { screen: pmTwoChoiceDialog });
+  other.pane.onOne = () => { other.pane.screenOverride = dialog; };
+  try {
+    await other.send();
+    assert.deepEqual(other.pane.keys, ["1"], "a different menu after 1 is not the menu the key was pressed on");
+  } finally { other.db.close(); }
+  const partial = harness(0, { screen: pmTwoChoiceDialog });
+  partial.pane.onOne = () => { partial.pane.screenOverride = pmOlderDialogAboveNewerPartial; };
+  try {
+    await partial.send();
+    assert.deepEqual(partial.pane.keys, ["1"], "a partial render after 1 authorizes no Enter");
+  } finally { partial.db.close(); }
 });
 
 test("PM partial render sends no menu keys", async () => {

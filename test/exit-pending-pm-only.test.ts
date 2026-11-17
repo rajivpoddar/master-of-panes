@@ -198,3 +198,87 @@ test(`existing post-respawn timer dispatches PM continuation for ${command} rath
   } finally { db.close(); }
 });
 }
+
+// CTO REVISE ts 1794949061.287419 (a9a89ffd): keep ignoring the old process's background poll_event prompts, but never hand a
+// second handoff prompt to a replacement boot that already accepted real input, or while PM inbound is pending.
+function continuationFixture(relayExtra: Record<string, unknown> = {}) {
+  const db = database();
+  const messages: string[] = [];
+  db.setExitPending(true, false, true, "resume");
+  db.markSlotExitCycled(0);
+  db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "old", source: "startup" });
+  // Real input BEFORE the replacement boot belongs to the old process and never counts.
+  db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "old" });
+  const bootId = db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "replacement", source: "startup" });
+  const relay = {
+    deliverGuardedToSlot: async (_slot: number, text: string, guard: any) => {
+      assert.equal(await guard.recheck(), null);
+      assert.equal(guard.finalCheck(), null);
+      messages.push(text);
+      return { outcome: "delivered" };
+    },
+    ...relayExtra,
+  };
+  const health = new ProcessHealthChecker(db, relay as any) as any;
+  return { db, messages, bootId, health };
+}
+
+test("old-process poll_event prompts after the replacement boot do not withhold the continuation", async () => {
+  const f = continuationFixture();
+  try {
+    f.db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "old", source: "poll_event" });
+    f.db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "old", source: "poll_event" });
+    await f.health.deliverPMRestartContinuation("%40", f.bootId);
+    assert.deepEqual(f.messages, ["resume"]);
+    assert.equal(f.db.getExitStatus().continuation_delivery, "delivered");
+    assert.equal(f.db.getEvents(0, 5, "pm_restart_continuation_withheld").length, 0);
+  } finally { f.db.close(); }
+});
+
+test("real input already accepted by the replacement boot withholds the continuation: no second handoff prompt", async () => {
+  const f = continuationFixture();
+  try {
+    f.db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "old", source: "poll_event" });
+    f.db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "replacement" }); // Rajiv's manual "resume from handoff"
+    await f.health.deliverPMRestartContinuation("%40", f.bootId);
+    await f.health.deliverPMRestartContinuation("%40", f.bootId);
+    assert.deepEqual(f.messages, []);
+    // Withheld, not claimed: the continuation stays waiting and the typed event is written once.
+    assert.equal(f.db.getExitStatus().continuation_delivery, "waiting");
+    const withheld = f.db.getEvents(0, 5, "pm_restart_continuation_withheld");
+    assert.equal(withheld.length, 1);
+    assert.equal(JSON.parse(withheld[0]!.payload).reason, "replacement_boot_input_accepted");
+    assert.equal(f.db.getEvents(0, 5, "pm_restart_continuation").length, 0, "no delivery attempt was made");
+  } finally { f.db.close(); }
+});
+
+test("pending PM inbound withholds the continuation without burning the claim; it is sent once the inbound is gone", async () => {
+  let pending = true;
+  const f = continuationFixture({ hasPendingPMInbound: () => pending });
+  try {
+    await f.health.deliverPMRestartContinuation("%40", f.bootId);
+    assert.deepEqual(f.messages, []);
+    assert.equal(f.db.getExitStatus().continuation_delivery, "waiting", "no durable attempt claim for a transient condition");
+    pending = false;
+    await f.health.deliverPMRestartContinuation("%40", f.bootId);
+    assert.deepEqual(f.messages, ["resume"]);
+    f.db.enqueuePendingPMEvent(1, "handoff", "inbound");
+    assert.equal(f.health.continuationInputRefusal(f.bootId), "pm_inbound_pending", "a queued PM event counts too");
+  } finally { f.db.close(); }
+});
+
+test("input arriving while the send waits for its turn refuses at every pre-effect check", async () => {
+  const f = continuationFixture({
+    deliverGuardedToSlot: async (_slot: number, _text: string, guard: any) => {
+      assert.equal(await guard.recheck(), null);
+      f.db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "replacement" });
+      assert.equal(await guard.recheck(), "replacement_boot_input_accepted");
+      assert.equal(guard.finalCheck("pre_enter"), "replacement_boot_input_accepted");
+      return { outcome: "refused_pre_effect" };
+    },
+  });
+  try {
+    await f.health.deliverPMRestartContinuation("%40", f.bootId);
+    assert.equal(f.db.getExitStatus().pm_only, true, "a refused continuation does not arm devs");
+  } finally { f.db.close(); }
+});

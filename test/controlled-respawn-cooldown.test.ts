@@ -146,13 +146,17 @@ test("a bare claude argv0 (launch-pm.sh exec claude) is owned only when its exec
   const health = new ProcessHealthChecker({} as never, {} as never) as any;
   const stable = join(homedir(), ".local/opt/claude-code/claude");
   let image: string | null = stable;
+  let raw: string | null = null; // overrides the image reader's stdout verbatim
   let listing = "100 1 -zsh\n200 100 claude --model claude-opus-5-5 --dangerously-skip-permissions\n201 200 caffeinate -i -t 300\n";
   health.runShell = async (command: string) => {
     if (command.startsWith("tmux ")) return { stdout: "100|/dev/ttys010\n", stderr: "" };
-    if (command.startsWith("lsof ")) {
-      if (image === null) throw new Error("lsof failed");
-      return { stdout: `p200\nftxt\nn${image}\nftxt\nn/usr/lib/dyld\n`, stderr: "" };
+    // The image is the OS-reported executable (libproc proc_pidpath), never a position in lsof's txt mappings.
+    if (command.startsWith("python3 ")) {
+      assert.ok(command.includes("proc_pidpath") && command.endsWith(" 200"), "the pinned direct child's pid is the one queried");
+      if (image === null) throw new Error("proc_pidpath failed");
+      return { stdout: raw ?? `${image}\n`, stderr: "" };
     }
+    assert.ok(!command.startsWith("lsof "), "no lsof text-mapping read identifies the executable");
     return { stdout: listing, stderr: "" };
   };
   assert.equal(await health.pmAgentProcess("%4"), "100:200");
@@ -161,6 +165,13 @@ test("a bare claude argv0 (launch-pm.sh exec claude) is owned only when its exec
   image = null;
   assert.equal(await health.pmAgentProcess("%4"), null, "an unresolvable image is UNKNOWN, not 'no Claude'");
   image = stable;
+  raw = `/usr/lib/dyld\n${stable}\n`;
+  assert.equal(await health.pmAgentProcess("%4"), null, "an ambiguous (multi-line) image read is UNKNOWN");
+  raw = "claude\n";
+  assert.equal(await health.pmAgentProcess("%4"), null, "a non-absolute image read is UNKNOWN");
+  raw = "";
+  assert.equal(await health.pmAgentProcess("%4"), null, "an empty image read is UNKNOWN");
+  raw = null;
   listing = "100 1 -zsh\n200 100 claude\n201 100 /opt/homebrew/bin/claude\n";
   assert.equal(await health.pmAgentProcess("%4"), null, "two Claude children are ambiguous");
 });

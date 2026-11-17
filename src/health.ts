@@ -71,6 +71,11 @@ const PM_MODEL_LAUNCH_ARGS: Record<string, string> = {
   opus: "claude-opus-5-5",
   deepseek: "deepseek",
 };
+/** Prints the OS-reported executable path of argv[1]'s pid (libproc proc_pidpath), or nothing when unreadable. */
+const PROC_PIDPATH_SCRIPT =
+  "import ctypes, sys; b = ctypes.create_string_buffer(4096); "
+  + "n = ctypes.CDLL('/usr/lib/libproc.dylib').proc_pidpath(int(sys.argv[1]), b, 4096); "
+  + "sys.stdout.write(b.value.decode() if n > 0 else '')";
 export const PM_RESTART_CONTINUATION_PROMPT =
   "Session restarted. Continue PM work: read /Users/rajiv/Downloads/projects/heydonna-app/data/pm-continuation-note.md "
   + "and memory MEMORY-session-handoff-current.md, reconcile live pm-ops.db, MoP slots and open PRs, then resume the next actions.";
@@ -570,12 +575,17 @@ export class ProcessHealthChecker {
     return `${pane}:${children[0] ?? ""}`;
   }
 
-  /** The executable image of a live pid (first text mapping), or null when it cannot be read. */
+  /**
+   * The executable image the OS reports for a live pid (libproc proc_pidpath), or null when it cannot be read as
+   * exactly one absolute path. lsof's txt mappings list the executable AND every mapped library in no guaranteed
+   * order, so no position in them identifies the main image (CTO REVISE ts 1794949061.287419).
+   */
   private async processImagePath(pid: string): Promise<string | null> {
     if (!/^\d+$/.test(pid)) return null;
     try {
-      const out = (await this.runShell(`lsof -nP -p ${pid} -a -d txt -Fn`, { timeout: 5_000 })).stdout;
-      return /^ftxt\r?\nn(\/.+)$/m.exec(out)?.[1]?.trim() ?? null;
+      const out = (await this.runShell(`python3 -I -c ${shellEscape(PROC_PIDPATH_SCRIPT)} ${pid}`, { timeout: 5_000 })).stdout;
+      const lines = out.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      return lines.length === 1 && lines[0].startsWith("/") ? lines[0] : null;
     } catch {
       return null;
     }
@@ -1383,6 +1393,29 @@ export class ProcessHealthChecker {
     });
   }
 
+  /**
+   * Why the saved-handoff continuation must not be pasted into the owned replacement boot now, or null.
+   * - replacement_boot_input_accepted: a real UserPromptSubmit (not a background poll_event) was logged after that
+   *   boot's SessionStart. The old process keeps firing poll_event prompts while it exits; those never count (episode
+   *   00857b64: they made the exit owner "superseded" and the continuation never arrived). Real input does.
+   * - pm_inbound_pending: PM inbound is in flight or queued; it is delivered first and is itself real input.
+   * Read-only on MoP's own event log and queue; it gates only this MoP-originated continuation, never PM input or hooks
+   * (rule 50).
+   */
+  private continuationInputRefusal(bootEventId: number): "replacement_boot_input_accepted" | "pm_inbound_pending" | null {
+    if (this.db.hasRealPromptSince(0, bootEventId)) return "replacement_boot_input_accepted";
+    if (this.relay.hasPendingPMInbound?.() || this.db.peekPendingPMEvents().length > 0) return "pm_inbound_pending";
+    return null;
+  }
+
+  /** Typed, once per episode+reason: the continuation stays "waiting" and is not sent. */
+  private noteContinuationWithheld(episode: string | null, reason: string, bootEventId: number): void {
+    const key = `${episode}:withheld:${reason}`;
+    if (this.uncertainContinuationNoted.has(key)) return;
+    this.uncertainContinuationNoted.add(key);
+    this.db.logEvent(0, "pm_restart_continuation_withheld", null, null, { episode, reason, boot_event_id: bootEventId });
+  }
+
   private async deliverPMRestartContinuation(paneId: string, expectedBoot?: number, claim?: Record<string, unknown>,
     processGuard?: () => Promise<string | null>): Promise<void> {
     const status = this.db.getExitStatus();
@@ -1393,6 +1426,14 @@ export class ProcessHealthChecker {
     const prompt = status.continuation_prompt ?? PM_RESTART_CONTINUATION_PROMPT;
     const boot = latestSessionStartEventId(this.db, 0);
     if (expectedBoot !== undefined && boot !== expectedBoot) return;
+    // A boot that already accepted real input (a manual "resume from handoff" that beat this tick) or has PM inbound
+    // pending must not get a second handoff prompt. Checked BEFORE the durable claim so a transient pending inbound
+    // burns nothing; the next tick re-evaluates (CTO REVISE ts 1794949061.287419).
+    const withheld = this.continuationInputRefusal(boot);
+    if (withheld) {
+      this.noteContinuationWithheld(status.episode, withheld, boot);
+      return;
+    }
     this.db.setConfig("exit_pending_continuation_delivery", "attempted");
     // Durable attempt-before-send claim bound to the restart evidence (uncertain-exit path).
     if (claim) this.db.logEvent(0, "pm_restart_continuation_claim", null, null, { episode: status.episode, ...claim });
@@ -1401,9 +1442,13 @@ export class ProcessHealthChecker {
       return !current.pending || !current.pm_only || current.episode !== status.episode || current.continuation_prompt !== status.continuation_prompt
         ? "exit_pending_changed" : latestSessionStartEventId(this.db, 0) !== boot ? "pm_session_changed" : null;
     };
+    // Every pre-effect check also re-reads the input guard: real input or PM inbound that lands while this send waits for
+    // the lock withholds it. The post-delivery fence() above/below stays input-blind: the continuation's own prompt is a
+    // real UserPromptSubmit and must not read as a refusal.
+    const inputFence = () => fence() ?? this.continuationInputRefusal(boot);
     const result = await this.relay.deliverGuardedToSlot(0, prompt, {
       expectedPaneId: paneId,
-      recheck: async () => fence() ?? (processGuard ? await processGuard() : null) ?? fence(), finalCheck: fence, bracketedPaste: true,
+      recheck: async () => inputFence() ?? (processGuard ? await processGuard() : null) ?? inputFence(), finalCheck: inputFence, bracketedPaste: true,
     });
     this.db.logEvent(0, "pm_restart_continuation", null, null, {
       episode: status.episode, boot_event_id: boot, delivery: result.outcome,
