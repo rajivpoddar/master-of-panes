@@ -1450,17 +1450,20 @@ proxy_agent_pool_live() {
     return 0
   fi
   python3 -I - "$1" <<'PY'
-import subprocess, sys
+import re, subprocess, sys
 pool = sys.argv[1]
+# Same shape as proxy-cap-count.py: one count per real `claude -p` process, not the wrapper line that embeds --model.
+pat = re.compile(r'(?:^|\s)\S*/claude\s+-p\s+--name\s+\S+\s+--model\s+(\S+)')
 try:
     out = subprocess.check_output(["/bin/ps", "-axo", "command="], text=True, timeout=5)
 except Exception:
     raise SystemExit(1)
 n = 0
 for line in out.splitlines():
-    if " --model " not in line:
+    match = pat.search(line)
+    if not match:
         continue
-    model = line.split(" --model ", 1)[1].split(None, 1)[0]
+    model = match.group(1)
     kind = "claude" if model.startswith("claude-") else "codex" if model.startswith("gpt-") else "grok" if model.startswith("grok") else ""
     if kind == pool:
         n += 1
@@ -1492,6 +1495,10 @@ proxy_agent_pool_blocked() {
 proxy_agent_primary_burn_check() {
   local _burn_model _burn_window _burn_max _burn_rc=0
   read -r _burn_model _burn_window _burn_max < <(resolve_model "$MODEL")
+  # Grok is balance-metered. The %/h shadow decision is "unknown" and must not refuse the launch.
+  case "$_burn_model" in
+    grok-4.7|grok) return 0;;
+  esac
   python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$_burn_model" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >&2 || _burn_rc=$?
   if [[ "$_burn_rc" -ne 0 ]]; then
     printf 'proxy-burn: mode=%s decision=would_refuse rc=%s\n' "$PROXY_BURN_GATE" "$_burn_rc" >&2
