@@ -1342,12 +1342,11 @@ proxy_agent_is_opencode_id() {
 proxy_agent_is_emergency_muse() {
   [[ "$1" == muse-spark-1.3-contributor ]]
 }
-# Ordered tiers; escalation after a stall is LIGHT -> MID -> TOP.
-proxy_agent_pick_tier() {
-  local tier="$1" id skipped="" last="" models rc claude_live emergency_ok=1
-  claude_live=0
-  if proxy_agent_is_capped "$TYPE"; then claude_live="$(proxy_agent_live_count claude)"; fi
-  case "$tier" in
+# Ordered tiers; escalation after a stall is LIGHT -> MID -> TOP. This is the single source of the tier lists: the picker and the
+# emergency eligibility check (proxy_agent_emergency_open) both read it. Prints the model ids, no-Codex flag applied.
+proxy_agent_tier_models() {
+  local models _m _kept=""
+  case "$1" in
     # OpenCode Go pool (Rajiv D0AMF0XE6TS thread 1794926930.078169, ts 1794930258.014469): hy4-flash-free joins LIGHT, deepseek-v4.1-flash joins MID.
     # Every tier ends with the emergency-only Muse Spark entry (see proxy_agent_is_emergency_muse). Grok stays in its existing slot.
     LIGHT) models="claude-haiku-5-5 hy4-flash-free grok-4.7 gpt-6-luna muse-spark-1.3-contributor";;
@@ -1370,16 +1369,72 @@ proxy_agent_pick_tier() {
   esac
   # No Codex for proxies (Rajiv ts 1794834402.077499): drop gpt-* from every rung while the flag file exists.
   if [[ -e "$HOME/.claude/state/proxy-no-codex" ]]; then
-    local _m _kept=""
     for _m in $models; do [[ "$_m" == gpt-* ]] || _kept="${_kept:+$_kept }$_m"; done
+    models="$_kept"
+  fi
+  printf '%s\n' "$models"
+}
+# Emergency Muse gate (CTO REVISE 2026-11-17, C0ALZJHGE49 thread 1794931098.013929, ts 1794932145.795929): Muse is emergency-only
+# across EVERY route, not merely last within one rung.
+# 0 when route $1 is KNOWN unusable right now: refused by the burn gate (capped roles, enforce mode), at its own pool cap, or in a
+# 402/429 cooldown (recorded, or a fresh probe answer). 1 when it is usable OR unknown: a probe failure or the operator's
+# no-subscription switch never proves exhaustion.
+proxy_agent_route_exhausted() {
+  local id="$1" rc
+  [[ "${PROXY_AGENT_NO_SUBSCRIPTION:-0}" != 1 ]] || return 1
+  if proxy_agent_burn_refused "$id"; then return 0; fi
+  if proxy_agent_pool_blocked "$id"; then return 0; fi
+  if proxy_agent_sub_usable "$id"; then return 1; else rc=$?; fi
+  [[ "$rc" == 1 ]]
+}
+# 0 when Muse may be used: EVERY eligible non-emergency route in EVERY tier list (Claude, Grok, Codex and the other OpenCode ids,
+# not only the rung being resolved) is known exhausted. The first route that is usable or unknown closes the gate and is named in
+# PA_EMERGENCY_BLOCKER. The verdict is computed once per launch and shared by the tier pick and the final-primary guard.
+PA_EMERGENCY_VERDICT=""
+PA_EMERGENCY_BLOCKER=""
+proxy_agent_emergency_open() {
+  local tier id seen=" "
+  if [[ -n "${PA_EMERGENCY_VERDICT:-}" ]]; then
+    [[ "$PA_EMERGENCY_VERDICT" == open ]] && return 0 || return 1
+  fi
+  for tier in LIGHT MID TOP PLAN BUILD1 BUILD2 BUILD3 PROOF1 PROOF2 REVIEW; do
+    for id in $(proxy_agent_tier_models "$tier"); do
+      proxy_agent_is_emergency_muse "$id" && continue
+      case "$seen" in *" $id "*) continue;; esac
+      seen="$seen$id "
+      if ! proxy_agent_route_exhausted "$id"; then
+        PA_EMERGENCY_VERDICT=closed
+        PA_EMERGENCY_BLOCKER="$id"
+        return 1
+      fi
+    done
+  done
+  PA_EMERGENCY_VERDICT=open
+  return 0
+}
+# Picks the first usable model of a tier into PICK_MODEL. Second argument "nested" is used for the Haiku/Sonnet/Opus alias picks:
+# those aliases are exported to the child, and an OpenCode id there would run uncounted by OPENCODE_PROXY_CAP (the live count sees
+# only the child's primary --model), so nested picks stay on the existing approved Claude/Grok/Codex routes and never use the pool.
+proxy_agent_pick_tier() {
+  local tier="$1" nested="${2:-}" id skipped="" last="" models rc claude_live emergency_ok=1 gate _m _kept=""
+  claude_live=0
+  if proxy_agent_is_capped "$TYPE"; then claude_live="$(proxy_agent_live_count claude)"; fi
+  models="$(proxy_agent_tier_models "$tier")" || return 1
+  if [[ "$nested" == nested ]]; then
+    for _m in $models; do proxy_agent_is_opencode_id "$_m" || _kept="${_kept:+$_kept }$_m"; done
     models="$_kept"
   fi
   for id in $models; do
     if proxy_agent_is_emergency_muse "$id"; then
-      # Emergency only: reached after every earlier entry was capped or cooled. An earlier probe failure is unknown, not cooled,
-      # and the fallback_last pick below never lands on Muse.
-      if [[ "$emergency_ok" != 1 ]]; then
+      # Emergency only. Rung-local: an earlier probe failure in this rung is unknown, not exhausted. Global: every eligible
+      # non-emergency route in every tier list must also be capped, burn-refused or cooled (proxy_agent_emergency_open).
+      # The fallback_last pick below never lands on Muse.
+      gate=""
+      if [[ "$emergency_ok" != 1 ]]; then gate=rung_probe_failed
+      elif ! proxy_agent_emergency_open; then gate="${PA_EMERGENCY_BLOCKER:-unknown}"; fi
+      if [[ -n "$gate" ]]; then
         skipped="${skipped:+$skipped,}$id:emergency_gate"
+        printf 'proxy-agent: emergency_gate skip model=%s blocker=%s\n' "$id" "$gate" >&2
         continue
       fi
     else
@@ -1505,11 +1560,32 @@ proxy_agent_pool_blocked() {
     *) return 1;;
   esac
   case "$cap" in ''|*[!0-9]*) return 1;; esac
+  # OpenCode cap 0 means the pool is off: blocked without counting, so an unreadable process list cannot let a launch through.
+  if [[ "$pool" == opencode && "$cap" =~ ^0+$ ]]; then return 0; fi
   if ! live="$(proxy_agent_pool_live "$pool")"; then
     printf 'proxy-agent: pool_cap UNAVAILABLE pool=%s\n' "$pool" >&2
     return 1
   fi
   [[ "${live:-0}" -ge "$cap" ]]
+}
+# Final-primary OpenCode guard (CTO REVISE 2026-11-17, C0ALZJHGE49 thread 1794931098.013929, ts 1794932145.795929). Runs in
+# proxy_agent_select on the RESOLVED primary, RAW included: a raw `--model hy4-flash-free` skips proxy_agent_pick_tier and the burn
+# check treats OpenCode ids as unmetered, so without this an explicit pool id launched past OPENCODE_PROXY_CAP (even 0), and an
+# explicit Muse skipped the emergency gate. Same pool_blocked decision as the picker, so actual scoped cap exemptions still apply;
+# an exemption is never emergency permission for Muse. Returns 75 on refusal, 0 otherwise.
+proxy_agent_primary_pool_guard() {
+  local _guard_id _guard_window _guard_max
+  read -r _guard_id _guard_window _guard_max < <(resolve_model "$MODEL")
+  proxy_agent_is_opencode_id "$_guard_id" || return 0
+  if proxy_agent_pool_blocked "$_guard_id"; then
+    printf 'proxy-agent: REFUSED primary %s (opencode pool_cap)\n' "$_guard_id" >&2
+    return 75
+  fi
+  if proxy_agent_is_emergency_muse "$_guard_id" && ! proxy_agent_emergency_open; then
+    printf 'proxy-agent: REFUSED primary %s (emergency_gate blocker=%s)\n' "$_guard_id" "${PA_EMERGENCY_BLOCKER:-unknown}" >&2
+    return 75
+  fi
+  return 0
 }
 # Primary burn check (CTO REVISE 2026-11-15, C0ALZJHGE49 ts 1794754734.596349). Runs in proxy_agent_select right after the
 # PRIMARY pick and BEFORE the nested alias picks, which make usability POSTs. A refused primary (e.g. a raw
@@ -1579,12 +1655,15 @@ proxy_agent_select() {
     proxy_agent_pick_tier "$tier" || return 75
     MODEL="$PICK_MODEL"; SELECT_REASON="$PICK_REASON"
   fi
+  # OpenCode pool cap and Muse emergency gate on the resolved primary (covers RAW primaries too), before any alias usability POST.
+  proxy_agent_primary_pool_guard || return 75
   # Primary burn decision first (covers RAW primaries too): a refused primary returns before any alias usability POST.
   proxy_agent_primary_burn_check || return 75
   # Nested aliases get the same burn gate. A refused alias leaves PICK_MODEL empty; the export block below fails it closed.
-  proxy_agent_pick_tier LIGHT || true; HAIKU_MODEL="$PICK_MODEL"
-  proxy_agent_pick_tier MID || true; SONNET_MODEL="$PICK_MODEL"
-  proxy_agent_pick_tier TOP || true; OPUS_MODEL="$PICK_MODEL"
+  # They never use the OpenCode pool (uncounted by its cap): "nested" keeps them on the existing Claude/Grok/Codex routes.
+  proxy_agent_pick_tier LIGHT nested || true; HAIKU_MODEL="$PICK_MODEL"
+  proxy_agent_pick_tier MID nested || true; SONNET_MODEL="$PICK_MODEL"
+  proxy_agent_pick_tier TOP nested || true; OPUS_MODEL="$PICK_MODEL"
 }
 
 # Model table: alias | CLIProxyAPI model id | context window | max output tokens.
