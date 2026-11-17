@@ -2697,7 +2697,8 @@ def claude_memory_line(arm: bool, now: datetime) -> str:
 #   - Muse: the launcher's selection log (primary and nested alias selections). Selection records only: not issued or successful
 #     use, and zero records does not prove zero use.
 # Read-only. A source that cannot be read renders UNAVAILABLE, or PARTIAL with the observed minimum, for its own field only;
-# it is never rendered as 0.
+# it is never rendered as 0. Invalid UTF-8 is never an exception and never a silent repair: a manifest or a Muse log line that
+# does not decode strictly could be (or hide) a record, so it counts toward PARTIAL (C0ALZJHGE49 thread 1794932691.512539).
 OPENCODE_MODELS = ("hy4-flash-free", "deepseek-v4.1-flash", "muse-spark-1.3-contributor")
 OPENCODE_CAP_DEFAULT = 2
 OPENCODE_WINDOW_S = 3600
@@ -2709,7 +2710,10 @@ MUSE_EMERGENCY_LOG = Path.home() / ".claude/state/proxy-emergency-muse.log"
 _OPENCODE_PS = re.compile(r"(?:^|\s)\S*/claude\s+-p\s+--name\s+\S+\s+--model\s+(\S+)")
 # proxy-agent.sh proxy_agent_log_emergency_muse: "<UTC stamp> EMERGENCY_MUSE role=.. name=.. type=.. tier=.. model=.. reason=..".
 _MUSE_LOG_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) EMERGENCY_MUSE\b")
+_MUSE_LOG_STAMP = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)")
 _MUSE_LOG_ROLE = re.compile(r"\srole=(\S+)")
+# An invalid UTF-8 byte read with errors="surrogateescape" survives as a lone surrogate U+DC80..U+DCFF, so it can be detected.
+_UNDECODABLE = re.compile(r"[\udc80-\udcff]")
 _MUSE_ALIAS_ROLES = ("haiku", "sonnet", "opus")
 
 
@@ -2754,10 +2758,11 @@ def opencode_cap(path: Path = PROXY_CAPS_FILE, environ: dict | None = None) -> t
 def opencode_live(ps_text: str | None = None) -> dict[str, int]:
     """Running PRIMARY-model `claude -p --name X --model <id>` processes per OpenCode model id (the launcher's own pool count).
     Nested OpenCode requests made through alias model slots are not processes of their own and are not counted here.
-    Raises OSError/SubprocessError if ps fails."""
+    Raises OSError/SubprocessError if ps fails. A process command line may hold invalid UTF-8: it is decoded with replacement
+    (the matched structure and model ids are ASCII) instead of letting UnicodeDecodeError escape."""
     if ps_text is None:
-        ps_text = subprocess.run(["/bin/ps", "-axo", "command="], capture_output=True, text=True,
-                                 timeout=5, check=True).stdout
+        ps_text = subprocess.run(["/bin/ps", "-axo", "command="], capture_output=True,
+                                 timeout=5, check=True).stdout.decode("utf-8", errors="replace")
     counts = dict.fromkeys(OPENCODE_MODELS, 0)
     for line in ps_text.splitlines():
         match = _OPENCODE_PS.search(line)
@@ -2773,8 +2778,8 @@ def opencode_registrations(now: datetime, root: Path = PROXY_RUN_STATE,
     manifest per run name and replaces it on a later start/resume, so this is latest-per-name registration evidence: it can
     miss an earlier launch of a re-registered name, and it includes a registration whose launch then failed. It is not a count
     of successful launches.
-    `partial` counts manifests that could hide a registration: unreadable or malformed JSON, no usable started_at, a started_at
-    stamped past now, or an in-window record with no model. Those are never read as "no activity"; the caller renders PARTIAL
+    `partial` counts manifests that could hide a registration: unreadable, undecodable (invalid UTF-8) or malformed JSON, no
+    usable started_at, a started_at stamped past now, or an in-window record with no model. Those are never read as "no activity"; the caller renders PARTIAL
     with the observed minimum. Raises OSError when the run registry itself cannot be listed."""
     ts_now = now.timestamp()
     cutoff = ts_now - window_s
@@ -2788,7 +2793,9 @@ def opencode_registrations(now: datetime, root: Path = PROXY_RUN_STATE,
             # registration inside it. Anything modified since is read in full and checked strictly below.
             if manifest.stat().st_mtime < cutoff - 300:
                 continue
-            data = json.loads(manifest.read_text())
+            # Strict UTF-8, never the locale default: invalid bytes raise UnicodeDecodeError (a ValueError), so an undecodable
+            # manifest is PARTIAL below, exactly like malformed JSON.
+            data = json.loads(manifest.read_bytes().decode("utf-8"))
         except (FileNotFoundError, NotADirectoryError):
             continue  # not a run directory, or removed while scanning
         except (OSError, ValueError):
@@ -2817,31 +2824,46 @@ def opencode_registrations(now: datetime, root: Path = PROXY_RUN_STATE,
     return counts, partial
 
 
+def _muse_stamp(text: str) -> float | None:
+    """Epoch seconds of a launcher log stamp (`YYYY-MM-DDTHH:MM:SSZ`, UTC), or None when it does not parse."""
+    try:
+        return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
 def muse_selection_records(now: datetime, path: Path = MUSE_EMERGENCY_LOG,
                            window_s: int = OPENCODE_WINDOW_S) -> tuple[dict[str, int], int, bool]:
     """(records by role {primary, alias, other}, malformed count, log_absent). Counts the launcher's EMERGENCY_MUSE selection
     records whose stamp is inside [now - window, now + skew], one per logged line: the primary selection and each nested
     haiku/sonnet/opus alias selection are separate records, and there is NO dedupe or time-based launch grouping. A record
     shows a model was SELECTED; it does not show a request was issued or succeeded, and zero records does not prove zero use.
-    A line carrying EMERGENCY_MUSE with an unparsable or future stamp is `malformed` (the caller renders PARTIAL). A missing
+    A line carrying EMERGENCY_MUSE with an unparsable or future stamp is `malformed` (the caller renders PARTIAL). A line with
+    invalid UTF-8 cannot be trusted for its marker or role, so it is `malformed` too unless its ASCII stamp proves it predates
+    the window (it then cannot hide an in-window record); it is never repaired into a normal-looking record. A missing
     log is zero records with log_absent set (the launcher creates it on the first selection); any other failure raises OSError."""
     try:
-        text = path.read_text(errors="replace")
+        text = path.read_text(encoding="utf-8", errors="surrogateescape")
     except FileNotFoundError:
         return {"primary": 0, "alias": 0, "other": 0}, 0, True
     ts_now = now.timestamp()
     counts = {"primary": 0, "alias": 0, "other": 0}
     malformed = 0
     for line in text.splitlines():
+        if _UNDECODABLE.search(line):
+            stamp = _MUSE_LOG_STAMP.match(line)
+            stamped = _muse_stamp(stamp.group(1)) if stamp else None
+            if stamped is None or stamped >= ts_now - window_s:
+                malformed += 1
+            continue
         if "EMERGENCY_MUSE" not in line:
             continue
         match = _MUSE_LOG_LINE.match(line)
         if not match:
             malformed += 1
             continue
-        try:
-            ts = datetime.strptime(match.group(1), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
-        except ValueError:
+        ts = _muse_stamp(match.group(1))
+        if ts is None:
             malformed += 1
             continue
         if ts < ts_now - window_s:
@@ -2887,7 +2909,7 @@ def opencode_line(now: datetime, caps: Path = PROXY_CAPS_FILE, root: Path = PROX
     registered_text = "run registrations last 1h (latest per run name, may include failed launches): "
     if registered is not None and partial:
         registered_text += (f"PARTIAL, observed minimum {cells(registered)} ({partial} manifest{'' if partial == 1 else 's'} "
-                            "unreadable, malformed or missing model/start time)")
+                            "unreadable, undecodable, malformed or missing model/start time)")
     else:
         registered_text += cells(registered)
     if muse is None:
@@ -2901,7 +2923,7 @@ def opencode_line(now: datetime, caps: Path = PROXY_CAPS_FILE, root: Path = PROX
         if absent:
             detail.append("log file absent")
         if malformed:
-            detail.append(f"{malformed} malformed log line{'' if malformed == 1 else 's'}")
+            detail.append(f"{malformed} malformed or undecodable log line{'' if malformed == 1 else 's'}")
         prefix = f"PARTIAL, observed minimum {total}" if malformed else str(total)
         muse_text = (f"Muse selection records logged last 1h: {prefix} ({' · '.join(detail)}; "
                      "selection log only, not proof of use or of no use)")

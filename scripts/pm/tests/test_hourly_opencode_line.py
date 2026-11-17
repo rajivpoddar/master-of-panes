@@ -8,6 +8,8 @@ Directive: OpenCode Go pool line for the hourly composer (no cost, no rate, no q
   2. live = PRIMARY-model processes only; run manifests are latest-per-name REGISTRATION evidence, not a launch count; unreadable,
      malformed, model-less or future-stamped manifests make the field PARTIAL with the observed minimum, never silent zero;
   3. Muse = logged selection records (primary and alias), no time-based launch grouping, zero is not proof of no use.
+Invalid UTF-8 follow-up: a manifest or Muse log line that does not decode strictly is PARTIAL (never an exception, never repaired
+into a normal-looking record); a process-table line with invalid UTF-8 no longer raises out of the live reader.
 Fakes only: the ps text, the run registry, the caps file, the environment and the Muse log are temp files, dicts or strings;
 nothing calls MoP, tmux, Slack or a provider.
 Added, NOT executed (MoP changes need no local test proof; Rajiv DM D0AMF0XE6TS thread 1793979986.975849,
@@ -16,6 +18,7 @@ ts 1793983042.752819).
 
 import importlib.util
 import json
+import os
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -150,6 +153,27 @@ def test_unreadable_malformed_modelless_or_future_manifests_are_partial_not_drop
     assert partial == 5
 
 
+def test_invalid_utf8_manifest_is_partial_not_an_exception_and_not_counted(tmp_path):
+    run = tmp_path / "px-badutf8"
+    run.mkdir()
+    (run / "manifest.json").write_bytes(b'{"model": "' + HY4.encode() + b'", "started_at": "' + stamp(10).encode()
+                                        + b'", "note": "\xc3\x28"}')  # \xc3\x28 is an invalid two-byte sequence
+    manifest(tmp_path, "px-ok", DEEP, stamp(10))
+    counts, partial = composer.opencode_registrations(NOW, tmp_path)
+    assert counts == {HY4: 0, DEEP: 1, MUSE: 0}  # the undecodable record is not trusted into the counts ...
+    assert partial == 1  # ... and is reported as PARTIAL rather than dropped
+
+
+def test_an_undecodable_manifest_older_than_the_window_is_not_partial(tmp_path):
+    run = tmp_path / "px-old"
+    run.mkdir()
+    old = run / "manifest.json"
+    old.write_bytes(b"\xff\xfe not utf-8")
+    long_ago = (NOW - timedelta(hours=5)).timestamp()
+    os.utime(old, (long_ago, long_ago))  # last modified long before the window: cannot hold an in-window registration
+    assert composer.opencode_registrations(NOW, tmp_path) == ({HY4: 0, DEEP: 0, MUSE: 0}, 0)
+
+
 def test_an_unlistable_registry_raises_instead_of_reading_zero(tmp_path):
     with pytest.raises(OSError):
         composer.opencode_registrations(NOW, tmp_path / "nope")
@@ -186,6 +210,24 @@ def test_muse_old_lines_are_skipped_and_bad_or_future_lines_are_malformed(tmp_pa
     assert malformed == 3
 
 
+def test_muse_log_with_invalid_utf8_does_not_raise_and_is_not_repaired_into_a_record(tmp_path):
+    log = tmp_path / "muse.log"
+    bad_in_window = log_line(60, "px-bad").encode().replace(b"px-bad", b"px-\xc3\x28")
+    bad_before_window = log_line(3700, "px-old").encode().replace(b"px-old", b"px-\xc3\x28")
+    log.write_bytes(log_line(30, "px-ok").encode() + bad_in_window + bad_before_window)
+    counts, malformed, absent = composer.muse_selection_records(NOW, log)
+    assert counts == {"primary": 1, "alias": 0, "other": 0}  # the in-window undecodable line is NOT counted as a record
+    assert (malformed, absent) == (1, False)  # it is PARTIAL; the undecodable line stamped before the window is not
+
+
+def test_live_reader_tolerates_invalid_utf8_in_the_process_table(monkeypatch):
+    raw = (b"/opt/homebrew/bin/claude -p --name px-0 --model " + DEEP.encode() + b" --note \xff\xfe\n"
+           b"/usr/bin/odd-tool \xc3\x28\n"
+           b"/opt/homebrew/bin/claude -p --name px-1 --model " + MUSE.encode() + b"\n")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=raw, stderr=b""))
+    assert composer.opencode_live() == {HY4: 0, DEEP: 1, MUSE: 1}
+
+
 # ---- fixture table (static/stub inputs; one row per CTO-named case) ----
 # Row keys: env (inherited environment), caps (None = no file, "dir" = unreadable path, else file text), runs (ordered manifest
 # writes; a repeated name overwrites, like a later start/resume), log (None = no file, else Muse log lines), ps (live primaries).
@@ -210,7 +252,7 @@ FIXTURES = [
                ("px-future", {"model": DEEP, "started_at": stamp(-3600)}),
                ("px-nostart", {"model": MUSE}), ("px-ok", {"model": HY4, "started_at": stamp(30)})],
          reg=("PARTIAL, observed minimum " + counts_text(1, hy4=1)
-              + " (4 manifests unreadable, malformed or missing model/start time)")),
+              + " (4 manifests unreadable, undecodable, malformed or missing model/start time)")),
     dict(id="overwritten-registration-is-latest-per-name-and-failed-launch-still-counts", env={}, caps=None,
          runs=[("px-a", {"model": MUSE, "started_at": stamp(1800)}),  # first registration ...
                ("px-a", {"model": DEEP, "started_at": stamp(5)}),  # ... replaced by a later start/resume of the same name
@@ -227,7 +269,21 @@ FIXTURES = [
     dict(id="malformed-and-future-muse-lines-are-partial", env={}, caps=None,
          log=[log_line(1800, "px-a"), "2026-13-45T99:99:99Z EMERGENCY_MUSE name=px-bad\n", log_line(-600, "px-future"),
               log_line(3700, "px-old"), "not a log line\n"],
-         muse=muse_cell(1, 1, 0, "2 malformed log lines", partial=True)),
+         muse=muse_cell(1, 1, 0, "2 malformed or undecodable log lines", partial=True)),
+    dict(id="invalid-utf8-manifest-is-partial-not-silent-and-not-a-crash", env={}, caps=None,
+         runs=[("px-badutf8", b'{"model": "hy4-flash-free", "started_at": "' + stamp(30).encode() + b'", "note": "\xff\xfe"}'),
+               ("px-ok", {"model": HY4, "started_at": stamp(30)})],
+         reg=("PARTIAL, observed minimum " + counts_text(1, hy4=1)
+              + " (1 manifest unreadable, undecodable, malformed or missing model/start time)")),
+    dict(id="invalid-utf8-muse-lines-are-partial-unless-stamped-before-the-window", env={}, caps=None,
+         log=[log_line(1800, "px-a"),  # decodes: counted
+              log_line(120, "px-b").encode().replace(b"px-b", b"px-\xff"),  # in-window, bad byte in a field: PARTIAL
+              (NOW - timedelta(seconds=90)).strftime("%Y-%m-%dT%H:%M:%SZ").encode()
+              + b" EMERGENCY_M\xffSE role=primary name=px-c\n",  # in-window, the marker itself is corrupt: PARTIAL
+              b"\xff\xfe no stamp, undecodable\n",  # cannot be placed in time: PARTIAL
+              log_line(3700, "px-old").encode().replace(b"px-old", b"px-\xff"),  # undecodable but stamped before the window
+              log_line(60, "px-d", "haiku")],  # decodes: counted
+         muse=muse_cell(2, 1, 1, "3 malformed or undecodable log lines", partial=True)),
 ]
 
 
@@ -243,10 +299,14 @@ def test_fixture_table(tmp_path, case):
     for name, payload in case.get("runs", []):
         run = runs / name
         run.mkdir(exist_ok=True)
-        (run / "manifest.json").write_text(payload if isinstance(payload, str) else json.dumps(payload))
+        manifest_file = run / "manifest.json"
+        if isinstance(payload, bytes):
+            manifest_file.write_bytes(payload)
+        else:
+            manifest_file.write_text(payload if isinstance(payload, str) else json.dumps(payload))
     log = tmp_path / "muse.log"
     if case.get("log") is not None:
-        log.write_text("".join(case["log"]))
+        log.write_bytes(b"".join(row if isinstance(row, bytes) else row.encode() for row in case["log"]))
     line = composer.opencode_line(NOW, caps=caps, root=runs, log=log, ps_text=ps(*case.get("ps", ())), environ=case["env"])
     expected = line_of(case.get("cap", "cap 2 (default: key absent, no cap file)"),
                        case.get("live", counts_text(0)), case.get("reg", counts_text(0)),
