@@ -663,7 +663,7 @@ def reset_seconds(text):
     return 3600
 
 model = os.environ.get("PROXY_AGENT_CLAUDE_PROBE_MODEL", "")
-if model not in ("claude-opus-5-5-high", "claude-sonnet-5-5-high", "gemini-4-argon-high", "gemini-3.8-flash-high", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-high", "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "grok-4.7", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6-astra", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-fable-5-2", "hy4-flash-free", "deepseek-v4.1-flash", "muse-spark-1.3-contributor"):
+if model not in ("claude-opus-5-5-high", "claude-sonnet-5-5-high", "gemini-4-argon-high", "gemini-3.8-flash-high", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-high", "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "grok-4.7", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6-astra", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-fable-5-2", "hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor"):
     finish("fail", 0)
 
 state_dir = os.environ.get("PROXY_AGENT_STATE_DIR") or os.path.expanduser("~/.cache/proxy-agent")
@@ -1134,14 +1134,15 @@ proxy_agent_canonical_id() {
     case "$1" in
       luna|gpt-6-luna) printf 'claude-haiku-5-5\n'; return;;
       terra|gpt-6.1-terra) printf 'claude-sonnet-5-5\n'; return;;
-      sol|gpt-6.1-sol) printf 'claude-opus-5-5\n'; return;;
+      sol|gpt-6.1-sol|gpt-6.2-sol) printf 'claude-opus-5-5\n'; return;;
       astra|gpt-6-astra) printf 'claude-fable-5-2\n'; return;;
     esac
   fi
   case "$1" in
     luna|gpt-6-luna) printf 'gpt-6-luna\n';;
     terra|gpt-6.1-terra) printf 'gpt-6.1-terra\n';;
-    sol|gpt-6.1-sol) printf 'gpt-6.1-sol\n';;
+    sol|gpt-6.2-sol) printf 'gpt-6.2-sol\n';;  # sol alias -> 6.2 (Rajiv ts 1794940770.892719)
+    gpt-6.1-sol) printf 'gpt-6.1-sol\n';;
     astra|gpt-6-astra) printf 'gpt-6-astra\n';;
     grok|grok-4.7) printf 'grok-4.7\n';;
     # Antigravity (Gemini + ag-* Claude) is banned: only grok, claude, codex (Rajiv ts 1794660714.234059). Old aliases remap to Claude equivalents.
@@ -1334,9 +1335,9 @@ proxy_agent_is_capped() {
 proxy_agent_live_count() {
   python3 -I "$HOME/.claude/scripts/proxy-cap-count.py" "$1" || printf '999\n'
 }
-# OpenCode Go pool: hy4-flash-free, deepseek-v4.1-flash and muse-spark-1.3-contributor share ONE cap (OPENCODE_PROXY_CAP, default 2).
+# OpenCode Go pool: hy4-flash-free, deepseek-v4.1-flash, glm-5.3 and muse-spark-1.3-contributor share ONE cap (OPENCODE_PROXY_CAP, default 2).
 proxy_agent_is_opencode_id() {
-  case "$1" in hy4-flash-free|deepseek-v4.1-flash|muse-spark-1.3-contributor) return 0;; *) return 1;; esac
+  case "$1" in hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor) return 0;; *) return 1;; esac
 }
 # Muse Spark Contributor trains on prompts: last-resort emergency entry (Rajiv D0AMF0XE6TS thread 1794926930.078169, ts 1794929496.349809).
 proxy_agent_is_emergency_muse() {
@@ -1350,8 +1351,10 @@ proxy_agent_tier_models() {
     # OpenCode Go pool (Rajiv D0AMF0XE6TS thread 1794926930.078169, ts 1794930258.014469): hy4-flash-free joins LIGHT, deepseek-v4.1-flash joins MID.
     # Every tier ends with the emergency-only Muse Spark entry (see proxy_agent_is_emergency_muse). Grok stays in its existing slot.
     LIGHT) models="claude-haiku-5-5 hy4-flash-free grok-4.7 gpt-6-luna muse-spark-1.3-contributor";;
+    # glm-5.3 registered, explicit --model only until one test build passes, Rajiv condition ts 1794942421.644269 (PM steer 2026-11-18: not in any automatic tier list).
     MID) models="claude-sonnet-5-5 deepseek-v4.1-flash grok-4.7 gpt-6.1-terra muse-spark-1.3-contributor";;
     TOP) models="claude-opus-5-5 grok-4.7 gpt-6.1-terra muse-spark-1.3-contributor";;  # sol dropped (Rajiv C0ALZJHGE49 ts 1794720589.429929: "cut down sol usage on proxies")
+    # gpt-6.2-sol replaces gpt-6.1-sol (the "sol" alias); gpt-6.1-terra stays in the tiers (Rajiv D0AMF0XE6TS thread 1794939318.063889, ts 1794941131.743129: "6.1 terra should stay. 6.2 sol should replace 6.1 sol").
     # Per-role ladders (Rajiv D0AMF0XE6TS thread 1794624936.567599: ts 1794639918.387399 ladder, ts 1794640102.756179 hydrogen in the mid rungs).
     # First id not in 429/402 cooldown wins within a rung; claude-* ids still skip at the cap (claude_cap), then the next id in the SAME rung is tried.
     PLAN) models="grok-4.7 claude-opus-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
@@ -1541,7 +1544,7 @@ for line in out.splitlines():
     if not match:
         continue
     model = match.group(1)
-    kind = "claude" if model.startswith("claude-") else "codex" if model.startswith("gpt-") else "grok" if model.startswith("grok") else "opencode" if model in ("hy4-flash-free", "deepseek-v4.1-flash", "muse-spark-1.3-contributor") else ""
+    kind = "claude" if model.startswith("claude-") else "codex" if model.startswith("gpt-") else "grok" if model.startswith("grok") else "opencode" if model in ("hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor") else ""
     if kind == pool:
         n += 1
 print(n)
@@ -1556,7 +1559,7 @@ proxy_agent_pool_blocked() {
     claude-*) pool=claude; cap="${CLAUDE_PROXY_CAP:-${PROXY_AGENT_CLAUDE_CAP:-5}}";;
     gpt-*) pool=codex; cap="${CODEX_PROXY_CAP:-8}";;
     grok-4.7|grok) pool=grok; cap="${GROK_PROXY_CAP:-8}";;
-    hy4-flash-free|deepseek-v4.1-flash|muse-spark-1.3-contributor) pool=opencode; cap="${OPENCODE_PROXY_CAP:-2}";;
+    hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor) pool=opencode; cap="${OPENCODE_PROXY_CAP:-2}";;
     *) return 1;;
   esac
   case "$cap" in ''|*[!0-9]*) return 1;; esac
@@ -1710,7 +1713,7 @@ resolve_model() {
   case "$1" in
     luna)         echo "gpt-6-luna 1050000 128000";;
     terra)        echo "gpt-6.1-terra 1050000 128000";;
-    sol)          echo "gpt-6.1-sol 1050000 128000";;
+    sol)          echo "gpt-6.2-sol 1050000 128000";;
     astra)        echo "gpt-6-astra 200000 32000";;
     grok)         echo "grok-4.7 500000 32000";;
     ernie)        echo "ernie-flash 1024000 921600";;
@@ -1727,6 +1730,7 @@ resolve_model() {
     # DeepSeek direct (balance-metered, emergencies only; Rajiv D0AMF0XE6TS ts 1794806595.680589). Never in a tier list.
     # (The OpenCode Go entry deepseek-v4.1-flash is a different id and a MID tier entry: see proxy_agent_pick_tier.)
     deepseek|deepseek-flash-4.1) echo "deepseek-flash-4.1 128000 8192";;
+    gpt-6.2-sol)  echo "gpt-6.2-sol 1050000 128000";;  # Rajiv D0AMF0XE6TS ts 1794940288.370549; exact id only, not in any tier ladder
     gpt-6-luna|gpt-6.1-terra|gpt-6.1-sol|gpt-6-astra|grok-4.7|gemini-4-argon-high|gemini-3.8-flash-high|gemini-4-hydrogen-xhigh|claude-opus-5-5-high|claude-sonnet-5-5-high|claude-haiku-5-5|claude-sonnet-5-5|claude-opus-5-5|claude-fable-5-2)
                   resolve_model "$(proxy_agent_alias_for_id "$1")";;
     *)            echo "$1 200000 32000";;
@@ -1823,8 +1827,8 @@ proxy_agent_log_emergency_muse haiku "${HAIKU_MODEL:-}"
 proxy_agent_log_emergency_muse sonnet "${SONNET_MODEL:-}"
 proxy_agent_log_emergency_muse opus "${OPUS_MODEL:-}"
 case "$MODEL" in
-  ag-opus|ag-sonnet|luna|terra|sol|astra|grok|hydrogen|ernie|gemini-pro|gemini-flash|gpt-6-luna|gpt-6.1-terra|gpt-6.1-sol|gpt-6-astra|grok-4.7|gemini-4-argon-high|gemini-3.8-flash-high|gemini-4-hydrogen-xhigh|claude-opus-5-5-high|claude-sonnet-5-5-high|haiku|sonnet|opus|fable|claude-haiku-5-5|claude-sonnet-5-5|claude-opus-5-5|claude-fable-5-2) ;;
-  hy4-flash-free|deepseek-v4.1-flash|muse-spark-1.3-contributor) ;;  # OpenCode Go via CLIProxyAPI; conservative 200000/32000 window until a source is added
+  ag-opus|ag-sonnet|luna|terra|sol|astra|grok|hydrogen|ernie|gemini-pro|gemini-flash|gpt-6-luna|gpt-6.1-terra|gpt-6.1-sol|gpt-6.2-sol|gpt-6-astra|grok-4.7|gemini-4-argon-high|gemini-3.8-flash-high|gemini-4-hydrogen-xhigh|claude-opus-5-5-high|claude-sonnet-5-5-high|haiku|sonnet|opus|fable|claude-haiku-5-5|claude-sonnet-5-5|claude-opus-5-5|claude-fable-5-2) ;;
+  hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor) ;;  # OpenCode Go via CLIProxyAPI; conservative 200000/32000 window until a source is added
   deepseek|deepseek-flash-4.1)
     # Emergencies only: explicit --model plus a P0 cap override (Rajiv D0AMF0XE6TS ts 1794806595.680589).
     case "${PROXY_AGENT_CAP_OVERRIDE:-}" in

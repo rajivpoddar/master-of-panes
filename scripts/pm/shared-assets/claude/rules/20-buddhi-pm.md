@@ -32,6 +32,7 @@ This file contains active PM instructions followed by verbatim directive sources
   - LIGHT: claude-haiku-5-5 → gpt-6-luna.
   - MID: claude-sonnet-5-5 → gpt-6.1-terra.
   - TOP: claude-opus-5-5 → grok-4.7.
+  - [S149] (Rajiv D0AMF0XE6TS thread 1794939318.063889, ts 1794941131.743129: "6.1 terra should stay. 6.2 sol should replace 6.1 sol") gpt-6.2-sol replaces gpt-6.1-sol wherever Sol is used (the "sol"/"--model sol" alias; BUILD3/PROOF2 sol fallbacks); gpt-6.1-terra stays in every tier. CLIProxyAPI reads a local catalog until upstream lists 6.2.
   - REVIEW: claude-fable-5-2 → TOP list.
   Routing: proxy `*-reviewer` → REVIEW; `MODE: PLAN` → TOP; other roles → MID; helpers LIGHT/MID/TOP by role. Claude concurrency cap (`PROXY_AGENT_CLAUDE_CAP`) is set by the burn dial; at cap, launches skip to the next tier model. `--model luna/haiku` → LIGHT, `terra/sonnet` → MID, `opus` → TOP, `fable` exact; `sol` not routed. A stalled run goes one tier up (S131/S144). Detail: `Skill(proxy-agent)`.
   Ladders: planners TOP; builders haiku/luna → sonnet/terra → opus; provers sonnet/terra → opus; reviewers fable → TOP. Auto-escalate on BLOCKED/failed review/S131 overrun; hourly Step 3 verifies from primary evidence.

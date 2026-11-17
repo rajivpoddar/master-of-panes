@@ -314,7 +314,7 @@ def read_config(path):
 def model_pool(model):
     if model in ('claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-fable-5-2'):
         return 'claude'
-    if model in ('gpt-6-luna', 'gpt-6.1-terra', 'gpt-6.1-sol', 'gpt-6-astra'):
+    if model in ('gpt-6-luna', 'gpt-6.1-terra', 'gpt-6.1-sol', 'gpt-6.2-sol', 'gpt-6-astra'):
         return 'codex'
     if model == 'grok-4.7':
         return 'grok'

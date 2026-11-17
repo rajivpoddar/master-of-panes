@@ -253,7 +253,7 @@ the readiness contract, write the merge-ready proof with exact current
 `headRefOid`, ask the CTO for the exact-head merge in the alert thread (head-pinned, with the screenshot thread or
 `No user-visible UI change: <reason>`); no merge-ready label flip executes.
 `PR_PM_REVIEW_REQUIRED` means PM must start or finish PM Claude
-phase-A review; mark `pm-state:pm-review-pending` with `gh pr edit <PR> --add-label pm-state:pm-review-pending` and run
+phase-A review; mark `pm-state:pm-review-pending` with `gh pr edit <PR> --add-label pm-state:pm-review-pending` and launch via Skill(launch-agent) (S148: in-process PM subagent under PM_SUBAGENT_CAP, proxy-agent.sh only on overflow; 12b stays in-process cap-exempt): run
 `Agent(pm-admission-reviewer)` when review is not already in flight. Readiness is satisfied at 12b admission; green exact-head CI+E2E means merge-ask due, with no post-green readiness check. [HIGH] NEVER start or wait on a 12b/PM review after dual green: dual green goes straight to the CTO merge ask the same turn (Rajiv D0AMF0XE6TS thread 1793027212.095579: "dual green shoudl go directly to cto for merges").
 `PR_PM_REVIEW_SLOT_RELEASE_REQUIRED` means a dev slot is still held
 while PM owns review; drain/release that slot through `Skill(direct-release)`
