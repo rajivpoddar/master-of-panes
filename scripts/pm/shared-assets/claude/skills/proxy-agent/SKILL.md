@@ -1,6 +1,6 @@
 ---
 name: proxy-agent
-description: Run any file-based PM subagent (hd-planner, hd-builder, hd-proof-qa, ci-repair-agent, cleanup-pr-runner, customer-artifact-investigator, pm-triage-agent, ...) out of process via CLIProxyAPI on Claude (haiku/sonnet/opus/fable; only the dc53c2ad-dev/qa accounts enabled) while the PM stays on direct Claude. ladders: planner carbon→grok→opus→sol; builder haiku→luna / sonnet→hydrogen→terra / opus→sol; proof-QA sonnet→hydrogen→terra / opus→sol; reviewers carbon→fable→astra. Runs are named peer sessions steerable with native SendMessage; safety hooks stay on. Use for every new PM background agent except 12b.
+description: Overflow launcher when PM_SUBAGENT_CAP is full (S148). Runs a file-based PM agent out of process via CLIProxyAPI while the PM stays on direct Claude. Do not use this as the default launch — Skill(launch-agent) comes first. 12b is never a proxy run (S147). Runs are named peer sessions steerable with native SendMessage; safety hooks stay on.
 ---
 
 # proxy-agent
@@ -9,7 +9,7 @@ Source: Rajiv, DM D0AMF0XE6TS thread 1794087326.732679:
 - ts 1794102850.404149: "can we use these instead of hotfixes now? the model has to chosen based on how urgent the work is."
 - ts 1794103421.702049: "create a skill for the proxy subagents and wire it up in buddhi."
 
-Buddhi rule: S120.
+Buddhi rule: S120 for a proxy that is already the overflow. S148: new work starts at `Skill(launch-agent)`. This skill runs only when live in-process PM subagents are at `PM_SUBAGENT_CAP` (ceiling 6), or when launch-agent's overflow step calls it. 12b never comes here (S147).
 
 ## Why
 The PM runs on direct Claude because PM quality degrades behind cliproxy. In-process subagents always share the PM's endpoint, so they bill Claude. A proxy agent is a separate `claude -p` process pointed at CLIProxyAPI (127.0.0.1:8317), which routes to Codex, Grok and Antigravity accounts. Prompt caching works there because session-affinity was turned on 2026-11-08.
@@ -75,7 +75,9 @@ Each run is a named peer session (`--name`). Find it with `ListAgents` under "Pe
 - Project settings/rules load from the proxy checkout; local settings (including MoP relays) are excluded. `PROXY_AGENT_RUN=1` suppresses reporting/state-writing hooks, not safety guards. UserPromptSubmit scripts are unchanged.
 - Never go back to `disableAllHooks`. Verified 2026-11-08: a merge was blocked and a force-push was denied.
 
-## Moving open PRs (the conveyor, with proxy agents)
+## Moving open PRs (the conveyor)
+
+S148: the Who column is the agent type. Launch it with `Skill(launch-agent)` (in-process until `PM_SUBAGENT_CAP`, this skill only when that cap is full). A "proxy agent" cell is the overflow owner, not a ban on an in-process run.
 | PR state | Next action | Who |
 |---|---|---|
 | rework (12b / Codex / CTO block) | `hd-builder` / `PR:` / `PLAN:` | proxy agent; escalate with `--rung N` |

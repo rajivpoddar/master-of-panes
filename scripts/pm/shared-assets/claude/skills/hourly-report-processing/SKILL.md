@@ -53,7 +53,7 @@ The PM thread reply does NOT @-mention the CTO by default (Rajiv D0AMF0XE6TS thr
 - [ ] 8. Every ACTIONS / Pending PM actions item has an owner or is done this turn.
 - [ ] 9. Step 3a / 2g: remote boxes healthy, or broken ones deleted and recreated (S141).
 - [ ] 10. Step 3x / 3c-2: dead-window cleanup result (DEAD_WINDOWS_CLOSED=N) plus per-window custody for any non-proxy scratch window closed.
-- [ ] 11. Step 3d: proxy caps (live/total, Claude) and any overrides used.
+- [ ] 11. Step 3d: **re-pace and apply the caps EVERY processing cycle** (Rajiv C0ALZJHGE49 thread 1794933979.934539, ts 1794934326.354799: "the pm subagent cap, proxy claude cap, proxy codex cap, proxy opencode cap, proxy grok cap has to be updated at each processing cycle and reported back on this thread"). Run `python3 ~/.claude/scripts/cost/proxy-burn-dial.py --apply` (S143 CTO pace formula: (100 − used%) / hours-to-horizon; caps are independent numbers), then post in the hourly thread one line: PM_SUBAGENT_CAP, CLAUDE_PROXY_CAP, CODEX_PROXY_CAP, OPENCODE_PROXY_CAP (value + source), GROK_PROXY_CAP, total, each with its change vs the previous cycle, plus live/total and any overrides used. A failed dial run is reported as such (caps unchanged), never silently skipped.
 - [ ] 12. Step 3b training progress and Step 3d social digest receipts, when present.
 - [ ] 13. Issue lifecycle dispositions and unblockables (Step 3d), with each issue's next action.
 - [ ] 14. Obligations: actionable rows classified (no bulk re-dating); new commitments recorded.
