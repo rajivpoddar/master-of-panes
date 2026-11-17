@@ -1580,6 +1580,18 @@ proxy_agent_pool_blocked() {
 proxy_agent_primary_pool_guard() {
   local _guard_id _guard_window _guard_max
   read -r _guard_id _guard_window _guard_max < <(resolve_model "$MODEL")
+  case "$_guard_id" in
+    gpt-*)
+      if [[ -e "$HOME/.claude/state/proxy-no-codex" ]]; then
+        printf 'proxy-agent: REFUSED primary %s (proxy-no-codex)\n' "$_guard_id" >&2
+        return 75
+      fi
+      if proxy_agent_pool_blocked "$_guard_id"; then
+        printf 'proxy-agent: REFUSED primary %s (codex pool_cap)\n' "$_guard_id" >&2
+        return 75
+      fi
+      return 0;;
+  esac
   proxy_agent_is_opencode_id "$_guard_id" || return 0
   if proxy_agent_pool_blocked "$_guard_id"; then
     printf 'proxy-agent: REFUSED primary %s (opencode pool_cap)\n' "$_guard_id" >&2
