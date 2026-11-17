@@ -42,7 +42,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "b9a688f71061bcb68d9f97664be461a1e62a5dffc7b28facacfb25598217fdf5",
+      "sha256": "5d2fea01c5fbf83f61fb0a14da86bb34888de471731ab10d625d449f78b0bcbd",
       "source_path": "claude/agents/remote-qa-runner.md"
     },
     {
@@ -935,7 +935,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "985b4f770f499a229fe1684f3c7053c91dfb1a7f6114e220ff4bc5abf9e35182",
+      "sha256": "f874ec7d017827c5a32bb3fba2595b320d49109f5087a9c19a78dfa394e0d007",
       "source_path": "claude/scripts/remote-qa-spec.sh"
     },
     {

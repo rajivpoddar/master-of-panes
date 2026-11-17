@@ -16,6 +16,10 @@
 #   Mac-side as one line: QA_PREWRITE_ANCHORS run=... head=... box=... receipt_sha256=... (stdout/ctl.log + <out>/lane.txt).
 #   The same five anchors (+ QA_RUN_ID_PATH) are exported READONLY into the spec runtime -> preflight -> Playwright -> spawned helpers,
 #   passed as runtime arguments from controller state (never derived from the receipt or a box file).
+#   --extra-secret SUPPORTING_DOCUMENT_RECEIPT_SECRET=generate (OPT-IN; needs --requires-modal --disposable-convex; same contract as
+#   the capture lane): the box generates one 64-hex dev-only secret, sets it on the disposable dev Convex via the ownership-verified
+#   helper, then writes it to the leased per-box Modal secret. Any other name or value is refused before any write; the value is
+#   never supplied by the caller, printed or logged.
 #   --timeout SECS: outer watchdog on the box-side lane run only (setup/teardown excluded). Default 3600s per leg (GREEN=3600, GREEN,RED,GREEN=10800),
 #   capped to the box TTL minus 600s. It is a harness watchdog, NOT a Playwright/CI budget (rule 03); recorded as timeout_secs in lane.txt.
 #   --on-miss (OPT-IN ONLY; Rajiv D0AMF0XE6TS thread 1793524869.957399 ev 1793528200.649109, CTO option A C0ALZJHGE49 1793524845.153109):
@@ -53,7 +57,7 @@ umask 077
 {
 rtb="$HOME/.claude/scripts/remote-test-box.sh"
 source "$HOME/.claude/scripts/remote-qa-ownership.sh"   # qa_emit_ownership_receipt (shared with capture mode)
-llm_onmiss='' stripe_test_env='' pre_write_check='' run_id="qa-spec-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+llm_onmiss='' stripe_test_env='' pre_write_check='' extra_secrets=() extra_args_remote='' extra_box_env='' requires_modal='' run_id="qa-spec-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 modal_helper="${QA_MODAL_HELPER:-$HOME/.claude/scripts/remote-qa-modal.py}"
 runtime="${QA_SPEC_RUNTIME:-$HOME/.claude/scripts/remote-qa-spec-runtime.sh}"
 fetch_helper="$HOME/.claude/scripts/remote-qa-spec-fetch.py"
@@ -68,7 +72,7 @@ while [ $# -gt 0 ]; do
     --slot) slot="$2"; shift 2;; --branch) branch="$2"; shift 2;; --head) head="$2"; shift 2;;
     --out) out="$2"; shift 2;; --env-file) env_file="$2"; shift 2;; --config) config="$2"; shift 2;;
     --provider) provider="$2"; shift 2;; --ttl) ttl="$2"; shift 2;; --allow-seed-replace) allow_seed=1; shift;;
-    --requires-modal) shift;; # This spec lane always deploys disposable Modal with strict replay.
+    --requires-modal) requires_modal=1; shift;; # This spec lane always deploys disposable Modal with strict replay; --extra-secret needs this flag.
     --spec) spec="$2"; shift 2;; --mutate-patch) patch="$2"; shift 2;; --test-line) test_line="$2"; shift 2;; --project) project="$2"; shift 2;; --with-deps) with_deps=yes; shift;; --legs) legs_override="$2"; shift 2;; --timeout) timeout_secs="$2"; shift 2;;
     --prod-build) prod_build=yes; shift;; # forwarded to local-repro-preflight.sh --prod-build (next build + next start, matches CI)
     --trace) trace=yes; shift;; # box-local playwright.config trace:'on'; trace.zip + video land in <out>/leg*/test-results
@@ -76,11 +80,12 @@ while [ $# -gt 0 ]; do
     --pre-write-check) pre_write_check="${2:?--pre-write-check needs a command}"; shift 2;;
     --on-miss) llm_onmiss=--on-miss; shift;; # opt-in capture-on-miss (see header); never inferred
     --stripe-test-env) stripe_test_env=--stripe-test-env; shift;; # opt-in Stripe TEST env on the disposable deployment (see header)
+    --extra-secret) extra_secrets+=("${2:?--extra-secret needs NAME=generate}"); shift 2;; # opt-in box-generated dev-only secret (see header)
     *) echo "Unknown spec argument: $1" >&2; exit 2;;
   esac
 done
 [[ "$slot" =~ ^[1-8]$ && "$head" =~ ^[0-9a-f]{40}$ ]] && [ -n "$branch" ] && [ -n "$out" ] && [ -n "$spec" ] || {
-  echo 'spec --slot N --branch B --head SHA40 --spec tests/e2e/specs/...spec.ts --out DIR --allow-seed-replace [--mutate-patch F] [--test-line N] [--project P] [--with-deps] [--legs GREEN,RED,GREEN] [--env-file F] [--config JSON] [--ttl 150m] [--timeout SECS] [--prod-build] [--trace] [--dry-run] [--disposable-convex [--pre-write-check CMD] [--on-miss] [--stripe-test-env]]' >&2; exit 2; }
+  echo 'spec --slot N --branch B --head SHA40 --spec tests/e2e/specs/...spec.ts --out DIR --allow-seed-replace [--mutate-patch F] [--test-line N] [--project P] [--with-deps] [--legs GREEN,RED,GREEN] [--env-file F] [--config JSON] [--ttl 150m] [--timeout SECS] [--prod-build] [--trace] [--dry-run] [--disposable-convex [--pre-write-check CMD] [--on-miss] [--stripe-test-env]] [--requires-modal --extra-secret SUPPORTING_DOCUMENT_RECEIPT_SECRET=generate]' >&2; exit 2; }
 [[ "$spec" =~ ^tests/e2e/(specs|qa-tests)/[A-Za-z0-9_./-]+\.spec\.ts$ && "$spec" != *..* ]] || { echo '--spec must be a repo-relative tests/e2e/specs/**.spec.ts or tests/e2e/qa-tests/**.spec.ts path' >&2; exit 2; }
 case "$spec" in tests/e2e/qa-tests/*|tests/e2e/specs/qa-tests/*) project=qa-tests;; esac
 if [ -n "$pool_lane" ]; then
@@ -92,6 +97,20 @@ else
 fi
 [ -z "$pre_write_check" ] || [ "$disposable_convex" = 1 ] || { echo '--pre-write-check requires --disposable-convex (it verifies the ownership receipt)' >&2; exit 2; }
 [ -z "$stripe_test_env" ] || [ "$disposable_convex" = 1 ] || { echo '--stripe-test-env requires --disposable-convex (never a slot/shared dev backend)' >&2; exit 2; }
+# --extra-secret fails closed BEFORE any credential, lease, box or Convex deployment exists. Refusal text never echoes the spec
+# (a pasted secret would otherwise land in the log). modal-lane.py prepare re-validates the same allowlist on the box.
+extra_args_remote=''
+if [ ${#extra_secrets[@]} -gt 0 ]; then
+  [ "$requires_modal" = 1 ] && [ "$disposable_convex" = 1 ] || {
+    echo 'QA_EXTRA_SECRET_REFUSED: --extra-secret requires --requires-modal and --disposable-convex (disposable dev Convex + leased per-box Modal app only)' >&2; exit 2; }
+  for _es in "${extra_secrets[@]}"; do
+    [ "$_es" = SUPPORTING_DOCUMENT_RECEIPT_SECRET=generate ] || {
+      echo 'QA_EXTRA_SECRET_REFUSED: only SUPPORTING_DOCUMENT_RECEIPT_SECRET=generate is accepted (value is generated on the box, never supplied)' >&2; exit 2; }
+    extra_args_remote="$extra_args_remote --extra-secret $_es"
+  done
+  unset _es
+  extra_args_remote="$extra_args_remote --convex-helper /root/qa/convex-lane.py --convex-root /root/qa/convex-root"
+fi
 if [ -n "$llm_onmiss" ]; then
   # CTO bounds: synthetic data only (throwaway dev Convex seeded from the synthetic preview seed), GREEN-only (RED-on-revert stays strict).
   [ "$disposable_convex" = 1 ] || { echo '--on-miss requires --disposable-convex (synthetic seed in a throwaway dev Convex only)' >&2; exit 2; }
@@ -401,6 +420,20 @@ if [ -n "$managed_dir" ]; then
     qa_rsh "chmod 444 /root/qa/convex-lane.py /root/qa/convex-root/ownership.json"
     echo "QA_CONVEX_ENV_SETTER pushed helper=/root/qa/convex-lane.py root=/root/qa/convex-root" | tee -a "$out/lane.txt"
   fi
+  # --extra-secret: push the allowlisted Convex env setter + the NON-secret ownership copy (read-only), same as spec --stripe-test-env.
+  # The box-side setter verifies the hash-anchored controller receipt (QA_* anchors below) and the scoped dev key before ONE write.
+  extra_box_env=''
+  if [ -n "$extra_args_remote" ]; then
+    [ -n "$managed_dir" ] && [ -n "${receipt_sha:-}" ] && [ -r "$managed_dir/ownership.json" ] \
+      || { echo 'QA_EXTRA_SECRET_REFUSED: disposable Convex ownership receipt unavailable' >&2; exit 2; }
+    qa_net qa_rsh "set -e; mkdir -p /root/qa/convex-root; chmod 700 /root/qa/convex-root"
+    qa_net qa_put "$convex_helper" /root/qa/convex-lane.py
+    qa_net qa_put "$managed_dir/ownership.json" /root/qa/convex-root/ownership.json
+    qa_net qa_rsh "chmod 444 /root/qa/convex-lane.py /root/qa/convex-root/ownership.json"
+    # CONVEX_ADMIN_KEY is read from the box env file into the prepare process only: never echoed, never argv, no xtrace.
+    extra_box_env="export QA_CONVEX_OWNERSHIP_PATH=/root/qa/convex-ownership.json QA_RECEIPT_SHA256='$receipt_sha' QA_CONTROLLER_RUN_ID='$run_id'; CONVEX_ADMIN_KEY=\$(grep -E '^CONVEX_ADMIN_KEY=' '$remote/.env.local' | head -1 | cut -d= -f2- | tr -d \"\\\"'\" | awk '{print \$1}'); export CONVEX_ADMIN_KEY; "
+    echo "QA_EXTRA_SECRET_REQUESTED names=SUPPORTING_DOCUMENT_RECEIPT_SECRET mode=generate (value generated on the box; never printed)" | tee -a "$out/lane.txt"
+  fi
 fi
 # The Modal overlay's anchors assume the UI-capture preflight patch (same prerequisite as the capture lane); it is inert for --spec runs.
 qa_put "$HOME/.claude/scripts/remote-qa-ui-capture.patch" /root/qa/ui-only.patch
@@ -423,7 +456,7 @@ if [ -n "$pre_write_check" ]; then
   fi
   echo "PRE_WRITE_CHECK_OK" | tee -a "$out/lane.txt"
 fi
-qa_rsh "set -e; source /root/qa/modal.env; export REMOTE_BOX=1; python3 -I /root/qa/modal-lane.py overlay --root '$remote' --box '$box' $llm_onmiss; python3 -I /root/qa/modal-lane.py prepare --box '$box' --root '$remote' --config /root/qa/config.json $llm_onmiss" >"$out/modal-prepare.log" 2>&1
+qa_rsh "set -e; source /root/qa/modal.env; export REMOTE_BOX=1; python3 -I /root/qa/modal-lane.py overlay --root '$remote' --box '$box' $llm_onmiss; ${extra_box_env}python3 -I /root/qa/modal-lane.py prepare --box '$box' --root '$remote' --config /root/qa/config.json $llm_onmiss$extra_args_remote" >"$out/modal-prepare.log" 2>&1
 if [ -n "$llm_onmiss" ]; then
   # The controller binds lease + exact head + request on the box; if it cannot (e.g. unverified pool hostname) it bakes the
   # strict OFF source and says QA_ONMISS_DISABLED: the run is then plain strict replay and is labelled so.

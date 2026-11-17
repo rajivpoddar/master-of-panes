@@ -98,6 +98,7 @@ Deployed implementation: `~/.claude/scripts/remote-qa-capture.sh`, `remote-qa-ca
 ## Existing full-spec / agent-browser runs
 
 `remote-browser-box.sh up | run | fetch | down | once` remain for existing canonical full-spec QA. Specs use `bash scripts/e2e/local-repro-preflight.sh --spec PATH`, not the capture callback. qa-tests run locally/remotely on demand, NEVER as CI/capture/replay merge prerequisites. Never use `--headed`; never touch production. Preserve the canonical synthetic-JWT lane and teardown even on failure.
+- `--extra-secret SUPPORTING_DOCUMENT_RECEIPT_SECRET=generate` (opt-in, both `remote-browser-box.sh capture` and `remote-browser-box.sh spec`; 2026-11-17): the box generates one 64-hex dev-only secret, sets it on the disposable dev Convex env and writes the same value to the leased per-box Modal secret. Requires `--requires-modal --disposable-convex`. Any other name or value (for example `STRIPE_WEBHOOK_SECRET=generate` or a supplied value) is refused with `QA_EXTRA_SECRET_REFUSED` (rc 2) before any box, lease, Convex or Modal write. Never pass a secret value on the command line; the value is never printed or logged.
 
 ## Safe deployed edits
 
