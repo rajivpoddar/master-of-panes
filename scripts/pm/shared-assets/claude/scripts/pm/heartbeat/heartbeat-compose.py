@@ -2407,6 +2407,11 @@ PACE_DEFAULT_ACCOUNTS = (
 PACE_MIN_WINDOW_HOURS = 0.25   # a baseline this young carries no rate at all
 PACE_THIN_HOURS = 2.0          # under this the rate is shown but flagged, whole-percent steps still dominate
 PACE_MAX_ETA_HOURS = 24 * 365
+PACE_WINDOW_TOL = 60           # reset stamps jitter by fractions of a second; a new weekly window is days away
+# Help text: the Pace horizon is Rajiv's 12:34 IST Codex reset (07:04Z). burn-horizons.json keeps 13:06 IST
+# (07:36Z) for the Burn line; the two are deliberately different and Burn's authority is unchanged.
+# Pace basis: rate, remaining quota, ceiling and ETA all run from the last observation (the sample) and each
+# clause shows the sample age. A baseline is bound to its weekly window by reset stamp; a passed horizon is UNKNOWN.
 
 
 def _pace_epoch(value) -> float:
@@ -2444,9 +2449,9 @@ def _pace_accounts(config: Path) -> list[dict]:
 
 
 def _pace_scan(snapshot: Path, wanted: dict[str, float | None]) -> dict[str, dict]:
-    """One pass over the usage log. Per wanted key: the newest valid row, and the first valid row at or after
-    that key's baseline instant. Unparseable or out-of-range rows are skipped."""
-    found: dict[str, dict] = {key: {"latest": None, "first": None} for key in wanted}
+    """One pass over the usage log. Per wanted key: the newest valid row, and every valid row at or after that key's
+    baseline instant, across all weekly windows (the clause binds them to one window by reset stamp)."""
+    found: dict[str, dict] = {key: {"latest": None, "rows": []} for key in wanted}
     with open(snapshot) as handle:
         for line in handle:
             try:
@@ -2457,56 +2462,83 @@ def _pace_scan(snapshot: Path, wanted: dict[str, float | None]) -> dict[str, dic
             ts, pct = (row.get("ts"), row.get("pct")) if slot is not None else (None, None)
             if slot is None or not _pace_number(ts) or not _pace_number(pct) or not 0 <= pct <= 100:
                 continue
-            reset = row.get("reset") if _pace_number(row.get("reset")) else None
+            reset = float(row["reset"]) if _pace_number(row.get("reset")) else None
+            sample = (float(ts), float(pct), reset)
             if slot["latest"] is None or ts >= slot["latest"][0]:
-                slot["latest"] = (float(ts), float(pct), reset)
+                slot["latest"] = sample
             start = wanted[row["key"]]
-            if start is not None and ts >= start and (slot["first"] is None or ts < slot["first"][0]):
-                slot["first"] = (float(ts), float(pct))
+            if start is not None and ts >= start:
+                slot["rows"].append(sample)
     return found
 
 
+def _pace_same_window(a, b) -> bool:
+    """Two weekly reset stamps name the same window. Stamps jitter by fractions of a second; a new week is 7 days away."""
+    return _pace_number(a) and _pace_number(b) and abs(a - b) <= PACE_WINDOW_TOL
+
+
+def _pace_stored_base(stored, stamp):
+    """A persisted baseline is used only for the same baseline instant and only with its reset identity recorded."""
+    if isinstance(stored, dict) and stored.get("from") == stamp and all(
+            _pace_number(stored.get(f)) for f in ("ts", "pct", "reset")):
+        return (float(stored["ts"]), float(stored["pct"]), float(stored["reset"]))
+    return None
+
+
+def _pace_cache(stamp, row) -> dict | None:
+    return {"from": stamp, "ts": row[0], "pct": row[1], "reset": row[2]} if row else None
+
+
 def _pace_clause(acct: dict, found: dict, stored, ts_now: float) -> tuple[str, dict | None]:
-    """(clause, baseline to cache) for one account. Every missing input reads UNKNOWN, never 0."""
+    """(clause, baseline to cache) for one account. Every missing input reads UNKNOWN, never 0.
+
+    Basis: rate, remaining quota, ceiling and ETA all run from the last observation (the sample), not from report
+    time, so an aged sample is judged against the time it was taken. A baseline is bound to its weekly window by the
+    reset stamp: a window change or an expired sample window is UNKNOWN and re-baselines; nothing is averaged across
+    windows and no zero is invented at a reset. A passed horizon is UNKNOWN; it never falls back to a weekly reset.
+    """
     name = f"{acct['label']} {acct['name']}"
     latest = found["latest"]
     if latest is None or not 0 <= ts_now - latest[0] <= USAGE_SAMPLE_MAX_AGE:
         return f"{name} UNKNOWN (no usage sample in the last {USAGE_SAMPLE_MAX_AGE // 3600}h)", None
     sampled, used, reset = latest
+    head = f"{name} {used:g}% used at {_ist(sampled, '%H:%M')} (sample {(ts_now - sampled) / 3600:.1f}h old)"
     stamp = acct.get("baseline_from")
-    base = None
-    if stamp:
-        if isinstance(stored, dict) and stored.get("from") == stamp and _pace_number(stored.get("ts")) \
-                and _pace_number(stored.get("pct")):
-            base = (float(stored["ts"]), float(stored["pct"]))
-        elif found["first"] is not None:
-            base = found["first"]
-    cache = {"from": stamp, "ts": base[0], "pct": base[1]} if base else None
-
-    horizon, own = _pace_epoch(acct["horizon"]), False
-    if horizon <= ts_now:
-        if reset is not None and reset > ts_now:
-            horizon, own = float(reset), True
-        else:
-            return (f"{name} {used:g}% used, UNKNOWN (horizon {_ist(horizon, '%a %m-%d %H:%M')} has passed, "
-                    "update the pace config)"), cache
-    ceiling = (100 - used) / ((horizon - ts_now) / 3600)
-    to = ("own weekly reset " if own else "") + _ist(horizon, "%a %m-%d %H:%M")
-
-    rate = None
     if not stamp:
-        measured = "UNKNOWN (no baseline_from in the pace config)"
-    elif base is None:
-        measured = "UNKNOWN (no usage sample at or after the baseline yet)"
+        return f"{head}, measured UNKNOWN (no baseline_from in the pace config) → UNKNOWN, ETA UNKNOWN", None
+    if reset is None or reset <= sampled:
+        return (f"{head}, measured UNKNOWN (the sample has no live weekly reset, re-baseline) "
+                "→ UNKNOWN, ETA UNKNOWN"), None
+
+    rows = found["rows"]
+    window = [r for r in rows if _pace_same_window(r[2], reset) and r[0] <= sampled]
+    base = _pace_stored_base(stored, stamp) or (min(rows, key=lambda r: r[0]) if rows else None)
+    if base is not None and not _pace_same_window(base[2], reset):
+        fresh = min(window, key=lambda r: r[0]) if window else None
+        note = (f"re-baselined at {_ist(fresh[0], '%H:%M')}" if fresh
+                else "waiting for the first sample of the new window")
+        return (f"{head}, measured UNKNOWN (weekly window changed since the baseline, {note}) "
+                "→ UNKNOWN, ETA UNKNOWN"), _pace_cache(stamp, fresh)
+    if base is None:
+        return f"{head}, measured UNKNOWN (no usage sample at or after the baseline yet) → UNKNOWN, ETA UNKNOWN", None
+    cache = _pace_cache(stamp, base)
+
+    horizon = _pace_epoch(acct["horizon"])
+    if horizon <= ts_now:
+        return (f"{head}, UNKNOWN (horizon {_ist(horizon, '%a %m-%d %H:%M')} has passed, "
+                "update the pace config with the next horizon)"), cache
+
+    hours = (sampled - base[0]) / 3600
+    rate = None
+    if hours < PACE_MIN_WINDOW_HOURS:
+        measured = f"UNKNOWN (baseline is only {hours:.1f}h old)"
+    elif used < base[1]:
+        measured = "UNKNOWN (usage fell since the baseline, re-baseline in the pace config)"
     else:
-        hours = (sampled - base[0]) / 3600
-        if hours < PACE_MIN_WINDOW_HOURS:
-            measured = f"UNKNOWN (baseline is only {hours:.1f}h old)"
-        elif used < base[1]:
-            measured = "UNKNOWN (usage fell since the baseline, re-baseline in the pace config)"
-        else:
-            rate = (used - base[1]) / hours
-            measured = f"{rate:.2f} %/h over {hours:.1f}h" + (", thin data" if hours < PACE_THIN_HOURS else "")
+        rate = (used - base[1]) / hours
+        measured = f"{rate:.2f} %/h over {hours:.1f}h" + (", thin data" if hours < PACE_THIN_HOURS else "")
+    ceiling = (100 - used) / ((horizon - sampled) / 3600)   # observation-time basis, same as the rate
+    to = _ist(horizon, "%a %m-%d %H:%M")
     if rate is None:
         verdict, eta = "UNKNOWN", "ETA UNKNOWN"
     elif used >= 100:
@@ -2515,9 +2547,8 @@ def _pace_clause(acct: dict, found: dict, stored, ts_now: float) -> tuple[str, d
         verdict = "ABOVE" if rate > ceiling else "BELOW"
         eta_hours = (100 - used) / rate if rate > 0 else math.inf
         eta = ("ETA 100% not at this rate" if eta_hours > PACE_MAX_ETA_HOURS
-               else f"ETA 100% {_ist(ts_now + eta_hours * 3600, '%a %m-%d %H:%M')}")
-    return (f"{name} {used:g}% used, measured {measured} vs ceiling {ceiling:.2f} %/h (to {to}) "
-            f"→ {verdict}, {eta}"), cache
+               else f"ETA 100% {_ist(sampled + eta_hours * 3600, '%a %m-%d %H:%M')}")
+    return f"{head}, measured {measured} vs ceiling {ceiling:.2f} %/h (to {to}) → {verdict}, {eta}", cache
 
 
 def _pace_write_state(state: Path, baselines: dict) -> None:

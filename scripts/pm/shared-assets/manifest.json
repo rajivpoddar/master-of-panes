@@ -780,7 +780,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "7b330e1ccedc7ad2d9bc8eb12a8b3b32135ea58b41ee38464e3369183fdceac4",
+      "sha256": "63f08855a5d30be9b1273fb26f8de31c4b9712580ba65f2814aee1ce048477c4",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
