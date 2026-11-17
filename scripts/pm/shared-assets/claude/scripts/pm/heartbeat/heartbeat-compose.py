@@ -2699,7 +2699,9 @@ def claude_memory_line(arm: bool, now: datetime) -> str:
 # Read-only. A source that cannot be read renders UNAVAILABLE, or PARTIAL with the observed minimum, for its own field only;
 # it is never rendered as 0. Invalid UTF-8 is never an exception and never a silent repair: a manifest or a Muse log line that
 # does not decode strictly could be (or hide) a record, so it counts toward PARTIAL (C0ALZJHGE49 thread 1794932691.512539).
-OPENCODE_MODELS = ("hy4-flash-free", "deepseek-v4.1-flash", "muse-spark-1.3-contributor")
+# The launcher's pool (proxy-agent.sh proxy_agent_is_opencode_model): glm-5.3 is explicit --model only, but an explicit GLM run
+# takes a pool slot and shares the cap, so it is counted here (CTO C0ALZJHGE49 thread 1794941233.245629, ts 1794949061.287419).
+OPENCODE_MODELS = ("hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor")
 OPENCODE_CAP_DEFAULT = 2
 OPENCODE_WINDOW_S = 3600
 OPENCODE_FUTURE_SKEW_S = 60  # a stamp this far past "now" is malformed, not a record inside the reporting window

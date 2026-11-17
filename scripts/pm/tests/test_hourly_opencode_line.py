@@ -30,7 +30,7 @@ spec = importlib.util.spec_from_file_location("heartbeat_compose_opencode", COMP
 composer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(composer)
 
-HY4, DEEP, MUSE = composer.OPENCODE_MODELS
+HY4, DEEP, GLM, MUSE = composer.OPENCODE_MODELS
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
 LIVE_LABEL = "live primary procs now (nested alias requests not counted): "
@@ -64,8 +64,8 @@ def ps(*models):
     return "\n".join(rows)
 
 
-def counts_text(pool, hy4=0, deep=0, muse=0):
-    return f"pool {pool} · {HY4} {hy4} · {DEEP} {deep} · {MUSE} {muse}"
+def counts_text(pool, hy4=0, deep=0, muse=0, glm=0):
+    return f"pool {pool} · {HY4} {hy4} · {DEEP} {deep} · {GLM} {glm} · {MUSE} {muse}"
 
 
 def muse_cell(total, primary, alias, *notes, partial=False):
@@ -118,8 +118,8 @@ def test_cap_default_and_fallback_labels(tmp_path):
 # ---- live ----
 
 def test_live_counts_only_real_primary_claude_processes_per_opencode_model():
-    live = composer.opencode_live(ps(HY4, DEEP, DEEP, "claude-sonnet-5-5", "grok-4.7", MUSE))
-    assert live == {HY4: 1, DEEP: 2, MUSE: 1}
+    live = composer.opencode_live(ps(HY4, DEEP, DEEP, GLM, "claude-sonnet-5-5", "grok-4.7", MUSE))
+    assert live == {HY4: 1, DEEP: 2, GLM: 1, MUSE: 1}  # an explicit glm-5.3 run takes a pool slot and is counted
 
 
 # ---- run registrations in the last hour ----
@@ -129,13 +129,14 @@ def test_registrations_count_only_opencode_models_registered_inside_the_window(t
     manifest(tmp_path, "px-b", DEEP, stamp(3000))
     manifest(tmp_path, "px-c", DEEP, stamp(3500))
     manifest(tmp_path, "px-d", MUSE, stamp(3599))
+    manifest(tmp_path, "px-glm", GLM, stamp(120))  # an explicit GLM run is a pool registration
     manifest(tmp_path, "px-soon", HY4, stamp(-30))  # a few seconds past now is inside the skew allowance
     manifest(tmp_path, "px-old", HY4, stamp(3700))  # registered before the window
     manifest(tmp_path, "px-claude", "claude-sonnet-5-5", stamp(30))  # a different named model
     (tmp_path / "stray.lock").write_text("")  # not a run directory
     (tmp_path / "px-empty").mkdir()  # run directory without a manifest
     counts, partial = composer.opencode_registrations(NOW, tmp_path)
-    assert counts == {HY4: 2, DEEP: 2, MUSE: 1}
+    assert counts == {HY4: 2, DEEP: 2, GLM: 1, MUSE: 1}
     assert partial == 0
 
 
@@ -149,7 +150,7 @@ def test_unreadable_malformed_modelless_or_future_manifests_are_partial_not_drop
     manifest(tmp_path, "px-future", MUSE, stamp(-3600))  # stamped an hour after the report: outside the window
     manifest(tmp_path, "px-ok", HY4, stamp(10))
     counts, partial = composer.opencode_registrations(NOW, tmp_path)
-    assert counts == {HY4: 1, DEEP: 0, MUSE: 0}
+    assert counts == {HY4: 1, DEEP: 0, GLM: 0, MUSE: 0}
     assert partial == 5
 
 
@@ -160,7 +161,7 @@ def test_invalid_utf8_manifest_is_partial_not_an_exception_and_not_counted(tmp_p
                                         + b'", "note": "\xc3\x28"}')  # \xc3\x28 is an invalid two-byte sequence
     manifest(tmp_path, "px-ok", DEEP, stamp(10))
     counts, partial = composer.opencode_registrations(NOW, tmp_path)
-    assert counts == {HY4: 0, DEEP: 1, MUSE: 0}  # the undecodable record is not trusted into the counts ...
+    assert counts == {HY4: 0, DEEP: 1, GLM: 0, MUSE: 0}  # the undecodable record is not trusted into the counts ...
     assert partial == 1  # ... and is reported as PARTIAL rather than dropped
 
 
@@ -171,7 +172,7 @@ def test_an_undecodable_manifest_older_than_the_window_is_not_partial(tmp_path):
     old.write_bytes(b"\xff\xfe not utf-8")
     long_ago = (NOW - timedelta(hours=5)).timestamp()
     os.utime(old, (long_ago, long_ago))  # last modified long before the window: cannot hold an in-window registration
-    assert composer.opencode_registrations(NOW, tmp_path) == ({HY4: 0, DEEP: 0, MUSE: 0}, 0)
+    assert composer.opencode_registrations(NOW, tmp_path) == ({HY4: 0, DEEP: 0, GLM: 0, MUSE: 0}, 0)
 
 
 def test_an_unlistable_registry_raises_instead_of_reading_zero(tmp_path):
@@ -225,7 +226,7 @@ def test_live_reader_tolerates_invalid_utf8_in_the_process_table(monkeypatch):
            b"/usr/bin/odd-tool \xc3\x28\n"
            b"/opt/homebrew/bin/claude -p --name px-1 --model " + MUSE.encode() + b"\n")
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout=raw, stderr=b""))
-    assert composer.opencode_live() == {HY4: 0, DEEP: 1, MUSE: 1}
+    assert composer.opencode_live() == {HY4: 0, DEEP: 1, GLM: 0, MUSE: 1}
 
 
 # ---- fixture table (static/stub inputs; one row per CTO-named case) ----
@@ -258,6 +259,9 @@ FIXTURES = [
                ("px-a", {"model": DEEP, "started_at": stamp(5)}),  # ... replaced by a later start/resume of the same name
                ("px-fail", {"model": HY4, "started_at": stamp(40), "rc": "UNAVAILABLE", "reason": "launch_failed"})],
          reg=counts_text(2, hy4=1, deep=1)),
+    dict(id="explicit-glm-run-is-counted-in-the-pool", env={}, caps=None, ps=(GLM,),
+         runs=[("px-glm", {"model": GLM, "started_at": stamp(30)})],
+         live=counts_text(1, glm=1), reg=counts_text(1, glm=1)),
     dict(id="unused-muse-alias-selection-is-a-record-not-use", env={}, caps=None, ps=(DEEP,),
          log=[log_line(90, "px-x", "haiku")],
          live=counts_text(1, deep=1), reg=counts_text(0), muse=muse_cell(1, 0, 1)),
