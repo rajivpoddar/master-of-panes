@@ -177,7 +177,18 @@ if printf '%s\n' "$ISSUE_BODY" | grep -qiE 'adminRetryAutoProcess|Recovery post-
 fi
 ```
 
-If `RECOVERY_REQUIRED=0` and the issue is OPEN: `gh issue close $ISSUE`.
+**Production-metric gate (regret ledger 2026-11-17, PR #13981; Rajiv C0ALZJHGE49 thread 1794720118.429839 ts 1794925893.305199).** If the issue's ACs name a production metric/volume/rate (for example an Axiom row count, a "drops by N%" target, an error rate or a cost/latency number), the merge is NOT the terminal condition:
+
+```bash
+METRIC_GATED=0
+if printf '%s\n' "$ISSUE_BODY" | grep -qiE 'axiom (hourly )?count|rows?/h(our)?|drops? (by )?(>=|≥)?[0-9]+ ?%|volume drops|error rate|post-deploy (readback|count|metric)'; then
+  METRIC_GATED=1
+fi
+```
+
+If `METRIC_GATED=1`: do NOT close the issue (if GitHub's `Closes #N` already closed it, reopen it with `gh issue reopen $ISSUE --comment "Reopened by cleanup-pr: production-metric AC; closes only on the post-deploy readback"`). Upsert ONE pm-ops obligation `--kind production_metric_readback --target-type github_issue --target-id $ISSUE --owner pm` due ~2h after the deploy is served. PM closes the issue only after reading the metric in production and pasting the query + number into the closing comment.
+
+If `RECOVERY_REQUIRED=0`, `METRIC_GATED=0` and the issue is OPEN: `gh issue close $ISSUE`.
 
 If `RECOVERY_REQUIRED=1`, do **not** close the issue in Step 3. Leave it open
 until Step 6.7 writes recovery proof. A merged code fix is not the terminal

@@ -1061,7 +1061,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-cleanup",
-      "sha256": "46a9bf8130525e14e9f723a3f7b2d08383d1075037724cae54fa8e3cdc661963",
+      "sha256": "a74042a993805bd41cddd89add8a3813dba31fac27ef69e621947427f70b6269",
       "source_path": "claude/skills/cleanup-pr/SKILL.md"
     },
     {
