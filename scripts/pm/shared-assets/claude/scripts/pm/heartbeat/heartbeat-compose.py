@@ -2675,6 +2675,17 @@ def pace_table(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = P
         return f"Pace: UNKNOWN ({type(exc).__name__}, pace check failed)"
 
 
+def claude_memory_line(arm: bool, now: datetime) -> str:
+    """RSS line from pm-claude-memory.py. Fail open. arm is true only for the claimed hourly."""
+    path = Path(__file__).with_name("pm-claude-memory.py")
+    spec = importlib.util.spec_from_file_location("pm_claude_memory", path)
+    if spec is None or spec.loader is None:
+        return "*Claude RSS:* UNAVAILABLE"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.hourly_line(arm=arm, now=now)
+
+
 def compose(
     mode: str,
     now: datetime,
@@ -2707,6 +2718,7 @@ def compose(
     slots_authoritative: bool = True,
     burn: tuple[str, str] | None = None,
     pace: str | None = None,  # pace_table() block, rendered directly under the *Hourly line
+    memory: str | None = None,  # PM Claude RSS line; 1h only
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -2770,7 +2782,8 @@ def compose(
         first = f"{mention}*Hourly — {stamp}*" + f" — TL;DR: {tldr}"
     burn_line, burn_modes = burn if (burn and mode == "1h") else (None, None)
     pace_lines = pace.splitlines() if (pace and mode == "1h") else []
-    lines = [first, *pace_lines, *(burn_line.splitlines() if burn_line else []), *body]
+    memory_lines = [memory] if (memory and mode == "1h") else []
+    lines = [first, *pace_lines, *memory_lines, *(burn_line.splitlines() if burn_line else []), *body]
     if asks:
         lines += ["", "*Asks:* " + " | ".join(asks)]
     pm_actions = [] if mode == "3h" else [a for r in (prs or []) for a in r.get("actions") or []]
@@ -2790,7 +2803,8 @@ def compose(
     burn_extra = max(0, len(burn_line.splitlines()) - 1) if burn_line else 0
     # The pace table is the same kind of multi-line block and gets the same allowance.
     pace_extra = len(pace_lines)
-    report = cap_lines(compact_report(lines, 23 if mode == "3h" else 20 + burn_extra + pace_extra, cadence=mode),
+    memory_extra = len(memory_lines)
+    report = cap_lines(compact_report(lines, 23 if mode == "3h" else 20 + burn_extra + pace_extra + memory_extra, cadence=mode),
                        MAX_LINE_CHARS - LINE_NOTE_RESERVE)
     if mode == "3h":
         # compact_report already placed exactly one empty line before each
@@ -3400,6 +3414,19 @@ def main() -> int:
     burn = burn_status(datetime.now(timezone.utc)) if args.mode == "1h" else None
     pace = (pace_table(datetime.now(timezone.utc), persist=usage_sample_claim_ok(args.sample_usage_claim))
             if args.mode == "1h" else None)
+    memory_line = None
+    if args.mode == "1h":
+        # Arm only on the claimed hourly producer. A bare compose, a saved-input
+        # render and the 3h path stay dry-run and never POST /exit-pending.
+        try:
+            memory_line = claude_memory_line(
+                arm=usage_sample_claim_ok(getattr(args, "sample_usage_claim", None))
+                and os.environ.get("MOP_PM_RSS_EXIT_ARM", "1") != "0",
+                now=datetime.now(timezone.utc),
+            )
+        except Exception as exc:
+            failures.append(f"claude-rss: {type(exc).__name__}")
+            memory_line = "*Claude RSS:* UNAVAILABLE"
     report = compose(
         args.mode, datetime.now(timezone.utc), axiom, mapping_doc.get("mapping", {}), prs,
         support=support, failures=failures, escalations=args.escalation,
@@ -3414,7 +3441,7 @@ def main() -> int:
                       + "\n" + (hourly.get("mac-box") or {}).get("line", "• Mac test box: UNKNOWN (collector deadline)")) if args.mode == "1h" else None,
         pending_actions=(pending_obligations(PM_OPS_DB, now), hourly.get("pending-github") or {"error": "UNAVAILABLE (no recent successful probe)"}) if args.mode == "1h" else None,
         proxies=hourly.get("proxies") if args.mode == "1h" else None,
-        burn=burn, pace=pace,
+        burn=burn, pace=pace, memory=memory_line,
     )
     labels = {"axiom": "*Axiom errors", "active": "*Active users", "prs": "open non-draft PRs",
               "slots": "*Slots", "priority": "*Slots",

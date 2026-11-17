@@ -53,6 +53,10 @@ readmit."
    quota sampler (`usage-snapshot.py`). A posted/uncertain bucket returns before any quota call, and a bare `compose --mode 1h`
    (saved-input render, agent-prompt STEP 1 below) never samples: it reads the cache only, so burn shows UNKNOWN (deny) once the
    last sample is over 7200 s old. The wrapper releases its claim only while it is still empty (no Slack send started).
+   The same claimed hourly adds one `*Claude RSS:*` line (PM pane 0:0.0 claude RSS, plus px-* claude processes over 1.5GB).
+   When PM RSS is at least 2.0GB (`MOP_PM_RSS_EXIT_BYTES` overrides), that claimed run arms the existing PM-only
+   `POST /exit-pending` (pm_only, not with_devs) at most once per 6h and says so on the line. A bare compose is a dry-run
+   and does not arm. `MOP_PM_RSS_EXIT_ARM=0` disables the arm. MoP unreachable fails open and does not gate PM input.
 3. The confirmed sender receipt handed to `hourly-thread-ts` requests processing
    through MoP's existing PM relay, keyed by the exact parent ts. PM consumes
    `Skill(hourly-report-processing)`, including Step 3, as well as `ACTIONS:`.

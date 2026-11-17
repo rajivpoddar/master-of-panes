@@ -780,7 +780,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "26adcd0b75f67112595db94cc1c80ab78d6a8e707247c5c188aa48cf7291f98a",
+      "sha256": "77112078f07fc4fd3ef830858ce746e4edc181655c6d8fb54581c6694411709f",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -809,6 +809,15 @@
       "ownership_class": "shared-claude-hourly-heartbeat",
       "sha256": "38d1f22b3c0b6244ec8a1619d5ad80d6fddfff90a7b16d72f536c015f502891c",
       "source_path": "claude/scripts/pm/heartbeat/issue-lifecycle.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm/heartbeat/pm-claude-memory.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-hourly-heartbeat",
+      "sha256": "b28893bc84892cb41f967e564741d5fa44d054dee29e18ecce628fed02803447",
+      "source_path": "claude/scripts/pm/heartbeat/pm-claude-memory.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/pm/heartbeat/pr-open-snapshot.py",
@@ -1205,7 +1214,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "8461c0da1e0e6379f85056a8f7b1626bb1bfbfd1d97fb1905cb316feca8d631c",
+      "sha256": "84c5c8b7700282445069a35148ce309283292d886c0f2756493e2ba16f7ef3c0",
       "source_path": "claude/skills/hourly-heartbeat/SKILL.md"
     },
     {
@@ -1959,7 +1968,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 214,
+    "selected_count": 215,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -2028,6 +2037,7 @@
       "~/.claude/scripts/sakshi-heartbeat.sh",
       "~/.claude/scripts/pm/heartbeat/heartbeat-axiom.py",
       "~/.claude/scripts/pm/heartbeat/heartbeat-compose.py",
+      "~/.claude/scripts/pm/heartbeat/pm-claude-memory.py",
       "~/.claude/scripts/pm/heartbeat/email-digest.py",
       "~/.claude/scripts/pm/heartbeat/heartbeat-error-map.py",
       "~/.claude/scripts/pm/heartbeat/pr-open-snapshot.py",
