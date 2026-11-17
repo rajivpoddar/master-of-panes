@@ -2567,12 +2567,8 @@ def _pace_clause(acct: dict, found: dict, stored, ts_now: float) -> tuple[str, d
                else f"ETA 100% {_ist(sampled + eta_hours * 3600, '%a %m-%d %H:%M')}")
         runs_out = ("not at this rate" if eta_hours > PACE_MAX_ETA_HOURS
                     else _ist(sampled + eta_hours * 3600, "%a %d %b %H:%M"))
-    # Same sample already used for the clause. The table burn cell quotes it; this is not a new measurement.
-    age_s = max(0.0, ts_now - sampled)
-    age = f"{round(age_s / 60)}m old" if age_s < 3600 else f"{age_s / 3600:.1f}h old"
-    observed = f"as of {datetime.fromtimestamp(sampled, IST).strftime('%H:%M')}, {age}"
     cells = {"used": used, "rate": rate, "hours": hours, "verdict": verdict, "runs_out": runs_out,
-             "ceiling": ceiling, "to": _ist(horizon, "%a %d %b %H:%M"), "observed": observed}
+             "ceiling": ceiling, "to": _ist(horizon, "%a %d %b %H:%M")}
     return f"{head}, measured {measured} vs ceiling {ceiling:.2f} %/h (to {to}) → {verdict}, {eta}", cache, cells
 
 
@@ -2649,9 +2645,11 @@ def _pace_table_lines(resolved: list[tuple]) -> list[str]:
             notes.append(PACE_NOTE_PREFIX + clause.replace(f"{acct['label']} {acct['name']}", display, 1))
         else:
             marker = "✅" if cells["verdict"] == "BELOW" else "⚠️"
-            # One decimal always, including a non-thin window. .0f rounded a short window to 0h and hid >=2h.
-            thin = ", thin" if cells["hours"] < PACE_THIN_HOURS else ""
-            burn_cell = f"{rate:.2f} {marker} ({cells['hours']:.1f}h window{thin}, {cells['observed']})"
+            # Rajiv 2026-11-17 (C0ALZJHGE49 1794897995.293229, ts 1794898350.080809: "drop the window stats form the burn
+            # % column"): the burn cell is the rate and the status mark only. Window length, sample time and sample age
+            # stay out of the table. A sample too old to trust (over USAGE_SAMPLE_MAX_AGE) or any missing input already
+            # reads UNKNOWN with its one "Pace note: " line below the table; that is the only place such facts appear.
+            burn_cell = f"{rate:.2f} {marker}"
             target_cell = f"≤{cells['ceiling']:.2f} to {cells['to']}"
             runs_cell = cells["runs_out"]
         rows.append([display, used_cell, burn_cell, target_cell, runs_cell])

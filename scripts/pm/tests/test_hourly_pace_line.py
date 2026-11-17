@@ -255,6 +255,11 @@ def _pipe_row(table, prefix):
     return next(l for l in table.splitlines() if l.startswith('| ' + prefix))
 
 
+def _cells(row):
+    """The cell texts of one pipe-table row."""
+    return [c.strip() for c in row.strip().strip('|').split('|')]
+
+
 def _slack_send_blocks(text):
     """Mirror of slack-send.sh has_markdown_table / _split_row / convert_text_to_blocks (the plain-text path used by
     pm-hourly-post.sh: slack-send.sh -c C0ALZJHGE49 -f). Keep in sync with ~/.claude/scripts/slack-send.sh."""
@@ -319,8 +324,12 @@ def test_pace_table_rows_show_burn_marker_target_and_runs_out_with_no_login_emai
     assert '@' not in table
     claude_row = _pipe_row(table, 'Claude: PM pane (keychain)')
     assert '48%' in claude_row and '0.75 ✅' in claude_row and '≤2.24 to Wed 18 Nov 09:30 IST' in claude_row
+    # Rajiv 2026-11-17 (C0ALZJHGE49 1794897995.293229): the burn cell is exactly the rate and the status mark.
+    assert _cells(claude_row)[2] == '0.75 ✅'
     codex_row = _pipe_row(table, 'Codex: rajiv-scribie CLI')
     assert '0.25 ✅' in codex_row and 'not at this rate' not in codex_row
+    assert _cells(codex_row)[2] == '0.25 ✅'
+    assert not any(word in table for word in ('window', 'as of', ' old', 'thin'))
     assert lines[2] == claude_row and lines[3] == codex_row and len(lines) == 4
     # Every row has exactly the header's cell count: no stray pipe inside a cell shifts a column.
     assert all(l.count('|') == len(PACE_HEADER) + 1 for l in lines)
@@ -360,12 +369,14 @@ def test_pace_table_is_accepted_by_the_slack_send_table_converter_as_one_native_
 
 def test_pace_cell_neutralises_pipes_and_newlines_so_columns_cannot_shift():
     assert composer._pace_cell('a | b\nc') == 'a / b c'
-    assert composer._pace_cell('0.75 ✅ (4.0h window, as of 10:13, 3m old)') == '0.75 ✅ (4.0h window, as of 10:13, 3m old)'
+    assert composer._pace_cell('0.75 ✅') == '0.75 ✅'
 
 
-def test_pace_table_numeric_row_keeps_sample_age_and_one_decimal_window(tmp_path):
-    """Extraction to table. CTO REVISE ts 1794881751.339589: a numeric burn cell keeps the sample age and the
-    rolling-window length to one decimal, including a non-thin (>=2h) window. UNKNOWN and thin stay as they are."""
+def test_pace_table_numeric_burn_cell_is_rate_and_mark_only_with_no_window_or_age(tmp_path):
+    """Rajiv 2026-11-17 (C0ALZJHGE49 thread 1794897995.293229, ts 1794898350.080809: "drop the window stats form the
+    burn % column"), superseding CTO REVISE ts 1794881751.339589. A numeric burn cell is the rate and the status mark
+    ('1.68 ✅'): no window length, no thin flag, no as-of time and no sample age, for a thin window and a non-thin one.
+    The calculations are unchanged, so the rate and marker equal what the clause reports."""
     window_s = 2 * H + 18 * 60                                   # 2.3h, non-thin, not a whole hour
     sample = BASE + window_s
     now = sample + 12 * 60                                       # accepted sample, 12m old
@@ -384,11 +395,13 @@ def test_pace_table_numeric_row_keeps_sample_age_and_one_decimal_window(tmp_path
         (sample - H, thin_key, 10), (sample, thin_key, 11),       # 1.0h, still thin
     ])
     table = composer.pace_table(_at(now), snapshot=log, config=cfg, state=tmp_path / 'state.json', persist=False)
+    burn_cell = re.compile(r'^\d+\.\d\d (✅|⚠️)$')
     claude_row = _pipe_row(table, 'Claude: PM pane (keychain)')
-    assert '2.3h window' in claude_row and 'as of 08:33, 12m old' in claude_row
-    assert ', thin' not in claude_row and '0h' not in claude_row
+    assert burn_cell.match(_cells(claude_row)[2]), claude_row
     thin_row = _pipe_row(table, 'Grok: local')
-    assert '1.0h window, thin' in thin_row and '12m old' in thin_row and 'UNKNOWN' not in thin_row
+    assert burn_cell.match(_cells(thin_row)[2]) and 'UNKNOWN' not in thin_row, thin_row
+    for row in (claude_row, thin_row):
+        assert not any(word in row for word in ('window', 'as of', ' old', 'thin', '08:33')), row
     codex_row = _pipe_row(table, 'Codex: ')
     assert 'UNKNOWN' in codex_row and '0.00' not in codex_row
     assert any(l.startswith('Pace note: Codex: ') and 'no usage sample' in l for l in table.splitlines())
