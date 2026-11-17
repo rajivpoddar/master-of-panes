@@ -638,6 +638,35 @@ text = text.encode('raw_unicode_escape').decode('unicode_escape')  # Decode \\n 
 # Strip escaped quotes that leak from shell quoting
 text = text.replace(chr(92) + chr(34), chr(34))
 
+def _chunk_prose(t, limit=2900):
+    # Slack rejects a section whose text is over 3000 chars. One shared splitter for
+    # every prose path (the no-table fallback and the table path), so a long prose run
+    # around a native table cannot ship as one oversized section (CTO REVISE, fd5876ee).
+    # Splits on line boundaries at limit, hard-wraps a single over-long line at a space,
+    # and never yields an empty chunk. Shell-safe: no backtick, no dollar, no double quote.
+    if len(t) <= 3000:
+        return [t]
+    pieces = []
+    for line in t.split('\n'):
+        while len(line) > limit:
+            cut = line.rfind(' ', 0, limit)
+            if cut <= 0:
+                cut = limit
+            pieces.append(line[:cut])
+            line = line[cut:].lstrip(' ')
+        pieces.append(line)
+    chunks = []
+    current = ''
+    for piece in pieces:
+        if current and len(current) + len(piece) + 1 > limit:
+            chunks.append(current)
+            current = piece
+        else:
+            current = current + '\n' + piece if current else piece
+    if current:
+        chunks.append(current)
+    return [c for c in chunks if c.strip()]
+
 def has_markdown_table(t):
     \"\"\"Detect markdown pipe tables (| col | col | or |---|---|)\"\"\"
     lines = t.strip().split('\n')
@@ -680,7 +709,8 @@ def convert_text_to_blocks(t):
             return
         text_chunk = '\n'.join(prose_buf).strip('\n')
         if text_chunk.strip():
-            blocks.append({'type': 'section', 'text': {'type': 'mrkdwn', 'text': text_chunk}})
+            for piece in _chunk_prose(text_chunk):
+                blocks.append({'type': 'section', 'text': {'type': 'mrkdwn', 'text': piece}})
         prose_buf.clear()
 
     def _cell(s, bold=False):
@@ -901,21 +931,8 @@ if has_markdown_table(text):
         blocks = convert_text_to_blocks(text)
 
 if blocks is None:
-    # No table — single mrkdwn section path (split if >3000 chars)
-    if len(text) <= 3000:
-        blocks = [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': text}}]
-    else:
-        chunks = []
-        current = ''
-        for line in text.split('\n'):
-            if len(current) + len(line) + 1 > 2900:
-                chunks.append(current)
-                current = line
-            else:
-                current = current + '\n' + line if current else line
-        if current:
-            chunks.append(current)
-        blocks = [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': chunk}} for chunk in chunks]
+    # No table: mrkdwn sections of at most 3000 chars each (shared _chunk_prose splitter)
+    blocks = [{'type': 'section', 'text': {'type': 'mrkdwn', 'text': chunk}} for chunk in _chunk_prose(text)]
 
 # Fallback text for notifications: strip table pipes for readability.
 #

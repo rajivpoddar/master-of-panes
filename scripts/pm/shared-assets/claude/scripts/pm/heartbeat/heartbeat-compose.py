@@ -2161,6 +2161,9 @@ def compact_report(lines: list[str], limit: int, cadence: str | None = None) -> 
                 start = i
                 while start > 0 and rows[start - 1].lstrip().startswith(("•", "- ")):
                     start -= 1
+                # A pipe-table row is never a fold anchor: appending to it would add a cell to the table.
+                if rows[start - 1].lstrip().startswith("|"):
+                    continue
                 runs.append((i - start + 1, start, i + 1))
         if not runs:
             # Never merge named sections; retain all evidence if sections alone
@@ -2623,6 +2626,9 @@ def _pace_cell(text: str) -> str:
     return " ".join(str(text).replace("|", "/").split())
 
 
+PACE_NOTE_PREFIX = "Pace note: "  # not a fold prefix: no bullet, no "- ", no leading spaces, no leading * or _
+
+
 def _pace_table_lines(resolved: list[tuple]) -> list[str]:
     """Unfenced Markdown pipe table: Account | Used | Burn %/h | Target %/h | Runs out at, then a |---| separator row and
     one row per account. slack-send.sh converts a pipe table to a native Slack table block, but only outside a code
@@ -2638,7 +2644,9 @@ def _pace_table_lines(resolved: list[tuple]) -> list[str]:
         used_cell = f"{used:g}%" if used is not None else "UNKNOWN"
         if rate is None:
             burn_cell = target_cell = runs_cell = "UNKNOWN"
-            notes.append("• " + clause.replace(f"{acct['label']} {acct['name']}", display, 1))
+            # Plain prose, never a bullet: compact_report folds "•"/"- "/two-space rows onto the row above, and
+            # the row above an UNKNOWN note is an account's pipe row (a 6th cell). CTO REVISE on fd5876ee.
+            notes.append(PACE_NOTE_PREFIX + clause.replace(f"{acct['label']} {acct['name']}", display, 1))
         else:
             marker = "✅" if cells["verdict"] == "BELOW" else "⚠️"
             # One decimal always, including a non-thin window. .0f rounded a short window to 0h and hid >=2h.

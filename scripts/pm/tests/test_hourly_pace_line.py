@@ -18,10 +18,13 @@ changes do not require any local testing or proof. they are not app code. MoP is
 import importlib.util
 import json
 import re
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 ASSETS = Path(__file__).parents[1] / 'shared-assets/claude/scripts'
+SLACK_SEND = ASSETS.parent / 'skills/slack-message/scripts/slack-send.sh'
 
 
 def _load(name, path):
@@ -248,7 +251,7 @@ PACE_HEADER = ['Account', 'Used', 'Burn %/h', 'Target %/h', 'Runs out at']
 
 
 def _pipe_row(table, prefix):
-    """The pipe-table row whose first cell starts with prefix (note lines start with a bullet, never a pipe)."""
+    """The pipe-table row whose first cell starts with prefix (note lines start with "Pace note: ", never a pipe)."""
     return next(l for l in table.splitlines() if l.startswith('| ' + prefix))
 
 
@@ -329,7 +332,9 @@ def test_pace_table_unknown_row_reads_unknown_with_a_note_and_no_zero(tmp_path):
                                 config=_write_config(tmp_path / 'cfg.json'), state=tmp_path / 'state.json', persist=False)
     codex_row = _pipe_row(table, 'Codex: ')
     assert 'UNKNOWN' in codex_row and '0.00' not in codex_row
-    assert any(l.startswith('• Codex: ') and 'no usage sample' in l for l in table.splitlines())
+    # The reason is a plain "Pace note: " prose line, not a bullet: compact_report folds bullets onto the row above.
+    assert any(l.startswith('Pace note: Codex: ') and 'no usage sample' in l for l in table.splitlines())
+    assert not any(l.startswith(('•', '- ', ' ')) for l in table.splitlines())
     assert '```' not in table and '@' not in table
 
 
@@ -386,5 +391,95 @@ def test_pace_table_numeric_row_keeps_sample_age_and_one_decimal_window(tmp_path
     assert '1.0h window, thin' in thin_row and '12m old' in thin_row and 'UNKNOWN' not in thin_row
     codex_row = _pipe_row(table, 'Codex: ')
     assert 'UNKNOWN' in codex_row and '0.00' not in codex_row
-    assert any(l.startswith('• Codex: ') and 'no usage sample' in l for l in table.splitlines())
+    assert any(l.startswith('Pace note: Codex: ') and 'no usage sample' in l for l in table.splitlines())
     assert '```' not in table and '@' not in table
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Full-path static fixture (CTO REVISE on fd5876ee, C0ALZJHGE49 thread 1794890771.399469, ts 1794893959.552039).
+# Composer -> the REAL slack-send.sh converter, no network. Two defects shipped together in fd5876ee:
+#   1. Pace UNKNOWN notes were "• " bullets, so compact_report folded them onto the account's pipe row (a 6th cell).
+#   2. slack-send.sh _flush_prose emitted a whole prose run as ONE section; Slack rejects a section over 3000 chars.
+# ---------------------------------------------------------------------------------------------------------------
+def _converter_blocks(text):
+    """Run the real auto-wrap python embedded in slack-send.sh (PAYLOAD=$(python3 -c "...")) on text and return its
+    BlockKit blocks. The body sits inside a bash double-quoted string, so undo bash's double-quote escapes
+    (backslash before a double quote, dollar, backtick or backslash) and run it with the script's own argv."""
+    source = SLACK_SEND.read_text(encoding='utf-8')
+    start = source.index('PAYLOAD=$(python3 -c "\n', source.index('# Auto-wrap plain text in Block Kit'))
+    start += len('PAYLOAD=$(python3 -c "\n')
+    end = source.index('" "$CHANNEL" "$THREAD_TS" "$MESSAGE")', start)
+    code = re.sub(r'\\(["\\$`])', r'\1', source[start:end])
+    done = subprocess.run([sys.executable, '-I', '-c', code, 'C0ALZJHGE49', '', text],
+                          capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)['blocks']
+
+
+def _cell_text(cell):
+    return cell['elements'][0]['elements'][0]['text']
+
+
+def test_full_path_long_report_with_unknown_pace_notes_yields_one_3x5_table_and_bounded_sections(tmp_path):
+    now = BASE + 4 * H
+    # An empty usage log: both accounts are UNKNOWN, so the table carries one reason note per account.
+    pace = composer.pace_table(_at(now), snapshot=_write_log(tmp_path / 'log.jsonl', []),
+                               config=_write_config(tmp_path / 'cfg.json'), state=tmp_path / 'state.json', persist=False)
+    assert pace.count('Pace note: ') == 2 and 'no usage sample' in pace
+    # Compaction pressure: 24 sections of 2-bullet runs. The 1h budget is ~26 physical lines, so compact_report must
+    # fold every foldable run, and the Pace note run is the earliest and smallest of them.
+    tracked = []
+    for n in range(24):
+        tracked += [f'*Tracked feature {n}:* status', f'• item {n}a ' + 'a' * 380, f'• item {n}b ' + 'b' * 380]
+    report = composer.compose('1h', _at(now), None, {}, [], failures=[], tracked=tracked, pace=pace,
+                              burn=('*Burn:* Claude 52% used · Codex 31% used', {}))
+    lines = report.splitlines()
+
+    assert '(2 items):' in report                                    # the pressure was real: runs were folded
+    pipe_rows = [i for i, l in enumerate(lines) if l.lstrip().startswith('|')]
+    assert pipe_rows == list(range(pipe_rows[0], pipe_rows[0] + 4))  # header, separator, Claude, Codex: contiguous
+    assert all(lines[i].count('|') == 6 for i in pipe_rows)          # 5 cells each, no folded 6th cell
+    after_table = '\n'.join(lines[pipe_rows[-1] + 1:])
+    assert len(after_table) >= 4500                                  # a long prose run after the table
+    assert 'Pace note: Claude' in after_table and 'Pace note: Codex' in after_table
+
+    blocks = _converter_blocks(report)
+    tables = [b for b in blocks if b['type'] == 'table']
+    assert len(tables) == 1
+    grid = [[_cell_text(c) for c in row] for row in tables[0]['rows']]
+    assert len(grid) == 3 and all(len(row) == 5 for row in grid)     # exactly one 3x5 table
+    assert grid[0] == PACE_HEADER and grid[1][1] == 'UNKNOWN' and grid[2][1] == 'UNKNOWN'
+    assert not any('no usage sample' in cell or 'Pace note' in cell for row in grid for cell in row)  # reasons outside
+
+    sections = [b['text']['text'] for b in blocks if b['type'] == 'section']
+    assert all(0 < len(s) <= 3000 for s in sections), [len(s) for s in sections]
+    assert len(sections) >= 3                                        # the long run was split, not shipped whole
+    prose = '\n'.join(sections)
+    assert 'Pace note: Claude' in prose and 'Pace note: Codex' in prose and 'no usage sample' in prose
+    assert all(f'Tracked feature {n}:' in prose for n in range(24))  # chunking dropped no section
+    assert blocks[0]['type'] == 'section' and re.match(r'^(<@[A-Z0-9]+> *)?\*Hourly', blocks[0]['text']['text'])
+
+
+def test_slack_send_prose_sections_stay_within_3000_with_and_without_a_table():
+    long_run = '\n'.join(f'row {n} ' + 'w' * 300 for n in range(40))       # ~12.4k chars of short lines
+    unbroken = 'Z' * 7000                                                  # one line, no space to wrap at
+    with_table = f'*Hourly — 07:00 IST*\n| A | B |\n|---|---|\n| 1 | 2 |\n{long_run}\n{unbroken}'
+    sections = [b['text']['text'] for b in _converter_blocks(with_table) if b['type'] == 'section']
+    assert [b['type'] for b in _converter_blocks(with_table)].count('table') == 1
+    assert sections[0] == '*Hourly — 07:00 IST*'
+    assert all(0 < len(s) <= 3000 for s in sections) and 'row 39 ' in '\n'.join(sections)
+    assert sum(s.count('Z') for s in sections) == 7000                     # hard wrap loses no characters
+    # No-table path: the first line alone is over the old splitter's limit, which used to emit an empty section.
+    plain = [b['text']['text'] for b in _converter_blocks(unbroken + '\n' + long_run) if b['type'] == 'section']
+    assert all(0 < len(s) <= 3000 for s in plain)
+    # A short message is still ONE untouched section.
+    assert [b['text']['text'] for b in _converter_blocks('plain status')] == ['plain status']
+
+
+def test_compact_report_never_folds_bullets_onto_a_pipe_table_row():
+    rows = ['*Hourly — 07:00 IST* — TL;DR: ok', '| A | B |', '|---|---|', '| x | y |',
+            '• stray one', '• stray two', '*Next:*', '• keep one', '• keep two']
+    folded = composer.compact_report(rows, 5, cadence='1h')
+    assert [l for l in folded.splitlines() if l.startswith('|')] == ['| A | B |', '|---|---|', '| x | y |']
+    assert '• stray one' in folded and '• stray two' in folded           # skipped, never merged into the table row
+    assert '*Next:* (2 items): • keep one; +1 more' in folded            # other runs still fold as before
