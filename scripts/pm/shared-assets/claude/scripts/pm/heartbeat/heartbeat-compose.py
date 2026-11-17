@@ -2384,6 +2384,182 @@ def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = 
         return f"*Burn:* {UNKNOWN_DENY} ({type(exc).__name__}) → {routes} ({BURN_SCOPE_NOTE})", fail_modes
 
 
+# ---------------------------------------------------------------------------
+# Pace line (Rajiv DM D0AMF0XE6TS thread 1794876281.724039, ts 1794877877.202879, 2026-11-17):
+# "every hourly report first state if we are above or below this rate and ETA for these two accounts."
+# PM correction (same day, heydonna-app-65): R is a ROLLING average since a persisted baseline sample,
+# (used_now - used_base) / hours_since_base, never the last-hour delta, because "% used" is whole-percent and
+# 1h deltas read 0 or 1 and flip ABOVE/BELOW. The hours of data behind the rate are shown. The baseline is
+# re-pointed by editing baseline_from in the pace config, together with the horizon.
+# Read-only against usage-snapshots.jsonl; it never samples. The only write is the baseline cache, and only
+# from the claimed normal hourly producer.
+# ---------------------------------------------------------------------------
+PACE_CONFIG = Path(os.environ.get("HOURLY_PACE_CONFIG") or Path.home() / ".claude/state/hourly-pace.json")
+PACE_STATE = Path(os.environ.get("HOURLY_PACE_STATE") or Path.home() / ".claude/state/hourly-pace-baselines.json")
+# Used only when the config file does not exist. A config file that exists replaces these entirely.
+# Horizons: Wed 11-18 09:30 IST and Fri 11-20 12:34 IST (Rajiv). baseline_from: 2026-11-17 06:15 IST.
+PACE_DEFAULT_ACCOUNTS = (
+    {"label": "Claude", "name": "rajiv@scribie", "key": "claude:rajiv@scribie.com:weekly",
+     "horizon": "2026-11-18T04:00:00Z", "baseline_from": "2026-11-17T00:45:00Z"},
+    {"label": "Codex", "name": "rajiv@scribie", "key": "codex:89aba566-ed7d-45a8-a2c4-619674a86e0c:weekly",
+     "horizon": "2026-11-20T07:04:00Z", "baseline_from": "2026-11-17T00:45:00Z"},
+)
+PACE_MIN_WINDOW_HOURS = 0.25   # a baseline this young carries no rate at all
+PACE_THIN_HOURS = 2.0          # under this the rate is shown but flagged, whole-percent steps still dominate
+PACE_MAX_ETA_HOURS = 24 * 365
+
+
+def _pace_epoch(value) -> float:
+    """ISO-8601 stamp with an explicit offset -> epoch seconds. Offset-less or malformed stamps are rejected."""
+    if not isinstance(value, str):
+        raise ValueError("pace stamp must be a string")
+    parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("pace stamp needs a UTC offset")
+    return parsed.timestamp()
+
+
+def _pace_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _pace_accounts(config: Path) -> list[dict]:
+    """The accounts to report. No config file means the defaults; a file that exists must be valid, so a bad
+    edit shows as UNKNOWN instead of silently reverting to stale horizons."""
+    try:
+        doc = json.loads(config.read_text())
+    except FileNotFoundError:
+        return [dict(a) for a in PACE_DEFAULT_ACCOUNTS]
+    rows = doc.get("accounts") if isinstance(doc, dict) else None
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("pace config has no accounts")
+    for row in rows:
+        if not isinstance(row, dict) or not all(isinstance(row.get(f), str) and row[f].strip()
+                                                for f in ("label", "name", "key", "horizon")):
+            raise ValueError("pace config account needs label, name, key and horizon")
+        _pace_epoch(row["horizon"])
+        if row.get("baseline_from") is not None:
+            _pace_epoch(row["baseline_from"])
+    return rows
+
+
+def _pace_scan(snapshot: Path, wanted: dict[str, float | None]) -> dict[str, dict]:
+    """One pass over the usage log. Per wanted key: the newest valid row, and the first valid row at or after
+    that key's baseline instant. Unparseable or out-of-range rows are skipped."""
+    found: dict[str, dict] = {key: {"latest": None, "first": None} for key in wanted}
+    with open(snapshot) as handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            slot = found.get(row.get("key")) if isinstance(row, dict) else None
+            ts, pct = (row.get("ts"), row.get("pct")) if slot is not None else (None, None)
+            if slot is None or not _pace_number(ts) or not _pace_number(pct) or not 0 <= pct <= 100:
+                continue
+            reset = row.get("reset") if _pace_number(row.get("reset")) else None
+            if slot["latest"] is None or ts >= slot["latest"][0]:
+                slot["latest"] = (float(ts), float(pct), reset)
+            start = wanted[row["key"]]
+            if start is not None and ts >= start and (slot["first"] is None or ts < slot["first"][0]):
+                slot["first"] = (float(ts), float(pct))
+    return found
+
+
+def _pace_clause(acct: dict, found: dict, stored, ts_now: float) -> tuple[str, dict | None]:
+    """(clause, baseline to cache) for one account. Every missing input reads UNKNOWN, never 0."""
+    name = f"{acct['label']} {acct['name']}"
+    latest = found["latest"]
+    if latest is None or not 0 <= ts_now - latest[0] <= USAGE_SAMPLE_MAX_AGE:
+        return f"{name} UNKNOWN (no usage sample in the last {USAGE_SAMPLE_MAX_AGE // 3600}h)", None
+    sampled, used, reset = latest
+    stamp = acct.get("baseline_from")
+    base = None
+    if stamp:
+        if isinstance(stored, dict) and stored.get("from") == stamp and _pace_number(stored.get("ts")) \
+                and _pace_number(stored.get("pct")):
+            base = (float(stored["ts"]), float(stored["pct"]))
+        elif found["first"] is not None:
+            base = found["first"]
+    cache = {"from": stamp, "ts": base[0], "pct": base[1]} if base else None
+
+    horizon, own = _pace_epoch(acct["horizon"]), False
+    if horizon <= ts_now:
+        if reset is not None and reset > ts_now:
+            horizon, own = float(reset), True
+        else:
+            return (f"{name} {used:g}% used, UNKNOWN (horizon {_ist(horizon, '%a %m-%d %H:%M')} has passed, "
+                    "update the pace config)"), cache
+    ceiling = (100 - used) / ((horizon - ts_now) / 3600)
+    to = ("own weekly reset " if own else "") + _ist(horizon, "%a %m-%d %H:%M")
+
+    rate = None
+    if not stamp:
+        measured = "UNKNOWN (no baseline_from in the pace config)"
+    elif base is None:
+        measured = "UNKNOWN (no usage sample at or after the baseline yet)"
+    else:
+        hours = (sampled - base[0]) / 3600
+        if hours < PACE_MIN_WINDOW_HOURS:
+            measured = f"UNKNOWN (baseline is only {hours:.1f}h old)"
+        elif used < base[1]:
+            measured = "UNKNOWN (usage fell since the baseline, re-baseline in the pace config)"
+        else:
+            rate = (used - base[1]) / hours
+            measured = f"{rate:.2f} %/h over {hours:.1f}h" + (", thin data" if hours < PACE_THIN_HOURS else "")
+    if rate is None:
+        verdict, eta = "UNKNOWN", "ETA UNKNOWN"
+    elif used >= 100:
+        verdict, eta = "ABOVE", "ETA 100% reached"
+    else:
+        verdict = "ABOVE" if rate > ceiling else "BELOW"
+        eta_hours = (100 - used) / rate if rate > 0 else math.inf
+        eta = ("ETA 100% not at this rate" if eta_hours > PACE_MAX_ETA_HOURS
+               else f"ETA 100% {_ist(ts_now + eta_hours * 3600, '%a %m-%d %H:%M')}")
+    return (f"{name} {used:g}% used, measured {measured} vs ceiling {ceiling:.2f} %/h (to {to}) "
+            f"→ {verdict}, {eta}"), cache
+
+
+def _pace_write_state(state: Path, baselines: dict) -> None:
+    state.parent.mkdir(parents=True, exist_ok=True)
+    tmp = state.with_name(f".{state.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps({"version": 1, "baselines": baselines}, indent=2, sort_keys=True) + "\n")
+    os.replace(tmp, state)
+
+
+def pace_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = PACE_CONFIG,
+                state: Path = PACE_STATE, persist: bool = False) -> str:
+    """The one-line account pace statement that opens every 1h report. Never raises: a failed check reads UNKNOWN.
+
+    persist=True (claimed normal hourly producer only) caches the resolved baseline samples so the rate keeps
+    its window if the usage log is ever trimmed. It never writes anything else and never samples usage.
+    """
+    try:
+        ts_now = now.timestamp()
+        accounts = _pace_accounts(config)
+        wanted = {a["key"]: (_pace_epoch(a["baseline_from"]) if a.get("baseline_from") else None) for a in accounts}
+        found = _pace_scan(snapshot, wanted)
+        try:
+            stored = json.loads(state.read_text()).get("baselines")
+        except (OSError, ValueError, AttributeError):
+            stored = None
+        stored = stored if isinstance(stored, dict) else {}
+        clauses, keep = [], {}
+        for acct in accounts:
+            clause, cache = _pace_clause(acct, found[acct["key"]], stored.get(acct["key"]), ts_now)
+            clauses.append(clause)
+            if cache:
+                keep[acct["key"]] = cache
+        if persist and keep != stored:
+            try:
+                _pace_write_state(state, keep)
+            except OSError:
+                pass  # the cache is an optimisation; the log still holds the baseline
+        return "*Pace:* " + " · ".join(clauses)
+    except Exception as exc:
+        return f"*Pace:* UNKNOWN ({type(exc).__name__}, pace check failed)"
+
+
 def compose(
     mode: str,
     now: datetime,
@@ -2415,6 +2591,7 @@ def compose(
     usage_error: str | None = None,
     slots_authoritative: bool = True,
     burn: tuple[str, str] | None = None,
+    pace: str | None = None,
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -2474,7 +2651,9 @@ def compose(
         first = f"*Heartbeat {stamp}* — TL;DR: {tldr}"
     else:
         mention = f"{CTO} " if asks else ""
-        first = f"{mention}*Hourly — {stamp}* — TL;DR: {tldr}"
+        # The pace statement is the first clause. The line must still open with "*Hourly": pm-hourly-post.sh and
+        # slack-send.sh's parent-thread detection both match on it.
+        first = f"{mention}*Hourly — {stamp}*" + (f" — {pace}" if pace else "") + f" — TL;DR: {tldr}"
     burn_line, burn_modes = burn if (burn and mode == "1h") else (None, None)
     lines = [first, *(burn_line.splitlines() if burn_line else []), *body]
     if asks:
@@ -3103,6 +3282,8 @@ def main() -> int:
     tracked = None
     langsmith = None  # LangSmith ingest dropped from the hourly (Rajiv ts 1792806414.519859)
     burn = burn_status(datetime.now(timezone.utc)) if args.mode == "1h" else None
+    pace = (pace_status(datetime.now(timezone.utc), persist=usage_sample_claim_ok(args.sample_usage_claim))
+            if args.mode == "1h" else None)
     report = compose(
         args.mode, datetime.now(timezone.utc), axiom, mapping_doc.get("mapping", {}), prs,
         support=support, failures=failures, escalations=args.escalation,
@@ -3117,7 +3298,7 @@ def main() -> int:
                       + "\n" + (hourly.get("mac-box") or {}).get("line", "• Mac test box: UNKNOWN (collector deadline)")) if args.mode == "1h" else None,
         pending_actions=(pending_obligations(PM_OPS_DB, now), hourly.get("pending-github") or {"error": "UNAVAILABLE (no recent successful probe)"}) if args.mode == "1h" else None,
         proxies=hourly.get("proxies") if args.mode == "1h" else None,
-        burn=burn,
+        burn=burn, pace=pace,
     )
     labels = {"axiom": "*Axiom errors", "active": "*Active users", "prs": "open non-draft PRs",
               "slots": "*Slots", "priority": "*Slots",
