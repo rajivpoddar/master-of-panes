@@ -393,11 +393,16 @@
         "alert_not_contains": [
           "`"
         ],
-        "state_status": "armed"
+        "state_status": "armed",
+        "state_alert": "posted",
+        "state_at_dispatch": {
+          "status": "armed",
+          "alert": "issued"
+        }
       }
     },
     {
-      "name": "unsent_alert_is_reported_and_never_gates",
+      "name": "unconfirmed_alert_stays_consumed_and_never_gates",
       "snapshot": {
         "pm_rss_bytes": 2576980378,
         "px": []
@@ -407,11 +412,12 @@
       "notifier": "fail",
       "expect": {
         "contains": [
-          "exit-pending armed; alert unsent"
+          "exit-pending armed; alert unconfirmed"
         ],
         "opener_calls": 1,
         "alerts": 1,
-        "state_status": "armed"
+        "state_status": "armed",
+        "state_alert": "issued"
       }
     },
     {
@@ -425,11 +431,12 @@
       "notifier": "raise",
       "expect": {
         "contains": [
-          "exit-pending armed; alert unsent"
+          "exit-pending armed; alert unconfirmed"
         ],
         "opener_calls": 1,
         "alerts": 1,
-        "state_status": "armed"
+        "state_status": "armed",
+        "state_alert": "issued"
       }
     },
     {
@@ -498,7 +505,68 @@
           "already pending",
           "nothing new was armed"
         ],
-        "state_status": "already_pending"
+        "state_status": "already_pending",
+        "state_alert": "posted",
+        "state_at_dispatch": {
+          "status": "already_pending",
+          "alert": "issued"
+        }
+      }
+    },
+    {
+      "name": "already_pending_lost_receipt_stays_consumed_unknown",
+      "snapshot": {
+        "pm_rss_bytes": 2576980378,
+        "px": []
+      },
+      "arm": true,
+      "status": "pending",
+      "opener": "ok",
+      "notifier": "fail",
+      "expect": {
+        "contains": [
+          "exit-pending already pending; alert unconfirmed"
+        ],
+        "not_contains": [
+          "alert unsent",
+          "alert posted"
+        ],
+        "opener_calls": 0,
+        "alerts": 1,
+        "state_status": "already_pending",
+        "state_alert": "issued",
+        "state_has_last_attempt_epoch": true,
+        "state_at_dispatch": {
+          "status": "already_pending",
+          "alert": "issued"
+        }
+      }
+    },
+    {
+      "name": "consumed_unknown_window_holds_a_second_crossing_without_a_dispatch",
+      "snapshot": {
+        "pm_rss_bytes": 2576980378,
+        "px": []
+      },
+      "state": {
+        "last_attempt_epoch": 1699990000,
+        "last_rss_bytes": 2576980378,
+        "status": "already_pending",
+        "alert": "issued"
+      },
+      "now_epoch": 1700000000,
+      "arm": true,
+      "status": "pending",
+      "opener": "ok",
+      "notifier": "ok",
+      "expect": {
+        "contains": [
+          "exit-pending cooldown"
+        ],
+        "opener_calls": 0,
+        "alerts": 0,
+        "state_last_attempt_epoch": 1699990000,
+        "state_alert": "issued"
       }
     },
     {

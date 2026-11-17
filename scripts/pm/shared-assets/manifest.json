@@ -501,7 +501,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-heartbeat-session-age-clear",
-      "sha256": "5783c5a1559693b95a1ed97d2b199a3e81984ff818192d587fb61298eed5f4ef",
+      "sha256": "865923baad63033f8763b8b373151bcba792713c2e246cb5ffd42325cf4d2af7",
       "source_path": "claude/scripts/heartbeat-session-age-clear.py"
     },
     {
@@ -816,7 +816,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "058f05c9c22ed0024d74fb45ac1ac784d8751ca76bf18df1e2c38bf7a718bd70",
+      "sha256": "5afbb23250a0e97a392a08f8143f45a21dc79fa49a47ea4b3f667f4ec47808ae",
       "source_path": "claude/scripts/pm/heartbeat/pm-claude-memory.py"
     },
     {

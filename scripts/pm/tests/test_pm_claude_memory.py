@@ -2,6 +2,9 @@
 
 Simulated RSS only. The arm opener and the Alerts notifier are fakes; nothing calls MoP, tmux or Slack.
 The shared deterministic trace is test/fixtures/pm-rss-arm-trace.json (client_steps).
+Alert send custody (CTO REVISE of da450c5, C0ALZJHGE49 thread 1794923203.112819, ts 1794925523.128429): the
+guarded send intent is persisted BEFORE every dispatch, including already-pending; an unconfirmed issued send
+stays consumed/UNKNOWN for the window and is never resent. Added, NOT executed (MoP changes need no local proof).
 """
 
 import importlib.util
@@ -172,7 +175,7 @@ def test_shared_client_trace(step, tmp_path):
     snap = step["snapshot"]
     pm = None if snap["pm_rss_bytes"] is None else (20, snap["pm_rss_bytes"])
     px = None if snap["px"] is None else [tuple(row) for row in snap["px"]]
-    payloads, alerts = [], []
+    payloads, alerts, at_dispatch = [], [], []
 
     def opener(payload):
         payloads.append(payload)
@@ -185,6 +188,8 @@ def test_shared_client_trace(step, tmp_path):
 
     def notifier(text):
         alerts.append(text)
+        # The guarded send intent must already be on disk when the dispatch happens (CTO REVISE of da450c5).
+        at_dispatch.append(json.loads(state.read_text()) if state.exists() else None)
         kind = step["notifier"]
         if kind == "raise":
             raise RuntimeError("slack down")
@@ -223,6 +228,10 @@ def test_shared_client_trace(step, tmp_path):
         assert ("last_attempt_epoch" in saved) is expect["state_has_last_attempt_epoch"]
     if "state_last_attempt_epoch" in expect:
         assert saved["last_attempt_epoch"] == expect["state_last_attempt_epoch"]
+    if "state_alert" in expect:
+        assert saved["alert"] == expect["state_alert"]
+    for key, value in expect.get("state_at_dispatch", {}).items():
+        assert at_dispatch[0] is not None and at_dispatch[0][key] == value, (step["name"], at_dispatch)
 
 
 def test_live_snapshot_reports_unavailable_when_ps_fails_and_pm_unknown_when_only_tmux_fails(monkeypatch):
@@ -291,3 +300,137 @@ def test_injected_opener_without_notifier_can_never_reach_slack(tmp_path, monkey
         status_get=lambda: {"pending": False}, opener=lambda _p: {"ok": True, "status": {"pm_only": True, "with_devs": False}}, env={},
     )
     assert "exit-pending armed" in line and "alert" not in line
+
+
+T0 = 1_700_000_000
+RSS = int(2.4 * GB)
+ARMED_OK = {"ok": True, "status": {"pm_only": True, "with_devs": False}}
+
+
+def arm(state, *, now_epoch, notifier, status=lambda: {"pending": True}, opener=None):
+    """One hourly decision at an RSS over the threshold. Every collaborator is a fake; nothing reaches MoP or Slack."""
+    return memory.arm_if_needed(
+        rss_bytes=RSS, now_epoch=now_epoch, state_path=state, threshold=2 * GB,
+        status_get=status, opener=opener or (lambda _payload: ARMED_OK), notifier=notifier,
+    )
+
+
+def never_opens(_payload):
+    raise AssertionError("the already-pending branch must not POST /exit-pending")
+
+
+def test_already_pending_persists_the_send_intent_before_the_dispatch(tmp_path):
+    state = tmp_path / "state.json"
+    seen = []
+
+    def notifier(_text):
+        seen.append(json.loads(state.read_text()))
+        return True
+
+    note = arm(state, now_epoch=T0, notifier=notifier, opener=never_opens)
+    assert note == "already_pending_alerted"
+    assert len(seen) == 1
+    assert seen[0]["status"] == "already_pending"
+    assert seen[0]["alert"] == "issued"
+    assert seen[0]["last_attempt_epoch"] == T0
+    assert json.loads(state.read_text())["alert"] == "posted"
+
+
+def test_accepted_send_with_a_lost_receipt_stays_consumed_and_is_not_resent_in_the_window(tmp_path):
+    state = tmp_path / "state.json"
+    sent = []
+
+    def lost_receipt(text):
+        sent.append(text)
+        return False  # Slack accepted the message; the receipt never arrived
+
+    assert arm(state, now_epoch=T0, notifier=lost_receipt, opener=never_opens) == "already_pending_unconfirmed"
+    assert json.loads(state.read_text())["alert"] == "issued", "unconfirmed stays consumed/UNKNOWN, never recorded as unsent"
+    # A second invocation and a restart both read only the state file: the window is consumed.
+    assert arm(state, now_epoch=T0 + 3600, notifier=lost_receipt, opener=never_opens) == "cooldown"
+    assert arm(state, now_epoch=T0 + memory.COOLDOWN_S - 1, notifier=lost_receipt, opener=never_opens) == "cooldown"
+    assert len(sent) == 1
+    # The next policy-due window is a separate reminder, not a retry of the uncertain send.
+    assert arm(state, now_epoch=T0 + memory.COOLDOWN_S, notifier=lost_receipt, opener=never_opens) == "already_pending_unconfirmed"
+    assert len(sent) == 2
+
+
+def test_a_raising_sender_is_unconfirmed_and_consumed(tmp_path):
+    state = tmp_path / "state.json"
+    calls = []
+
+    def boom(_text):
+        calls.append(1)
+        raise TimeoutError("sender timed out after dispatch")
+
+    assert arm(state, now_epoch=T0, notifier=boom, opener=never_opens) == "already_pending_unconfirmed"
+    assert arm(state, now_epoch=T0 + 3600, notifier=boom, opener=never_opens) == "cooldown"
+    assert len(calls) == 1
+    assert json.loads(state.read_text())["alert"] == "issued"
+
+
+def test_state_write_failure_after_an_ok_receipt_does_not_repeat(tmp_path, monkeypatch):
+    state = tmp_path / "state.json"
+    sent = []
+    real_atomic = memory._atomic
+
+    def fail_after_dispatch(path, payload):
+        if sent:
+            raise OSError("disk full")
+        real_atomic(path, payload)
+
+    monkeypatch.setattr(memory, "_atomic", fail_after_dispatch)
+    notifier = lambda text: sent.append(text) or True  # noqa: E731
+    assert arm(state, now_epoch=T0, notifier=notifier, opener=never_opens) == "already_pending_alerted"
+    assert json.loads(state.read_text())["alert"] == "issued", "the persisted intent still holds the window"
+    assert arm(state, now_epoch=T0 + 3600, notifier=notifier, opener=never_opens) == "cooldown"
+    assert len(sent) == 1
+
+
+def test_unwritable_intent_skips_the_alert_and_fails_open(tmp_path):
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("x")
+    state = blocker / "state.json"
+    sent = []
+    note = arm(state, now_epoch=T0, notifier=lambda text: sent.append(text) or True, opener=never_opens)
+    assert note == "already_pending_skipped"
+    assert sent == [], "no intent on disk means nothing is dispatched"
+    assert not state.exists()
+    line = memory.format_line((20, RSS), [], note)
+    assert "exit-pending already pending; alert skipped" in line
+
+
+def test_arm_path_skips_the_alert_when_only_the_intent_write_fails(tmp_path, monkeypatch):
+    state = tmp_path / "state.json"
+    real_atomic = memory._atomic
+
+    def fail_intent(path, payload):
+        if "alert" in payload:
+            raise OSError("read-only after the arm")
+        real_atomic(path, payload)
+
+    monkeypatch.setattr(memory, "_atomic", fail_intent)
+    opened, sent = [], []
+    note = arm(
+        state, now_epoch=T0, status=lambda: {"pending": False},
+        opener=lambda payload: opened.append(payload) or ARMED_OK, notifier=lambda text: sent.append(text) or True,
+    )
+    assert note == "armed_skipped"
+    assert len(opened) == 1 and sent == []
+    assert json.loads(state.read_text())["status"] == "attempted", "the pre-POST throttle intent still holds the window"
+    assert arm(state, now_epoch=T0 + 3600, notifier=lambda text: sent.append(text) or True) == "cooldown"
+    assert sent == []
+
+
+def test_alert_never_touches_an_existing_exit_pending_episode(tmp_path):
+    """Episode cb42059c is pending with an UNKNOWN outcome: the alert path posts nothing to MoP and arms nothing."""
+    state = tmp_path / "state.json"
+    arms = []
+    sent = []
+    note = arm(
+        state, now_epoch=T0, status=lambda: {"pending": True, "episode": "cb42059c-60de-4aa1-b7a4-18799b05d06b"},
+        opener=lambda payload: arms.append(payload), notifier=lambda text: sent.append(text) or False,
+    )
+    assert note == "already_pending_unconfirmed"
+    assert arms == [], "no POST /exit-pending, no clear, no re-arm of the existing episode"
+    assert len(sent) == 1

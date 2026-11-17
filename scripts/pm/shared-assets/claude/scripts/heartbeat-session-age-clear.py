@@ -21,8 +21,14 @@ for the clear itself. PM's own clear request still goes through MoP's existing
 pm_save_handoff flow, which injects /clear at the next PM Stop after the save
 (Rajiv D0AMF0XE6TS ts 1793732417.459339). The message is sent once per PM
 session and re-sent no sooner than six hours later while that session lives.
-Nothing here gates PM input or tools; a Slack failure is reported and retried
-at the next run.
+Send custody (CTO REVISE of da450c5, C0ALZJHGE49 thread 1794923203.112819, ts
+1794925523.128429): the guarded send intent is persisted in the existing
+session/window state BEFORE every dispatch. An issued send that is not confirmed
+by an OK receipt (timeout, lost response, state-write failure afterwards) stays
+consumed/UNKNOWN under that session/window key and is never resent
+automatically; only a later policy-due reminder (the next six-hour window) can
+send again. If the intent cannot be persisted the alert is skipped and the run
+fails open. Nothing here gates PM input or tools.
 
 Session age is measured from the effective session start = the first timestamped
 event in the pane's newest non-sidechain session JSONL. A `/clear` starts a
@@ -34,12 +40,14 @@ clear-worthy threshold remains 3h; PM threshold is strictly greater than 6h.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
 import re
 import subprocess
 import urllib.request
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -138,40 +146,100 @@ def _post_alert(text: str, channel: str = ALERT_CHANNEL) -> bool:
     )
 
 
+def _read_alert_state(state_path: Path) -> dict | None:
+    """The saved session/window record. {} when absent or unparsable; None when the file exists but cannot be read."""
+    try:
+        saved = json.loads(state_path.read_text())
+    except FileNotFoundError:
+        return {}
+    except ValueError:
+        return {}
+    except OSError:
+        return None  # unknown is not absence: the window cannot be proven, so nothing is dispatched
+    return saved if isinstance(saved, dict) else {}
+
+
+def _write_alert_state(state_path: Path, record: dict) -> None:
+    """Durable atomic write of the session/window record. Raises OSError."""
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = state_path.with_name(state_path.name + f".{os.getpid()}.new")
+    try:
+        with temporary.open("w") as handle:
+            handle.write(json.dumps(record, sort_keys=True))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, state_path)
+    except OSError:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _alert_window_send(saved: dict, session_id: str, now: datetime) -> str | None:
+    """The send state of the live window for this session: "posted", "issued", or None when no window holds.
+
+    "issued" means a send was dispatched (or was about to be) and no OK receipt confirmed it: consumed/UNKNOWN.
+    A record written before the intent field existed (da450c5) was written only after an OK receipt.
+    """
+    sent = saved.get("sent_epoch")
+    if (
+        saved.get("session_id") == session_id
+        and isinstance(sent, (int, float)) and not isinstance(sent, bool)
+        and now.timestamp() - float(sent) < ALERT_RENOTIFY_SECONDS
+    ):
+        return "issued" if saved.get("send") == "issued" else "posted"
+    return None
+
+
 def _alert_pm_self_clear(
     session_id: str, age_seconds: float, now: datetime, post=None, state_path: Path | None = None,
 ) -> tuple[str | None, str | None]:
     """Ask PM, through one Alerts message, to do housekeeping and self-clear.
 
-    Once per session; re-sent no sooner than ALERT_RENOTIFY_SECONDS later. The state is written
-    only after an OK receipt, so a failed post is retried at the next run. Fails open.
+    Once per session; a policy-due reminder is sent no sooner than ALERT_RENOTIFY_SECONDS later.
+    The guarded send intent (session_id, window start, send=issued) is persisted BEFORE the dispatch,
+    under a non-blocking lock so two runs cannot both claim the window. An issued send that is not
+    confirmed by an OK receipt (post False or raising, or the write of the confirmation failing) stays
+    consumed/UNKNOWN under this session/window key and is never resent automatically. If the intent
+    cannot be persisted (state unreadable or unwritable, lock contended) nothing is dispatched and the
+    caller reports it. Fails open: nothing here gates PM.
+    Returns (status, error): status is alert_posted, alert_already_sent or alert_send_unconfirmed.
     """
     post = post or _post_alert
     state_path = state_path or ALERT_STATE
-    try:
-        saved = json.loads(state_path.read_text())
-    except (OSError, ValueError):
-        saved = {}
-    sent = saved.get("sent_epoch") if isinstance(saved, dict) else None
-    if (
-        isinstance(saved, dict) and saved.get("session_id") == session_id
-        and isinstance(sent, (int, float)) and not isinstance(sent, bool)
-        and now.timestamp() - float(sent) < ALERT_RENOTIFY_SECONDS
-    ):
-        return "alert_already_sent", None
-    try:
-        delivered = bool(post(_alert_text(age_seconds)))
-    except Exception as exc:  # a sender fault never gates PM (rule 50)
-        return None, f"alert_post_failed:{type(exc).__name__}"
-    if not delivered:
-        return None, "alert_post_failed"
+    intent = {
+        "attempt": uuid.uuid4().hex,
+        "send": "issued",
+        "sent_epoch": now.timestamp(),
+        "session_id": session_id,
+    }
     try:
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = state_path.with_name(state_path.name + f".{os.getpid()}.new")
-        temporary.write_text(json.dumps({"session_id": session_id, "sent_epoch": now.timestamp()}))
-        os.replace(temporary, state_path)
+        with state_path.with_name(state_path.name + ".lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            saved = _read_alert_state(state_path)
+            if saved is None:
+                return None, "alert_intent_not_persisted"
+            held = _alert_window_send(saved, session_id, now)
+            if held == "posted":
+                return "alert_already_sent", None
+            if held == "issued":
+                return "alert_send_unconfirmed", None
+            _write_alert_state(state_path, intent)
+    except OSError:  # includes a contended lock: nothing was dispatched, the next run retries
+        return None, "alert_intent_not_persisted"
+    try:
+        delivered = bool(post(_alert_text(age_seconds)))
+    except Exception:  # a sender fault never gates PM (rule 50); the issued send stays consumed/UNKNOWN
+        return "alert_send_unconfirmed", None
+    if not delivered:
+        return "alert_send_unconfirmed", None
+    try:
+        _write_alert_state(state_path, {**intent, "send": "posted"})
     except OSError:
-        pass  # message is out; worst case one more message at the next run
+        pass  # the persisted intent already consumes this window; the message is out and is not resent
     return "alert_posted", None
 
 

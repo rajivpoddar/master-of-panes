@@ -18,6 +18,15 @@ old GET-then-POST here was a race. The message follows the threshold crossing, n
 the arm outcome: armed, uncertain, already pending or preserved all post the same
 single message (its text says which), under the unchanged 6h throttle.
 
+Send custody (CTO REVISE of da450c5, C0ALZJHGE49 thread 1794923203.112819, ts
+1794925523.128429): the guarded send intent is persisted in the existing throttle state
+BEFORE every alert dispatch, the already-pending branch included. An issued send that is
+not confirmed (notifier False, a lost receipt, a raised fault, a failed write afterwards)
+stays consumed/UNKNOWN (alert "issued") under that window and is never resent
+automatically; only the next policy-due window (after the 6h throttle) can alert again.
+If the intent cannot be persisted the alert is skipped and the hourly fails open. This
+never touches an existing exit-pending episode: the alert is not a second arm.
+
 Unavailable is never reported as none: when the process snapshot cannot be read
 the px part says unavailable.
 
@@ -55,25 +64,32 @@ CONTINUATION = (
     "do not duplicate running work."
 )
 
+OUTCOME_NOTES = {
+    "armed": "; exit-pending armed",
+    "already_pending": "; exit-pending already pending",
+    "preserved": "; exit-pending not armed (existing owner state preserved)",
+    "uncertain": "; exit-pending uncertain (fail open)",
+}
+ALERT_NOTES = {
+    "alerted": "; alert posted",
+    # An issued send with no confirmed receipt: consumed/UNKNOWN, never resent inside the window.
+    "unconfirmed": "; alert unconfirmed",
+    # The send intent could not be persisted, so nothing was dispatched.
+    "skipped": "; alert skipped",
+}
 NOTES = {
     "below": "",
     "unknown": "",
     "would_arm": "; exit-pending dry-run would arm",
-    "armed": "; exit-pending armed",
-    "armed_alerted": "; exit-pending armed; alert posted",
-    "armed_unalerted": "; exit-pending armed; alert unsent",
     "cooldown": "; exit-pending cooldown",
-    "already_pending": "; exit-pending already pending",
-    "already_pending_alerted": "; exit-pending already pending; alert posted",
-    "already_pending_unalerted": "; exit-pending already pending; alert unsent",
-    "preserved": "; exit-pending not armed (existing owner state preserved)",
-    "preserved_alerted": "; exit-pending not armed (existing owner state preserved); alert posted",
-    "preserved_unalerted": "; exit-pending not armed (existing owner state preserved); alert unsent",
     "unreachable": "; exit-pending not armed (MoP unreachable)",
-    "uncertain": "; exit-pending uncertain (fail open)",
-    "uncertain_alerted": "; exit-pending uncertain (fail open); alert posted",
-    "uncertain_unalerted": "; exit-pending uncertain (fail open); alert unsent",
     "refused": "; exit-pending refused (fail open)",
+    **OUTCOME_NOTES,
+    **{
+        f"{outcome}_{alert}": OUTCOME_NOTES[outcome] + ALERT_NOTES[alert]
+        for outcome in OUTCOME_NOTES
+        for alert in ALERT_NOTES
+    },
 }
 
 
@@ -328,6 +344,11 @@ def arm_if_needed(
     housekeeping, and the 6h throttle starts, so there is never more than one message per window.
     MoP unreachable posts nothing and starts nothing (retried at the next hourly). Intent is
     persisted before the POST. notifier posts the message; None (the default) posts nothing.
+
+    The alert's send intent (alert=issued, with the window start) is persisted BEFORE every
+    dispatch, including the already-pending branch. A dispatch without a confirmed receipt stays
+    issued: consumed/UNKNOWN for this window, never resent automatically. If the intent cannot be
+    persisted the alert is skipped (note "..._skipped"), nothing is issued, and PM work is never gated.
     """
     state = _load_state(state_path)
     decision = decide(rss_bytes, now_epoch, state, threshold, cooldown_s)
@@ -345,17 +366,28 @@ def arm_if_needed(
         attempted["status"] = outcome
         alerted = outcome
         if notifier is not None:
+            # Guarded send intent, persisted BEFORE the dispatch: it consumes this window, so a lost
+            # receipt, a crash or a failed write afterwards can never lead to an automatic resend.
+            attempted["alert"] = "issued"
+            try:
+                _atomic(state_path, attempted)
+            except OSError:
+                _log(log_path, f"alert_skipped intent_unwritable rss={rss_bytes}")
+                _log(log_path, f"{outcome} rss={rss_bytes}")
+                return f"{outcome}_skipped"  # nothing was issued; fail open
             try:
                 sent = bool(notifier(alert_text(outcome, rss_bytes, threshold)))
             except Exception:  # fail open: a sender fault never gates PM or the hourly
                 sent = False
-            attempted["alert"] = "posted" if sent else "unsent"
-            alerted = f"{outcome}_{'alerted' if sent else 'unalerted'}"
-            _log(log_path, f"alert_{'posted' if sent else 'unsent'} rss={rss_bytes}")
+            if sent:
+                attempted["alert"] = "posted"
+            # Not sent: the issued send stays "issued" (consumed/UNKNOWN); it is never retried here.
+            alerted = f"{outcome}_{'alerted' if sent else 'unconfirmed'}"
+            _log(log_path, f"alert_{'posted' if sent else 'unconfirmed'} rss={rss_bytes}")
         try:
             _atomic(state_path, attempted)
         except OSError:
-            pass
+            pass  # the persisted intent already holds the window
         _log(log_path, f"{outcome} rss={rss_bytes}")
         return alerted
 
