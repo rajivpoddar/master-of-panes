@@ -56,3 +56,30 @@ test("normal inbound cancels Enter but does not revoke physical paste cleanup ow
   assert.ok(relay.includes('command === "/exit" && effectAttempted && enterSent === 0'));
   assert.ok(relay.includes('slotNum === 0 && removed'));
 });
+
+test("an unsubmitted PM continuation draft is held and cleaned only on the exact owned draft, inside the send lock (CTO REVISE ts 1794950616.405579)", () => {
+  const start = relay.indexOf("private async reconcileUnsubmittedContinuationDraft");
+  const body = relay.slice(start, relay.indexOf("Check if a slot is currently active", start));
+  // The hold is written FIRST and released only after the draft is proven gone.
+  assert.ok(body.indexOf('setConfig("pm_exit_cleanup_pending", JSON.stringify') < body.indexOf("clearOwnedRefusedPasteComposer("));
+  assert.ok(body.includes('if (removed) this.db?.setConfig("pm_exit_cleanup_pending", "")'));
+  // Exact owned draft only, with awaited identity proof, a fresh read and a synchronous boot fence before each key.
+  assert.ok(body.includes("composerOwnsOnlyPayload(first, payload"));
+  assert.ok(body.indexOf("if (!(await owns())) return") < body.lastIndexOf("draft.sameBoot()"));
+  assert.ok(body.lastIndexOf("draft.sameBoot()") < body.indexOf("C-u"), "the last fence is synchronous and right before the key");
+  // Called from the guarded writer's finally (same lock), never after an Enter, never for /exit (its own block).
+  const call = relay.indexOf("this.reconcileUnsubmittedContinuationDraft(paneId, command");
+  assert.ok(relay.includes('slotNum === 0 && command !== "/exit" && opts.continuationDraft && effectAttempted && enterSent === 0'));
+  assert.ok(call > relay.indexOf('command === "/exit" && effectAttempted && enterSent === 0'));
+  assert.ok(call < relay.indexOf("await fs.unlink(tmpFile)", call));
+  // The consumed attempt is never reset here and the continuation is never resent.
+  assert.ok(!body.includes("exit_pending_continuation_delivery"));
+  assert.ok(!body.includes("Enter"));
+});
+test("continuation draft ownership is physical (same boot + owned process), never the input fence", () => {
+  const owner = health.slice(health.indexOf("const sameBoot ="), health.indexOf("const result = await this.relay.deliverGuardedToSlot(0, prompt"));
+  assert.ok(owner.includes("continuationDraft"));
+  assert.ok(owner.includes("latestSessionStartEventId(this.db, 0) === boot"));
+  assert.ok(owner.includes("processGuard"));
+  assert.ok(!owner.includes("inputFence") && !owner.includes("continuationInputRefusal"), "inbound/real input cancels the Enter, not ownership");
+});

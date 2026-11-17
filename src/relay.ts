@@ -15,7 +15,7 @@ import type { JsonlActivitySignal } from "./jsonlActivity.js";
 import type { MoPConfig, SlotState } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, isDecommissionedSlot, isValidDevSlot, isValidRuntimeSlot } from "./slotConfig.js";
 import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity } from "./paneIdentity.js";
-import { QUEUED_HINT, composerOwnsOnlyPayload, composerText, INJECT_ENTER_DELAY_MS, isSlashCommand, resolveSlashCommandEnterDelayMs, slashComposerClearable, submitWithComposerCheck } from "./composer.js";
+import { QUEUED_HINT, clearOwnedRefusedPasteComposer, composerOwnsOnlyPayload, composerText, INJECT_ENTER_DELAY_MS, isSlashCommand, resolveSlashCommandEnterDelayMs, slashComposerClearable, submitWithComposerCheck } from "./composer.js";
 import { withSlotSendLock } from "./slotSendLock.js";
 import { parseForegroundClaude, type DevExitAttempt } from "./devExitAttempt.js";
 import type { PMClearFenceRefusal } from "./pmClearLatch.js";
@@ -2296,6 +2296,13 @@ export class TmuxRelay {
       exitEpisode?: string;
       /** Original consumed Stop owner, captured before deferred dispatch. */
       exitOwnerPin?: ExitOwnerPin;
+      /**
+       * PM restart continuation only (slot 0). Proof that the draft a withheld Enter leaves in the composer is still ours:
+       * `owns` = same boot and same owned PM process (the pane id is checked here), `sameBoot` = synchronous boot pin.
+       * Inbound or real input arriving after the paste cancels the Enter, never this ownership. Without it (or when it
+       * does not prove) the draft is retained and automated paste is held, as for an /exit draft.
+       */
+      continuationDraft?: { owns: () => Promise<boolean>; sameBoot: () => boolean };
       timing?: { dwellMs?: number; pollMs?: number; payloadGraceMs?: number; payloadStableMs?: number; clearGraceMs?: number };
     },
   ): Promise<GuardedSlotDelivery> {
@@ -2509,6 +2516,12 @@ export class TmuxRelay {
           attempt.phase = "unknown";
           this.db.saveExitAttempt(slotNum, attempt);
         }
+        if (slotNum === 0 && command !== "/exit" && opts.continuationDraft && effectAttempted && enterSent === 0) {
+          // The continuation was pasted and its Enter withheld or never reached: same custody boundary as the /exit draft,
+          // inside this same send lock. The consumed attempt (caller-owned) is never touched here.
+          await this.reconcileUnsubmittedContinuationDraft(paneId, command, opts.continuationDraft, prePasteComposer,
+            opts.bracketedPaste === true, capture);
+        }
         await fs.unlink(tmpFile).catch(() => undefined);
         if (enterSent > 0 && opts.exitEpisode && exitProcess) {
           // Preserve the original /exit disposition, including UNKNOWN. This
@@ -2519,6 +2532,78 @@ export class TmuxRelay {
     });
     this.db?.logEvent(slotNum, "guarded_delivery", null, null, { ...result, command: command.slice(0, 200) });
     return result;
+  }
+
+  /**
+   * A PM restart continuation was pasted but its Enter was withheld or never reached (PM inbound or real input arrived
+   * after the paste, the composer stopped being provably ours, ...). Its text is still in the composer, and the next
+   * queued message must never be pasted into it and submitted alongside it (CTO REVISE C0ALZJHGE49/1794941233.245629,
+   * ts 1794950616.405579, on 43fcc72). Same paste-custody boundary as the /exit draft (`pm_exit_cleanup_pending`, honored
+   * by injectDirectNow), run inside the caller's slot send lock. It is a paste-safety hold on MoP's own automated paste,
+   * not an input or tool admission gate: PM hooks and tools are untouched and every held message stays queued.
+   * - The hold is written FIRST and cleared only once the draft is proven gone (removed by us, or already empty).
+   * - Removal needs the same pane, boot and owned process (awaited proof, then a fresh composer read, then a synchronous
+   *   boot fence right before each key) and a composer that holds exactly this payload: whitespace reflow tolerated,
+   *   nothing else. Human text, a changed or unreadable composer, a thrown probe or an unconfirmed Ctrl-U retain the
+   *   draft and the hold.
+   * - The consumed continuation attempt is never reset and the continuation is never resent (both caller-owned).
+   */
+  private async reconcileUnsubmittedContinuationDraft(
+    paneId: string,
+    payload: string,
+    draft: { owns: () => Promise<boolean>; sameBoot: () => boolean },
+    prePasteComposer: string | null,
+    bracketedPaste: boolean,
+    capture: () => Promise<string | null>,
+  ): Promise<void> {
+    this.db?.setConfig("pm_exit_cleanup_pending", JSON.stringify({ paneId, kind: "pm_restart_continuation" }));
+    const owns = async (): Promise<boolean> => {
+      try {
+        const current = await verifyPaneIdentity(0, this.runShell);
+        return current.ok && current.snapshot.paneId === paneId && (await draft.owns()) === true && draft.sameBoot();
+      } catch { return false; }
+    };
+    let removed = false;
+    let reason = "ownership_unproven";
+    try {
+      if (await owns()) {
+        const first = composerText(await capture());
+        if (first === "") {
+          removed = true;
+          reason = "composer_already_empty";
+        } else if (first === null) {
+          reason = "composer_unreadable";
+        } else if (prePasteComposer !== "" || !composerOwnsOnlyPayload(first, payload, {
+          allowOpaquePlaceholder: bracketedPaste && payload.includes("\n"),
+          prePasteComposer,
+        })) {
+          reason = "composer_not_exact_draft";
+        } else {
+          let presses = 0;
+          const cleanup = await clearOwnedRefusedPasteComposer(payload, {
+            prePasteComposer,
+            lastObservedComposer: first,
+            enterPresses: 0,
+            capture,
+            clearComposer: async () => {
+              if (!(await owns())) return "ownership_lost";
+              if (presses === 0 && composerText(await capture()) !== first) return "draft_changed";
+              if (!draft.sameBoot()) return "boot_changed";
+              presses++;
+              await this.runShell(`tmux send-keys -t ${paneId} C-u`, { timeout: 3_000 });
+              return true;
+            },
+            sleep,
+          });
+          removed = cleanup.cleared;
+          reason = cleanup.reason;
+        }
+      }
+    } catch {
+      reason = "cleanup_error";
+    }
+    if (removed) this.db?.setConfig("pm_exit_cleanup_pending", "");
+    this.db?.logEvent(0, "pm_restart_continuation_draft", null, null, { pane_id: paneId, removed, reason, held: !removed });
   }
 
   /**

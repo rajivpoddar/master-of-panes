@@ -1446,9 +1446,19 @@ export class ProcessHealthChecker {
     // the lock withholds it. The post-delivery fence() above/below stays input-blind: the continuation's own prompt is a
     // real UserPromptSubmit and must not read as a refusal.
     const inputFence = () => fence() ?? this.continuationInputRefusal(boot);
+    // Physical ownership of OUR unsubmitted paste, for the relay's draft cleanup inside the same send lock: same boot and
+    // the same owned PM process (the relay checks the pane id). Deliberately NOT inputFence: inbound or real input arriving
+    // after the paste cancels the Enter but never makes the draft someone else's. No process proof means no cleanup: the
+    // draft is retained and automated paste is held (CTO REVISE ts 1794950616.405579).
+    const sameBoot = () => latestSessionStartEventId(this.db, 0) === boot;
+    const continuationDraft = {
+      sameBoot,
+      owns: async () => sameBoot() && !!processGuard && (await processGuard()) === null && sameBoot(),
+    };
     const result = await this.relay.deliverGuardedToSlot(0, prompt, {
       expectedPaneId: paneId,
       recheck: async () => inputFence() ?? (processGuard ? await processGuard() : null) ?? inputFence(), finalCheck: inputFence, bracketedPaste: true,
+      continuationDraft,
     });
     this.db.logEvent(0, "pm_restart_continuation", null, null, {
       episode: status.episode, boot_event_id: boot, delivery: result.outcome,
