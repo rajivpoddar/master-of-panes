@@ -31,6 +31,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import unicodedata
 from itertools import islice
 from time import monotonic
 from contextlib import closing
@@ -2400,9 +2401,11 @@ PACE_STATE = Path(os.environ.get("HOURLY_PACE_STATE") or Path.home() / ".claude/
 # Horizons: Wed 11-18 09:30 IST and Fri 11-20 12:34 IST (Rajiv). baseline_from: 2026-11-17 06:15 IST.
 PACE_DEFAULT_ACCOUNTS = (
     {"label": "Claude", "name": "rajiv@scribie", "key": "claude:rajiv@scribie.com:weekly",
-     "horizon": "2026-11-18T04:00:00Z", "baseline_from": "2026-11-17T00:45:00Z"},
+     "horizon": "2026-11-18T04:00:00Z", "baseline_from": "2026-11-17T00:45:00Z",
+     "display": "Claude: PM pane (keychain)"},
     {"label": "Codex", "name": "rajiv@scribie", "key": "codex:89aba566-ed7d-45a8-a2c4-619674a86e0c:weekly",
-     "horizon": "2026-11-20T07:04:00Z", "baseline_from": "2026-11-17T00:45:00Z"},
+     "horizon": "2026-11-20T07:04:00Z", "baseline_from": "2026-11-17T00:45:00Z",
+     "display": "Codex: rajiv-scribie CLI"},
 )
 PACE_MIN_WINDOW_HOURS = 0.25   # a baseline this young carries no rate at all
 PACE_THIN_HOURS = 2.0          # under this the rate is shown but flagged, whole-percent steps still dominate
@@ -2445,7 +2448,15 @@ def _pace_accounts(config: Path) -> list[dict]:
         _pace_epoch(row["horizon"])
         if row.get("baseline_from") is not None:
             _pace_epoch(row["baseline_from"])
+        if row.get("display") is not None and not (isinstance(row["display"], str) and row["display"].strip()):
+            raise ValueError("pace config display must be a non-empty string")
     return rows
+
+
+def _pace_display(acct: dict) -> str:
+    """Slack-safe account name for the table. Never shows the login e-mail: Slack turns '@x' into a mention."""
+    shown = acct.get("display") or f"{acct['label']}: {acct['name']}"
+    return shown.replace("@", "-")
 
 
 def _pace_scan(snapshot: Path, wanted: dict[str, float | None]) -> dict[str, dict]:
@@ -2489,26 +2500,29 @@ def _pace_cache(stamp, row) -> dict | None:
     return {"from": stamp, "ts": row[0], "pct": row[1], "reset": row[2]} if row else None
 
 
-def _pace_clause(acct: dict, found: dict, stored, ts_now: float) -> tuple[str, dict | None]:
-    """(clause, baseline to cache) for one account. Every missing input reads UNKNOWN, never 0.
+def _pace_clause(acct: dict, found: dict, stored, ts_now: float) -> tuple[str, dict | None, dict]:
+    """(clause, baseline to cache, table cells) for one account. Every missing input reads UNKNOWN, never 0.
 
     Basis: rate, remaining quota, ceiling and ETA all run from the last observation (the sample), not from report
     time, so an aged sample is judged against the time it was taken. A baseline is bound to its weekly window by the
     reset stamp: a window change or an expired sample window is UNKNOWN and re-baselines; nothing is averaged across
     windows and no zero is invented at a reset. A passed horizon is UNKNOWN; it never falls back to a weekly reset.
+    The cells feed the table renderer only; the clause text is unchanged and still drives pace_status.
     """
     name = f"{acct['label']} {acct['name']}"
     latest = found["latest"]
     if latest is None or not 0 <= ts_now - latest[0] <= USAGE_SAMPLE_MAX_AGE:
-        return f"{name} UNKNOWN (no usage sample in the last {USAGE_SAMPLE_MAX_AGE // 3600}h)", None
+        return f"{name} UNKNOWN (no usage sample in the last {USAGE_SAMPLE_MAX_AGE // 3600}h)", None, {"used": None}
     sampled, used, reset = latest
     head = f"{name} {used:g}% used at {_ist(sampled, '%H:%M')} (sample {(ts_now - sampled) / 3600:.1f}h old)"
+    unknown_cells = {"used": used}
     stamp = acct.get("baseline_from")
     if not stamp:
-        return f"{head}, measured UNKNOWN (no baseline_from in the pace config) → UNKNOWN, ETA UNKNOWN", None
+        return (f"{head}, measured UNKNOWN (no baseline_from in the pace config) → UNKNOWN, ETA UNKNOWN", None,
+                unknown_cells)
     if reset is None or reset <= sampled:
         return (f"{head}, measured UNKNOWN (the sample has no live weekly reset, re-baseline) "
-                "→ UNKNOWN, ETA UNKNOWN"), None
+                "→ UNKNOWN, ETA UNKNOWN"), None, unknown_cells
 
     rows = found["rows"]
     window = [r for r in rows if _pace_same_window(r[2], reset) and r[0] <= sampled]
@@ -2518,15 +2532,16 @@ def _pace_clause(acct: dict, found: dict, stored, ts_now: float) -> tuple[str, d
         note = (f"re-baselined at {_ist(fresh[0], '%H:%M')}" if fresh
                 else "waiting for the first sample of the new window")
         return (f"{head}, measured UNKNOWN (weekly window changed since the baseline, {note}) "
-                "→ UNKNOWN, ETA UNKNOWN"), _pace_cache(stamp, fresh)
+                "→ UNKNOWN, ETA UNKNOWN"), _pace_cache(stamp, fresh), unknown_cells
     if base is None:
-        return f"{head}, measured UNKNOWN (no usage sample at or after the baseline yet) → UNKNOWN, ETA UNKNOWN", None
+        return (f"{head}, measured UNKNOWN (no usage sample at or after the baseline yet) → UNKNOWN, ETA UNKNOWN",
+                None, unknown_cells)
     cache = _pace_cache(stamp, base)
 
     horizon = _pace_epoch(acct["horizon"])
     if horizon <= ts_now:
         return (f"{head}, UNKNOWN (horizon {_ist(horizon, '%a %m-%d %H:%M')} has passed, "
-                "update the pace config with the next horizon)"), cache
+                "update the pace config with the next horizon)"), cache, unknown_cells
 
     hours = (sampled - base[0]) / 3600
     rate = None
@@ -2540,15 +2555,19 @@ def _pace_clause(acct: dict, found: dict, stored, ts_now: float) -> tuple[str, d
     ceiling = (100 - used) / ((horizon - sampled) / 3600)   # observation-time basis, same as the rate
     to = _ist(horizon, "%a %m-%d %H:%M")
     if rate is None:
-        verdict, eta = "UNKNOWN", "ETA UNKNOWN"
+        verdict, eta, runs_out = "UNKNOWN", "ETA UNKNOWN", "UNKNOWN"
     elif used >= 100:
-        verdict, eta = "ABOVE", "ETA 100% reached"
+        verdict, eta, runs_out = "ABOVE", "ETA 100% reached", "reached"
     else:
         verdict = "ABOVE" if rate > ceiling else "BELOW"
         eta_hours = (100 - used) / rate if rate > 0 else math.inf
         eta = ("ETA 100% not at this rate" if eta_hours > PACE_MAX_ETA_HOURS
                else f"ETA 100% {_ist(sampled + eta_hours * 3600, '%a %m-%d %H:%M')}")
-    return f"{head}, measured {measured} vs ceiling {ceiling:.2f} %/h (to {to}) → {verdict}, {eta}", cache
+        runs_out = ("not at this rate" if eta_hours > PACE_MAX_ETA_HOURS
+                    else _ist(sampled + eta_hours * 3600, "%a %d %b %H:%M"))
+    cells = {"used": used, "rate": rate, "hours": hours, "verdict": verdict, "runs_out": runs_out,
+             "ceiling": ceiling, "to": _ist(horizon, "%a %d %b %H:%M")}
+    return f"{head}, measured {measured} vs ceiling {ceiling:.2f} %/h (to {to}) → {verdict}, {eta}", cache, cells
 
 
 def _pace_write_state(state: Path, baselines: dict) -> None:
@@ -2558,37 +2577,91 @@ def _pace_write_state(state: Path, baselines: dict) -> None:
     os.replace(tmp, state)
 
 
+def _pace_resolve(now: datetime, snapshot: Path, config: Path, state: Path, persist: bool) -> list[tuple]:
+    """Single calculation behind both renderings: [(account, clause, cells)] per account. May raise."""
+    ts_now = now.timestamp()
+    accounts = _pace_accounts(config)
+    wanted = {a["key"]: (_pace_epoch(a["baseline_from"]) if a.get("baseline_from") else None) for a in accounts}
+    found = _pace_scan(snapshot, wanted)
+    try:
+        stored = json.loads(state.read_text()).get("baselines")
+    except (OSError, ValueError, AttributeError):
+        stored = None
+    stored = stored if isinstance(stored, dict) else {}
+    resolved, keep = [], {}
+    for acct in accounts:
+        clause, cache, cells = _pace_clause(acct, found[acct["key"]], stored.get(acct["key"]), ts_now)
+        resolved.append((acct, clause, cells))
+        if cache:
+            keep[acct["key"]] = cache
+    if persist and keep != stored:
+        try:
+            _pace_write_state(state, keep)
+        except OSError:
+            pass  # the cache is an optimisation; the log still holds the baseline
+    return resolved
+
+
 def pace_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = PACE_CONFIG,
                 state: Path = PACE_STATE, persist: bool = False) -> str:
-    """The one-line account pace statement that opens every 1h report. Never raises: a failed check reads UNKNOWN.
+    """The one-line account pace statement. Never raises: a failed check reads UNKNOWN.
 
     persist=True (claimed normal hourly producer only) caches the resolved baseline samples so the rate keeps
     its window if the usage log is ever trimmed. It never writes anything else and never samples usage.
     """
     try:
-        ts_now = now.timestamp()
-        accounts = _pace_accounts(config)
-        wanted = {a["key"]: (_pace_epoch(a["baseline_from"]) if a.get("baseline_from") else None) for a in accounts}
-        found = _pace_scan(snapshot, wanted)
-        try:
-            stored = json.loads(state.read_text()).get("baselines")
-        except (OSError, ValueError, AttributeError):
-            stored = None
-        stored = stored if isinstance(stored, dict) else {}
-        clauses, keep = [], {}
-        for acct in accounts:
-            clause, cache = _pace_clause(acct, found[acct["key"]], stored.get(acct["key"]), ts_now)
-            clauses.append(clause)
-            if cache:
-                keep[acct["key"]] = cache
-        if persist and keep != stored:
-            try:
-                _pace_write_state(state, keep)
-            except OSError:
-                pass  # the cache is an optimisation; the log still holds the baseline
-        return "*Pace:* " + " · ".join(clauses)
+        return "*Pace:* " + " · ".join(clause for _, clause, _ in _pace_resolve(now, snapshot, config, state, persist))
     except Exception as exc:
         return f"*Pace:* UNKNOWN ({type(exc).__name__}, pace check failed)"
+
+
+def _pace_width(text: str) -> int:
+    """Terminal cell width for Slack monospace: emoji and wide glyphs take two cells, variation selectors none."""
+    width = 0
+    for ch in text:
+        if ch == "️":
+            continue
+        width += 2 if ch in "✅⚠" or unicodedata.east_asian_width(ch) in ("W", "F") else 1
+    return width
+
+
+def _pace_table_lines(resolved: list[tuple]) -> list[str]:
+    """Fenced, column-aligned table: Account | Used | Burn %/h | Target %/h | Runs out at. Rows with UNKNOWN inputs
+    get one note line each below the fence, with the reason from the clause (login e-mail replaced by display name)."""
+    header = ["Account", "Used", "Burn %/h", "Target %/h", "Runs out at"]
+    rows, notes = [], []
+    for acct, clause, cells in resolved:
+        display = _pace_display(acct)
+        used = cells.get("used")
+        rate = cells.get("rate")
+        used_cell = f"{used:g}%" if used is not None else "UNKNOWN"
+        if rate is None:
+            burn_cell = target_cell = runs_cell = "UNKNOWN"
+            notes.append("• " + clause.replace(f"{acct['label']} {acct['name']}", display, 1))
+        else:
+            marker = "✅" if cells["verdict"] == "BELOW" else "⚠️"
+            thin = f", thin" if cells["hours"] < PACE_THIN_HOURS else ""
+            burn_cell = f"{rate:.2f} {marker}" + (f" ({cells['hours']:.0f}h{thin})" if thin else "")
+            target_cell = f"≤{cells['ceiling']:.2f} to {cells['to']}"
+            runs_cell = cells["runs_out"]
+        rows.append([display, used_cell, burn_cell, target_cell, runs_cell])
+    widths = [max(_pace_width(r[i]) for r in [header, *rows]) for i in range(len(header))]
+
+    def fmt(cols: list[str]) -> str:
+        return "  ".join(c + " " * (w - _pace_width(c)) for c, w in zip(cols, widths)).rstrip()
+
+    block = ["```", fmt(header), fmt(["-" * w for w in widths]), *(fmt(r) for r in rows), "```"]
+    return "\n".join([*block, *notes]).replace("@", "-").splitlines()
+
+
+def pace_table(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = PACE_CONFIG,
+               state: Path = PACE_STATE, persist: bool = False) -> str:
+    """The Pace block that sits directly under the *Hourly line of every 1h report. Same calculation as pace_status.
+    Never raises: a failed check reads one UNKNOWN line."""
+    try:
+        return "\n".join(_pace_table_lines(_pace_resolve(now, snapshot, config, state, persist)))
+    except Exception as exc:
+        return f"Pace: UNKNOWN ({type(exc).__name__}, pace check failed)"
 
 
 def compose(
@@ -2622,7 +2695,7 @@ def compose(
     usage_error: str | None = None,
     slots_authoritative: bool = True,
     burn: tuple[str, str] | None = None,
-    pace: str | None = None,
+    pace: str | None = None,  # pace_table() block, rendered directly under the *Hourly line
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -2682,11 +2755,12 @@ def compose(
         first = f"*Heartbeat {stamp}* — TL;DR: {tldr}"
     else:
         mention = f"{CTO} " if asks else ""
-        # The pace statement is the first clause. The line must still open with "*Hourly": pm-hourly-post.sh and
-        # slack-send.sh's parent-thread detection both match on it.
-        first = f"{mention}*Hourly — {stamp}*" + (f" — {pace}" if pace else "") + f" — TL;DR: {tldr}"
+        # The line must still open with "*Hourly": pm-hourly-post.sh and slack-send.sh's parent-thread detection both
+        # match on it. The pace table sits directly under it (Rajiv ts 1794880759.943659), not inline.
+        first = f"{mention}*Hourly — {stamp}*" + f" — TL;DR: {tldr}"
     burn_line, burn_modes = burn if (burn and mode == "1h") else (None, None)
-    lines = [first, *(burn_line.splitlines() if burn_line else []), *body]
+    pace_lines = pace.splitlines() if (pace and mode == "1h") else []
+    lines = [first, *pace_lines, *(burn_line.splitlines() if burn_line else []), *body]
     if asks:
         lines += ["", "*Asks:* " + " | ".join(asks)]
     pm_actions = [] if mode == "3h" else [a for r in (prs or []) for a in r.get("actions") or []]
@@ -2704,7 +2778,9 @@ def compose(
     # The burn section is one row per account (Rajiv 2026-11-16); widen the 1h budget by its extra rows
     # so the other sections are not folded to make room for it.
     burn_extra = max(0, len(burn_line.splitlines()) - 1) if burn_line else 0
-    report = cap_lines(compact_report(lines, 23 if mode == "3h" else 20 + burn_extra, cadence=mode),
+    # The pace table is the same kind of multi-line block and gets the same allowance.
+    pace_extra = len(pace_lines)
+    report = cap_lines(compact_report(lines, 23 if mode == "3h" else 20 + burn_extra + pace_extra, cadence=mode),
                        MAX_LINE_CHARS - LINE_NOTE_RESERVE)
     if mode == "3h":
         report = '\n'.join(line for line in report.splitlines() if line.strip()).replace(CTO, '')
@@ -3313,7 +3389,7 @@ def main() -> int:
     tracked = None
     langsmith = None  # LangSmith ingest dropped from the hourly (Rajiv ts 1792806414.519859)
     burn = burn_status(datetime.now(timezone.utc)) if args.mode == "1h" else None
-    pace = (pace_status(datetime.now(timezone.utc), persist=usage_sample_claim_ok(args.sample_usage_claim))
+    pace = (pace_table(datetime.now(timezone.utc), persist=usage_sample_claim_ok(args.sample_usage_claim))
             if args.mode == "1h" else None)
     report = compose(
         args.mode, datetime.now(timezone.utc), axiom, mapping_doc.get("mapping", {}), prs,

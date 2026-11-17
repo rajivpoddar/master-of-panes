@@ -228,18 +228,46 @@ def test_fixed_time_table_pins_observation_basis_and_window_binding(tmp_path):
         assert line.startswith('*Pace:* ')
 
 
-def test_hourly_first_line_still_opens_with_the_hourly_marker_and_carries_pace_first():
-    """pm-hourly-post.sh rejects a body whose first line does not match this pattern, so Pace is a clause."""
-    pace = '*Pace:* Claude rajiv@scribie 45% used'
+def test_hourly_first_line_still_opens_with_the_hourly_marker_and_pace_table_sits_under_it():
+    """pm-hourly-post.sh rejects a body whose first line does not match this pattern, so the table goes under it."""
     source = (ASSETS / 'pm/heartbeat/heartbeat-compose.py').read_text()
-    assert 'first = f"{mention}*Hourly — {stamp}*" + (f" — {pace}" if pace else "") + f" — TL;DR: {tldr}"' in source
-    first = f"<@U0BNFGX2UAX> *Hourly — 07:00 IST* — {pace} — TL;DR: ok"
+    assert 'first = f"{mention}*Hourly — {stamp}*" + f" — TL;DR: {tldr}"' in source
+    assert 'lines = [first, *pace_lines, *(burn_line.splitlines() if burn_line else []), *body]' in source
+    first = "<@U0BNFGX2UAX> *Hourly — 07:00 IST* — TL;DR: ok"
     assert re.match(r'^(<@[A-Z0-9]+> *)?\*Hourly', first)
-    assert first.index('*Pace:*') < first.index('TL;DR')
 
 
 def test_pace_is_wired_for_the_1h_mode_only_and_persists_only_under_the_hourly_claim():
     source = (ASSETS / 'pm/heartbeat/heartbeat-compose.py').read_text()
     assert 'persist=usage_sample_claim_ok(args.sample_usage_claim)' in source
-    assert re.search(r'pace = \(pace_status\(.*?\)\s*if args\.mode == "1h" else None\)', source, re.S)
+    assert re.search(r'pace = \(pace_table\(.*?\)\s*if args\.mode == "1h" else None\)', source, re.S)
     assert 'burn=burn, pace=pace' in source
+
+
+def test_pace_table_rows_show_burn_marker_target_and_runs_out_with_no_login_email(tmp_path):
+    now = BASE + 4 * H
+    cfg = _write_config(tmp_path / 'cfg.json')
+    accounts = json.loads(cfg.read_text())['accounts']
+    for account, display in zip(accounts, ('Claude: PM pane (keychain)', 'Codex: rajiv-scribie CLI')):
+        account['display'] = display
+    cfg.write_text(json.dumps({'accounts': accounts}))
+    table = composer.pace_table(_at(now), snapshot=_write_log(tmp_path / 'log.jsonl',
+                                [(BASE, CLAUDE, 45), (now, CLAUDE, 48), (BASE, CODEX, 29), (now, CODEX, 30)]),
+                                config=cfg, state=tmp_path / 'state.json', persist=False)
+    assert table.startswith('```') and table.endswith('```')
+    assert '@' not in table
+    claude_row = next(l for l in table.splitlines() if l.startswith('Claude: PM pane (keychain)'))
+    assert '48%' in claude_row and '0.75 ✅' in claude_row and '≤2.24 to Wed 18 Nov 09:30 IST' in claude_row
+    codex_row = next(l for l in table.splitlines() if l.startswith('Codex: rajiv-scribie CLI'))
+    assert '0.25 ✅' in codex_row and 'not at this rate' not in codex_row
+    assert 'Runs out at' in table.splitlines()[1]
+
+
+def test_pace_table_unknown_row_reads_unknown_with_a_note_and_no_zero(tmp_path):
+    now = BASE + 4 * H
+    table = composer.pace_table(_at(now), snapshot=_write_log(tmp_path / 'log.jsonl', [(BASE, CLAUDE, 45), (now, CLAUDE, 48)]),
+                                config=_write_config(tmp_path / 'cfg.json'), state=tmp_path / 'state.json', persist=False)
+    codex_row = next(l for l in table.splitlines() if l.startswith('Codex: '))
+    assert 'UNKNOWN' in codex_row and '0.00' not in codex_row
+    assert any(l.startswith('• Codex: ') and 'no usage sample' in l for l in table.splitlines())
+    assert '@' not in table
