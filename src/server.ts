@@ -14,7 +14,8 @@
 
 import { resolveAcceptedPmSelfClear } from "./pmSelfClearObligation.js";
 import { resolveBindHost } from "./bindHost.js";
-import { registerPMSoftBoundary, type PMStopAuthority, type PMStopAuthorityPins } from "./pmSoftBoundary.js";
+import { pendingPMMaintenance, registerPMSoftBoundary, type PMStopAuthority, type PMStopAuthorityPins } from "./pmSoftBoundary.js";
+import { evaluatePmRssArm, PM_RSS_ARM_CONDITION, type PmRssArmProbes } from "./pmRssArm.js";
 import {
   PM_HANDOFF_REQUESTED_AT_KEY,
   PM_HANDOFF_SESSION_KEY,
@@ -1594,13 +1595,31 @@ app.use("/exit-pending", async (c, next) => {
   }
 });
 
+/** Read-only owner probes for the conditional PM RSS arm (never mutate, never gate input). */
+const pmRssArmProbes: PmRssArmProbes = {
+  pendingMaintenance: () => pendingPMMaintenance(db),
+  boundaryHeld: () => pmSoftBoundary.isHeld(),
+};
+
 /** Set or clear the exit_pending flag (REST parity for mop_set_exit_pending). */
 app.post("/exit-pending", async (c) => {
-  let body: { enabled?: boolean; dev_only?: boolean; pm_only?: boolean; with_devs?: boolean; continuation_prompt?: string; recover_episode?: unknown; reason?: unknown } = {};
+  let body: { enabled?: boolean; dev_only?: boolean; pm_only?: boolean; with_devs?: boolean; continuation_prompt?: string; recover_episode?: unknown; reason?: unknown;
+    condition?: unknown; rss_bytes?: unknown; threshold_bytes?: unknown } = {};
   try {
     body = await c.req.json();
   } catch {
     body = {};
+  }
+  // Conditional PM Claude RSS arm (hourly heartbeat). The owner check and the arm
+  // below are ONE synchronous step: with_devs is refused for this condition, so the
+  // dev-session probe loop (the only await after this point) is never entered.
+  // Any existing owner state is preserved with a 409 and zero mutation.
+  const rssArm = body.condition === undefined ? null : evaluatePmRssArm(db, body, pmRssArmProbes);
+  if (rssArm && !rssArm.ok) {
+    db.logEvent(0, "pm_rss_arm_refused", null, null, {
+      reason: rssArm.reason, owner: rssArm.owner, rss_bytes: typeof body.rss_bytes === "number" ? body.rss_bytes : null,
+    });
+    return c.json({ ok: false, armed: false, reason: rssArm.reason, error: rssArm.error, owner: rssArm.owner }, rssArm.status);
   }
   // Same-owner recovery edge for a refused (zero-effect) PM exit terminal
   // (CTO REVISE ts 1793756803.183959): re-arm THAT episode's PM-only restart
@@ -1695,8 +1714,9 @@ app.post("/exit-pending", async (c) => {
       superseded_pending: previousEpisode.pending, superseded_cycled: previousEpisode.cycled,
     } : {}),
     ...(recovered ? { recovered_episode: recovered, via: "same_owner_recovery" } : {}),
+    ...(rssArm ? { source: PM_RSS_ARM_CONDITION, rss_bytes: rssArm.rss_bytes, threshold_bytes: rssArm.threshold_bytes } : {}),
   });
-  return c.json({ ok: true, enabled: body.enabled, status: db.getExitStatus() });
+  return c.json({ ok: true, enabled: body.enabled, status: db.getExitStatus(), ...(rssArm ? { conditional: PM_RSS_ARM_CONDITION } : {}) });
 });
 
 /** Exit-pending status (REST parity for mop_exit_status). */

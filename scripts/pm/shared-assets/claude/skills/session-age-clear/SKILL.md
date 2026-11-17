@@ -21,6 +21,14 @@ not clear, or queue a clear for, any dev slot S1-S6.
 
 Policy:
 
+- Current trigger (Rajiv, DM D0AMF0XE6TS thread 1794921293.133799, ts 1794923900.734289:
+  "easiest trigger alerts message to dev immediately, PM self-clear same way"): when the PM
+  session is older than 6h, `heartbeat-session-age-clear.py` posts ONE HeyDonna Alerts message
+  in #heydonna-dev (once per PM session, re-sent no sooner than 6h) asking PM to do clear
+  housekeeping and self-clear. It no longer calls `POST /slots/0/clear` itself; PM's own
+  clear request goes through MoP's save-handoff flow, which injects `/clear` at the next Stop
+  after the save. Nothing gates PM input or tools. The manual nag procedure below still applies
+  to a manual run of this skill.
 - PM is clear-worthy when effective session age is `>=3h`.
 - Dev slots S1-S6 are never cleared on a cadence by this skill. This skill must
   not create a per-dev-slot pending-clear row, and must not call a dev-slot

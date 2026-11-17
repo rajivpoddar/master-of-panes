@@ -1,0 +1,570 @@
+{
+  "description": "Deterministic trace for the conditional PM Claude RSS arm. server_steps run against the real POST /exit-pending route body with a fresh in-memory MoP DB per step (test/pm-rss-arm.test.ts). client_steps run against scripts/pm/shared-assets/claude/scripts/pm/heartbeat/pm-claude-memory.py with injected collectors, openers and notifiers, so nothing reaches tmux, MoP or Slack (scripts/pm/tests/test_pm_claude_memory.py). Added, not executed (MoP changes need no local proof).",
+  "source": "Rajiv DM D0AMF0XE6TS thread 1794921293.133799, ts 1794921896.970909 and ts 1794923900.734289; CTO race finding: the client GET-then-POST let an RSS arm supersede an existing owner.",
+  "gib": 1073741824,
+  "threshold_bytes": 2147483648,
+  "server_steps": [
+    {
+      "name": "below_threshold_arms_nothing",
+      "setup": [],
+      "request": {
+        "enabled": true,
+        "pm_only": true,
+        "with_devs": false,
+        "continuation_prompt": "resume",
+        "condition": "pm_rss",
+        "rss_bytes": 1073741824,
+        "threshold_bytes": 2147483648
+      },
+      "expect": {
+        "status": 409,
+        "reason": "below_threshold",
+        "exit_pending": false,
+        "obligations": 0
+      }
+    },
+    {
+      "name": "non_integer_evidence_is_a_400",
+      "setup": [],
+      "request": {
+        "enabled": true,
+        "pm_only": true,
+        "condition": "pm_rss",
+        "rss_bytes": "large",
+        "threshold_bytes": 2147483648
+      },
+      "expect": {
+        "status": 400,
+        "reason": "invalid_rss_evidence",
+        "exit_pending": false,
+        "obligations": 0
+      }
+    },
+    {
+      "name": "unknown_condition_is_a_400",
+      "setup": [],
+      "request": {
+        "enabled": true,
+        "pm_only": true,
+        "condition": "disk",
+        "rss_bytes": 3221225472,
+        "threshold_bytes": 2147483648
+      },
+      "expect": {
+        "status": 400,
+        "reason": "unsupported_condition",
+        "exit_pending": false,
+        "obligations": 0
+      }
+    },
+    {
+      "name": "with_devs_is_never_allowed_for_the_rss_arm",
+      "setup": [],
+      "request": {
+        "enabled": true,
+        "pm_only": true,
+        "with_devs": true,
+        "condition": "pm_rss",
+        "rss_bytes": 3221225472,
+        "threshold_bytes": 2147483648
+      },
+      "expect": {
+        "status": 400,
+        "reason": "rss_arm_never_cycles_devs",
+        "exit_pending": false,
+        "obligations": 0
+      }
+    },
+    {
+      "name": "idle_pm_arms_once_and_opens_one_obligation",
+      "setup": [],
+      "request": {
+        "enabled": true,
+        "pm_only": true,
+        "with_devs": false,
+        "continuation_prompt": "resume",
+        "condition": "pm_rss",
+        "rss_bytes": 2576980378,
+        "threshold_bytes": 2147483648
+      },
+      "expect": {
+        "status": 200,
+        "conditional": "pm_rss",
+        "exit_pending": true,
+        "pm_only": true,
+        "with_devs": false,
+        "obligations": 1
+      }
+    },
+    {
+      "name": "second_rss_arm_preserves_the_first_episode",
+      "setup": [
+        "rss_arm"
+      ],
+      "request": {
+        "enabled": true,
+        "pm_only": true,
+        "with_devs": false,
+        "continuation_prompt": "resume again",
+        "condition": "pm_rss",
+        "rss_bytes": 2684354560,
+        "threshold_bytes": 2147483648
+      },
+      "expect": {
+        "status": 409,
+        "reason": "owner_state_preserved",
+        "owner_kind": "exit_pending",
+        "state_unchanged": true,
+        "exit_pending": true,
+        "obligations": 1
+      }
+    },
+    {
+      "name": "existing_with_devs_episode_is_preserved",
+      "setup": [
+        "exit_pending_with_devs"
+      ],
+      "request": {
+        "enabled": true,
+        "pm_only": true,
+        "with_devs": false,
+        "continuation_prompt": "resume",
+        "condition": "pm_rss",
+        "rss_bytes": 3221225472,
+        "threshold_bytes": 2147483648
+      },
+      "expect": {
+        "status": 409,
+        "reason": "owner_state_preserved",
+        "owner_kind": "exit_pending",
+        "state_unchanged": true,
+        "with_devs": true,
+        "obligations": 0
+      }
+    },
+    {
+      "name": "dev_only_episode_is_preserved",
+      "setup": [
+        "exit_pending_dev_only"
+      ],
+      "request": {
+        "enabled": true,
+        "pm_only": true,
+        "condition": "pm_rss",
+        "rss_bytes": 3221225472,
+        "threshold_bytes": 2147483648
+      },
+      "expect": {
+        "status": 409,
+        "reason": "owner_state_preserved",
+        "owner_kind": "exit_pending",
+        "state_unchanged": true,
+        "obligations": 0
+      }
+    },
+    {
+      "name": "refused_exit_terminal_keeps_its_retained_continuation",
+      "setup": [
+        "refused_terminal"
+      ],
+      "request": {
+        "enabled": true,
+        "pm_only": true,
+        "condition": "pm_rss",
+        "rss_bytes": 3221225472,
+        "threshold_bytes": 2147483648
+      },
+      "expect": {
+        "status": 409,
+        "reason": "owner_state_preserved",
+        "owner_kind": "exit_refused_terminal",
+        "terminal_kept": true,
+        "exit_pending": false,
+        "obligations": 0
+      }
+    },
+    {
+      "name": "latched_pm_clear_is_preserved",
+      "setup": [
+        "pm_clear_pending"
+      ],
+      "request": {
+        "enabled": true,
+        "pm_only": true,
+        "condition": "pm_rss",
+        "rss_bytes": 3221225472,
+        "threshold_bytes": 2147483648
+      },
+      "expect": {
+        "status": 409,
+        "reason": "owner_state_preserved",
+        "owner_kind": "pm_clear_pending",
+        "exit_pending": false,
+        "obligations": 0
+      }
+    },
+    {
+      "name": "requested_clear_handoff_is_preserved",
+      "setup": [
+        "clear_handoff_requested"
+      ],
+      "request": {
+        "enabled": true,
+        "pm_only": true,
+        "condition": "pm_rss",
+        "rss_bytes": 3221225472,
+        "threshold_bytes": 2147483648
+      },
+      "expect": {
+        "status": 409,
+        "reason": "owner_state_preserved",
+        "owner_kind": "pm_clear_handoff_requested",
+        "exit_pending": false,
+        "obligations": 0
+      }
+    },
+    {
+      "name": "pinned_maintenance_is_preserved",
+      "setup": [
+        "maintenance_pending"
+      ],
+      "request": {
+        "enabled": true,
+        "pm_only": true,
+        "condition": "pm_rss",
+        "rss_bytes": 3221225472,
+        "threshold_bytes": 2147483648
+      },
+      "expect": {
+        "status": 409,
+        "reason": "owner_state_preserved",
+        "owner_kind": "pm_maintenance_pending",
+        "exit_pending": false,
+        "obligations": 0
+      }
+    },
+    {
+      "name": "held_soft_boundary_is_preserved",
+      "setup": [
+        "boundary_held"
+      ],
+      "request": {
+        "enabled": true,
+        "pm_only": true,
+        "condition": "pm_rss",
+        "rss_bytes": 3221225472,
+        "threshold_bytes": 2147483648
+      },
+      "expect": {
+        "status": 409,
+        "reason": "owner_state_preserved",
+        "owner_kind": "pm_maintenance_held",
+        "exit_pending": false,
+        "obligations": 0
+      }
+    },
+    {
+      "name": "an_unreadable_owner_lookup_is_not_absence",
+      "setup": [
+        "probe_throws"
+      ],
+      "request": {
+        "enabled": true,
+        "pm_only": true,
+        "condition": "pm_rss",
+        "rss_bytes": 3221225472,
+        "threshold_bytes": 2147483648
+      },
+      "expect": {
+        "status": 409,
+        "reason": "owner_state_preserved",
+        "owner_kind": "owner_state_unknown",
+        "exit_pending": false,
+        "obligations": 0
+      }
+    },
+    {
+      "name": "unconditional_arm_still_supersedes_for_other_owners",
+      "setup": [
+        "exit_pending_with_devs"
+      ],
+      "request": {
+        "enabled": true,
+        "pm_only": true,
+        "continuation_prompt": "manual re-arm"
+      },
+      "expect": {
+        "status": 200,
+        "exit_pending": true,
+        "pm_only": true,
+        "with_devs": false,
+        "episode_changed": true,
+        "obligations": 1
+      }
+    }
+  ],
+  "client_steps": [
+    {
+      "name": "px_snapshot_unavailable_is_not_none",
+      "snapshot": {
+        "pm_rss_bytes": 1073741824,
+        "px": null
+      },
+      "arm": false,
+      "expect": {
+        "contains": [
+          "PM 1.00GB pid 20",
+          "px over 1.5GB: unavailable"
+        ],
+        "not_contains": [
+          "px over 1.5GB: none"
+        ],
+        "opener_calls": 0,
+        "alerts": 0
+      }
+    },
+    {
+      "name": "empty_px_list_is_none",
+      "snapshot": {
+        "pm_rss_bytes": 1073741824,
+        "px": []
+      },
+      "arm": false,
+      "expect": {
+        "contains": [
+          "px over 1.5GB: none"
+        ],
+        "not_contains": [
+          "unavailable"
+        ],
+        "opener_calls": 0,
+        "alerts": 0
+      }
+    },
+    {
+      "name": "no_snapshot_at_all_reports_both_unavailable",
+      "snapshot": {
+        "pm_rss_bytes": null,
+        "px": null
+      },
+      "arm": true,
+      "expect": {
+        "contains": [
+          "PM unknown",
+          "px over 1.5GB: unavailable"
+        ],
+        "not_contains": [
+          "exit-pending"
+        ],
+        "opener_calls": 0,
+        "alerts": 0
+      }
+    },
+    {
+      "name": "threshold_crossing_arms_conditionally_and_posts_one_alert",
+      "snapshot": {
+        "pm_rss_bytes": 2576980378,
+        "px": []
+      },
+      "arm": true,
+      "opener": "ok",
+      "notifier": "ok",
+      "expect": {
+        "contains": [
+          "exit-pending armed; alert posted"
+        ],
+        "opener_calls": 1,
+        "alerts": 1,
+        "payload": {
+          "condition": "pm_rss",
+          "pm_only": true,
+          "with_devs": false,
+          "rss_bytes": 2576980378,
+          "threshold_bytes": 2147483648
+        },
+        "alert_contains": [
+          "2.40GB",
+          "2.00GB",
+          "restart housekeeping",
+          "resume prompt",
+          "continuation note",
+          "MEMORY-session-handoff-current.md"
+        ],
+        "alert_not_contains": [
+          "`"
+        ],
+        "state_status": "armed"
+      }
+    },
+    {
+      "name": "unsent_alert_is_reported_and_never_gates",
+      "snapshot": {
+        "pm_rss_bytes": 2576980378,
+        "px": []
+      },
+      "arm": true,
+      "opener": "ok",
+      "notifier": "fail",
+      "expect": {
+        "contains": [
+          "exit-pending armed; alert unsent"
+        ],
+        "opener_calls": 1,
+        "alerts": 1,
+        "state_status": "armed"
+      }
+    },
+    {
+      "name": "notifier_exception_fails_open",
+      "snapshot": {
+        "pm_rss_bytes": 2576980378,
+        "px": []
+      },
+      "arm": true,
+      "opener": "ok",
+      "notifier": "raise",
+      "expect": {
+        "contains": [
+          "exit-pending armed; alert unsent"
+        ],
+        "opener_calls": 1,
+        "alerts": 1,
+        "state_status": "armed"
+      }
+    },
+    {
+      "name": "lost_response_is_uncertain_and_still_alerts_once",
+      "snapshot": {
+        "pm_rss_bytes": 2576980378,
+        "px": []
+      },
+      "arm": true,
+      "opener": "timeout",
+      "notifier": "ok",
+      "expect": {
+        "contains": [
+          "exit-pending uncertain (fail open); alert posted"
+        ],
+        "opener_calls": 1,
+        "alerts": 1,
+        "alert_contains": [
+          "uncertain",
+          "GET /exit-status"
+        ],
+        "state_status": "uncertain"
+      }
+    },
+    {
+      "name": "server_409_preserves_the_owner_and_still_alerts_once",
+      "snapshot": {
+        "pm_rss_bytes": 2576980378,
+        "px": []
+      },
+      "arm": true,
+      "opener": "owner_preserved",
+      "notifier": "ok",
+      "expect": {
+        "contains": [
+          "not armed (existing owner state preserved); alert posted"
+        ],
+        "opener_calls": 1,
+        "alerts": 1,
+        "alert_contains": [
+          "preserved it",
+          "nothing new was armed",
+          "restart housekeeping"
+        ],
+        "state_status": "preserved",
+        "state_has_last_attempt_epoch": true
+      }
+    },
+    {
+      "name": "already_pending_episode_alerts_once_without_a_post",
+      "snapshot": {
+        "pm_rss_bytes": 2576980378,
+        "px": []
+      },
+      "arm": true,
+      "status": "pending",
+      "opener": "ok",
+      "notifier": "ok",
+      "expect": {
+        "contains": [
+          "exit-pending already pending; alert posted"
+        ],
+        "opener_calls": 0,
+        "alerts": 1,
+        "alert_contains": [
+          "already pending",
+          "nothing new was armed"
+        ],
+        "state_status": "already_pending"
+      }
+    },
+    {
+      "name": "throttle_holds_a_second_crossing_inside_six_hours",
+      "snapshot": {
+        "pm_rss_bytes": 2576980378,
+        "px": []
+      },
+      "state": {
+        "last_attempt_epoch": 1699990000,
+        "status": "armed"
+      },
+      "now_epoch": 1700000000,
+      "arm": true,
+      "opener": "ok",
+      "notifier": "ok",
+      "expect": {
+        "contains": [
+          "exit-pending cooldown"
+        ],
+        "opener_calls": 0,
+        "alerts": 0,
+        "state_last_attempt_epoch": 1699990000
+      }
+    },
+    {
+      "name": "throttle_releases_after_six_hours",
+      "snapshot": {
+        "pm_rss_bytes": 2576980378,
+        "px": []
+      },
+      "state": {
+        "last_attempt_epoch": 1699970000,
+        "status": "armed"
+      },
+      "now_epoch": 1700000000,
+      "arm": true,
+      "opener": "ok",
+      "notifier": "ok",
+      "expect": {
+        "contains": [
+          "exit-pending armed; alert posted"
+        ],
+        "opener_calls": 1,
+        "alerts": 1,
+        "state_status": "armed"
+      }
+    },
+    {
+      "name": "mop_unreachable_posts_nothing_and_starts_no_throttle",
+      "snapshot": {
+        "pm_rss_bytes": 2576980378,
+        "px": []
+      },
+      "arm": true,
+      "status": "down",
+      "opener": "ok",
+      "notifier": "ok",
+      "expect": {
+        "contains": [
+          "not armed (MoP unreachable)"
+        ],
+        "opener_calls": 0,
+        "alerts": 0,
+        "state_exists": false
+      }
+    }
+  ]
+}

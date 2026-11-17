@@ -152,13 +152,15 @@ produce, consume, or act on a per-slot pending row, and must not invoke
 `mop-clear-slot.sh` for any dev slot. `heartbeat-session-age-clear.py` is
 materialize-only for numbered slots.
 
-PM stays clear-worthy on cadence. Due PM becomes a PM pending-clear row
-(`SESSION_AGE_CLEAR_PENDING PM`, PM effective session age ≥ 3h). The
-`pm-self-clear-stop` hook only emits a non-blocking Stop reminder; PM finishes
-housekeeping, saves any last note to pm-todo/pm-ops, then self-clears through
-MoP logging with
-`bash /Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/mop-clear-slot.sh pm`.
-Never inject raw `/clear`; never respawn as the stale-session fix.
+PM stays clear-worthy on cadence. A PM session older than 6h makes
+`heartbeat-session-age-clear.py` post ONE HeyDonna Alerts message in #heydonna-dev
+(once per PM session, re-sent no sooner than 6h) asking PM to do clear
+housekeeping (handoff, resume prompt, continuation note) and then self-clear
+(Rajiv, DM D0AMF0XE6TS thread 1794921293.133799, ts 1794923900.734289). The script
+no longer asks MoP for the clear itself. PM self-clears through MoP logging with
+`bash /Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/mop-clear-slot.sh pm`;
+MoP then opens its save-handoff obligation and injects `/clear` at the next PM Stop
+after the save. Never inject raw `/clear`; never respawn as the stale-session fix.
 
 ## Dropped from the post (do not re-add)
 

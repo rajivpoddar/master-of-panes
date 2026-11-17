@@ -121,9 +121,15 @@ export function isLifecycleEmailWindow(now: Date): boolean {
   return et.weekday !== "Sat" && et.weekday !== "Sun" && et.hour >= 10;
 }
 
+// RETIRED (Rajiv DM D0AMF0XE6TS thread 1794921293.133799, ts 1794923900.734289:
+// "easiest trigger alerts message to dev immediately, PM self-clear same way,
+// remove 4am restart"). The PM restart trigger is now the hourly heartbeat's PM
+// Claude RSS arm plus its HeyDonna Alerts message; the 04:00 IST occurrence never
+// fires again. The definition stays so persisted config keys, the status view,
+// queued-event parsing and the pause/run routes keep working; nothing is deleted.
 const DAILY_PM_RESTART_TASK: PMCadenceTask = {
   name: "daily-pm-restart",
-  label: "daily PM restart (04:00 IST)",
+  label: "daily PM restart (RETIRED; was 04:00 IST)",
   configPrefix: "pm_cadence_daily_pm_restart",
   commandDescription: "MoP: run Skill(daily-pm-restart)",
 };
@@ -150,6 +156,13 @@ const TASKS: Record<PMCadenceTaskName, PMCadenceTask> = {
   "lifecycle-email": LIFECYCLE_EMAIL_TASK,
   "daily-pm-restart": DAILY_PM_RESTART_TASK,
 };
+
+/** Tasks that never run again, whether scheduled, at boot catch-up, or manual. */
+const RETIRED_TASKS: ReadonlySet<PMCadenceTaskName> = new Set<PMCadenceTaskName>(["daily-pm-restart"]);
+
+export function isPMCadenceTaskRetired(taskName: PMCadenceTaskName): boolean {
+  return RETIRED_TASKS.has(taskName);
+}
 
 const CFG_GLOBAL_PAUSED = "pm_cadence_paused";
 const LOCAL_MORNING_BRIEF_HOUR = 10;
@@ -372,6 +385,7 @@ export class PMCadenceScheduler {
     tasks: Array<{
       task: PMCadenceTaskName;
       label: string;
+      retired: boolean;
       paused: boolean;
       last_due_key: string | null;
       last_run_ts: string | null;
@@ -398,6 +412,7 @@ export class PMCadenceScheduler {
         return {
           task: taskName,
           label: task.label,
+          retired: RETIRED_TASKS.has(taskName),
           paused: globalPaused || taskPaused,
           last_due_key: lastDueKey,
           last_run_ts: this.db.getConfig(configKey(task, "last_run_ts")),
@@ -412,6 +427,8 @@ export class PMCadenceScheduler {
   }
 
   private async runIfDue(taskName: PMCadenceTaskName, reason: PMCadenceTriggerReason, startupTime?: Date): Promise<PMCadenceRunResult | null> {
+    // A retired task is neither run, seeded nor marked: its persisted keys stay as they were.
+    if (RETIRED_TASKS.has(taskName)) return null;
     if (this.db.getConfig(CFG_GLOBAL_PAUSED) === "true" || this.isTaskPaused(taskName)) {
       return null;
     }
@@ -493,6 +510,10 @@ export class PMCadenceScheduler {
     manual: boolean,
   ): Promise<PMCadenceRunResult> {
     const task = TASKS[taskName];
+    if (RETIRED_TASKS.has(taskName)) {
+      return { task: taskName, triggered: false, reason, due_key: dueKey, injected: false, queued: false,
+        message: `${taskName} is retired; the PM restart trigger is the hourly PM Claude RSS arm and its HeyDonna Alerts message` };
+    }
     if (taskName === "lifecycle-email" && !lifecycleEmailApproved()) {
       return { task: taskName, triggered: false, reason, due_key: dueKey,
         injected: false, queued: false, message: "Templates not all APPROVED; selector send_allowed=false" };
@@ -701,6 +722,8 @@ export class PMCadenceScheduler {
     const queuedCadence = /^cadence-(heartbeat|morning-brief|hourly-heartbeat|growth-daily|lifecycle-email|daily-pm-restart|rtb-split-update)-(.+)$/.exec(eventType);
     if (!queuedCadence) return "deliver";
     const taskName = queuedCadence[1] as PMCadenceTaskName;
+    // An occurrence queued before retirement is dropped, never delivered.
+    if (RETIRED_TASKS.has(taskName)) return { drop: "cadence-task-retired" };
     if (queuedCadence[2] !== this.currentDueKey(taskName, now)) {
       return { drop: "cadence-bucket-expired" };
     }
@@ -716,6 +739,7 @@ export class PMCadenceScheduler {
   }
 
   private isTaskDue(taskName: PMCadenceTaskName, now: Date, lastDueKey: string | null): boolean {
+    if (RETIRED_TASKS.has(taskName)) return false;
     if (taskName === "rtb-split-update") return rtbSplitUpdateDueKey(now) !== lastDueKey;
     if (taskName === "daily-pm-restart") {
       return isDailyPMRestartWindow(now) && dailyPMRestartParts(now).day !== lastDueKey;

@@ -11,12 +11,18 @@ can_clear_now: false, materialized_only: true` as an observation only; dev-slot
 clearing belongs to the PM assignment boundary (`mop-assign-slot --class
 new_issue`) or a distinct explicit operator clear. The PM pane path below is
 unchanged.
-For PM, a session age strictly greater than six hours asks MoP for a PM clear
-(POST /slots/0/clear, source=session_age_policy). MoP opens ONE
-`pm_save_handoff` obligation and injects /clear itself at the next PM Stop
-after the handoff is saved (Rajiv D0AMF0XE6TS ts 1793732417.459339). Repeat
-heartbeats are idempotent; MoP refuses an automatic re-request for a session
-whose clear already failed open.
+For PM, a session age strictly greater than six hours posts ONE HeyDonna Alerts
+message in #heydonna-dev asking PM to do clear housekeeping (handoff, resume
+prompt, continuation note) and then self-clear (Rajiv D0AMF0XE6TS thread
+1794921293.133799, ts 1794923900.734289: "easiest trigger alerts message to dev
+immediately, PM self-clear same way"). This replaces the earlier automatic
+POST /slots/0/clear (source=session_age_policy): the script no longer asks MoP
+for the clear itself. PM's own clear request still goes through MoP's existing
+pm_save_handoff flow, which injects /clear at the next PM Stop after the save
+(Rajiv D0AMF0XE6TS ts 1793732417.459339). The message is sent once per PM
+session and re-sent no sooner than six hours later while that session lives.
+Nothing here gates PM input or tools; a Slack failure is reported and retried
+at the next run.
 
 Session age is measured from the effective session start = the first timestamped
 event in the pane's newest non-sidechain session JSONL. A `/clear` starts a
@@ -31,6 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import urllib.request
 from datetime import datetime, timezone
@@ -42,6 +49,11 @@ PM_DIR = "-Users-rajiv-Downloads-projects-heydonna-app"
 AGE_DUE_SECONDS = 3 * 60 * 60
 PM_AGE_DUE_SECONDS = 6 * 60 * 60
 LATEST = Path(os.environ.get("SESSION_AGE_CLEAR_LATEST", "/tmp/session-age-clear-latest.json"))
+ALERT_CHANNEL = "C0ALZJHGE49"  # #heydonna-dev
+ALERT_RENOTIFY_SECONDS = 6 * 60 * 60
+ALERT_STATE = Path(os.environ.get(
+    "PM_SESSION_AGE_ALERT_STATE", str(Path.home() / ".claude" / "state" / "pm-session-age-alert.json")))
+PM_CLEAR_COMMAND = "bash /Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/mop-clear-slot.sh pm"
 
 
 def _iso_now() -> str:
@@ -93,22 +105,74 @@ def _pane_dir(pane: str) -> Path:
     return PROJECTS / f"{PM_DIR}-300{pane}"
 
 
-def _request_mop_handoff_clear(session_id: str) -> tuple[str | None, str | None]:
-    """Ask MoP to open the save-handoff obligation. Fails open when MoP is down."""
-    body = json.dumps({"source": "session_age_policy", "session_id": session_id}).encode()
-    request = urllib.request.Request(
-        f"{MOP_BASE}/slots/0/clear", data=body, method="POST",
-        headers={"Content-Type": "application/json"},
+def _alert_text(age_seconds: float) -> str:
+    """The one HeyDonna Alerts message for a stale PM session. No backticks (slack-send rule)."""
+    hours = age_seconds / 3600
+    return (
+        f"*PM session is {hours:.1f}h old (limit {PM_AGE_DUE_SECONDS // 3600}h).* "
+        "PM: do clear housekeeping now, then self-clear. "
+        f"Run the MoP-logged PM clear: {PM_CLEAR_COMMAND}. That opens MoP's save-handoff obligation: "
+        "update the handoff (memory/MEMORY-session-handoff-current.md), the resume prompt and the "
+        "continuation note (data/pm-continuation-note.md), then end the turn. MoP injects /clear at "
+        "your next Stop after the save. If a clear is already pending or uncertain, do not request "
+        "another. Nothing is blocked meanwhile."
     )
+
+
+def _post_alert(text: str, channel: str = ALERT_CHANNEL) -> bool:
+    """Post as the HeyDonna Alerts bot (SLACK_SEND_AS=alerts), body on stdin. True only on an OK receipt."""
+    sender = os.environ.get("PM_ALERT_SLACK_SEND") or str(Path.home() / ".claude" / "scripts" / "slack-send.sh")
     try:
-        with urllib.request.urlopen(request, timeout=8) as resp:
-            payload = json.loads(resp.read().decode())
-    except Exception as exc:  # MoP unreachable: never block the PM (rule 50)
-        return None, f"mop_unreachable:{type(exc).__name__}"
-    for row in payload.get("results", []):
-        if row.get("slot") == 0:
-            return str(row.get("status", "")), None
-    return None, "mop_no_pm_result"
+        done = subprocess.run(
+            [sender, "-c", channel, "-f"], input=text, capture_output=True, text=True,
+            timeout=20, check=False, env={**os.environ, "SLACK_SEND_AS": "alerts"},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    receipt = next((line for line in done.stdout.splitlines() if line.startswith("OK ts=")), "")
+    fields = dict(part.split("=", 1) for part in receipt.split()[1:] if "=" in part)
+    return (
+        done.returncode == 0
+        and re.fullmatch(r"[0-9]+\.[0-9]+", fields.get("ts", "")) is not None
+        and fields.get("channel") == channel
+    )
+
+
+def _alert_pm_self_clear(
+    session_id: str, age_seconds: float, now: datetime, post=None, state_path: Path | None = None,
+) -> tuple[str | None, str | None]:
+    """Ask PM, through one Alerts message, to do housekeeping and self-clear.
+
+    Once per session; re-sent no sooner than ALERT_RENOTIFY_SECONDS later. The state is written
+    only after an OK receipt, so a failed post is retried at the next run. Fails open.
+    """
+    post = post or _post_alert
+    state_path = state_path or ALERT_STATE
+    try:
+        saved = json.loads(state_path.read_text())
+    except (OSError, ValueError):
+        saved = {}
+    sent = saved.get("sent_epoch") if isinstance(saved, dict) else None
+    if (
+        isinstance(saved, dict) and saved.get("session_id") == session_id
+        and isinstance(sent, (int, float)) and not isinstance(sent, bool)
+        and now.timestamp() - float(sent) < ALERT_RENOTIFY_SECONDS
+    ):
+        return "alert_already_sent", None
+    try:
+        delivered = bool(post(_alert_text(age_seconds)))
+    except Exception as exc:  # a sender fault never gates PM (rule 50)
+        return None, f"alert_post_failed:{type(exc).__name__}"
+    if not delivered:
+        return None, "alert_post_failed"
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = state_path.with_name(state_path.name + f".{os.getpid()}.new")
+        temporary.write_text(json.dumps({"session_id": session_id, "sent_epoch": now.timestamp()}))
+        os.replace(temporary, state_path)
+    except OSError:
+        pass  # message is out; worst case one more message at the next run
+    return "alert_posted", None
 
 
 def _newest_main_session(dir_path: Path) -> tuple[str | None, str | None]:
@@ -189,13 +253,13 @@ def main() -> int:
         due = age > threshold if pane == "pm" else age >= threshold
         if due:
             if pane == "pm":
-                mop_status, error = _request_mop_handoff_clear(session_id)
+                alert_status, error = _alert_pm_self_clear(session_id, age, now)
                 if error:
                     blocked = True
                     read_errors[pane] = error
                     results[pane] = {
                         "age_due": True,
-                        "kind": "pm_save_handoff",
+                        "kind": "pm_self_clear_alert",
                         "session_id": session_id,
                         "status": "blocked",
                     }
@@ -203,12 +267,12 @@ def main() -> int:
                 pending.append(pane)
                 results[pane] = {
                     "age_due": True,
-                    "kind": "pm_save_handoff",
+                    "kind": "pm_self_clear_alert",
                     "materialized_only": True,
-                    "mop_status": mop_status,
+                    "alert_status": alert_status,
                     "pane": pane,
                     "session_id": session_id,
-                    "status": "pending_save_handoff",
+                    "status": "pending_self_clear_alert",
                 }
                 continue
             oid = _obligation_id(pane, session_id)
@@ -233,7 +297,7 @@ def main() -> int:
 
     out = {
         "due_before": list(pending),
-        "execution": "materialize_numbered_and_request_pm_handoff",
+        "execution": "materialize_numbered_and_alert_pm_self_clear",
         "mcp_children_running": _mcp_children_running(),
         "generated_at": _iso_now(),
         "inventory": inventory,
@@ -242,7 +306,7 @@ def main() -> int:
         "pending": list(pending),
         "read_errors": read_errors,
         "results": results,
-        "source": "mop_rest+runtime_jsonl+mop_pm_handoff_clear",
+        "source": "mop_rest+runtime_jsonl+heydonna_alerts_pm_self_clear",
     }
     payload = json.dumps(out, sort_keys=True, indent=2)
     try:

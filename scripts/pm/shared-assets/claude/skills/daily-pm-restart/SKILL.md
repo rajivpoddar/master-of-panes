@@ -1,9 +1,15 @@
 ---
 name: daily-pm-restart
-description: Daily 04:00 IST PM continuation snapshot and one exit-pending episode that restarts the PM and the dev slots together.
+description: RETIRED. Do not run. The daily 04:00 IST PM restart schedule is gone; the PM restart trigger is the hourly heartbeat's PM Claude RSS arm plus its HeyDonna Alerts message.
 ---
 
 # Daily PM restart
+
+> **RETIRED (Rajiv, DM D0AMF0XE6TS thread 1794921293.133799, ts 1794923900.734289: "easiest trigger alerts message to dev immediately, PM self-clear same way, remove 4am restart").**
+> MoP's cadence scheduler no longer runs `daily-pm-restart` (scheduled, boot or manual): the 04:00 IST occurrence never fires and a queued one is dropped. Do not run this skill or `daily-pm-restart.sh`.
+> Current trigger: when PM Claude RSS reaches 2.0GB the hourly heartbeat arms a PM-only `POST /exit-pending` (conditional at the server: any existing owner state is preserved) and posts ONE HeyDonna Alerts message in #heydonna-dev asking PM to do restart housekeeping (handoff, resume prompt, continuation note) and then restart. See `hourly-heartbeat` (Claude RSS line) and `pm-claude-memory.py`. A stale PM session is handled the same way by `heartbeat-session-age-clear.py` (Alerts message, then PM self-clear).
+> Consequence: dev slots are no longer cycled by a daily episode; an RSS restart is PM-only (`with_devs` false).
+> The text below is kept only as history of the retired design.
 
 Source: Rajiv, DM D0AMF0XE6TS ts 1793501776.726249: "restart pm pane now. note that mop should wait till the next stop and inject /exit into the pm pane and then the respawn command with the continuation prompt." Ts 1793502261.099499: "exit pending already has the exit injection logic at the next stop. just enabling it should work". Ts 1793502605.714159: "note that all dev slots have to be restarted after pm restart".
 

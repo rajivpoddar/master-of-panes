@@ -55,8 +55,17 @@ readmit."
    last sample is over 7200 s old. The wrapper releases its claim only while it is still empty (no Slack send started).
    The same claimed hourly adds one `*Claude RSS:*` line (PM pane 0:0.0 claude RSS, plus px-* claude processes over 1.5GB).
    When PM RSS is at least 2.0GB (`MOP_PM_RSS_EXIT_BYTES` overrides), that claimed run arms the existing PM-only
-   `POST /exit-pending` (pm_only, not with_devs) at most once per 6h and says so on the line. A bare compose is a dry-run
-   and does not arm. `MOP_PM_RSS_EXIT_ARM=0` disables the arm. MoP unreachable fails open and does not gate PM input.
+   `POST /exit-pending` (pm_only, not with_devs) at most once per 6h and says so on the line. The arm is conditional at the
+   MoP server (`condition: pm_rss`): any existing owner state (a pending exit episode, a refused-exit terminal, a pending clear
+   or clear handoff, a held maintenance request) answers 409 `owner_state_preserved` and changes nothing. At the threshold
+   crossing it posts ONE HeyDonna Alerts message in #heydonna-dev asking PM to do restart housekeeping (handoff, resume
+   prompt, continuation note) and then restart (Rajiv, DM D0AMF0XE6TS thread 1794921293.133799, ts 1794923900.734289). The
+   message follows the crossing, not the arm outcome (armed, uncertain, already pending or preserved each post the same
+   single message, whose text says which), under the same 6h throttle; MoP unreachable posts nothing and retries next hour.
+   The daily 04:00 IST restart is retired; this is the PM restart trigger.
+   If the process snapshot cannot be read the line says `px over 1.5GB: unavailable`, never `none`. A bare compose is a
+   dry-run and does not arm or post. `MOP_PM_RSS_EXIT_ARM=0` disables the arm. MoP unreachable fails open and does not gate
+   PM input.
 3. The confirmed sender receipt handed to `hourly-thread-ts` requests processing
    through MoP's existing PM relay, keyed by the exact parent ts. PM consumes
    `Skill(hourly-report-processing)`, including Step 3, as well as `ACTIONS:`.
