@@ -13,6 +13,15 @@ import { DEFAULT_CONFIG } from "../src/types.js";
 
 const rule = "─".repeat(40);
 const dialog = "Background work is running\n❯ 1. Exit and stop tasks\n  2. Move to background and exit\n  3. Stay\nEnter to confirm · Esc to cancel";
+// Screen of the 2026-11-17 PM exit (Rajiv, C0ALZJHGE49 thread 1794941233.245629): a task list sits between the
+// title and a TWO-choice menu, and the empty composer chevron stays visible below the footer rule.
+const pmTwoChoiceDialog = [
+  "Background update waiting while this panel is open", rule, "Background work is running", "The following will stop when you exit:", "",
+  "subagent · #13525 proof (partner Wed)", "shell · ~/.claude/scripts/proxy-agent.sh claude '/private…", "subagent · 12b review PR #13770",
+  "shell · ~/.claude/scripts/remote-test-box.sh typecheck 'r…", "code · started by Claude", "code · Finalize plan text, write file, release box, sync…", "",
+  "❯ 1. Exit and stop tasks", "  2. Stay", "", "Enter to confirm · Esc to cancel", rule, "❯ ",
+  "Dhruva PM Opus 5.5 · heydonna-app · main · rajiv@scribie.com", "⏵⏵ bypass permissions on · 8 background tasks · /tasks to see subagents",
+].join("\n");
 
 function actualHookRoute(db: MoPDatabase, processor: HookProcessor, slot: number) {
   const source = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8");
@@ -33,7 +42,7 @@ function actualHookRoute(db: MoPDatabase, processor: HookProcessor, slot: number
   return app;
 }
 
-function harness(slot: number, options: { persistent?: boolean; noDialog?: boolean; delay?: number; afterStop?: boolean; partial?: boolean } = {}) {
+function harness(slot: number, options: { persistent?: boolean; noDialog?: boolean; delay?: number; afterStop?: boolean; partial?: boolean; screen?: string } = {}) {
   const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: ":memory:" });
   db.setExitPending(true, slot !== 0, slot === 0);
   db.logEvent(slot, "SessionStart", "SessionStart", null, { session_id: "original" });
@@ -60,7 +69,7 @@ function harness(slot: number, options: { persistent?: boolean; noDialog?: boole
         // rechecks pane idleness before its single send).
         const renderAt = options.afterStop ? pane.stopRespondedAt : pane.exitAt;
         stdout = !pane.exitAt ? `${rule}\n❯ \n${rule}`
-          : renderAt && pane.showing && Date.now() - renderAt >= (options.delay ?? 0) ? (options.partial ? "Background work is running\n❯ 1. Exit and stop tasks\nEnter to confirm" : dialog) : "shell $";
+          : renderAt && pane.showing && Date.now() - renderAt >= (options.delay ?? 0) ? (options.partial ? "Background work is running\n❯ 1. Exit and stop tasks\nEnter to confirm" : options.screen ?? dialog) : "shell $";
       }
     } else if (command.startsWith("tmux load-buffer")) {
       pane.buffer = await readFile(command.match(/'([^']+)'\s*$/)![1], "utf8");
@@ -299,6 +308,21 @@ test("PM delayed menu sends one 1 then Enter only after full visible choices", a
   try {
     await h.send();
     assert.ok(selectedAt - h.pane.exitAt >= 800);
+    assert.deepEqual(h.pane.keys, ["1", "Enter"]);
+  } finally { h.db.close(); }
+});
+
+test("PM two-choice dialog with a task list and an empty composer is recognized and confirmed", async () => {
+  assert.equal(relayExports.isExitConfirmationDialog(pmTwoChoiceDialog), true);
+  assert.equal(relayExports.isCompletePMExitMenu(pmTwoChoiceDialog), true);
+  assert.equal(relayExports.isCompletePMExitMenu(dialog), true, "the three-choice menu still matches");
+  assert.equal(relayExports.isCompletePMExitMenu(pmTwoChoiceDialog.replace("  2. Stay\n", "")), false, "no Stay choice is a partial render");
+  assert.equal(relayExports.isCompletePMExitMenu(pmTwoChoiceDialog.replace("\nEnter to confirm · Esc to cancel", "")), false, "no footer is a partial render");
+  assert.equal(relayExports.isCompletePMExitMenu(pmTwoChoiceDialog.replace("❯ \nDhruva", "❯ resume now\nDhruva")), false, "a typed prompt is not the dialog");
+  assert.equal(relayExports.isCompletePMExitMenu(pmTwoChoiceDialog.replace("  2. Stay", "  2. Stay\n  3. Other")), false, "an unknown third choice is not this menu");
+  const h = harness(0, { screen: pmTwoChoiceDialog });
+  try {
+    await h.send();
     assert.deepEqual(h.pane.keys, ["1", "Enter"]);
   } finally { h.db.close(); }
 });

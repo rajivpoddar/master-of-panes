@@ -519,6 +519,10 @@ export class ProcessHealthChecker {
    * non-numeric pane pid, or more than one Claude child).
    * Callers must refuse on null, never compare two nulls as a match
    * (CTO REVISE ts 1794019803.549589).
+   * A bare "claude" argv[0] (launch-pm.sh does `exec claude`) is owned only when
+   * the process's resolved executable image is one of the trusted paths below.
+   * 06f1d4b dropped bare names entirely, so every launch-pm.sh restart failed
+   * with launch_boot_process_unowned (boot_process "<pane>:") from 2026-11-11.
    */
   private async pmAgentProcess(paneId: string): Promise<string | null> {
     let pane = "";
@@ -547,9 +551,34 @@ export class ProcessHealthChecker {
     for (const path of paths) {
       try { executables.add(realpathSync(path)); } catch { /* unavailable alias */ }
     }
-    const children = rows.filter((row) => row[2] === pane && executables.has(row[3].split(/\s/, 1)[0])).map((row) => row[1]);
+    const children: string[] = [];
+    for (const row of rows) {
+      if (row[2] !== pane) continue;
+      const argv0 = row[3].split(/\s/, 1)[0];
+      if (executables.has(argv0)) { children.push(row[1]); continue; }
+      // `exec claude` (launch-pm.sh) leaves a bare "claude" argv[0]: the name the
+      // launcher typed, not a path, so it proves nothing by itself. Resolve the
+      // process's real executable image and apply the SAME trusted-path test.
+      // An unresolvable image is UNKNOWN (null), never "no Claude child".
+      if (argv0 === "claude") {
+        const image = await this.processImagePath(row[1]);
+        if (image === null) return null;
+        if (executables.has(image)) children.push(row[1]);
+      }
+    }
     if (children.length > 1) return null;
     return `${pane}:${children[0] ?? ""}`;
+  }
+
+  /** The executable image of a live pid (first text mapping), or null when it cannot be read. */
+  private async processImagePath(pid: string): Promise<string | null> {
+    if (!/^\d+$/.test(pid)) return null;
+    try {
+      const out = (await this.runShell(`lsof -nP -p ${pid} -a -d txt -Fn`, { timeout: 5_000 })).stdout;
+      return /^ftxt\r?\nn(\/.+)$/m.exec(out)?.[1]?.trim() ?? null;
+    } catch {
+      return null;
+    }
   }
 
   /** A known identity with exactly one live Claude child. */

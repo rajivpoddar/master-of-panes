@@ -16,6 +16,12 @@ test("owner-changed or unrelated replacement is retained, not cycled", () => {
   assert.ok(observer.indexOf('if (!bound)') < observer.indexOf('db.markSlotExitCycled'));
   assert.ok(observer.includes('replacement_not_owned_by_restart'));
 });
+test("a saved PM handoff stays owned despite later UserPromptSubmit events (poll events during exit)", () => {
+  const observer = relay.slice(relay.indexOf("async observeExitAttempts"), relay.indexOf("private scheduleExitConfirmation"));
+  assert.ok(observer.includes("const savedPmHandoff = slot === 0 && pin?.savedPmHandoff === true;"));
+  assert.ok(observer.includes("(savedPmHandoff || attempt.inputEventId ===") , "input equality applies only without a saved handoff");
+  assert.ok(observer.indexOf("savedPmHandoff") < observer.indexOf("if (!ownerMatches)"));
+});
 test("failed cleanup preserves waiting inbound instead of joining its paste", () => {
   assert.ok(relay.includes('if (exactDraft === command && physicalRefusal() === null)'));
   assert.ok(relay.includes('removed = await owns() && composerText(await capture()) === ""'));

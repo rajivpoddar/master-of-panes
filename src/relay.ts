@@ -63,7 +63,12 @@ type PendingExitDispatch = {
 /** Shared PM + numbered-slot paste->Enter dwell (see composer.ts). */
 export const PM_INJECT_ENTER_DELAY_MS: number = INJECT_ENTER_DELAY_MS;
 
-/** Visible Claude exit dialog, not a phrase left in scrollback or a new composer. */
+/**
+ * Visible Claude exit dialog, not a phrase left in scrollback or a new composer.
+ * An EMPTY composer chevron below the dialog is part of the live screen (the
+ * 2026-11-17 PM dialog kept the bare "❯" prompt under its footer rule); only a
+ * chevron line with text (a typed or new prompt) disqualifies it.
+ */
 export function isExitConfirmationDialog(text: string): boolean {
   const lines = text.replace(/\x1b\[[0-9;]*m/g, "").split(/\r?\n/);
   const title = lines.reduce((last, line, index) => /^\s*[│┃║]?\s*Background work is running[.!]?\s*$/.test(line) ? index : last, -1);
@@ -71,16 +76,23 @@ export function isExitConfirmationDialog(text: string): boolean {
   const dialog = lines.slice(title + 1);
   return dialog.some(line => /^[\s│┃║❯>]*1[.)]\s+Exit and stop tasks\s*[│┃║]?\s*$/.test(line))
     && dialog.some(line => /Enter to confirm/i.test(line))
-    && !dialog.some(line => /^\s*[❯>]\s*/.test(line) && !/^\s*[❯>]\s*[123][.)]\s/.test(line));
+    && !dialog.some(line => /^\s*[❯>]\s*\S/.test(line) && !/^\s*[❯>]\s*[123][.)]\s/.test(line));
 }
 
-/** Complete numbered PM menu from the captured canonical dialog fixture. */
+/**
+ * Complete numbered PM menu. Two shapes of the same dialog exist: the original
+ * three choices (1 Exit and stop tasks / 2 Move to background and exit / 3 Stay)
+ * and the 2026-11-17 two-choice build (1 Exit and stop tasks / 2 Stay), whose
+ * task list sits between the title and the choices. Option 1 stops the tasks in
+ * both; a partial render matches neither.
+ */
 export function isCompletePMExitMenu(text: string): boolean {
   const plain = text.replace(/\x1b\[[0-9;]*m/g, "");
-  return isExitConfirmationDialog(plain)
-    && /^[\s│┃║❯>]*1\.\s+Exit and stop tasks\s*[│┃║]?\s*$/m.test(plain)
-    && /^[\s│┃║❯>]*2\.\s+Move to background and exit\s*[│┃║]?\s*$/m.test(plain)
-    && /^[\s│┃║❯>]*3\.\s+Stay\s*[│┃║]?\s*$/m.test(plain);
+  const option = (n: number, label: string) =>
+    new RegExp(`^[\\s│┃║❯>]*${n}\\.\\s+${label}\\s*[│┃║]?\\s*$`, "m").test(plain);
+  return isExitConfirmationDialog(plain) && option(1, "Exit and stop tasks")
+    && ((option(2, "Move to background and exit") && option(3, "Stay"))
+      || (option(2, "Stay") && !/^[\s│┃║❯>]*3\.\s/m.test(plain)));
 }
 
 // v3 (2026-05-09 14:15 IST Rajiv): direct tmux send-keys, no wait-for-idle
@@ -1979,10 +1991,17 @@ export class TmuxRelay {
         const retained = JSON.parse(db.getConfig(`exit_retained_${slot}`) || "null");
         delayedReceiptRetention = retained?.episode === attempt.episode && retained.reason === "replacement_not_owned_by_restart";
       } catch { /* Other retention remains binding. */ }
+      // A PM Stop that consumed its exit on a SAVED handoff stays owned despite new
+      // input (exitOwnerRefusal and hooks.ts: "a saved handoff remains valid despite
+      // new input"). Background-agent poll events keep firing UserPromptSubmit while
+      // the old PM exits, so requiring the Stop-time input id here retained that
+      // exit as exit_owner_superseded, no cycle credit, and no continuation
+      // (episode 00857b64, 2026-11-17).
+      const savedPmHandoff = slot === 0 && pin?.savedPmHandoff === true;
       const ownerMatches = !!pin && (!db.isExitSlotRetained(slot) || delayedReceiptRetention)
         && attempt.assignmentEpoch === (db.getSlot(slot)?.assignment_epoch ?? 0)
         && (slot === 0 || (!!db.getSlot(slot) && this.exitAssignment(db.getSlot(slot)!) === pin.assignment))
-        && attempt.inputEventId === (db.getEvents(slot, 1, "UserPromptSubmit")[0]?.id ?? null);
+        && (savedPmHandoff || attempt.inputEventId === (db.getEvents(slot, 1, "UserPromptSubmit")[0]?.id ?? null));
       if (!ownerMatches) { db.retainExitSlot(slot, "exit_owner_superseded"); continue; }
       if (process && process !== attempt.originalProcess) {
         const restart = db.getEvents(slot, 1, "exit_replacement_bound")[0];

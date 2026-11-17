@@ -3,6 +3,8 @@
 // fallback) -> FRESH configured-model launcher (no --continue) -> wait for the Claude input prompt
 // -> ONE continuation through the guarded writer. Crash recovery uses the same path.
 import assert from "node:assert/strict";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { MoPDatabase } from "../src/db.js";
 import { HookProcessor } from "../src/hooks.js";
@@ -36,6 +38,8 @@ function harness(options: { state?: PaneState; exitAfterPolls?: number; bootSess
       stdout = `${pane.pid} 1 -zsh\n` + (alive && pane.child ? `${pane.child} ${pane.pid} claude --model claude-opus-5-5\n` : "");
     }
     else if (command.startsWith("git -C")) stdout = `${PM_PATH}\n`;
+    // The listing shows a bare "claude" argv0 (launch-pm.sh exec claude); its image is the stable executable.
+    else if (command.startsWith("lsof ")) stdout = `p${pane.child}\nftxt\nn${join(homedir(), ".local/opt/claude-code/claude")}\n`;
     else if (command.startsWith("tmux respawn-pane")) { pane.state = "shell"; pane.pid = "600"; order.push("respawn"); }
     else if (command.startsWith("tmux send-keys -l")) {
       if (pane.failPaste) throw new Error("paste timed out");

@@ -140,6 +140,31 @@ test("restart ownership recognizes only the stable Claude executable and approve
   assert.equal(await health.pmAgentProcess("%4"), null);
 });
 
+test("a bare claude argv0 (launch-pm.sh exec claude) is owned only when its executable image is trusted", async () => {
+  // 2026-11-17: ps showed "claude --model ..." for the PM launched by launch-pm.sh, so every restart failed
+  // launch_boot_process_unowned with boot_process "<pane>:" and no continuation was injected.
+  const health = new ProcessHealthChecker({} as never, {} as never) as any;
+  const stable = join(homedir(), ".local/opt/claude-code/claude");
+  let image: string | null = stable;
+  let listing = "100 1 -zsh\n200 100 claude --model claude-opus-5-5 --dangerously-skip-permissions\n201 200 caffeinate -i -t 300\n";
+  health.runShell = async (command: string) => {
+    if (command.startsWith("tmux ")) return { stdout: "100|/dev/ttys010\n", stderr: "" };
+    if (command.startsWith("lsof ")) {
+      if (image === null) throw new Error("lsof failed");
+      return { stdout: `p200\nftxt\nn${image}\nftxt\nn/usr/lib/dyld\n`, stderr: "" };
+    }
+    return { stdout: listing, stderr: "" };
+  };
+  assert.equal(await health.pmAgentProcess("%4"), "100:200");
+  image = "/tmp/unrelated/claude";
+  assert.equal(await health.pmAgentProcess("%4"), "100:", "a bare name resolving to an untrusted image is not Claude");
+  image = null;
+  assert.equal(await health.pmAgentProcess("%4"), null, "an unresolvable image is UNKNOWN, not 'no Claude'");
+  image = stable;
+  listing = "100 1 -zsh\n200 100 claude\n201 100 /opt/homebrew/bin/claude\n";
+  assert.equal(await health.pmAgentProcess("%4"), null, "two Claude children are ambiguous");
+});
+
 test("agent boot is the success boundary", async () => {
   const events: string[] = [];
   const checker = new ProcessHealthChecker(
