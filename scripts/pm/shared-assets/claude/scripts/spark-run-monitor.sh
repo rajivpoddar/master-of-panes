@@ -3,10 +3,13 @@
 # Usage: spark-run-monitor.sh --run-name N --log /remote/log --memory-config LAUNCHER_EXPORT.json
 #        [--thread-ts TS] [--interval 900] [--max-hours H] [--container OWNED_CONTAINER]
 #        [--proc-pattern PGREP_PATTERN] [--floor-mib ASSERT_FLOOR] [--channel C0ALZJHGE49] [--host dgx-spark]
+# [--reminder-key KEY] keeps the run's bounded recurring Alerts reminder renewed while the run is unfinished.
 # --validate-config-only binds the installed CPU policy without Slack, memory clearance or enforcement.
 # No --thread-ts: posts a new top-level parent, prints its ts. Never mentions CTO. Never prints secrets.
+# Step stats post as before. A DOWN run (container/process gone, no training-complete marker) or an unreachable Spark
+# alerts as the HeyDonna Alerts bot every 30 min, and a down run holds a pm-ops training_run_down obligation until recovery.
 exec python3 - "$@" <<'PY'
-import argparse, re, subprocess, sys, time, os, tempfile, shlex, json, math
+import argparse, re, subprocess, sys, time, os, tempfile, shlex, json, math, datetime
 
 # This exact CPU-only program is regression-tested. It imports the hash-pinned
 # installed policy, not torch; all GPU readings belong to the existing supervisor.
@@ -118,6 +121,7 @@ ap.add_argument("--channel", default="C0ALZJHGE49")
 ap.add_argument("--host", default="dgx-spark")
 ap.add_argument("--container", help="exact owned training container name/id; enforcement stops ONLY this one (never by pattern)")
 ap.add_argument("--total-steps", type=int, help="authoritative optimizer-step total for this run; required for persisted progress")
+ap.add_argument("--reminder-key", help="MoP alert-reminder key to keep renewed (same args, 7-day bound) while this monitor runs (a cancelled reminder is never revived)")
 a = ap.parse_args()
 memory_config = load_memory_config(a.memory_config, a.run_name, a.floor_mib)
 binding = memory_status(memory_config, a.host, "config")
@@ -135,20 +139,23 @@ POST_RETRY_DELAY_S = 10
 
 # Delivered = slack-send.sh rc 0 AND its "OK ts=" line (printed only after Slack returned ok:true with a ts).
 # One retry; a second failure appends a local alert row so a terminal/dead alert is never silent (2026-11-07).
-def post(text, thread=None):
+def post(text, thread=None, alert=False):
     text = redact(text)
     cmd = ["bash", SEND, "-c", a.channel] + (["-t", thread] if thread else []) + ["-f"]
+    # alert=True posts as the HeyDonna Alerts bot (SLACK_SEND_AS=alerts) so PM processes it. A third attempt under
+    # the default identity keeps a down alert from being lost if the Alerts bot cannot post in this channel.
+    envs = [dict(os.environ, SLACK_SEND_AS="alerts")] * 2 + [None] if alert else [None, None]
     why = ""
-    for attempt in (1, 2):
+    for attempt, env in enumerate(envs, 1):
         try:
-            r = subprocess.run(cmd, input=text, capture_output=True, text=True, errors="replace", timeout=120)
+            r = subprocess.run(cmd, input=text, capture_output=True, text=True, errors="replace", timeout=120, env=env)
             m = re.search(r"^OK ts=(\d+\.\d+)\b", r.stdout or "", re.M)
             if r.returncode == 0 and m: return m.group(1)
             why = "rc=%d %s" % (r.returncode, redact(((r.stdout or "") + (r.stderr or "")).strip())[:200])
         except (subprocess.TimeoutExpired, OSError) as e:
             why = type(e).__name__
         print("post attempt %d failed: %s" % (attempt, why), file=sys.stderr, flush=True)
-        if attempt == 1: time.sleep(POST_RETRY_DELAY_S)
+        if attempt < len(envs): time.sleep(POST_RETRY_DELAY_S)
     try:
         os.makedirs(ALERT_DIR, exist_ok=True)
         path = os.path.join(ALERT_DIR, re.sub(r"[^\w.-]", "_", a.run_name) + ".alerts.jsonl")
@@ -159,6 +166,88 @@ def post(text, thread=None):
     except OSError as e:
         print("UNDELIVERED: Slack post failed twice and the alert file failed: " + type(e).__name__, file=sys.stderr, flush=True)
     return None
+
+# Down handling and reminder renewal (Rajiv 2026-11-18, D0AMF0XE6TS thread 1794988313.192109). Incident: the sindhu-r7
+# hourly reminder reached its mandatory 7-day until_at at 2026-11-17 16:05Z and completed (expired/schedule_complete);
+# the run then stopped 17:05Z in a save_protection HOLD and nothing alerted: the monitor posted once as the PM identity
+# (which PM does not process) and exited. The reminder stays bounded; this watcher renews it while the run is unfinished.
+DOWN_REALERT_S = 1800
+DOWN_KIND = "training_run_down"
+REMINDER_RENEW_BELOW_S = 3 * 86400
+REMINDER_HORIZON_S = 7 * 86400 - 3600  # inside MoP's 7-day cap
+PM_OPS = os.path.expanduser("~/.claude/scripts/pm-ops.py")
+MOP_CLI = os.path.expanduser("~/.claude/scripts/mop.py")
+LIVE = not os.environ.get("MONITOR_TEST") and not os.environ.get("MONITOR_DRY_RUN")
+
+def iso_epoch(s):
+    return datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+
+def reminder_renewal(row, now):
+    """argv tail for `mop.py reminder add` renewing this run's own reminder with its stored args, or None.
+    Only a natural expiry (or an active row with under 3 days left) is renewed: a stopped row (cancelled or
+    obligation-resolved) is never revived, and nothing here creates a reminder or changes interval/thread/text."""
+    if not row or row.get("status") == "stopped": return None
+    active = row.get("status") == "active"
+    if active and iso_epoch(row["until_at"]) - now >= REMINDER_RENEW_BELOW_S: return None
+    until = datetime.datetime.fromtimestamp(now + REMINDER_HORIZON_S, datetime.timezone.utc).isoformat()
+    argv = ["--key", row["key"], "--thread", row["thread_ts"], "--text=" + row["text"], "--every", "%ds" % row["interval_s"],
+            "--until", until, "--channel", row["channel"], "--created-by", "spark-run-monitor"]
+    if row.get("stop_obligation_id"): argv += ["--stop-obligation", str(row["stop_obligation_id"])]
+    if active:
+        argv.append("--replace")
+        if iso_epoch(row["next_at"]) > now: argv += ["--first-at", row["next_at"]]  # keep the hourly grid
+    else:
+        argv += ["--first-at", "+1m"]
+    return argv
+
+def renew_reminder(key):
+    if not key: return
+    try:
+        r = subprocess.run(["python3", MOP_CLI, "reminder", "list", "--status", "all"], capture_output=True, text=True, errors="replace", timeout=30)
+        row = next((x for x in json.loads(r.stdout).get("reminders", []) if x.get("key") == key), None)
+        argv = reminder_renewal(row, time.time())
+        if not argv: return
+        r = subprocess.run(["python3", MOP_CLI, "reminder", "add", *argv], capture_output=True, text=True, errors="replace", timeout=30)
+        try: outcome = json.loads(r.stdout).get("outcome")
+        except ValueError: outcome = None
+        print("reminder %s renewal rc=%d outcome=%s" % (key, r.returncode, outcome), file=sys.stderr, flush=True)
+    except Exception as e:
+        print("reminder %s renewal failed: %s" % (key, type(e).__name__), file=sys.stderr, flush=True)
+
+def pm_ops(*args):
+    return subprocess.run(["python3", PM_OPS, *args], capture_output=True, text=True, errors="replace", timeout=60)
+
+def down_obligation_open(run):
+    """True/False from the canonical pm-ops ledger, None when it cannot be read (never treated as closed)."""
+    try:
+        r = pm_ops("obligation-list", "--kind", DOWN_KIND, "--format", "json")
+        return any(x.get("target_id") == run for x in json.loads(r.stdout).get("rows", []))
+    except Exception:
+        return None
+
+def down_obligation_upsert(run, reason, since):
+    try:
+        r = pm_ops("obligation-upsert", "--kind", DOWN_KIND, "--target-type", "run", "--target-id", run,
+                   "--severity", "high", "--owner", "pm", "--horizon", "hourly", "--title", "Training run down: " + run,
+                   "--action", "Inspect the run's HOLD/FAILED state and resume or release it per training-run-processing; resolves when the monitor sees the run healthy",
+                   "--evidence-json", json.dumps({"run": run, "reason": reason[:200],
+                                                  "down_since_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(since))}),
+                   "--print-id")
+        return r.returncode == 0
+    except Exception:
+        return False
+
+def down_obligation_resolve(run, reason):
+    try:
+        pm_ops("obligation-resolve", "--kind", DOWN_KIND, "--target-type", "run", "--target-id", run, "--reason", reason)
+    except Exception as e:
+        print("obligation resolve failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
+
+def down_banner(run, since, now, recorded):
+    mins = int(max(0, now - since) // 60)
+    return (":rotating_light: *TRAINING RUN DOWN: %s* since %s UTC (%dh%02dm). Re-alerting every %d min until recovery. pm-ops %s: %s."
+            % (run, time.strftime("%Y-%m-%d %H:%M", time.gmtime(since)), mins // 60, mins % 60, DOWN_REALERT_S // 60, DOWN_KIND,
+               "open" if recorded else "NOT recorded (pm-ops write failed)"))
 
 REMOTE = ("L=%s; P=%s; C=%s; echo '##IDENTITY_BEFORE'; stat -c '%%d:%%i:%%s' \"$L\" 2>/dev/null; if [ -n \"$C\" ]; then docker inspect -f '{{.Id}}:{{.State.StartedAt}}' \"$C\" 2>/dev/null; fi;"
           " echo '##TAIL'; tail -c 30000 \"$L\" 2>&1 | tr '\\r' '\\n' | tail -n 400; grep -o \"{.loss.: [^}]*}\" \"$L\" 2>/dev/null | tail -1;"
@@ -255,7 +344,9 @@ if not thread:
     if not thread: sys.exit("could not create parent thread")
 print("thread_ts=" + thread, flush=True)
 min_avail = min_cuda = None; unreachable_posted = False; obs = []; step_history = []; last_mtime = None; stale = 0; last = None
+down_since = None; down_recorded = False; last_down_alert = 0.0; last_unreach_alert = 0.0
 while True:
+    if LIVE: renew_reminder(a.reminder_key)
     try:
         sec = gather(); unreachable_posted = False
         d = parse(sec.get("TAIL", []), a.total_steps)
@@ -339,7 +430,7 @@ while True:
                     lines.append(":octagonal_sign: ENFORCE: stopped owned container %s (%s); rc=%d" % (a.container, harm, rr.returncode))
         handed_off = False
         # Copy-timeout only (Rajiv ts 1794287346.192189). Memory and OOM still fall through to the ended post.
-        if ended and not d["terminal"] and a.container and not os.environ.get("MONITOR_TEST"):
+        if ended and not d["terminal"] and a.container and not os.environ.get("MONITOR_TEST") and down_since is None:
             try:
                 import importlib.util
                 spec = importlib.util.spec_from_file_location(
@@ -392,13 +483,46 @@ while True:
                 lines.append("auto-resume did not start: %s" % type(exc).__name__)
         if handed_off:
             break
-        post("\n".join(lines), thread)
-        if ended or (harm and not os.environ.get("MONITOR_DRY_RUN")): break
+        if d["terminal"]:
+            # Training finished: post the unchanged "run ended" stats and close any down obligation. Renewal simply
+            # stops with this monitor, so the bounded reminder lapses on its own; PM cancels it earlier if it wants.
+            post("\n".join(lines), thread)
+            if LIVE and down_obligation_open(a.run_name): down_obligation_resolve(a.run_name, "training complete")
+            break
+        if not ended:
+            post("\n".join(lines), thread)  # step stats: unchanged
+            if LIVE and cstate in ("running", "NA") and down_obligation_open(a.run_name):
+                down_obligation_resolve(a.run_name, "monitor observed the run healthy")
+                post(":white_check_mark: *[%s]* recovered; %s obligation resolved" % (a.run_name, DOWN_KIND), thread)
+                down_since = None; down_recorded = False; last_down_alert = 0.0
+            # No container to stop: the harm cannot be acted on, so stop monitoring as before. With a container the
+            # stop was issued above and the next sample sees it gone, which is the down path below.
+            if harm and not os.environ.get("MONITOR_DRY_RUN") and not a.container: break
+        else:
+            # Container/process gone with no training-complete marker: DOWN. Alert as Alerts every 30 min and hold a
+            # pm-ops obligation until a monitor sees the run healthy (or PM resolves it). Never exit just because it is down.
+            now_t = time.time()
+            if down_since is None: down_since = now_t
+            due = now_t - last_down_alert >= DOWN_REALERT_S
+            reason = "no training-complete marker; " + ("container exited (%s)" % cstate[:60] if container_gone else "process no longer running")
+            if LIVE and (due or not down_recorded): down_recorded = down_obligation_upsert(a.run_name, reason, down_since) or down_recorded
+            if due:
+                post("\n".join(lines + [down_banner(a.run_name, down_since, now_t, down_recorded)]), thread, alert=True)
+                last_down_alert = now_t
+            elif LIVE and down_recorded and down_obligation_open(a.run_name) is False:
+                post("%s obligation for %s was closed; monitor stopping (run still down)" % (DOWN_KIND, a.run_name), thread)
+                break
     except Exception as e:
-        if not unreachable_posted:
-            post(monitor_error_line(e, a.interval), thread)
-            unreachable_posted = isinstance(e, (SSHFailure, subprocess.TimeoutExpired))
+        reach = isinstance(e, (SSHFailure, subprocess.TimeoutExpired))
+        if not unreachable_posted or (reach and time.time() - last_unreach_alert >= DOWN_REALERT_S):
+            post(monitor_error_line(e, a.interval), thread, alert=reach)
+            unreachable_posted = reach
+            if reach: last_unreach_alert = time.time()
     if time.time() + a.interval > deadline:
-        post("monitor stopping at max-hours; run still active (step %s/%s)" % ((last or {}).get("step", "n/a"), (last or {}).get("total", "n/a")), thread); break
-    time.sleep(a.interval)
+        if down_since is not None:
+            post("monitor stopping at max-hours; run is DOWN, %s obligation stays open (step %s/%s)" % (DOWN_KIND, (last or {}).get("step", "n/a"), (last or {}).get("total", "n/a")), thread, alert=True)
+        else:
+            post("monitor stopping at max-hours; run still active (step %s/%s)" % ((last or {}).get("step", "n/a"), (last or {}).get("total", "n/a")), thread)
+        break
+    time.sleep(min(a.interval, max(30, last_down_alert + DOWN_REALERT_S - time.time())) if down_since is not None else a.interval)
 PY
