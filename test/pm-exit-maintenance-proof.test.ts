@@ -239,7 +239,8 @@ test("healthy flow: save -> natural Stop -> one /exit -> continuation -> dev-onl
     } as any) as any;
     await health.deliverPMRestartContinuation("%1");
     assert.deepEqual(messages, ["Read resume. Resume PM."]);
-    assert.equal(h.status().dev_only, true);
+    assert.equal(h.status().pending, false, "the PM-only episode ends with its continuation");
+    assert.equal(h.status().dev_only, false);
   } finally { h.close(); }
 });
 
@@ -303,7 +304,8 @@ test("Rajiv proof: request -> save -> PM Stop on a BUSY pane while a new prompt 
     } as any) as any;
     await boot(h, "pm-next", "resume");
     await health.deliverPMRestartContinuation("%1");
-    assert.equal(h.status().dev_only, true, "dev_only armed after PM continuation");
+    assert.equal(h.status().pending, false, "the PM-only episode ends with its continuation");
+    assert.equal(h.status().dev_only, false, "dev slots are never armed by a PM-only restart");
   } finally { h.close(); }
 });
 
@@ -555,7 +557,8 @@ test("both intents ready: exactly ONE command (exit); clear intent kept; no lost
     } as any) as any;
     await health.deliverPMRestartContinuation("%1");
     assert.deepEqual(messages, ["Read resume. Resume PM."]);
-    assert.equal(h.status().dev_only, true);
+    assert.equal(h.status().pending, false, "the PM-only episode ends with its continuation");
+    assert.equal(h.status().dev_only, false);
   } finally { h.close(); }
 });
 

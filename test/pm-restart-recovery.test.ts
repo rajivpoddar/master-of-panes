@@ -187,7 +187,7 @@ test("uncertain /exit continuation matrix: watchdog restart settles once; boot a
         if (kind === "watchdog_restart") {
           assert.deepEqual(sent, ["saved continuation"], "one guarded continuation");
           assert.equal(claims.length, 1);
-          assert.equal(status.dev_only, true); assert.equal(status.pm_only, false);
+          assert.equal(status.pending, false); assert.equal(status.dev_only, false); assert.equal(status.pm_only, false);
           assert.equal(status.continuation_delivery, "delivered");
           assert.equal(pmExitInCustody(db), false); assert.equal(db.getConfig(PM_EXIT_CONSUMED_EPISODE_KEY), "");
         } else if (kind === "response_loss") {

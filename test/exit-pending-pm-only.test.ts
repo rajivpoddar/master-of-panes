@@ -7,6 +7,18 @@ import { DEFAULT_CONFIG } from "../src/types.js";
 
 const database = () => new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: ":memory:" });
 
+// A flag alone is never proof of replacement: cycled[0] needs a VERIFIED exit attempt of the CURRENT episode. Call it after
+// setExitPending(true, ...) (the episode id is generated there).
+function markPmCycled(db: MoPDatabase) {
+  db.saveExitAttempt(0, {
+    episode: db.getExitStatus().episode!, paneId: "%40", originalClaudePid: 4000, originalStart: "Wed Nov 18 00:29:17 2026",
+    originalProcess: '["%40",4000,"Wed Nov 18 00:29:17 2026"]', sessionId: "old", inputEventId: null, assignmentEpoch: 0,
+    stopEventId: null, ownerPin: null, phase: "verified", attemptCount: 1, submittedAt: new Date().toISOString(),
+    blockedReason: null, replacementProcess: '["%40",4001,"Wed Nov 18 08:18:49 2026"]',
+  });
+  db.markSlotExitCycled(0);
+}
+
 test("PM-only arming persists the prompt without resetting any dev flag; health scan sends nothing", async () => {
   const db = database();
   try {
@@ -51,18 +63,18 @@ test("real PM Stop without slot row consumes /exit once, while dev Stops and inp
 });
 
 for (const prompt of [undefined, "Read /some/path. It's PM's saved prompt.\nResume."]) {
-  test(`boot continuation ${prompt ? "saved literal" : "fallback"} precedes dev reset and survives duplicate callback`, async () => {
+  test(`boot continuation ${prompt ? "saved literal" : "fallback"} ends the PM-only episode without arming devs and survives duplicate callback`, async () => {
     const db = database();
     const messages: string[] = [];
     try {
-      db.markSlotExitCycled(2);
       db.setExitPending(true, false, true, prompt);
-      db.markSlotExitCycled(0);
+      markPmCycled(db);
       const health = new ProcessHealthChecker(db, {
         deliverGuardedToSlot: async (slot: number, text: string, guard: any) => {
           assert.equal(slot, 0); assert.equal(guard.bracketedPaste, true);
+          assert.equal(guard.allowNativeQueuedInput, true, "a busy PM queues the continuation instead of refusing it");
           assert.equal(await guard.recheck(), null); assert.equal(guard.finalCheck(), null);
-          assert.equal(db.getExitStatus().cycled[2], true, "dev flag still untouched during delivery");
+          assert.equal(db.getExitStatus().dev_only, false, "no dev phase is armed during delivery");
           messages.push(text); return { outcome: "delivered" };
         },
       } as any) as any;
@@ -70,36 +82,37 @@ for (const prompt of [undefined, "Read /some/path. It's PM's saved prompt.\nResu
       await health.deliverPMRestartContinuation("%40");
       // Fresh PM launch: the fallback is the handoff-pointing continuation, never bare "continue".
       assert.deepEqual(messages, [prompt ?? PM_RESTART_CONTINUATION_PROMPT]);
+      // PM-only means PM only (Rajiv C0ALZJHGE49 thread 1794970059.617269, ts 1794971912.636829): the episode ends with its
+      // continuation (delivered, pending cleared, exit_pending_complete logged) and no dev slot is ever armed.
       const status = db.getExitStatus();
-      assert.equal(status.pm_only, false); assert.equal(status.dev_only, true);
-      assert.equal(status.continuation_delivery, "delivered"); assert.equal(status.stop_only, true);
-      assert.equal(status.cycled[0], true);
-      for (let i = 1; i <= 8; i++) assert.equal(status.cycled[i], false);
-      // Successor devs exit at Stop, or at an observed idle EMPTY prompt
-      // (f0a1b666); working panes are never sent /exit and PM is never scanned.
+      assert.equal(status.pending, false); assert.equal(status.pm_only, false); assert.equal(status.dev_only, false);
+      assert.equal(status.continuation_delivery, "delivered"); assert.equal(status.stop_only, false);
+      assert.equal(db.getEvents(0, 5, "exit_pending_complete").length, 1);
+      assert.equal(JSON.parse(db.getEvents(0, 1, "exit_pending_complete")[0]!.payload).source, "pm_restart_continuation");
       const scanned: number[] = [];
       health.getPaneCommand = async () => "claude";
       health.relay.observeSlotPane = async (slot: number) => { scanned.push(slot); return { paneId: `%${slot}`, text: "" }; };
       health.relay.getSlotActivityState = async () => "busy";
       await health.checkExitPending();
-      assert.deepEqual(messages, [prompt ?? PM_RESTART_CONTINUATION_PROMPT], "no /exit to working devs");
-      assert.equal(scanned.includes(0), false);
+      assert.deepEqual(messages, [prompt ?? PM_RESTART_CONTINUATION_PROMPT], "no /exit to any dev");
+      assert.deepEqual(scanned, [], "no slot is scanned once the PM-only episode has ended");
     } finally { db.close(); }
   });
 }
 
 for (const outcome of ["refused_pre_effect", "uncertain"]) {
-  test(`${outcome} continuation does not arm devs or repeat an uncertain prompt`, async () => {
+  test(`${outcome} continuation never arms devs; only a proven zero-effect refusal is retried`, async () => {
     const db = database(); let sends = 0;
     try {
-      db.setExitPending(true, false, true, "resume"); db.markSlotExitCycled(0); db.markSlotExitCycled(3);
+      db.setExitPending(true, false, true, "resume"); markPmCycled(db);
       const health = new ProcessHealthChecker(db, {
         deliverGuardedToSlot: async () => { sends++; return { outcome }; },
       } as any) as any;
       await health.deliverPMRestartContinuation("%40");
       await health.deliverPMRestartContinuation("%40");
-      assert.equal(sends, 1); assert.equal(db.getExitStatus().pm_only, true);
-      assert.equal(db.getExitStatus().cycled[3], true);
+      assert.equal(sends, outcome === "refused_pre_effect" ? 2 : 1, "zero effect is retried; an uncertain prompt is never repeated");
+      assert.equal(db.getExitStatus().pm_only, true); assert.equal(db.getExitStatus().dev_only, false);
+      assert.equal(db.getExitStatus().continuation_delivery, outcome === "refused_pre_effect" ? "waiting" : "attempted");
     } finally { db.close(); }
   });
 }
@@ -108,8 +121,7 @@ test("rearming the same prompt during continuation cannot reset successor dev fl
   const db = database();
   try {
     db.setExitPending(true, false, true, "resume");
-    db.markSlotExitCycled(0);
-    db.markSlotExitCycled(3);
+    markPmCycled(db);
     const health = new ProcessHealthChecker(db, {
       deliverGuardedToSlot: async () => {
         db.setExitPending(true, false, true, "resume");
@@ -118,7 +130,7 @@ test("rearming the same prompt during continuation cannot reset successor dev fl
     } as any) as any;
     await health.deliverPMRestartContinuation("%40");
     assert.equal(db.getExitStatus().pm_only, true);
-    assert.equal(db.getExitStatus().cycled[3], true);
+    assert.equal(db.getExitStatus().pending, true, "the newer episode is untouched");
     assert.equal(db.getExitStatus().continuation_delivery, "waiting");
   } finally { db.close(); }
 });
@@ -169,7 +181,7 @@ test(`existing post-respawn timer dispatches PM continuation for ${command} rath
   const generic: string[] = [];
   try {
     db.setExitPending(true, false, true, "saved continuation");
-    db.markSlotExitCycled(0);
+    markPmCycled(db);
     db.logEvent(0, "exit_pending_triggered", "Stop", null, {
       episode: db.getExitStatus().episode, delivery: "delivered",
     });
@@ -194,20 +206,22 @@ test(`existing post-respawn timer dispatches PM continuation for ${command} rath
     await callback!();
     assert.deepEqual(sent, ["saved continuation"]);
     assert.deepEqual(generic, []);
-    assert.equal(db.getExitStatus().dev_only, true);
+    assert.equal(db.getExitStatus().pending, false, "the PM-only episode ends with its continuation");
+    assert.equal(db.getExitStatus().dev_only, false);
   } finally { db.close(); }
 });
 }
 
-// CTO REVISE ts 1794949061.287419 (a9a89ffd): keep ignoring the old process's background poll_event prompts, but never hand a
-// second handoff prompt to a replacement boot that already accepted real input, or while PM inbound is pending.
+// Rajiv C0ALZJHGE49 thread 1794970059.617269, ts 1794971912.636829: "continuation delivery is supposed to be injected right after
+// the process is back up. it does not have to wait for stop or any other gate." No input guard: real input the replacement
+// boot already accepted, or PM inbound pending, never withholds the continuation (supersedes the withhold of CTO REVISE
+// ts 1794949061.287419, which starved episode 33fdff94 for 30+ minutes).
 function continuationFixture(relayExtra: Record<string, unknown> = {}) {
   const db = database();
   const messages: string[] = [];
   db.setExitPending(true, false, true, "resume");
-  db.markSlotExitCycled(0);
+  markPmCycled(db);
   db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "old", source: "startup" });
-  // Real input BEFORE the replacement boot belongs to the old process and never counts.
   db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "old" });
   const bootId = db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "replacement", source: "startup" });
   const relay = {
@@ -223,62 +237,85 @@ function continuationFixture(relayExtra: Record<string, unknown> = {}) {
   return { db, messages, bootId, health };
 }
 
+function assertEpisodeComplete(db: MoPDatabase) {
+  const status = db.getExitStatus();
+  assert.equal(status.pending, false);
+  assert.equal(status.continuation_delivery, "delivered");
+  assert.equal(status.dev_only, false);
+  assert.equal(db.getEvents(0, 5, "exit_pending_complete").length, 1);
+}
+
 test("old-process poll_event prompts after the replacement boot do not withhold the continuation", async () => {
   const f = continuationFixture();
   try {
     f.db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "old", source: "poll_event" });
-    f.db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "old", source: "poll_event" });
     await f.health.deliverPMRestartContinuation("%40", f.bootId);
     assert.deepEqual(f.messages, ["resume"]);
-    assert.equal(f.db.getExitStatus().continuation_delivery, "delivered");
-    assert.equal(f.db.getEvents(0, 5, "pm_restart_continuation_withheld").length, 0);
+    assertEpisodeComplete(f.db);
   } finally { f.db.close(); }
 });
 
-test("real input already accepted by the replacement boot withholds the continuation: no second handoff prompt", async () => {
+test("real input already accepted by the replacement boot does NOT withhold the continuation: delivered once, episode complete", async () => {
   const f = continuationFixture();
   try {
-    f.db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "old", source: "poll_event" });
-    f.db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "replacement" }); // Rajiv's manual "resume from handoff"
+    f.db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "replacement" }); // a Slack inbound 6s after boot (33fdff94)
     await f.health.deliverPMRestartContinuation("%40", f.bootId);
-    await f.health.deliverPMRestartContinuation("%40", f.bootId);
-    assert.deepEqual(f.messages, []);
-    // Withheld, not claimed: the continuation stays waiting and the typed event is written once.
-    assert.equal(f.db.getExitStatus().continuation_delivery, "waiting");
-    const withheld = f.db.getEvents(0, 5, "pm_restart_continuation_withheld");
-    assert.equal(withheld.length, 1);
-    assert.equal(JSON.parse(withheld[0]!.payload).reason, "replacement_boot_input_accepted");
-    assert.equal(f.db.getEvents(0, 5, "pm_restart_continuation").length, 0, "no delivery attempt was made");
-  } finally { f.db.close(); }
-});
-
-test("pending PM inbound withholds the continuation without burning the claim; it is sent once the inbound is gone", async () => {
-  let pending = true;
-  const f = continuationFixture({ hasPendingPMInbound: () => pending });
-  try {
-    await f.health.deliverPMRestartContinuation("%40", f.bootId);
-    assert.deepEqual(f.messages, []);
-    assert.equal(f.db.getExitStatus().continuation_delivery, "waiting", "no durable attempt claim for a transient condition");
-    pending = false;
     await f.health.deliverPMRestartContinuation("%40", f.bootId);
     assert.deepEqual(f.messages, ["resume"]);
-    f.db.enqueuePendingPMEvent(1, "handoff", "inbound");
-    assert.equal(f.health.continuationInputRefusal(f.bootId), "pm_inbound_pending", "a queued PM event counts too");
+    assertEpisodeComplete(f.db);
+    assert.equal(f.db.getEvents(0, 5, "pm_restart_continuation_withheld").length, 0);
+    assert.equal(f.db.getEvents(0, 5, "pm_restart_continuation").length, 1);
   } finally { f.db.close(); }
 });
 
-test("input arriving while the send waits for its turn refuses at every pre-effect check", async () => {
+test("pending PM inbound does NOT withhold the continuation", async () => {
+  const f = continuationFixture({ hasPendingPMInbound: () => true });
+  try {
+    f.db.enqueuePendingPMEvent(1, "handoff", "inbound");
+    await f.health.deliverPMRestartContinuation("%40", f.bootId);
+    assert.deepEqual(f.messages, ["resume"]);
+    assertEpisodeComplete(f.db);
+  } finally { f.db.close(); }
+});
+
+test("a delivery already on record is never repeated: no second injection, the episode just completes", async () => {
+  const f = continuationFixture();
+  try {
+    f.db.logEvent(0, "pm_restart_continuation", null, null, {
+      episode: f.db.getExitStatus().episode, boot_event_id: f.bootId, delivery: "delivered",
+    });
+    await f.health.deliverPMRestartContinuation("%40", f.bootId);
+    assert.deepEqual(f.messages, []);
+    assertEpisodeComplete(f.db);
+  } finally { f.db.close(); }
+});
+
+test("a zero-effect refusal hands the claim back and the next attempt delivers", async () => {
+  let refuse = true;
   const f = continuationFixture({
-    deliverGuardedToSlot: async (_slot: number, _text: string, guard: any) => {
-      assert.equal(await guard.recheck(), null);
-      f.db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "replacement" });
-      assert.equal(await guard.recheck(), "replacement_boot_input_accepted");
-      assert.equal(guard.finalCheck("pre_enter"), "replacement_boot_input_accepted");
-      return { outcome: "refused_pre_effect" };
+    deliverGuardedToSlot: async (_slot: number, text: string) => {
+      if (refuse) return { outcome: "refused_pre_effect", reason: "composer_not_empty" };
+      f.messages.push(text); return { outcome: "delivered" };
     },
   });
   try {
     await f.health.deliverPMRestartContinuation("%40", f.bootId);
-    assert.equal(f.db.getExitStatus().pm_only, true, "a refused continuation does not arm devs");
+    assert.deepEqual(f.messages, []);
+    assert.equal(f.db.getExitStatus().continuation_delivery, "waiting");
+    assert.equal(f.db.getExitStatus().pending, true);
+    refuse = false;
+    await f.health.deliverPMRestartContinuation("%40", f.bootId);
+    assert.deepEqual(f.messages, ["resume"]);
+    assertEpisodeComplete(f.db);
+  } finally { f.db.close(); }
+});
+
+test("a delivered PM-only episode still pending (dialog confirmation open at delivery) is cleared by the health observer", async () => {
+  const f = continuationFixture({ hasPendingExitConfirmation: () => false, observeExitAttempts: async () => undefined });
+  try {
+    f.db.setConfig("exit_pending_continuation_delivery", "delivered");
+    await f.health.checkExitPending();
+    assertEpisodeComplete(f.db);
+    assert.equal(JSON.parse(f.db.getEvents(0, 1, "exit_pending_complete")[0]!.payload).source, "health_observer");
   } finally { f.db.close(); }
 });

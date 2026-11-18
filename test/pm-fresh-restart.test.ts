@@ -149,7 +149,8 @@ for (const prompt of [undefined, "Read /saved/resume.md and resume."]) {
       assert.deepEqual(h.order, ["type", "enter", "continuation", "drain"]);
       const status = h.db.getExitStatus();
       assert.equal(status.continuation_delivery, "delivered");
-      assert.equal(status.dev_only, true, "devs armed only after the PM continuation");
+      assert.equal(status.pending, false, "the PM-only episode ends with its continuation");
+      assert.equal(status.dev_only, false, "dev slots are never armed by a PM-only restart");
       // A later health tick or duplicate trigger never resends.
       await h.health.reconcilePMRestartContinuation();
       await h.health.restartPMFresh("exit", episode);

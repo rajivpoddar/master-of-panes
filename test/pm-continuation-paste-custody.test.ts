@@ -72,11 +72,30 @@ function pane(opts: { lineCtrlU?: boolean } = {}) {
   };
 }
 
+// A one-shot Enter withhold that leaves draft ownership intact: the first process probe after the paste (the pre-Enter
+// recheck) refuses, every later probe (the draft-ownership proof) passes. It replaces the former trigger, PM inbound
+// between paste and Enter, which no longer withholds a continuation (Rajiv C0ALZJHGE49 thread 1794970059.617269, ts
+// 1794971912.636829: no gate). The inbound is still submitted in the hook so the "queued message goes out alone" checks hold.
+function withholdEnterOnce(p: ReturnType<typeof pane>, then: () => Promise<string | null> = async () => null) {
+  let done = false;
+  return async () => {
+    if (p.pasted().length > 0 && !done) { done = true; return "pm_process_changed"; }
+    return then();
+  };
+}
+
 function fixture(p: ReturnType<typeof pane>, prompt = "resume") {
   const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: ":memory:" });
   const relay = new TmuxRelay(DEFAULT_CONFIG, { pmRuntime: "claude", pmPaneReady: async () => true, runShell: p.runShell as never });
   relay.setDatabase(db);
   db.setExitPending(true, false, true, prompt);
+  // A flag alone is never proof of replacement: cycled[0] needs a VERIFIED exit attempt of the current episode.
+  db.saveExitAttempt(0, {
+    episode: db.getExitStatus().episode!, paneId: "%1", originalClaudePid: 4000, originalStart: "Wed Nov 18 00:29:17 2026",
+    originalProcess: '["%1",4000,"Wed Nov 18 00:29:17 2026"]', sessionId: "old", inputEventId: null, assignmentEpoch: 0,
+    stopEventId: null, ownerPin: null, phase: "verified", attemptCount: 1, submittedAt: new Date().toISOString(),
+    blockedReason: null, replacementProcess: '["%1",4001,"Wed Nov 18 08:18:49 2026"]',
+  });
   db.markSlotExitCycled(0);
   db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "old", source: "startup" });
   const bootId = db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "replacement", source: "startup" });
@@ -96,13 +115,13 @@ test("no inbound: the continuation is pasted and submitted once and no draft cle
   } finally { f.close(); }
 });
 
-test("inbound between paste and Enter: zero continuation Enter, the exact owned draft is removed in the same lock, the queued message goes out alone", async () => {
+test("Enter withheld after the paste (ownership intact): zero continuation Enter, the exact owned draft is removed in the same lock, the queued message goes out alone", async () => {
   const p = pane();
   const f = fixture(p);
   let inbound: Promise<unknown> | undefined;
   p.setOnPaste(() => { inbound = f.relay.submitToPM("hello PM"); });
   try {
-    await f.health.deliverPMRestartContinuation("%1", f.bootId, undefined, async () => null);
+    await f.health.deliverPMRestartContinuation("%1", f.bootId, undefined, withholdEnterOnce(p));
     await inbound;
     assert.equal(p.pasted()[0], "resume");
     assert.equal(p.submitted().length, 1, "exactly one Enter, and it is the inbound's, never the continuation's");
@@ -177,7 +196,7 @@ test("multiline draft, no interference: a fresh composer read follows the owners
   const f = fixture(p, DRAFT);
   let inbound: Promise<unknown> | undefined;
   p.setOnPaste(() => { inbound = f.relay.submitToPM("hello PM"); });
-  const guard = async () => { p.trace().push("probe"); return null; };
+  const guard = withholdEnterOnce(p, async () => { p.trace().push("probe"); return null; });
   try {
     await f.health.deliverPMRestartContinuation("%1", f.bootId, undefined, guard);
     await inbound;
@@ -207,10 +226,10 @@ test("multiline remainder, human text typed while the NEXT ownership probe is in
   let typed = false;
   // The first key goes out cleanly (leaving a two-line remainder); during the probe that precedes the SECOND key a
   // person types a new line. A recheck only before the first key would not see it and the next Ctrl-U would erase it.
-  const guard = async () => {
+  const guard = withholdEnterOnce(p, async () => {
     if (p.ctrlU() === 1 && !typed) { typed = true; p.setComposer(`${p.composer()}\nmy own words`); }
     return null;
-  };
+  });
   try {
     await f.health.deliverPMRestartContinuation("%1", f.bootId, undefined, guard);
     await inbound;

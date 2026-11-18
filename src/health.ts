@@ -831,6 +831,11 @@ export class ProcessHealthChecker {
     // 4. ONE continuation. A PM-only exit episode keeps its durable
     //    waiting -> attempted claim (and its saved continuation); every other
     //    restart claims this boot once.
+    // Rajiv C0ALZJHGE49 thread 1794970059.617269, ts 1794971912.636829: "continuation delivery is supposed to be
+    // injected right after the process is back up". The replacement is verified by the health observer, which otherwise
+    // only runs on the next tick: reconcile below saw cycled[0]=false, returned silently, and the next attempt came after
+    // the restart cooldown (episode 33fdff94, 2.5 min later). Verify it here, now, through the same observer.
+    if (trigger === "exit") await this.relay.observeExitAttempts?.().catch(() => undefined);
     const status = this.db.getExitStatus();
     if (pin.episode && status.pending && status.pm_only && this.db.hasExitAttemptSubmitted(0) && status.episode === pin.episode) {
       await this.reconcilePMRestartContinuation(boot.id);  // binds the booted record + process inside
@@ -1212,6 +1217,12 @@ export class ProcessHealthChecker {
 
     // After dead-process checks, scan for exit_pending on idle slots
     await this.checkExitPending();
+    // The PM continuation is not part of the per-slot loop above: that loop skips the PM during the post-restart
+    // cooldown and runs reconcile BEFORE the observer marks the replacement verified. Retry it here, after the observer,
+    // every tick until it lands (Rajiv ts 1794971912.636829: no Stop, idle or other gate). It also completes an episode
+    // whose continuation is still "waiting" with a verified replacement on the first tick after a release activation.
+    // A restart in flight owns its own delivery; the durable waiting -> attempted claim makes any overlap safe.
+    if (this.db.getExitPending() && !this.pmInitiatedRespawns.has(0)) await this.reconcilePMRestartContinuation();
   }
 
   // ─── Exit Pending: process receipts only, never timer-driven /exit ───
@@ -1219,6 +1230,11 @@ export class ProcessHealthChecker {
   private async checkExitPending(): Promise<void> {
     await this.relay.observeExitAttempts();
     const status = this.db.getExitStatus();
+    // A PM-only episode whose continuation was delivered while its /exit dialog confirmation was still open ends here.
+    if (status.pending && status.pm_only && !status.with_devs && status.continuation_delivery === "delivered") {
+      this.completePMOnlyEpisode(status.episode, "health_observer");
+      return;
+    }
     if (!status.pending || status.pm_only) return;
     const settled = Object.entries(status.cycled).every(([slot, verified]) =>
       (status.dev_only && Number(slot) === 0) || verified || this.db.isExitSlotRetained(Number(slot)));
@@ -1393,77 +1409,39 @@ export class ProcessHealthChecker {
     });
   }
 
+  /** A delivered receipt for THIS episode is already recorded: its continuation is never injected a second time. */
+  private continuationDeliveryRecorded(episode: string | null): boolean {
+    return this.db.getEvents(0, 20, "pm_restart_continuation").some((row) => {
+      try {
+        const payload = JSON.parse(row.payload);
+        return payload.episode === episode && payload.delivery === "delivered";
+      } catch { return false; }
+    });
+  }
+
   /**
-   * Why the saved-handoff continuation must not be pasted into the owned replacement boot now, or null.
-   * - replacement_boot_input_accepted: a real UserPromptSubmit (not a background poll_event) was logged after that
-   *   boot's SessionStart. The old process keeps firing poll_event prompts while it exits; those never count (episode
-   *   00857b64: they made the exit owner "superseded" and the continuation never arrived). Real input does.
-   * - pm_inbound_pending: PM inbound is in flight or queued; it is delivered first and is itself real input.
-   * Read-only on MoP's own event log and queue; it gates only this MoP-originated continuation, never PM input or hooks
-   * (rule 50).
+   * A PM-only episode (pm_only, not with_devs) ends the moment its continuation is delivered: pending clears, the episode
+   * reads `delivered` and `exit_pending_complete` is logged. Dev slots are never armed (Rajiv C0ALZJHGE49 thread
+   * 1794970059.617269, ts 1794971912.636829; the RSS arm and pm-respawn.sh both promise a PM-only restart, and the
+   * 2026-11-09 global exit-pending restarted a dev slot mid-task). setExitPending(false) resets the delivery marker, so it
+   * is written after. An /exit dialog confirmation still open for the episode defers the clear to the next health tick
+   * (checkExitPending); the episode already reads `delivered`, so the continuation is never resent.
    */
-  private continuationInputRefusal(bootEventId: number): "replacement_boot_input_accepted" | "pm_inbound_pending" | null {
-    if (this.db.hasRealPromptSince(0, bootEventId)) return "replacement_boot_input_accepted";
-    if (this.relay.hasPendingPMInbound?.() || this.db.peekPendingPMEvents().length > 0) return "pm_inbound_pending";
-    return null;
-  }
-
-  /** Typed, once per episode+reason: the continuation stays "waiting" and is not sent. */
-  private noteContinuationWithheld(episode: string | null, reason: string, bootEventId: number): void {
-    const key = `${episode}:withheld:${reason}`;
-    if (this.uncertainContinuationNoted.has(key)) return;
-    this.uncertainContinuationNoted.add(key);
-    this.db.logEvent(0, "pm_restart_continuation_withheld", null, null, { episode, reason, boot_event_id: bootEventId });
-  }
-
-  private async deliverPMRestartContinuation(paneId: string, expectedBoot?: number, claim?: Record<string, unknown>,
-    processGuard?: () => Promise<string | null>): Promise<void> {
-    const status = this.db.getExitStatus();
-    if (!status.pending || !status.pm_only || !status.cycled[0]
-        || status.continuation_delivery !== "waiting") return;
-    // The fresh PM has no resumed session: a saved episode continuation wins,
-    // otherwise the standard handoff-pointing continuation (never bare "continue").
-    const prompt = status.continuation_prompt ?? PM_RESTART_CONTINUATION_PROMPT;
-    const boot = latestSessionStartEventId(this.db, 0);
-    if (expectedBoot !== undefined && boot !== expectedBoot) return;
-    // A boot that already accepted real input (a manual "resume from handoff" that beat this tick) or has PM inbound
-    // pending must not get a second handoff prompt. Checked BEFORE the durable claim so a transient pending inbound
-    // burns nothing; the next tick re-evaluates (CTO REVISE ts 1794949061.287419).
-    const withheld = this.continuationInputRefusal(boot);
-    if (withheld) {
-      this.noteContinuationWithheld(status.episode, withheld, boot);
+  private completePMOnlyEpisode(episode: string | null, source: string): void {
+    if (this.relay.hasPendingExitConfirmation?.(episode)) {
+      this.db.setConfig("exit_pending_continuation_delivery", "delivered");
       return;
     }
-    this.db.setConfig("exit_pending_continuation_delivery", "attempted");
-    // Durable attempt-before-send claim bound to the restart evidence (uncertain-exit path).
-    if (claim) this.db.logEvent(0, "pm_restart_continuation_claim", null, null, { episode: status.episode, ...claim });
-    const fence = () => {
-      const current = this.db.getExitStatus();
-      return !current.pending || !current.pm_only || current.episode !== status.episode || current.continuation_prompt !== status.continuation_prompt
-        ? "exit_pending_changed" : latestSessionStartEventId(this.db, 0) !== boot ? "pm_session_changed" : null;
-    };
-    // Every pre-effect check also re-reads the input guard: real input or PM inbound that lands while this send waits for
-    // the lock withholds it. The post-delivery fence() above/below stays input-blind: the continuation's own prompt is a
-    // real UserPromptSubmit and must not read as a refusal.
-    const inputFence = () => fence() ?? this.continuationInputRefusal(boot);
-    // Physical ownership of OUR unsubmitted paste, for the relay's draft cleanup inside the same send lock: same boot and
-    // the same owned PM process (the relay checks the pane id). Deliberately NOT inputFence: inbound or real input arriving
-    // after the paste cancels the Enter but never makes the draft someone else's. No process proof means no cleanup: the
-    // draft is retained and automated paste is held (CTO REVISE ts 1794950616.405579).
-    const sameBoot = () => latestSessionStartEventId(this.db, 0) === boot;
-    const continuationDraft = {
-      sameBoot,
-      owns: async () => sameBoot() && !!processGuard && (await processGuard()) === null && sameBoot(),
-    };
-    const result = await this.relay.deliverGuardedToSlot(0, prompt, {
-      expectedPaneId: paneId,
-      recheck: async () => inputFence() ?? (processGuard ? await processGuard() : null) ?? inputFence(), finalCheck: inputFence, bracketedPaste: true,
-      continuationDraft,
+    this.db.setExitPending(false);
+    this.db.setConfig("exit_pending_continuation_delivery", "delivered");
+    this.db.logEvent(0, "exit_pending_complete", null, null, {
+      source, episode, reason: "PM-only episode: continuation delivered, dev slots untouched",
     });
-    this.db.logEvent(0, "pm_restart_continuation", null, null, {
-      episode: status.episode, boot_event_id: boot, delivery: result.outcome,
-    });
-    if (result.outcome !== "delivered" || fence()) return;
+    this.unresponsiveStates.delete(0);
+  }
+
+  /** The continuation is delivered (now, or by a receipt already on record): finish the episode. */
+  private finishPMContinuation(status: ReturnType<MoPDatabase["getExitStatus"]>): void {
     if (status.with_devs) {
       // 04:00 single occurrence (obligation 30559): the devs were armed in THIS
       // episode already. Keep the episode and every dev cycle flag (no second
@@ -1488,15 +1466,66 @@ export class ProcessHealthChecker {
       this.unresponsiveStates.delete(0);
       return;
     }
-    // Rajiv 1793502605.714159: only AFTER PM has booted and received its
-    // continuation do we reset dev flags. DND and normal Stop handling remain.
-    this.db.setExitPending(true, true);
-    this.db.setConfig("exit_pending_stop_only", "true");
-    this.db.setConfig("exit_pending_continuation_delivery", "delivered");
-    this.db.logEvent(0, "dev_exit_pending_after_pm_restart", null, null, {
-      reason: "PM continuation delivered; dev slots exit at their next Stop, DND skipped",
+    this.completePMOnlyEpisode(status.episode, "pm_restart_continuation");
+  }
+
+  private async deliverPMRestartContinuation(paneId: string, expectedBoot?: number, claim?: Record<string, unknown>,
+    processGuard?: () => Promise<string | null>): Promise<void> {
+    const status = this.db.getExitStatus();
+    if (!status.pending || !status.pm_only || !status.cycled[0]
+        || status.continuation_delivery !== "waiting") return;
+    // The fresh PM has no resumed session: a saved episode continuation wins,
+    // otherwise the standard handoff-pointing continuation (never bare "continue").
+    const prompt = status.continuation_prompt ?? PM_RESTART_CONTINUATION_PROMPT;
+    const boot = latestSessionStartEventId(this.db, 0);
+    if (expectedBoot !== undefined && boot !== expectedBoot) return;
+    // Rajiv C0ALZJHGE49 thread 1794970059.617269, ts 1794971912.636829: "continuation delivery is supposed to be injected
+    // right after the process is back up. it does not have to wait for stop or any other gate." No input guard: a boot that
+    // already accepted real input, or has PM inbound pending, still gets its continuation (the former
+    // replacement_boot_input_accepted / pm_inbound_pending withholds starved episode 33fdff94 for 30+ minutes). It is one
+    // serialized paste on the same chain as every PM write, so it never interleaves with an inbound. A delivery already
+    // recorded for this episode is never repeated: the episode just finishes.
+    if (this.continuationDeliveryRecorded(status.episode)) {
+      this.finishPMContinuation(status);
+      return;
+    }
+    this.db.setConfig("exit_pending_continuation_delivery", "attempted");
+    // Durable attempt-before-send claim bound to the restart evidence (uncertain-exit path).
+    if (claim) this.db.logEvent(0, "pm_restart_continuation_claim", null, null, { episode: status.episode, ...claim });
+    const fence = () => {
+      const current = this.db.getExitStatus();
+      return !current.pending || !current.pm_only || current.episode !== status.episode || current.continuation_prompt !== status.continuation_prompt
+        ? "exit_pending_changed" : latestSessionStartEventId(this.db, 0) !== boot ? "pm_session_changed" : null;
+    };
+    // Physical ownership of OUR unsubmitted paste, for the relay's draft cleanup inside the same send lock: same boot and
+    // the same owned PM process (the relay checks the pane id). No process proof means no cleanup: the draft is retained
+    // and automated paste is held (CTO REVISE ts 1794950616.405579).
+    const sameBoot = () => latestSessionStartEventId(this.db, 0) === boot;
+    const continuationDraft = {
+      sameBoot,
+      owns: async () => sameBoot() && !!processGuard && (await processGuard()) === null && sameBoot(),
+    };
+    const result = await this.relay.deliverGuardedToSlot(0, prompt, {
+      expectedPaneId: paneId,
+      recheck: async () => fence() ?? (processGuard ? await processGuard() : null) ?? fence(), finalCheck: fence, bracketedPaste: true,
+      // A busy PM queues the prompt behind its turn (native "press up to edit queued messages" banner) instead of
+      // refusing it: "queued submit is fine" (same directive).
+      allowNativeQueuedInput: true,
+      continuationDraft,
     });
-    this.unresponsiveStates.delete(0);
+    this.db.logEvent(0, "pm_restart_continuation", null, null, {
+      episode: status.episode, boot_event_id: boot, delivery: result.outcome,
+    });
+    if (result.outcome === "refused_pre_effect") {
+      // Proven zero effect (a busy composer, a pane that moved): hand the claim back so the next health tick retries.
+      // An uncertain outcome keeps the consumed attempt and is never resent. Only this episode's own claim is returned.
+      if (!fence() && this.db.getExitStatus().continuation_delivery === "attempted") {
+        this.db.setConfig("exit_pending_continuation_delivery", "waiting");
+      }
+      return;
+    }
+    if (result.outcome !== "delivered" || fence()) return;
+    this.finishPMContinuation(status);
   }
 
   // ─── Lifecycle ─────────────────────────────────────────

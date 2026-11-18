@@ -252,7 +252,7 @@ test("lost obligation write: the exit stays pending and the next waiting Stop re
   } finally { f.close(); }
 });
 
-test("full sequence: saved exit -> watchdog boot -> continuation -> dev-only exits (downstream unchanged)", async () => {
+test("full sequence: saved exit -> watchdog boot -> continuation -> the PM-only episode ends, dev slots untouched", async () => {
   const f = fixture();
   try {
     await f.arm();
@@ -266,9 +266,11 @@ test("full sequence: saved exit -> watchdog boot -> continuation -> dev-only exi
     await health.deliverPMRestartContinuation("%40");
     assert.deepEqual(messages, ["Read resume. Resume PM."]);
     const status = f.db.getExitStatus();
+    assert.equal(status.pending, false);
     assert.equal(status.pm_only, false);
-    assert.equal(status.dev_only, true);
-    assert.equal(status.handoff_requested_at, null, "dev-only episode needs no PM handoff");
+    assert.equal(status.dev_only, false);
+    assert.equal(status.continuation_delivery, "delivered");
+    assert.equal(status.handoff_requested_at, null, "a finished episode needs no PM handoff");
   } finally { f.close(); }
 });
 
