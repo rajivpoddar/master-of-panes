@@ -55,6 +55,8 @@ def _bash(body, tmp_path, env=None):
 
 PICK_STUBS = r'''
 TYPE=hd-builder
+PA_FREE_SCOPE=verified  # the free-model scope gate has its own tests (test_proxy_agent_free_model_guard.py)
+PA_FREE_SCOPE_WHY=stub
 PROXY_AGENT_CLAUDE_CAP=5
 STUB_BLOCKED="${STUB_BLOCKED:-}"
 STUB_COOLED="${STUB_COOLED:-}"

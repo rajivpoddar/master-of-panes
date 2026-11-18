@@ -5,7 +5,7 @@
 # Rajiv DM D0AMF0XE6TS thread 1794087326.732679: "keep pm on direct claude" ... "go".
 # Rajiv DM ts 1794102299.043149: "set the correct context window sizes in the wrapper ... make the model configureable".
 #
-# Usage: proxy-agent.sh <agent-type> <prompt-file> [--cwd DIR] [--model M] [--rung N] [--out FILE] [--max-turns N]
+# Usage: proxy-agent.sh <agent-type> <prompt-file> [--cwd DIR] [--model M] [--rung N] [--out FILE] [--max-turns N] [--data-scope no-customer-content,no-prod-write] [--qa-mode replay-only]
 #   <agent-type>  basename of an existing .md in --cwd/.claude/agents, ~/.claude/agents,
 #                 or the main heydonna-app/.claude/agents, in that lookup order.
 #                 SDK built-ins such as general-purpose or claude work only if a matching
@@ -38,6 +38,10 @@ MODEL="auto"  # Ordered tier selection below.
 RUNG=""       # hd-builder 1-3 / hd-proof-qa 1-2 escalation rung; empty = rung 1.
 OUT=""
 MAX_TURNS="200"
+# Free-model scope declarations (see "Free-model scope gate" below). Per-launch flags, not ambient env, so a stale export cannot grant eligibility.
+# --data-scope no-customer-content,no-prod-write is the only recognised scope; --qa-mode replay-only applies to remote-qa-runner. Both are ignored on --resume.
+DATA_SCOPE_ARG=""
+QA_MODE_ARG=""
 PM_ROLE="${PROXY_AGENT_PM_ROLE:-0}"
 # One explicit allowlist; dev types retain their existing routing.
 PM_ROLE_TYPES="growth pm-ops-tooling pm-triage-agent customer-artifact-investigator cleanup-pr-runner pm-admission-reviewer donna-influencer explore-issue-agent"
@@ -89,6 +93,8 @@ while [[ $# -gt 0 ]]; do
     --rung) RUNG="$2"; shift 2;;
     --out) OUT="$2"; shift 2;;
     --max-turns) MAX_TURNS="$2"; shift 2;;
+    --data-scope) DATA_SCOPE_ARG="$2"; shift 2;;
+    --qa-mode) QA_MODE_ARG="$2"; shift 2;;
     --pm-role) PM_ROLE=1; shift;;
     *) usage;;
   esac
@@ -1349,24 +1355,137 @@ proxy_agent_is_emergency_muse() {
 proxy_agent_is_free_trial_id() {
   case "$1" in hy4-flash-free|muse-spark-1.3-contributor) return 0;; *) return 1;; esac
 }
-# 0 when this launch reads customer content or writes prod: by agent type, or because the brief text names beloved-cardinal-941,
-# prod/production or customer. remote-qa-runner counts while it captures on miss (its default; --strict-replay opts out).
-# An unreadable brief never proves a launch is safe for a remote-qa-runner; for other types it adds no signal.
-proxy_agent_sensitive_launch() {
-  local _brief="${ROLE_BRIEF:-}" _readable=0
-  if [[ -n "$_brief" && -r "$_brief" ]]; then _readable=1; fi
+# Free-model scope gate (CTO REVISE of b4229671, C0ALZJHGE49 thread 1794985651.254889, ts 1794986198.378749). Trigger: the first guard
+# identified a protected launch by role/brief text, so an unclassified role or a missing brief fell through as safe, its QA branch took
+# brief text as evidence of strict replay, and a manual resume re-ran that text heuristic on the restored role and brief.
+# DEFAULT DENY: a free/trial id runs only for a launch whose scope was VERIFIED safe (no customer content, no prod write).
+#  - The authorised scope is the per-launch `--data-scope no-customer-content,no-prod-write` declaration. Missing, unrecognised or
+#    ambiguous scope denies. A sensitive role, an unreadable brief, or brief text naming prod/customer also denies. Brief text is
+#    advisory: it can only veto, never grant.
+#  - remote-qa-runner additionally needs a VERIFIED replay-only execution mode (proxy_agent_qa_replay_only_verified).
+#  - The verdict is computed once per run (proxy_agent_free_scope_classify), recorded beside the run state and restored verbatim by
+#    `--resume`, never recomputed from the restored role/brief. The auto-continuation loop reuses the launch's resolved model and
+#    refuses to continue a free-id run whose verdict is not "verified" (see the run.sh generator below).
+# Only the two ids are covered; deepseek-v4.1-flash, glm-5.3 and every paid route are untouched.
+PROXY_AGENT_FREE_SCOPE_DECLARED="no-customer-content,no-prod-write"
+# Roles that read customer content or write prod by definition: a declared scope never overrides them.
+proxy_agent_sensitive_type() {
   case "${TYPE:-}" in
     customer-artifact-investigator|hd-investigator|sync-manager-specialist|*lockout*|pm-lock-release|prod-admin*|prod-modal-deploy*) return 0;;
-    remote-qa-runner)
-      if [[ "$_readable" != 1 ]] || grep -Eiq -- 'capture[- _]on[- _]miss' "$_brief" || ! grep -Fq -- '--strict-replay' "$_brief"; then return 0; fi;;
   esac
-  [[ "$_readable" == 1 ]] || return 1
-  grep -Eiq -- 'beloved-cardinal-941|(^|[^[:alnum:]_])prod(uction)?($|[^[:alnum:]_])|customer' "$_brief"
+  return 1
 }
-# 0 when model id $1 is a free/trial id AND this launch is sensitive: the pick falls back to the next tier model (or refuses a raw id).
+# 0 when brief $1 names beloved-cardinal-941, prod/production or customer, OR cannot be scanned (grep rc other than 1 fails closed).
+proxy_agent_brief_names_sensitive_scope() {
+  local _grep_rc=0
+  grep -Eiq -- 'beloved-cardinal-941|(^|[^[:alnum:]_])prod(uction)?($|[^[:alnum:]_])|customer' "$1" 2>/dev/null || _grep_rc=$?
+  [[ "$_grep_rc" != 1 ]]
+}
+# 0 when this launch's QA execution is replay-only AND its route can enforce it. The live-capture decision is made by the spec lane
+# (remote-qa-spec.sh) from its PARSED options (--on-miss), never by brief text, so this needs both the explicit `--qa-mode replay-only`
+# declaration and the deployed spec lane carrying the refusal. The launcher then pins PROXY_AGENT_QA_REPLAY_ONLY=1 for the child
+# (the spec lane refuses --on-miss) and denies the capture lane in the generated settings. Missing script or marker is "not verified".
+proxy_agent_qa_replay_only_verified() {
+  [[ "${QA_MODE_ARG:-}" == replay-only ]] || return 1
+  grep -Fq -- 'QA_REPLAY_ONLY_REFUSED' "$HOME/.claude/scripts/remote-qa-spec.sh" 2>/dev/null
+}
+# Per-run verdict record: <run state root>/<run name>/free-scope. proxy-run-state.py (not a MoP asset) hands --resume only fixed
+# fields, so the launcher keeps its own record beside the run state. Written once at launch; --resume restores it, never rewrites it.
+proxy_agent_free_scope_file() {
+  [[ -n "${PROXY_AGENT_RUN_NAME:-}" ]] || return 1
+  printf '%s/%s/free-scope\n' "${PROXY_AGENT_RUN_STATE_DIR:-$HOME/.local/state/proxy-agent-runs}" "$PROXY_AGENT_RUN_NAME"
+}
+proxy_agent_brief_digest() {
+  [[ -n "${1:-}" && -r "$1" ]] || return 1
+  python3 -I -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$1" 2>/dev/null
+}
+proxy_agent_free_scope_record() {
+  local _file _dir _tmp _digest
+  _file="$(proxy_agent_free_scope_file)" || return 0
+  _dir="${_file%/*}"
+  [[ -d "$_dir" ]] || return 0
+  _digest="$(proxy_agent_brief_digest "${ROLE_BRIEF:-}" || true)"
+  _tmp="$(mktemp "$_dir/.free-scope.XXXXXX")" || return 0
+  chmod 600 "$_tmp" 2>/dev/null || true
+  if printf 'v1\ntype=%s\nbrief_sha256=%s\nscope=%s\nwhy=%s\nqa_replay_only=%s\n' \
+       "${TYPE:-}" "$_digest" "$PA_FREE_SCOPE" "$PA_FREE_SCOPE_WHY" "$PA_QA_REPLAY_PINNED" > "$_tmp"; then
+    mv -f "$_tmp" "$_file" || rm -f "$_tmp"
+  else
+    rm -f "$_tmp"
+  fi
+  return 0
+}
+# --resume: restore the recorded verdict. No record, a record for another role/brief, or anything unreadable is "denied"; a recorded
+# "denied" is never upgraded. The restored role and brief are used only to confirm they are the ones the verdict was recorded for.
+proxy_agent_free_scope_restore() {
+  local _file _key _val _ver="" _rtype="" _rsha="" _rscope="" _rwhy="" _rqa="" _digest
+  PA_FREE_SCOPE=denied
+  PA_QA_REPLAY_PINNED=0
+  if ! _file="$(proxy_agent_free_scope_file)" || [[ ! -r "$_file" ]]; then
+    PA_FREE_SCOPE_WHY=resume_scope_unrecorded
+    return 0
+  fi
+  while IFS='=' read -r _key _val; do
+    case "$_key" in
+      v1) _ver=v1;;
+      type) _rtype="$_val";;
+      brief_sha256) _rsha="$_val";;
+      scope) _rscope="$_val";;
+      why) _rwhy="$_val";;
+      qa_replay_only) _rqa="$_val";;
+    esac
+  done < "$_file"
+  _digest="$(proxy_agent_brief_digest "${ROLE_BRIEF:-}" || true)"
+  if [[ "$_ver" != v1 || "$_rtype" != "${TYPE:-}" || -z "$_rsha" || "$_rsha" != "$_digest" ]]; then
+    PA_FREE_SCOPE_WHY=resume_scope_mismatch
+    return 0
+  fi
+  if [[ "$_rscope" == verified ]]; then PA_FREE_SCOPE=verified; fi
+  if [[ "$_rqa" == 1 ]]; then PA_QA_REPLAY_PINNED=1; fi
+  PA_FREE_SCOPE_WHY="resume:${_rwhy:-recorded}"
+  return 0
+}
+# Fresh launch: positive eligibility only. Every unmet condition leaves PA_FREE_SCOPE=denied with the first reason.
+proxy_agent_free_scope_decide() {
+  local _brief="${ROLE_BRIEF:-}"
+  if [[ "${TYPE:-}" == remote-qa-runner ]] && proxy_agent_qa_replay_only_verified; then PA_QA_REPLAY_PINNED=1; fi
+  case "${DATA_SCOPE_ARG:-}" in
+    "") PA_FREE_SCOPE_WHY=scope_missing; return 0;;
+    "$PROXY_AGENT_FREE_SCOPE_DECLARED") ;;
+    *) PA_FREE_SCOPE_WHY=scope_ambiguous; return 0;;
+  esac
+  if proxy_agent_sensitive_type; then PA_FREE_SCOPE_WHY=sensitive_role; return 0; fi
+  if [[ -z "$_brief" || ! -r "$_brief" ]]; then PA_FREE_SCOPE_WHY=brief_unreadable; return 0; fi
+  if proxy_agent_brief_names_sensitive_scope "$_brief"; then PA_FREE_SCOPE_WHY=brief_names_sensitive_scope; return 0; fi
+  if [[ "${TYPE:-}" == remote-qa-runner && "$PA_QA_REPLAY_PINNED" != 1 ]]; then PA_FREE_SCOPE_WHY=qa_replay_only_unverified; return 0; fi
+  PA_FREE_SCOPE=verified
+  PA_FREE_SCOPE_WHY=scope_declared_and_checked
+  return 0
+}
+# Runs once per run, after the role is resolved and before any tier pick. Exports the verdict for the child and its continuations.
+proxy_agent_free_scope_classify() {
+  PA_FREE_SCOPE=denied
+  PA_FREE_SCOPE_WHY=unclassified
+  PA_QA_REPLAY_PINNED=0
+  if [[ -n "${RESUME_NAME:-}" ]]; then
+    if [[ -n "${DATA_SCOPE_ARG:-}${QA_MODE_ARG:-}" ]]; then
+      printf 'proxy-agent: --data-scope/--qa-mode ignored on --resume (the recorded verdict is restored)\n' >&2
+    fi
+    proxy_agent_free_scope_restore
+  else
+    proxy_agent_free_scope_decide
+    proxy_agent_free_scope_record
+  fi
+  printf 'proxy-agent: free-model scope=%s why=%s type=%s\n' "$PA_FREE_SCOPE" "$PA_FREE_SCOPE_WHY" "${TYPE:-}" >&2
+  export PROXY_AGENT_FREE_SCOPE="$PA_FREE_SCOPE"
+  if [[ "$PA_QA_REPLAY_PINNED" == 1 ]]; then export PROXY_AGENT_QA_REPLAY_ONLY=1; else unset PROXY_AGENT_QA_REPLAY_ONLY; fi
+  return 0
+}
+# 0 (refuse) when model id $1 is a free/trial id AND this run's scope is not VERIFIED safe: the pick falls back to the next tier model
+# (or refuses a raw id). An unset or unknown verdict refuses.
 proxy_agent_free_guard_refuses() {
   proxy_agent_is_free_trial_id "$1" || return 1
-  proxy_agent_sensitive_launch
+  [[ "${PA_FREE_SCOPE:-denied}" != verified ]]
 }
 # Ordered tiers; escalation after a stall is LIGHT -> MID -> TOP. This is the single source of the tier lists: the picker and the
 # emergency eligibility check (proxy_agent_emergency_open) both read it. Prints the model ids, no-Codex flag applied.
@@ -1454,10 +1573,10 @@ proxy_agent_pick_tier() {
     models="$_kept"
   fi
   for id in $models; do
-    # Free-model guard: before the emergency gate and before `last` is set, so a refused id can never become the fallback pick.
+    # Free-model scope gate: before the emergency gate and before `last` is set, so a refused id can never become the fallback pick.
     if proxy_agent_free_guard_refuses "$id"; then
       skipped="${skipped:+$skipped,}$id:free_model_guard"
-      printf 'proxy-agent: REFUSED free-model guard model=%s type=%s (customer-content/prod launch; trying the next tier model)\n' "$id" "${TYPE:-}" >&2
+      printf 'proxy-agent: REFUSED free-model guard model=%s type=%s scope=%s why=%s (scope not verified safe; trying the next tier model)\n' "$id" "${TYPE:-}" "${PA_FREE_SCOPE:-denied}" "${PA_FREE_SCOPE_WHY:-unclassified}" >&2
       continue
     fi
     if proxy_agent_is_emergency_muse "$id"; then
@@ -1626,7 +1745,7 @@ proxy_agent_primary_pool_guard() {
   proxy_agent_is_opencode_id "$_guard_id" || return 0
   # Free-model guard on the resolved primary: a raw `--model hy4-flash-free|muse-spark-1.3-contributor` has no tier to fall back within.
   if proxy_agent_free_guard_refuses "$_guard_id"; then
-    printf 'proxy-agent: REFUSED free-model guard primary %s type=%s (customer-content/prod launch; name a vetted model)\n' "$_guard_id" "${TYPE:-}" >&2
+    printf 'proxy-agent: REFUSED free-model guard primary %s type=%s scope=%s why=%s (scope not verified safe; name a vetted model or declare --data-scope)\n' "$_guard_id" "${TYPE:-}" "${PA_FREE_SCOPE:-denied}" "${PA_FREE_SCOPE_WHY:-unclassified}" >&2
     return 75
   fi
   if proxy_agent_pool_blocked "$_guard_id"; then
@@ -1797,6 +1916,7 @@ proxy_agent_print_selection() {
 }
 
 proxy_agent_resolve_type
+proxy_agent_free_scope_classify
 proxy_agent_select || exit 75  # includes the primary burn check (proxy_agent_primary_burn_check), before alias probes
 # A UTC-second stamp alone is not unique: several same-type proxies started in
 # one second overwrite one markdown file, and delivery/jsonl follow that name.
@@ -1936,7 +2056,7 @@ SAFETY_SETTINGS="$(mktemp "${TMPDIR:-/tmp}/proxy-agent-safety.XXXXXX")"
 # helper ran an unauthorized "gh run rerun" for #13844 (Rajiv D0AMF0XE6TS 1794787507.634289; PM trace 12:10 IST).
 _HELPER_READONLY=0
 if [[ "${PROXY_AGENT_NAME:-}" == *heartbeat* || "${PROXY_AGENT_NAME:-}" == *hourly* ]] || head -1 "$PROMPT_FILE" 2>/dev/null | grep -qiE '^MODE:[[:space:]]*(heartbeat|hourly)'; then _HELPER_READONLY=1; fi
-HELPER_READONLY="$_HELPER_READONLY" python3 - "/Users/rajiv/Downloads/projects/heydonna-app/.claude/settings.json" "$SAFETY_SETTINGS" <<'PY'
+HELPER_READONLY="$_HELPER_READONLY" QA_REPLAY_ONLY="${PA_QA_REPLAY_PINNED:-0}" python3 - "/Users/rajiv/Downloads/projects/heydonna-app/.claude/settings.json" "$SAFETY_SETTINGS" <<'PY'
 import json, sys
 src, out = sys.argv[1], sys.argv[2]
 want = ("block-cto-mention-without-ladder", "block-invalid-backlog-issue-create",
@@ -1960,6 +2080,9 @@ if os.environ.get("HELPER_READONLY") == "1":
     deny += ["Bash(gh run rerun*)", "Bash(gh run cancel*)", "Bash(gh workflow run*)",
              "Bash(gh pr ready*)", "Bash(gh pr close*)", "Bash(gh pr edit*)",
              "Bash(*pm-admit-ci.sh*)", "Bash(git push*)"]
+if os.environ.get("QA_REPLAY_ONLY") == "1":
+    # Verified replay-only QA (--qa-mode replay-only): no capture lane, no capture-on-miss. remote-qa-spec.sh also refuses --on-miss.
+    deny += ["Bash(*remote-browser-box.sh capture*)", "Bash(*remote-qa-capture.sh*)", "Bash(*--on-miss*)"]
 json.dump({"hooks": {"PreToolUse": keep},
            "permissions": {"deny": deny}}, open(out, "w"))
 PY
@@ -2068,6 +2191,9 @@ CLAUDE_BIN="$(command -v claude)"
     pm-lock-release|prod-*|manual-lease-release|customer-artifact-investigator|remote-qa-runner|pm-admission-reviewer|codex-*|main-red-skip)
       printf 'PROXY_AGENT_NO_CONTINUE=1\n';;
   esac
+  # Continuations reuse this launch's resolved model and settings (no re-selection). A free/trial-id run also never continues unless the
+  # scope verdict recorded at launch is "verified" (CTO REVISE 1794986198.378749, automatic continuation).
+  printf 'case %q in hy4-flash-free|muse-spark-1.3-contributor) [[ %q == verified ]] || PROXY_AGENT_NO_CONTINUE=1;; esac\n' "$MODEL_ID" "${PA_FREE_SCOPE:-denied}"
   printf 'printf "Continue the task in your brief from exactly where you stopped. Do not end your turn until it is DONE, or BLOCKED with the exact external blocker (or HANDOFF). Do not send interim progress peer messages to PM; send ONE message only for a blocker that needs a PM decision, plus the final Stop.\\n" > %q\n' "$JOB_DIR/continue.md"
   # Also continue after an error_max_turns stop (rc!=0): 4 sol runs died that way on 2026-11-13 with work mid-flight (PM).
   printf 'pa_maxturns() { tail -c 6000 %q 2>/dev/null | grep -q "\\"subtype\\":\\"error_max_turns\\""; }\n' "$JSONL"
