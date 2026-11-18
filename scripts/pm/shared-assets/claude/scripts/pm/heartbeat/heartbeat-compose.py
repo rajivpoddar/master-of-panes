@@ -2811,8 +2811,13 @@ PACE_DEFAULT_ACCOUNTS = (
 # Alias key (Rajiv 2026-11-18): an account whose key is claude:keychain:weekly follows the PM pane keychain across account
 # switches. It reads the newest weekly keychain row (claude:keychain-<identity>:weekly, or the old literal key) and
 # restarts the baseline at the first sample of a new identity or a new weekly reset stamp (_pace_keychain_segment).
+# CTO REVISE (C0ALZJHGE49 thread 1794988176.080829, ts 1794988503.096489): the cached baseline is bound to the sampled
+# identity (an opaque tag, never the login) and the weekly window, so trimming the log cannot reuse another account's
+# baseline; a usage run that took no keychain sample leaves the previous login's sample ineligible; the alias and a
+# configured concrete key each get the same observation with their own baseline; the switch note is neutral.
 PACE_KEYCHAIN_KEY = "claude:keychain:weekly"
 _PACE_KEYCHAIN_ROW = re.compile(r"^claude:keychain(?:-(?P<identity>[^\s:]+))?:weekly$")
+PACE_RUN_TOL = 60              # every row one usage run writes carries the same ts; a keychain row this far behind the newest Claude row missed that run
 PACE_MIN_WINDOW_HOURS = 0.25   # a baseline this young carries no rate at all
 PACE_THIN_HOURS = 2.0          # under this the rate is shown but flagged, whole-percent steps still dominate
 PACE_MAX_ETA_HOURS = 24 * 365
@@ -2871,10 +2876,12 @@ def _pace_scan(snapshot: Path, wanted: dict[str, float | None]) -> dict[str, dic
 
     The alias key PACE_KEYCHAIN_KEY reads every weekly keychain row, whichever account the keychain held when the
     sampler ran (claude:keychain-<identity>:weekly, or the old literal claude:keychain:weekly). Those rows also go to
-    slot["keychain"] as (ts, pct, reset, identity) so _pace_keychain_segment can find the current segment."""
+    slot["keychain"] as (ts, pct, reset, identity) so _pace_keychain_segment can find the current segment. A keychain
+    row feeds the alias slot AND, when its raw key is configured too, that concrete slot, each with its own baseline.
+    slot["run"] is the newest ts of any claude: row: one usage run writes all its rows with one ts."""
     found: dict[str, dict] = {key: {"latest": None, "rows": []} for key in wanted}
     if PACE_KEYCHAIN_KEY in found:
-        found[PACE_KEYCHAIN_KEY]["keychain"] = []
+        found[PACE_KEYCHAIN_KEY].update(keychain=[], run=None)
     with open(snapshot) as handle:
         for line in handle:
             try:
@@ -2882,54 +2889,104 @@ def _pace_scan(snapshot: Path, wanted: dict[str, float | None]) -> dict[str, dic
             except ValueError:
                 continue
             key = row.get("key") if isinstance(row, dict) else None
-            identity = None
-            keychain = _PACE_KEYCHAIN_ROW.match(key) if PACE_KEYCHAIN_KEY in found and isinstance(key, str) else None
+            if not isinstance(key, str):
+                continue
+            ts, pct = row.get("ts"), row.get("pct")
+            if PACE_KEYCHAIN_KEY in found and key.startswith("claude:") and _pace_number(ts):
+                run = found[PACE_KEYCHAIN_KEY]["run"]
+                found[PACE_KEYCHAIN_KEY]["run"] = float(ts) if run is None or ts > run else run
+            targets = {key: None} if key in found else {}
+            keychain = _PACE_KEYCHAIN_ROW.match(key) if PACE_KEYCHAIN_KEY in found else None
             if keychain:
-                key, identity = PACE_KEYCHAIN_KEY, keychain.group("identity") or ""
-            slot = found.get(key) if isinstance(key, str) else None
-            ts, pct = (row.get("ts"), row.get("pct")) if slot is not None else (None, None)
-            if slot is None or not _pace_number(ts) or not _pace_number(pct) or not 0 <= pct <= 100:
+                targets[PACE_KEYCHAIN_KEY] = keychain.group("identity") or ""
+            if not targets or not _pace_number(ts) or not _pace_number(pct) or not 0 <= pct <= 100:
                 continue
             reset = float(row["reset"]) if _pace_number(row.get("reset")) else None
             sample = (float(ts), float(pct), reset)
-            if slot["latest"] is None or ts >= slot["latest"][0]:
-                slot["latest"] = sample
-            start = wanted[key]
-            if start is not None and ts >= start:
-                slot["rows"].append(sample)
-                if identity is not None:
-                    slot["keychain"].append(sample + (identity,))
+            for target, identity in targets.items():
+                slot = found[target]
+                if slot["latest"] is None or ts >= slot["latest"][0]:
+                    slot["latest"] = sample
+                start = wanted[target]
+                if start is not None and ts >= start:
+                    slot["rows"].append(sample)
+                    if identity is not None:
+                        slot["keychain"].append(sample + (identity,))
     return found
 
 
-def _pace_keychain_segment(entry: dict, stamp) -> tuple[dict, str | None, str | None]:
+def _pace_ident(identity: str) -> str:
+    """Opaque tag of a sampled keychain identity. Only the tag is compared or cached; the identity itself never
+    reaches the report, the note or the state file."""
+    return hashlib.sha256(identity.encode()).hexdigest()[:16]
+
+
+def _pace_cached_segment(stored, floor):
+    """The cached alias baseline, or None unless it is complete and inside the configured window (>= floor)."""
+    ok = (isinstance(stored, dict) and isinstance(stored.get("identity"), str)
+          and all(_pace_number(stored.get(f)) for f in ("ts", "pct", "reset", "seen"))
+          and (floor is None or stored["ts"] >= floor))
+    return stored if ok else None
+
+
+def _pace_keychain_segment(entry: dict, stamp, stored=None, sampled: bool = True) -> tuple[dict, str | None, str | None]:
     """(entry, baseline stamp, IST note) for the claude:keychain:weekly alias account.
 
-    The newest weekly keychain row is the sample. The baseline is the latest of: the configured baseline_from (rows
-    before it are never read), the first sample of the current keychain identity, and the first sample after the weekly
-    reset stamp changed. So a keychain account switch or a weekly roll restarts the measurement at its first sample
-    instead of reading UNKNOWN or averaging across two accounts. The configured horizon is never touched. The note
-    names the IST time of that restart; it is None when nothing restarted inside the configured window. The returned
-    stamp stays the configured one without a restart and becomes the restart instant otherwise, so a cached baseline
-    can never outlive its segment."""
+    The newest weekly keychain row is the sample, and it is eligible only if the newest usage run that sampled Claude
+    also took a keychain sample: a run whose keychain read failed leaves the previous login's row behind, and that row
+    must not stand for the PM pane (UNKNOWN, the cached baseline untouched). sampled=False is the claimed producer
+    saying its own usage run failed outright (no rows at all), which the log alone cannot show. The baseline is the latest of: the
+    configured baseline_from (rows before it are never read), the first sample of the current keychain identity, and
+    the first sample after the weekly reset stamp changed. So a keychain account switch (also A -> B -> A) or a weekly
+    roll restarts the measurement at its first sample instead of averaging across two accounts. The configured horizon
+    is never touched.
+
+    The note is neutral ("PM keychain account changed (HH:MM IST)", never a login or suffix) and names the restart.
+    When trimming removed the boundary rows, the cached baseline (identity tag, weekly reset, baseline ts, last sample
+    seen) decides: same identity and window, covering the rows still held and seen contiguously -> keep it (and its
+    note); a different identity or window, or rows trimmed past what the cache saw -> start a new baseline at the
+    first remaining sample of the current segment, with the note. A cache that cannot be tied to this account and
+    segment is never reused. The returned stamp is the configured one without a restart and the restart instant
+    otherwise."""
+    out = {**entry, "rows": [], "ident": None, "seen": None, "why": None}
     sequence = sorted(entry.get("keychain") or (), key=lambda r: r[0])
+    run, latest = entry.get("run"), entry.get("latest")
+    if not sampled or (latest is not None and run is not None and latest[0] + PACE_RUN_TOL < run):
+        out["unverified"] = "the latest usage run took no PM keychain sample, the previous sample is not used"
+        return out, stamp, None
     segment: list[tuple] = []
-    note, last_reset = None, None
+    why = restart = last_reset = None
     for row in sequence:
-        if segment and row[3] != segment[-1][3]:
-            old, new = segment[-1][3] or "keychain", row[3] or "keychain"
-            note = f"keychain switched {old} → {new} at {_ist(row[0], '%a %d %b %H:%M')}, baseline reset there"
-            segment, last_reset = [], None
-        elif segment and last_reset is not None and row[2] is not None and not _pace_same_window(row[2], last_reset):
-            note = f"keychain weekly reset stamp changed at {_ist(row[0], '%a %d %b %H:%M')}, baseline reset there"
-            segment = []
+        change = ("account changed" if segment and row[3] != segment[-1][3] else
+                  "weekly window changed" if segment and last_reset is not None and row[2] is not None
+                  and not _pace_same_window(row[2], last_reset) else None)
+        if change:
+            why, restart, segment, last_reset = change, row[0], [], None
         segment.append(row)
         if row[2] is not None:
             last_reset = row[2]
-    if note is None or not segment:
-        return {**entry, "rows": [r[:3] for r in segment]}, stamp, None
-    restart = datetime.fromtimestamp(segment[0][0], timezone.utc).isoformat()
-    return {**entry, "rows": [r[:3] for r in segment]}, restart, note
+    if not segment:
+        return out, stamp, None
+    first, newest = segment[0], segment[-1]
+    base_rows = [r[:3] for r in segment]
+    cached = None
+    if why is None and newest[2] is not None:      # no boundary visible: the cache is the only evidence left
+        cached = _pace_cached_segment(stored, _pace_epoch(stamp) if stamp else None)
+        if cached is not None and cached["ts"] <= first[0]:
+            if cached["identity"] != _pace_ident(newest[3]):
+                why, restart = "account changed", first[0]
+            elif not _pace_same_window(cached["reset"], newest[2]):
+                why, restart = "weekly window changed", first[0]
+            elif cached["seen"] + PACE_RUN_TOL < first[0]:
+                why, restart = "baseline restarted", first[0]   # rows trimmed past what the cache saw: not contiguous
+            else:
+                why, restart = cached.get("why"), cached["ts"]
+                base_rows = [(cached["ts"], cached["pct"], cached["reset"])] + base_rows
+    out.update(rows=base_rows, ident=_pace_ident(newest[3]), seen=newest[0], why=why)
+    if not why:
+        return out, stamp, None
+    return (out, datetime.fromtimestamp(restart, timezone.utc).isoformat(),
+            f"PM keychain {why} ({_ist(restart, '%H:%M')})")
 
 
 def _pace_same_window(a, b) -> bool:
@@ -2960,6 +3017,8 @@ def _pace_clause(acct: dict, found: dict, stored, ts_now: float) -> tuple[str, d
     """
     name = f"{acct['label']} {acct['name']}"
     latest = found["latest"]
+    if found.get("unverified"):
+        return f"{name} UNKNOWN ({found['unverified']})", None, {"used": None}
     if latest is None or not 0 <= ts_now - latest[0] <= USAGE_SAMPLE_MAX_AGE:
         return f"{name} UNKNOWN (no usage sample in the last {USAGE_SAMPLE_MAX_AGE // 3600}h)", None, {"used": None}
     sampled, used, reset = latest
@@ -3026,7 +3085,16 @@ def _pace_write_state(state: Path, baselines: dict) -> None:
     os.replace(tmp, state)
 
 
-def _pace_resolve(now: datetime, snapshot: Path, config: Path, state: Path, persist: bool) -> list[tuple]:
+def _pace_keep(acct: dict, stored) -> bool:
+    """A cached baseline that still belongs to this account's configured window survives an hour whose clause is
+    UNKNOWN (no or stale sample, no live reset, failed keychain sample): a transient gap must not drop it."""
+    if acct["key"] == PACE_KEYCHAIN_KEY:
+        return _pace_cached_segment(stored, _pace_epoch(acct["baseline_from"]) if acct.get("baseline_from") else None) is not None
+    return _pace_stored_base(stored, acct.get("baseline_from")) is not None
+
+
+def _pace_resolve(now: datetime, snapshot: Path, config: Path, state: Path, persist: bool,
+                  sampled: bool = True) -> list[tuple]:
     """Single calculation behind both renderings: [(account, clause, cells)] per account. May raise."""
     ts_now = now.timestamp()
     accounts = _pace_accounts(config)
@@ -3038,17 +3106,22 @@ def _pace_resolve(now: datetime, snapshot: Path, config: Path, state: Path, pers
         stored = None
     stored = stored if isinstance(stored, dict) else {}
     resolved, keep = [], {}
-    for acct in accounts:
-        entry, note = found[acct["key"]], None
+    for configured in accounts:
+        acct, entry, note, cached = configured, found[configured["key"]], None, stored.get(configured["key"])
         if acct["key"] == PACE_KEYCHAIN_KEY:
-            entry, stamp, note = _pace_keychain_segment(entry, acct.get("baseline_from"))
-            acct = {**acct, "baseline_from": stamp}
-        clause, cache, cells = _pace_clause(acct, entry, stored.get(acct["key"]), ts_now)
+            # The segment applies the identity-bound cache itself, so _pace_clause gets no stamp-keyed one.
+            entry, stamp, note = _pace_keychain_segment(entry, acct.get("baseline_from"), cached, sampled)
+            acct, cached = {**acct, "baseline_from": stamp}, None
+        clause, cache, cells = _pace_clause(acct, entry, cached, ts_now)
+        if cache and configured["key"] == PACE_KEYCHAIN_KEY and entry.get("ident"):
+            cache = {**cache, "identity": entry["ident"], "seen": entry["seen"], "why": entry.get("why")}
         if note and cells.get("used") is not None:
-            clause, cells = f"{clause} ({note})", {**cells, "note": note}
+            cells = {**cells, "note": note}
         resolved.append((acct, clause, cells))
         if cache:
-            keep[acct["key"]] = cache
+            keep[configured["key"]] = cache
+        elif _pace_keep(configured, stored.get(configured["key"])):
+            keep[configured["key"]] = stored[configured["key"]]
     if persist and keep != stored:
         try:
             _pace_write_state(state, keep)
@@ -3058,14 +3131,15 @@ def _pace_resolve(now: datetime, snapshot: Path, config: Path, state: Path, pers
 
 
 def pace_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = PACE_CONFIG,
-                state: Path = PACE_STATE, persist: bool = False) -> str:
+                state: Path = PACE_STATE, persist: bool = False, sampled: bool = True) -> str:
     """The one-line account pace statement. Never raises: a failed check reads UNKNOWN.
 
     persist=True (claimed normal hourly producer only) caches the resolved baseline samples so the rate keeps
     its window if the usage log is ever trimmed. It never writes anything else and never samples usage.
     """
     try:
-        return "*Pace:* " + " · ".join(clause for _, clause, _ in _pace_resolve(now, snapshot, config, state, persist))
+        return "*Pace:* " + " · ".join(f"{clause}; {cells['note']}" if cells.get("note") else clause
+                                        for _, clause, cells in _pace_resolve(now, snapshot, config, state, persist, sampled))
     except Exception as exc:
         return f"*Pace:* UNKNOWN ({type(exc).__name__}, pace check failed)"
 
@@ -3105,8 +3179,8 @@ def _pace_table_lines(resolved: list[tuple]) -> list[str]:
             burn_cell = f"{rate:.2f} {marker}"
             target_cell = f"≤{cells['ceiling']:.2f} to {cells['to']}"
             runs_cell = cells["runs_out"]
-            if cells.get("note"):   # keychain switch / weekly roll (claude:keychain:weekly alias): one IST note line
-                notes.append(f"{PACE_NOTE_PREFIX}{display}: {cells['note']}")
+        if cells.get("note"):   # keychain switch / weekly roll (claude:keychain:weekly alias): its own neutral IST line
+            notes.append(f"{PACE_NOTE_PREFIX}{cells['note']}")
         rows.append([display, used_cell, burn_cell, target_cell, runs_cell])
 
     def row(cols: list[str]) -> str:
@@ -3117,11 +3191,11 @@ def _pace_table_lines(resolved: list[tuple]) -> list[str]:
 
 
 def pace_table(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = PACE_CONFIG,
-               state: Path = PACE_STATE, persist: bool = False) -> str:
+               state: Path = PACE_STATE, persist: bool = False, sampled: bool = True) -> str:
     """The Pace block that sits directly under the *Hourly line of every 1h report. Same calculation as pace_status.
     Never raises: a failed check reads one UNKNOWN line."""
     try:
-        return "\n".join(_pace_table_lines(_pace_resolve(now, snapshot, config, state, persist)))
+        return "\n".join(_pace_table_lines(_pace_resolve(now, snapshot, config, state, persist, sampled)))
     except Exception as exc:
         return f"Pace: UNKNOWN ({type(exc).__name__}, pace check failed)"
 
@@ -4118,7 +4192,8 @@ def main() -> int:
     tracked = None
     langsmith = None  # LangSmith ingest dropped from the hourly (Rajiv ts 1792806414.519859)
     burn = burn_status(datetime.now(timezone.utc)) if args.mode == "1h" else None
-    pace = (pace_table(datetime.now(timezone.utc), persist=usage_sample_claim_ok(args.sample_usage_claim))
+    pace = (pace_table(datetime.now(timezone.utc), persist=usage_sample_claim_ok(args.sample_usage_claim),
+                       sampled=not any(f.startswith("usage:") for f in failures))
             if args.mode == "1h" else None)
     memory_line = None
     if args.mode == "1h":

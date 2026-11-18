@@ -186,19 +186,26 @@ def test_stored_baseline_from_a_previous_window_is_never_reused(tmp_path):
 
 # claude:keychain:weekly alias (Rajiv 2026-11-18): the account follows the PM pane keychain across account switches.
 # The newest weekly keychain row is the sample; the baseline is the latest of the configured baseline_from, the first
-# sample of the current identity and the first sample after the weekly reset stamp changed; an IST note names the
-# restart; the configured horizon is untouched. Synthetic sequences only (not executed by the MoP repair run).
+# sample of the current identity and the first sample after the weekly reset stamp changed; a neutral IST note names the
+# restart; the configured horizon is untouched. CTO REVISE (C0ALZJHGE49 thread 1794988176.080829, ts 1794988503.096489):
+# the cached baseline is bound to the sampled identity (opaque tag) and weekly window, a usage run without a keychain
+# sample leaves the previous login ineligible, alias + concrete key both read, and the note carries no login.
+# Synthetic sequences only (not executed by the MoP repair run).
 ALIAS = 'claude:keychain:weekly'
 KEYCHAIN_DEV = 'claude:keychain-dev@scribie.com:weekly'
 KEYCHAIN_RAJIV = 'claude:keychain-rajiv@scribie.com:weekly'
 WINDOW_RAJIV = WINDOW + 2 * 86400
 
 
-def _alias_config(path, baseline_from=BASE):
+def _alias_config(path, baseline_from=BASE, extra=()):
     path.write_text(json.dumps({'accounts': [
         {'label': 'Claude', 'name': 'keychain', 'key': ALIAS, 'horizon': CLAUDE_HORIZON,
-         'baseline_from': _iso(baseline_from), 'display': 'Claude: PM pane (keychain)'}]}))
+         'baseline_from': _iso(baseline_from), 'display': 'Claude: PM pane (keychain)'}, *extra]}))
     return path
+
+
+def _note_lines(table):
+    return [l for l in table.splitlines() if l.startswith('Pace note: ')]
 
 
 def test_keychain_alias_identity_switch_restarts_the_baseline_and_annotates_the_ist_switch(tmp_path):
@@ -207,19 +214,19 @@ def test_keychain_alias_identity_switch_restarts_the_baseline_and_annotates_the_
             (BASE + 4 * H, KEYCHAIN_RAJIV, 10, WINDOW_RAJIV), (BASE + 6 * H, KEYCHAIN_RAJIV, 13, WINDOW_RAJIV),
             (BASE + 8 * H, KEYCHAIN_RAJIV, 16, WINDOW_RAJIV)]
     cfg = _alias_config(tmp_path / 'cfg.json')
-    clause = _clause(_pace(tmp_path, rows, now, config=cfg), 'Claude')
+    line = _pace(tmp_path, rows, now, config=cfg)
+    clause = _clause(line, 'Claude')
     # baseline = the new identity's first sample (10% at 10:15 IST), never averaged with the 40-44% rows of the old one:
     # (16-10)/4.0h = 1.50 %/h; ceiling 84/19.25h = 4.36 %/h to the UNCHANGED configured horizon.
     assert ('Claude keychain 16% used at 14:15 IST (sample 0.0h old), measured 1.50 %/h over 4.0h '
             'vs ceiling 4.36 %/h (to Wed 11-18 09:30 IST) → BELOW') in clause
-    assert 'keychain switched dev@scribie.com → rajiv@scribie.com at Tue 17 Nov 10:15 IST, baseline reset there' in clause
-    assert 'UNKNOWN' not in clause
+    assert 'PM keychain account changed (10:15 IST)' in clause and 'UNKNOWN' not in clause
+    assert 'scribie' not in line and '@' not in line
     table = composer.pace_table(_at(now), snapshot=tmp_path / 'log.jsonl', config=cfg, state=tmp_path / 'state.json')
     lines = table.splitlines()
     assert _cells(_pipe_row(table, 'Claude: PM pane (keychain)'))[2] == '1.50 ✅'
-    assert lines[-1] == ('Pace note: Claude: PM pane (keychain): keychain switched dev-scribie.com → rajiv-scribie.com '
-                         'at Tue 17 Nov 10:15 IST, baseline reset there')
-    assert len(lines) == 4 and '@' not in table
+    assert lines[-1] == 'Pace note: PM keychain account changed (10:15 IST)'   # its own line, no login, no suffix
+    assert len(lines) == 4 and '@' not in table and 'scribie' not in table
 
 
 def test_keychain_alias_weekly_reset_stamp_change_restarts_the_baseline_and_caches_it(tmp_path):
@@ -234,10 +241,13 @@ def test_keychain_alias_weekly_reset_stamp_change_restarts_the_baseline_and_cach
     # no UNKNOWN for the window change, no 60-70% rows from the old window in the average.
     assert 'Claude keychain 8% used at 15:15 IST (sample 0.0h old), measured 1.50 %/h over 4.0h' in clause
     assert 'vs ceiling 5.04 %/h (to Wed 11-18 09:30 IST) → BELOW' in clause
-    assert 'keychain weekly reset stamp changed at Tue 17 Nov 11:15 IST, baseline reset there' in clause
-    assert 'switched' not in clause and 'UNKNOWN' not in clause
+    assert 'PM keychain weekly window changed (11:15 IST)' in clause
+    assert 'account changed' not in clause and 'UNKNOWN' not in clause
     cached = json.loads(state.read_text())['baselines'][ALIAS]
-    assert cached == {'from': '2026-11-17T05:45:00+00:00', 'ts': BASE + 5 * H, 'pct': 2.0, 'reset': rolled}
+    assert cached == {'from': '2026-11-17T05:45:00+00:00', 'ts': BASE + 5 * H, 'pct': 2.0, 'reset': rolled,
+                      'identity': composer._pace_ident('dev@scribie.com'), 'seen': BASE + 9 * H,
+                      'why': 'weekly window changed'}
+    assert 'dev@' not in state.read_text() and 'scribie' not in state.read_text()   # the tag, never the login
     again = _clause(_pace(tmp_path, rows, now, persist=False, config=cfg, state=state), 'Claude')
     assert again == clause                                                    # the cached restart baseline is stable
 
@@ -255,9 +265,111 @@ def test_keychain_alias_latest_configured_baseline_wins_and_other_keychain_rows_
     # 22% at 11:15 IST, (26-22)/3.0h = 1.33 %/h. Fable and 5h rows are not weekly keychain rows. No annotation.
     assert ('Claude keychain 26% used at 14:15 IST (sample 0.0h old), measured 1.33 %/h over 3.0h '
             'vs ceiling 3.84 %/h (to Wed 11-18 09:30 IST) → BELOW') in clause
-    assert 'switched' not in clause and 'reset stamp changed' not in clause and 'UNKNOWN' not in clause
+    assert 'PM keychain' not in clause and 'UNKNOWN' not in clause
     table = composer.pace_table(_at(now), snapshot=tmp_path / 'log.jsonl', config=cfg, state=tmp_path / 'state.json')
     assert 'Pace note: ' not in table and len(table.splitlines()) == 3
+
+
+def test_keychain_alias_a_to_b_to_a_restarts_at_each_switch_and_never_averages_across_accounts(tmp_path):
+    now = BASE + 9 * H
+    rows = [(BASE, KEYCHAIN_DEV, 40, WINDOW), (BASE + 2 * H, KEYCHAIN_DEV, 44, WINDOW),
+            (BASE + 3 * H, KEYCHAIN_RAJIV, 10, WINDOW), (BASE + 4 * H, KEYCHAIN_RAJIV, 11, WINDOW),   # same stamp: identity alone
+            (BASE + 5 * H, KEYCHAIN_DEV, 46, WINDOW), (BASE + 7 * H, KEYCHAIN_DEV, 48, WINDOW),       # A is back
+            (BASE + 9 * H, KEYCHAIN_DEV, 52, WINDOW)]
+    cfg, state = _alias_config(tmp_path / 'cfg.json'), tmp_path / 'state.json'
+    clause = _clause(_pace(tmp_path, rows, now, persist=True, config=cfg, state=state), 'Claude')
+    # baseline = the first sample of the SECOND A stint (46% at 11:15 IST): (52-46)/4.0h = 1.50 %/h; ceiling 48/18.25h.
+    assert 'Claude keychain 52% used at 15:15 IST (sample 0.0h old), measured 1.50 %/h over 4.0h' in clause
+    assert 'vs ceiling 2.63 %/h (to Wed 11-18 09:30 IST) → BELOW' in clause
+    assert 'PM keychain account changed (11:15 IST)' in clause and 'UNKNOWN' not in clause
+    table = composer.pace_table(_at(now), snapshot=tmp_path / 'log.jsonl', config=cfg, state=state)
+    assert _note_lines(table) == ['Pace note: PM keychain account changed (11:15 IST)'] and 'scribie' not in table
+    cached = json.loads(state.read_text())['baselines'][ALIAS]
+    assert cached['identity'] == composer._pace_ident('dev@scribie.com') and cached['ts'] == BASE + 5 * H
+
+
+def test_keychain_alias_failed_sample_right_after_a_switch_leaves_the_previous_login_ineligible(tmp_path):
+    cfg, state = _alias_config(tmp_path / 'cfg.json'), tmp_path / 'state.json'
+    before = [(BASE, KEYCHAIN_DEV, 40, WINDOW), (BASE + 1 * H, KEYCHAIN_DEV, 41, WINDOW), (BASE + 2 * H, KEYCHAIN_DEV, 42, WINDOW)]
+    _pace(tmp_path, before, BASE + 2 * H, persist=True, config=cfg, state=state)
+    cached = json.loads(state.read_text())['baselines'][ALIAS]
+    # The login switched; the next usage run wrote its other Claude rows (same ts) but its keychain read failed.
+    failed = [*before, (BASE + 3 * H, CLAUDE, 12, WINDOW_RAJIV)]
+    now = BASE + 3 * H
+    clause = _clause(_pace(tmp_path, failed, now, persist=True, config=cfg, state=state), 'Claude')
+    assert 'UNKNOWN (the latest usage run took no PM keychain sample, the previous sample is not used)' in clause
+    assert '42%' not in clause and 'BELOW' not in clause and 'ABOVE' not in clause
+    table = composer.pace_table(_at(now), snapshot=tmp_path / 'log.jsonl', config=cfg, state=state)
+    assert _cells(_pipe_row(table, 'Claude: PM pane (keychain)'))[1:] == ['UNKNOWN'] * 4
+    assert json.loads(state.read_text())['baselines'][ALIAS] == cached         # the baseline is kept, not dropped
+    # The following run samples the new login: a new segment starts there, visibly, with the old login's rows unused.
+    recovered = [*failed, (BASE + 4 * H, CLAUDE, 13, WINDOW_RAJIV), (BASE + 4 * H, KEYCHAIN_RAJIV, 15, WINDOW_RAJIV)]
+    table = composer.pace_table(_at(BASE + 4 * H), snapshot=_write_log(tmp_path / 'log.jsonl', recovered), config=cfg, state=state)
+    row = _cells(_pipe_row(table, 'Claude: PM pane (keychain)'))
+    assert row[1] == '15%' and row[2] == 'UNKNOWN'                             # baseline only 0.0h old: UNKNOWN, not 42%
+    assert 'Pace note: PM keychain account changed (10:15 IST)' in table.splitlines()
+    # The claimed producer's own usage run failed outright (no rows written): its caller says so, sample ineligible.
+    table = composer.pace_table(_at(BASE + 4 * H), snapshot=tmp_path / 'log.jsonl', config=cfg, state=state, sampled=False)
+    assert _cells(_pipe_row(table, 'Claude: PM pane (keychain)'))[1:] == ['UNKNOWN'] * 4
+    source = (ASSETS / 'pm/heartbeat/heartbeat-compose.py').read_text()
+    assert 'sampled=not any(f.startswith("usage:") for f in failures)' in source
+
+
+def test_keychain_alias_and_a_configured_concrete_key_each_read_the_same_sample_with_their_own_baseline(tmp_path):
+    now = BASE + 6 * H
+    rows = [(BASE, KEYCHAIN_DEV, 40, WINDOW), (BASE + 2 * H, KEYCHAIN_DEV, 46, WINDOW),
+            (BASE + 4 * H, KEYCHAIN_DEV, 48, WINDOW), (BASE + 6 * H, KEYCHAIN_DEV, 52, WINDOW)]
+    concrete = {'label': 'Claude', 'name': 'pinned', 'key': KEYCHAIN_DEV, 'horizon': CLAUDE_HORIZON,
+                'baseline_from': _iso(BASE + 2 * H), 'display': 'Claude: pinned account'}
+    cfg = _alias_config(tmp_path / 'cfg.json', extra=(concrete,))
+    table = composer.pace_table(_at(now), snapshot=_write_log(tmp_path / 'log.jsonl', rows), config=cfg,
+                                state=tmp_path / 'state.json')
+    alias_row = _cells(_pipe_row(table, 'Claude: PM pane (keychain)'))
+    pinned_row = _cells(_pipe_row(table, 'Claude: pinned account'))
+    assert alias_row[1] == pinned_row[1] == '52%'                              # the concrete row is never UNKNOWN
+    assert alias_row[2] == '2.00 ✅'                                            # (52-40)/6.0h from the configured BASE
+    assert pinned_row[2] == '1.50 ✅'                                           # (52-46)/4.0h from ITS baseline, +2h
+    assert 'UNKNOWN' not in table and 'Pace note: ' not in table
+
+
+def test_keychain_alias_trimming_the_boundary_keeps_the_cached_baseline_only_for_the_same_account(tmp_path):
+    cfg, state = _alias_config(tmp_path / 'cfg.json'), tmp_path / 'state.json'
+    full = [(BASE, KEYCHAIN_DEV, 40, WINDOW), (BASE + 1 * H, KEYCHAIN_DEV, 41, WINDOW),
+            (BASE + 2 * H, KEYCHAIN_RAJIV, 10, WINDOW_RAJIV), (BASE + 3 * H, KEYCHAIN_RAJIV, 11, WINDOW_RAJIV),
+            (BASE + 4 * H, KEYCHAIN_RAJIV, 13, WINDOW_RAJIV), (BASE + 5 * H, KEYCHAIN_RAJIV, 13, WINDOW_RAJIV),
+            (BASE + 6 * H, KEYCHAIN_RAJIV, 14, WINDOW_RAJIV)]
+    now = BASE + 6 * H
+    _pace(tmp_path, full, now, persist=True, config=cfg, state=state)
+    # (a) the log is trimmed past the switch and the baseline row: the cached baseline (same identity tag and window)
+    # is kept, so the rate is still (14-10)/4.0h and the note survives; a re-baseline would read (14-13)/2.0h = 0.50.
+    trimmed = [r for r in full if r[0] >= BASE + 4 * H]
+    clause = _clause(_pace(tmp_path, trimmed, now, config=cfg, state=state), 'Claude')
+    assert 'measured 1.00 %/h over 4.0h' in clause and 'PM keychain account changed (08:15 IST)' in clause
+    # (b) the CTO case: only the OTHER account's rows remain and its reset stamp EQUALS the cached one. The cache belongs
+    # to a different identity tag, so it is not reused: a new baseline starts at the first remaining sample, visibly.
+    state.unlink()
+    _pace(tmp_path, [(BASE, KEYCHAIN_DEV, 40, WINDOW), (BASE + 2 * H, KEYCHAIN_DEV, 43, WINDOW)], BASE + 2 * H,
+          persist=True, config=cfg, state=state)
+    only_b = [(BASE + 3 * H, KEYCHAIN_RAJIV, 20, WINDOW), (BASE + 4 * H, KEYCHAIN_RAJIV, 21, WINDOW),
+              (BASE + 5 * H, KEYCHAIN_RAJIV, 23, WINDOW)]
+    clause = _clause(_pace(tmp_path, only_b, BASE + 5 * H, config=cfg, state=state), 'Claude')
+    assert 'measured 1.50 %/h' in clause and 'usage fell' not in clause and 'UNKNOWN' not in clause
+    assert 'PM keychain account changed (09:15 IST)' in clause
+    # (c) rows trimmed past what the cache last saw cannot be tied to the cached segment: restart, visibly.
+    late = [(BASE + 9 * H, KEYCHAIN_DEV, 50, WINDOW), (BASE + 10 * H, KEYCHAIN_DEV, 51, WINDOW)]
+    clause = _clause(_pace(tmp_path, late, BASE + 10 * H, config=cfg, state=state), 'Claude')
+    assert 'PM keychain baseline restarted (15:15 IST)' in clause
+
+
+def test_keychain_alias_unknown_hour_without_a_live_reset_keeps_the_cached_baseline(tmp_path):
+    cfg, state = _alias_config(tmp_path / 'cfg.json'), tmp_path / 'state.json'
+    rows = [(BASE, KEYCHAIN_DEV, 40, WINDOW), (BASE + 2 * H, KEYCHAIN_DEV, 44, WINDOW)]
+    _pace(tmp_path, rows, BASE + 2 * H, persist=True, config=cfg, state=state)
+    cached = json.loads(state.read_text())['baselines'][ALIAS]
+    clause = _clause(_pace(tmp_path, [*rows, (BASE + 3 * H, KEYCHAIN_DEV, 45, None)], BASE + 3 * H,
+                           persist=True, config=cfg, state=state), 'Claude')
+    assert 'UNKNOWN (the sample has no live weekly reset' in clause
+    assert json.loads(state.read_text())['baselines'][ALIAS] == cached         # the producer no longer drops it
 
 
 # Fixed-time static fixture table (CTO proof request, ts 1794879652.704859). Times are UTC.
