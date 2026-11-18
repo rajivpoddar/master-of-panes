@@ -7,9 +7,14 @@ Paths covered:
 - raw/explicit and resumed Claude and Grok primaries skip proxy_agent_pick_tier; they now meet the same pool_blocked decision as the
   Codex and OpenCode primaries (router-equivalent identity, so a decorated or upper-case id is the same admission);
 - the non-enforced best-effort `fallback_last` never exports a pool-capped (or empty) id;
-- the DeepSeek emergency alias accepts only `P0:<digits>`, the shape every other override gate already requires.
+- the direct DeepSeek emergency route accepts only `P0:<digits>`, the shape every other override gate already requires, and the gate runs on
+  the canonical router identity (decorated, upper-case or padded ids included) BEFORE the dry-run return (CTO REVISE of fbdfbdc,
+  C0ALZJHGE49 thread 1795038046.056679, ts 1795038184.764339); the OpenCode Go id deepseek-v4.1-flash is not that route;
+- the read-only helper deny of pm-admit-ci.sh has no brief-marker grant (the _ADMIT_DISPATCH lift of 707e4c1 is gone), and the Codex
+  companion roles get runtime-state write paths only, never the shared config, routing files or auth store of ~/.codex-companions.
 Left as designed: the total and Claude-count checks stay telemetry (burn-rate caps, 1e4787f), and the continuation runner re-checks only OpenCode.
 """
+import json
 import os
 import re
 import subprocess
@@ -29,8 +34,8 @@ def _slice(start, end):
 # Tier lists, router identity, free-model guard, emergency gate and proxy_agent_pick_tier (burn / pool / probe helpers are stubbed below).
 PICKER = _slice('# OpenCode Go pool: hy4-flash-free', '# Ordinary burn gate for capped roles')
 GUARD = _slice('proxy_agent_primary_pool_guard() {', '# Primary burn check (CTO REVISE')
-# The launch-time arm (the resolve_model arm of the same name has code on its own line); ends at the unknown-model arm.
-DEEPSEEK_GATE = _slice('  deepseek|deepseek-flash-4.1)\n    # Emergencies only', '  *) echo "proxy-agent: model')
+# The direct DeepSeek gate: canonical-identity helper plus the P0:<digits> check, placed between proxy_agent_select and the dry-run return.
+DEEPSEEK_GATE = _slice('proxy_agent_is_direct_deepseek() {', '# A UTC-second stamp alone')
 
 STUBS = r'''
 TYPE=hd-builder
@@ -145,27 +150,100 @@ def test_the_fallback_check_sits_after_the_enforced_branch_and_before_the_export
     assert enforced < check < export
 
 
-# ---- DeepSeek emergency override validity -----------------------------------------------------------------------------
+# ---- direct DeepSeek emergency gate -------------------------------------------------------------------------------------
 
-def _gate(tmp_path, override):
-    body = f'MODEL=deepseek\ncase "$MODEL" in\n{DEEPSEEK_GATE}  *) ;;\nesac\necho passed\n'
+DIRECT_DEEPSEEK = ('deepseek', 'deepseek-flash-4.1', 'deepseek-flash', 'DeepSeek', 'deepseek(high)', 'deepseek-flash-4.1(high)',
+                   'DeepSeek-Flash-4.1(high)', 'deepseek-flash-4.1[1m]', ' deepseek-flash-4.1 ')
+
+
+def _gate(tmp_path, override, model='deepseek'):
+    body = STUBS + PICKER + f'MODEL={model!r}\n' + DEEPSEEK_GATE + 'echo passed\n'
     return _bash(body, tmp_path, {'PROXY_AGENT_CAP_OVERRIDE': override})
 
 
+@pytest.mark.parametrize('model', DIRECT_DEEPSEEK)
 @pytest.mark.parametrize('override', ('P0:14000', 'P0:1'))
-def test_deepseek_alias_accepts_a_valid_p0_override(tmp_path, override):
-    result = _gate(tmp_path, override)
+def test_direct_deepseek_accepts_a_valid_p0_override(tmp_path, model, override):
+    result = _gate(tmp_path, override, model)
     assert result.returncode == 0 and result.stdout.strip() == 'passed', result.stderr
     assert f'DeepSeek emergency route for {override}' in result.stderr
 
 
+@pytest.mark.parametrize('model', DIRECT_DEEPSEEK)
 @pytest.mark.parametrize('override', ('', 'P0:', 'P0:abc', 'P0:12 extra', 'P0:12x', 'p0:12', 'rajiv:1794806595.680589', 'P1:12', ' P0:12'))
-def test_deepseek_alias_refuses_an_invalid_override(tmp_path, override):
-    result = _gate(tmp_path, override)
+def test_direct_deepseek_refuses_an_invalid_override_in_every_decoration(tmp_path, model, override):
+    result = _gate(tmp_path, override, model)
     assert result.returncode == 2 and 'passed' not in result.stdout
     assert 'deepseek_requires_p0_override' in result.stderr
+
+
+@pytest.mark.parametrize('model', ('deepseek-v4.1-flash', 'deepseek-v4.1-flash(high)', 'Deepseek-V4.1-Flash', 'glm-5.3', 'claude-sonnet-5-5'))
+def test_the_opencode_flash_id_and_other_models_are_not_the_direct_deepseek_route(tmp_path, model):
+    result = _gate(tmp_path, '', model)
+    assert result.returncode == 0 and result.stdout.strip() == 'passed', result.stderr
+    assert 'DeepSeek emergency route' not in result.stderr
+
+
+def test_the_deepseek_gate_runs_before_the_dry_run_return_and_exists_once():
+    assert SRC.index('if proxy_agent_is_direct_deepseek "$MODEL"; then') < SRC.index(
+        'if [[ "${PROXY_AGENT_DRY_RUN:-}" == "1" ]]; then\n  proxy_agent_print_selection')
+    assert SRC.count('deepseek_requires_p0_override') == 1
 
 
 def test_the_deepseek_gate_has_no_wildcard_p0_arm():
     assert not re.search(r'^\s+P0:\*\)', SRC, re.M)
     assert 'P0:[0-9]+$ ]]; then' in DEEPSEEK_GATE
+
+
+# ---- read-only admission denial and companion write scope (CTO REVISE of 707e4c1) ---------------------------------------
+
+CODEX_HOME = '/Users/rajiv/.codex-companions'
+# Shared model/routing config, auth store and prompt-bearing state: never in a lane's write set.
+SHARED_CONFIG = ('config.toml', 'auth.json', 'auth.json.symlink-target.bak', 'codex-router/merged-models.json',
+                 'codex-router/model-picker.json', 'models_cache.json', 'rules', 'skills', 'plugins', 'agents',
+                 'memories/MEMORY.md', 'RUNBOOK.md')
+
+
+def _settings_script():
+    start = SRC.index('HELPER_READONLY="$_HELPER_READONLY" PROXY_AGENT_TYPE_FOR_SANDBOX')
+    body = SRC.index("<<'PY'\n", start) + len("<<'PY'\n")
+    return SRC[body:SRC.index('\nPY\n', body) + 1]
+
+
+def _settings(tmp_path, role, helper_readonly):
+    out = tmp_path / 'settings.json'
+    env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': str(tmp_path), 'PROXY_AGENT_SANDBOX': '1',
+           'HELPER_READONLY': '1' if helper_readonly else '0', 'PROXY_AGENT_TYPE_FOR_SANDBOX': role}
+    result = subprocess.run(['python3', '-I', '-', str(tmp_path / 'missing-settings.json'), str(out)],
+                            input=_settings_script(), capture_output=True, text=True, env=env)
+    assert result.returncode == 0, result.stderr
+    return json.loads(out.read_text())
+
+
+def _covered(path, allow):
+    return any(path == a or path.startswith(a.rstrip('/') + '/') for a in allow)
+
+
+@pytest.mark.parametrize('role', ('hd-builder', 'codex-code-reviewer', 'pm-ops-tooling', 'claude'))
+def test_read_only_helpers_stay_denied_pm_admit_ci_with_no_override_variant(tmp_path, role):
+    deny = _settings(tmp_path, role, helper_readonly=True)['permissions']['deny']
+    assert 'Bash(*pm-admit-ci.sh*)' in deny
+    assert not any('--no-12b-gate' in d or '--force-ci' in d or '--reason' in d for d in deny)
+
+
+def test_there_is_no_brief_marker_grant_for_ci_admission():
+    assert 'ADMIT_DISPATCH' not in SRC
+
+
+@pytest.mark.parametrize('role', ('hd-builder', 'hd-planner', 'codex-code-reviewer', 'pm-proof-qa'))
+def test_companion_roles_write_runtime_state_only_never_shared_config_or_auth(tmp_path, role):
+    allow = _settings(tmp_path, role, helper_readonly=False)['sandbox']['filesystem']['allowWrite']
+    assert CODEX_HOME not in allow
+    assert _covered(CODEX_HOME + '/sqlite/codex-dev.db', allow) and _covered(CODEX_HOME + '/sessions/x.jsonl', allow)
+    for rel in SHARED_CONFIG:
+        assert not _covered(CODEX_HOME + '/' + rel, allow), rel
+
+
+def test_other_roles_get_no_companion_write_path(tmp_path):
+    allow = _settings(tmp_path, 'claude', helper_readonly=False)['sandbox']['filesystem']['allowWrite']
+    assert not any(a.startswith(CODEX_HOME) for a in allow)

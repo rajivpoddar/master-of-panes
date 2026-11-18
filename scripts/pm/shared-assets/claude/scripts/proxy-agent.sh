@@ -1909,6 +1909,28 @@ proxy_agent_print_selection() {
 
 proxy_agent_resolve_type
 proxy_agent_select || exit 75  # includes the primary burn check (proxy_agent_primary_burn_check), before alias probes
+# Direct DeepSeek emergency gate, on the CANONICAL router identity and BEFORE the dry-run return (CTO REVISE of fbdfbdc, C0ALZJHGE49
+# thread 1795038046.056679, ts 1795038184.764339). The earlier gate matched the raw $MODEL after the dry-run exit, so a supported suffix
+# (`deepseek-flash-4.1(high)`, `[1m]`), other case or padding skipped it while CLIProxyAPI still routed to the same direct, balance-metered
+# `deepseek-api` upstream, and a dry run reported a selection the real launch would refuse. The identity is the router's own
+# (proxy_agent_router_identity: lowercase, cut at the first `(` or `[`, trim); `deepseek-flash` is that upstream's own model name (deny side,
+# over-matching only refuses more). `deepseek-v4.1-flash` is the OpenCode Go MID entry, a different id: it is not matched here and keeps its
+# OpenCode pool-cap path. Emergencies only (Rajiv D0AMF0XE6TS ts 1794806595.680589): the override must be `P0:<digits>`, the same shape
+# proxy_agent_cap_exempt, the total-cap gate and proxy-burn-shadow.py require.
+proxy_agent_is_direct_deepseek() {
+  local ident rid
+  ident="$(proxy_agent_router_identity "$1")"
+  case "$ident" in deepseek|deepseek-flash|deepseek-flash-4.1) return 0;; esac
+  read -r rid _ < <(resolve_model "$ident")
+  [[ "$rid" == deepseek-flash-4.1 ]]
+}
+if proxy_agent_is_direct_deepseek "$MODEL"; then
+  if [[ "${PROXY_AGENT_CAP_OVERRIDE:-}" =~ ^P0:[0-9]+$ ]]; then
+    echo "proxy-agent: DeepSeek emergency route for ${PROXY_AGENT_CAP_OVERRIDE}" >&2
+  else
+    echo "PROXY_AGENT_FAILED reason=deepseek_requires_p0_override (set PROXY_AGENT_CAP_OVERRIDE=P0:<issue>)" >&2; exit 2
+  fi
+fi
 # A UTC-second stamp alone is not unique: several same-type proxies started in
 # one second overwrite one markdown file, and delivery/jsonl follow that name.
 # PROXY_AGENT_NAME (sanitized) plus this process id keeps concurrent launches apart.
@@ -1993,15 +2015,7 @@ proxy_agent_log_emergency_muse opus "${OPUS_MODEL:-}"
 case "$MODEL" in
   ag-opus|ag-sonnet|luna|terra|sol|astra|grok|hydrogen|ernie|gemini-pro|gemini-flash|gpt-6-luna|gpt-6.1-terra|gpt-6.1-sol|gpt-6.2-sol|gpt-6-astra|grok-4.7|gemini-4-argon-high|gemini-3.8-flash-high|gemini-4-hydrogen-xhigh|claude-opus-5-5-high|claude-sonnet-5-5-high|haiku|sonnet|opus|fable|claude-haiku-5-5|claude-sonnet-5-5|claude-opus-5-5|claude-fable-5-2) ;;
   hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor) ;;  # OpenCode Go via CLIProxyAPI; conservative 200000/32000 window until a source is added
-  deepseek|deepseek-flash-4.1)
-    # Emergencies only: explicit --model plus a P0 cap override (Rajiv D0AMF0XE6TS ts 1794806595.680589).
-    # Valid override only (MoP proxy cap repair 2026-11-19): the glob `P0:*` accepted `P0:`, `P0:abc` and `P0:1 anything`, while every other
-    # override gate (proxy_agent_cap_exempt, the total-cap gate, proxy-burn-shadow.py) requires `P0:<digits>`. Same shape here, no wildcard.
-    if [[ "${PROXY_AGENT_CAP_OVERRIDE:-}" =~ ^P0:[0-9]+$ ]]; then
-      echo "proxy-agent: DeepSeek emergency route for ${PROXY_AGENT_CAP_OVERRIDE}" >&2
-    else
-      echo "PROXY_AGENT_FAILED reason=deepseek_requires_p0_override (set PROXY_AGENT_CAP_OVERRIDE=P0:<issue>)" >&2; exit 2
-    fi;;
+  deepseek|deepseek-flash-4.1) ;;  # direct DeepSeek: the P0:<digits> gate (canonical identity, decorated forms included) runs before the dry-run return above
   *) echo "proxy-agent: model '$MODEL' not in alias table; using 200000-token window (warning)" >&2;;
 esac
 # Auto-compact window is capped by Claude Code at 1,000,000 tokens.
@@ -2050,13 +2064,10 @@ SAFETY_SETTINGS="$(mktemp "${TMPDIR:-/tmp}/proxy-agent-safety.XXXXXX")"
 # helper ran an unauthorized "gh run rerun" for #13844 (Rajiv D0AMF0XE6TS 1794787507.634289; PM trace 12:10 IST).
 _HELPER_READONLY=0
 if [[ "${PROXY_AGENT_NAME:-}" == *heartbeat* || "${PROXY_AGENT_NAME:-}" == *hourly* ]] || head -1 "$PROMPT_FILE" 2>/dev/null | grep -qiE '^MODE:[[:space:]]*(heartbeat|hourly)'; then _HELPER_READONLY=1; fi
-# PM admission dispatch (adm<PR> lanes) uses a "MODE: heartbeat-style single task (PM admission dispatch)" brief, so it matched the
-# heartbeat read-only denies and could not run ~/.claude/scripts/ci/pm-admit-ci.sh (adm14103, 2026-11-19: "Bash permission denied by
-# the harness"; deny source = the Bash(*pm-admit-ci.sh*) rule below). Only that exact first-line marker lifts that ONE deny, and the
-# override flags stay denied (see ADMIT_DISPATCH below). Real heartbeat/hourly lanes keep the full deny. 2026-11-19 pm-ops-tooling.
-_ADMIT_DISPATCH=0
-if [[ "$_HELPER_READONLY" == 1 ]] && head -1 "$PROMPT_FILE" 2>/dev/null | grep -qiE '^MODE:[[:space:]]*heartbeat-style single task[[:space:]]*\(PM admission dispatch\)'; then _ADMIT_DISPATCH=1; fi
-HELPER_READONLY="$_HELPER_READONLY" ADMIT_DISPATCH="$_ADMIT_DISPATCH" PROXY_AGENT_TYPE_FOR_SANDBOX="$TYPE" PROXY_AGENT_SANDBOX="${PROXY_AGENT_SANDBOX:-1}" python3 - "/Users/rajiv/Downloads/projects/heydonna-app/.claude/settings.json" "$SAFETY_SETTINGS" <<'PY'
+# No PM-admission grant here (CTO REVISE of 707e4c1, C0ALZJHGE49 thread 1795038046.056679, ts 1795038184.764339): a brief's first line is
+# lane-authored text, so it cannot lift the read-only lane's CI admission deny. Read-only helpers stay denied pm-admit-ci.sh; admission runs
+# through the existing trusted owner (the PM pane or its in-process agent), never a read-only proxy lane.
+HELPER_READONLY="$_HELPER_READONLY" PROXY_AGENT_TYPE_FOR_SANDBOX="$TYPE" PROXY_AGENT_SANDBOX="${PROXY_AGENT_SANDBOX:-1}" python3 - "/Users/rajiv/Downloads/projects/heydonna-app/.claude/settings.json" "$SAFETY_SETTINGS" <<'PY'
 import json, sys
 src, out = sys.argv[1], sys.argv[2]
 want = ("block-cto-mention-without-ladder", "block-invalid-backlog-issue-create",
@@ -2084,15 +2095,7 @@ deny += ["Bash(ssh *localhost*)", "Bash(ssh *127.0.0.1*)", "Bash(ssh *::1*)", "B
 if os.environ.get("HELPER_READONLY") == "1":
     deny += ["Bash(gh run rerun*)", "Bash(gh run cancel*)", "Bash(gh workflow run*)",
              "Bash(gh pr ready*)", "Bash(gh pr close*)", "Bash(gh pr edit*)",
-             "Bash(git push*)"]
-    if os.environ.get("ADMIT_DISPATCH") == "1":
-        # PM admission dispatch: allow `pm-admit-ci.sh <PR>` (plus its read-only/no-op modes) but keep every override
-        # flag of the script denied, so the lane can only run the standard admission.
-        deny += ["Bash(*pm-admit-ci.sh*--no-12b-gate*)", "Bash(*pm-admit-ci.sh*--skip-related-tests*)",
-                 "Bash(*pm-admit-ci.sh*--force-ci*)", "Bash(*pm-admit-ci.sh*--allow-main-red*)",
-                 "Bash(*pm-admit-ci.sh*--reason*)"]
-    else:
-        deny += ["Bash(*pm-admit-ci.sh*)"]
+             "Bash(*pm-admit-ci.sh*)", "Bash(git push*)"]
 # Bash sandbox for proxy agents only (this --settings file). Not the PM pane.
 # Rajiv DM D0AMF0XE6TS thread 1795004502.133389, ts 1795006580.326659; layer 2 approved
 # ("ok", ts 1795011133.027879): agents must not delete directories with Python shutil.
@@ -2124,10 +2127,24 @@ allow_write = [
 # state there. Only the roles that run the companion get it; nothing else is widened. Its other writes already fit the list above
 # (markers under /tmp/codex-app-*.txt and /tmp/codex-review-companion, plan history under ~/.claude/state/codex-review-companion);
 # the skill dir is read-only. ~/.codex (auth.json symlink target) is NOT writable: no credential-store write access.
+# CTO REVISE of 707e4c1 (C0ALZJHGE49 thread 1795038046.056679, ts 1795038184.764339): that first grant covered the WHOLE home, which also holds
+# the shared model/routing config (config.toml, codex-router/, models_cache.json), the auth store (auth.json symlink and its backups),
+# the rules/skills/plugins links, memories/, agents/ and RUNBOOK.md, so any planner/builder/reviewer lane could rewrite the model, effort or
+# sandbox mode every companion review runs under, or swap the auth link. The grant is now RUNTIME STATE ONLY: the directories the app-server
+# creates files in while it runs, its root-level sqlite stores (+ WAL/SHM siblings), the session index and its lock files. Anything not listed
+# stays read-only; if a companion run hits EPERM on another runtime path, add that exact path here, never the home or a config path.
 _COMPANION_ROLES = ("codex-diag-reviewer", "codex-plan-reviewer", "codex-code-reviewer", "codex-qa-reviewer",
                     "codex-arch-reviewer", "hd-planner", "hd-builder", "hd-proof-qa", "pm-hotfix", "pm-proof-qa")
 if os.environ.get("PROXY_AGENT_TYPE_FOR_SANDBOX", "") in _COMPANION_ROLES:
-    allow_write.append("/Users/rajiv/.codex-companions")
+    import glob
+    _ch = "/Users/rajiv/.codex-companions"
+    allow_write += [_ch + "/" + _d for _d in ("sqlite", "sessions", "shell_snapshots", "thread-writer-locks", "log", "ipc", "tmp",
+                                              "cache", "rollout-migrations")]
+    # Root-level stores carry a schema version in the name (state_5, logs_2, ...), so enumerate what exists at launch time.
+    for _db in sorted(glob.glob(_ch + "/*.sqlite")):
+        allow_write += [_db, _db + "-wal", _db + "-shm"]
+    allow_write += [_ch + "/session_index.jsonl", _ch + "/.sqlite-maintenance.lock"]
+    allow_write += [_ch + "/.tmp/" + _n for _n in ("plugins.sync.lock", "rollout-compression.lock", "rollout-maintenance.lock")]
 excluded_commands = [
     "~/.claude/scripts/remote-test-box.sh *",
     "/Users/rajiv/.claude/scripts/remote-test-box.sh *",
