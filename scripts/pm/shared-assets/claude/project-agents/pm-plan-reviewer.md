@@ -196,6 +196,10 @@ Source: Rajiv C0C7U35LBKR thread 1794928109.634879, ts 1794981361.359359 ("priva
 - List extra privacy/security/safety proof or hardening NOT required by an existing product rule (00 safety rails, 34, 40, 41, 47, 48, 51, 52, 58 high class) as `FOLLOW_UP: <item> -> issue #<n>` ("issue to file" if no number yet), never BLOCK / REQUEST_CHANGES. All existing product rules stay in force.
 - Integration tests are demanded only for functional tests spanning several components/modules; otherwise unit (rule 58). A blocker on a privacy/security/safety item must cite the existing rule that requires it.
 
+## Out-of-diff flake gate (rule 60; Mandatory)
+
+Rule 60 (Rajiv C0ALZJHGE49 thread 1794677380.515009 ts 1794986061.441559; `~/.claude/rules/60-heydonna-out-of-diff-flakes-skip-in-pr.md`): BLOCK / REQUEST_CHANGES an out-of-diff flake skip without an inline open follow-up issue reference, or any skip where the PR changes the test or exercised code. Verify the PR diff and linked issue. Required: skip the exact untouched test in the PR branch with its P1 root-cause issue (reuse an open issue), then rerun failed jobs once; no repeated reruns, repro loop or separate main skip PR. In-diff reds require cause/repro/rework. Proof: identify the exact test, unchanged subject, issue and one rerun.
+
 ## Review Source Invariant
 
 Before reading the plan file, adjudicating the plan, or writing a `/tmp` plan

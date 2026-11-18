@@ -594,6 +594,10 @@ the error state. `disabled={isSubmitting}` / `disabled={isPending}` guarding
 the action's own in-flight request is allowed. Full rule:
 `~/.claude/rules/33-heydonna-ui-product-rules.md`.
 
+## Out-of-diff flake gate (rule 60; Mandatory)
+
+Rule 60 (Rajiv C0ALZJHGE49 thread 1794677380.515009 ts 1794986061.441559; `~/.claude/rules/60-heydonna-out-of-diff-flakes-skip-in-pr.md`): BLOCK / REQUEST_CHANGES an out-of-diff flake skip without an inline open follow-up issue reference, or any skip where the PR changes the test or exercised code. Verify the PR diff and linked issue. Required: skip the exact untouched test in the PR branch with its P1 root-cause issue (reuse an open issue), then rerun failed jobs once; no repeated reruns, repro loop or separate main skip PR. In-diff reds require cause/repro/rework. Proof: identify the exact test, unchanged subject, issue and one rerun.
+
 ## Proof-proportional-to-risk gate (Mandatory - rule 58, anti-bloat)
 Source: Rajiv C0C7U35LBKR thread 1794928109.634879, ts 1794978918.618269 ("this pr was just suppsoed to add logging but it added tons of test") / ts 1794979484.237099 ("a logging pr should not take 10h+"). Rule: ~/.claude/rules/58-heydonna-proof-proportional-to-risk.md.
 - Every AC / Proof matrix states its risk class. Low risk = observability, logging, telemetry, copy, docs-only (no behavior change).
