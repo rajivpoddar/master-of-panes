@@ -39,7 +39,13 @@ _REVIEW_GATE_SPEC.loader.exec_module(_REVIEW_GATE)
 
 
 def _memoize(fn):
-    """Batch identical successful reads for this process. Failures are not cached."""
+    """Batch identical successful reads for this process.
+
+    None is an unresolved lookup (resolve_commit fail-closed on timeout or
+    miss). It is not cached, so a later call in this run can retry. Raised
+    failures are not cached either. Definite values, including False, stay
+    cached.
+    """
     cache = {}
     lock = threading.Lock()
 
@@ -52,6 +58,8 @@ def _memoize(fn):
             if key in cache:
                 return cache[key]
         value = fn(*args, **kwargs)
+        if value is None:
+            return None
         with lock:
             return cache.setdefault(key, value)
 
@@ -413,10 +421,12 @@ def _latest_12b_verdict(pr: dict, head: str, authorized_login: str | None = None
         # Missing authority or unavailable carry-forward evidence never grants 12b.
         # Do not cache: a later call in this run must be able to retry.
         return None
-    if key is not None:
-        with _VERDICT_LOCK:
-            return _VERDICT_CACHE.setdefault(key, result)
-    return result
+    # None is indeterminate (unresolved lookup or no usable marker). Caching it
+    # would hide a later exact-head BLOCK for the rest of the run.
+    if result is None or key is None:
+        return result
+    with _VERDICT_LOCK:
+        return _VERDICT_CACHE.setdefault(key, result)
 
 
 def _has_12b_block(pr: dict, head: str) -> bool:
