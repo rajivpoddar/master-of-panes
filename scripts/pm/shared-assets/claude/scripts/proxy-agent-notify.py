@@ -144,6 +144,10 @@ def lookup_thread(issue: str, pr: str | None) -> tuple[str, str] | None:
 
 
 def post(channel: str, thread_ts: str, body: str) -> bool:
+    # Rajiv DM D0AMF0XE6TS ts 1794992065.308419: "remove the slack alert from the proxy assign
+    # script. it's causing too much noise." Proxy launch/stop lines are no longer posted to Slack.
+    log("skip reason=slack_alerts_removed_rajiv_1794992065")
+    return False
     if not thread_target_ok(channel, thread_ts):
         log("skip reason=target_refused")
         return False
