@@ -3460,31 +3460,35 @@ def opencode_line(now: datetime, caps: Path = PROXY_CAPS_FILE, root: Path = PROX
 
 EXPIRED_REMINDERS_LABEL = "*Expired reminders (48h):*"
 MAX_EXPIRED_REMINDERS = 6
+# Same grammar as alertReminders KEY_RE (max 80). A displayed key is copied into a renewal, so it is the full
+# validated key or it is not shown. Never a sanitised or truncated prefix (CTO REVISE ts 1794992303.632879).
+REMINDER_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$")
 
 
 def render_expired_reminders(doc) -> str:
     """One line for MoP's expired-without-stop-obligation reminders (CTO ask C0ALZJHGE49 thread 1794990919.983979).
 
-    Pure. Each row is the key, the time the scheduler MARKED it expired (`updated_at`, IST; a delayed tick makes this
-    later than the scheduled cutoff) and "no stop obligation". An empty successful list is "none". Anything that is
-    not a well-formed success document is "listing unavailable": a failed read is never rendered as "none", and a row
-    that already carries a stop obligation breaks the endpoint contract and is never labelled "no stop obligation".
+    Pure. Each row is the full validated key as inline code, then "marked expired <IST>" (`updated_at`; a delayed
+    tick makes this later than the scheduled cutoff). An empty successful list is "none". Anything that is not a
+    well-formed success document is "listing unavailable": a failed read is never rendered as "none", a row that
+    already carries a stop obligation is never labelled as having none, and a key outside the reminder grammar
+    (including anything longer than 80 characters) is never rewritten into a shorter lookalike key.
     """
     rows = doc.get("reminders") if isinstance(doc, dict) and doc.get("success") is True else None
     if not isinstance(rows, list) or any(
-            not isinstance(r, dict) or not isinstance(r.get("key"), str) or not r["key"]
+            not isinstance(r, dict) or not isinstance(r.get("key"), str) or REMINDER_KEY_RE.fullmatch(r["key"]) is None
             or r.get("stop_obligation_id") is not None for r in rows):
         return f"{EXPIRED_REMINDERS_LABEL} listing unavailable"
     if not rows:
         return f"{EXPIRED_REMINDERS_LABEL} none"
     shown = []
     for row in rows[:MAX_EXPIRED_REMINDERS]:
-        key = re.sub(r"[^\w.:#/+-]", "-", row["key"])[:60]  # no '@' mentions, backticks or mrkdwn from a key
+        key = row["key"]
         try:
             at = _ist(datetime.fromisoformat(str(row.get("updated_at")).replace("Z", "+00:00")).timestamp())
         except (TypeError, ValueError):
             at = "at an unknown time"
-        shown.append(f"{key} expired {at}, no stop obligation")
+        shown.append(f"`{key}` marked expired {at}")
     more = len(rows) - len(shown)
     return f"{EXPIRED_REMINDERS_LABEL} " + "; ".join(shown) + (f"; +{more} more" if more else "")
 

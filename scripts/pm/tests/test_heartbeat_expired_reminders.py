@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Hourly report: expired-reminder line (CTO ask C0ALZJHGE49 thread 1794990919.983979, ts 1794991008.258509 / 1794991173.488999).
 
-Source: MoP 3f4be39 `GET /alert-reminders?expired_since=48h`. Each row shows the key, the time the scheduler MARKED it
-expired (`updated_at`, IST) and "no stop obligation". "none" (empty successful list) is distinct from "listing
-unavailable" (failed or malformed read).
+Source: MoP 3f4be39 `GET /alert-reminders?expired_since=48h`. Each row shows the full validated key (up to 80
+characters, the reminder grammar) as inline code and "marked expired <IST>" (`updated_at`). CTO REVISE ts
+1794992303.632879: no 60-character cut. "none" (empty successful list) is distinct from "listing unavailable"
+(failed, malformed, or a key that cannot be shown unchanged).
 """
 import importlib.util
 import json
@@ -60,8 +61,8 @@ class RenderTests(unittest.TestCase):
             row('practice-pilot-hourly-dev', '2026-11-17T07:22:24.821Z', '2026-11-17T07:22:09.792Z'),
             row('p1-13062-hourly', '2026-11-16T13:55:09.438Z', '2026-11-16T14:53:34.000Z')))
         self.assertTrue(line.startswith(LABEL))
-        self.assertIn('practice-pilot-hourly-dev expired Tue 12:52 IST, no stop obligation', line)
-        self.assertIn('p1-13062-hourly expired Mon 19:25 IST, no stop obligation', line)
+        self.assertIn('`practice-pilot-hourly-dev` marked expired Tue 12:52 IST', line)
+        self.assertIn('`p1-13062-hourly` marked expired Mon 19:25 IST', line)
 
     def test_time_is_when_the_scheduler_marked_it_expired_not_the_scheduled_cutoff(self):
         # A delayed tick: until_at 14:53:34Z (20:23 IST) is later than the mark at 13:55:09Z (19:25 IST) here.
@@ -71,19 +72,34 @@ class RenderTests(unittest.TestCase):
 
     def test_unparseable_updated_at_is_labelled_not_guessed(self):
         line = m.render_expired_reminders(ok(row('k', 'not-a-time'), row('j', None)))
-        self.assertIn('k expired at an unknown time, no stop obligation', line)
-        self.assertIn('j expired at an unknown time, no stop obligation', line)
+        self.assertIn('`k` marked expired at an unknown time', line)
+        self.assertIn('`j` marked expired at an unknown time', line)
 
     def test_key_cannot_inject_mentions_or_markup(self):
         line = m.render_expired_reminders(ok(row('<@U0BNFGX2UAX> `x` *b*', '2026-11-17T07:22:24Z')))
-        for bad in ('@', '<', '>', '`', '*b*'):
-            self.assertNotIn(bad, line.split(LABEL, 1)[1])
+        self.assertEqual(line, f'{LABEL} listing unavailable')
+        for bad in ('@', '<', '>', '*b*', 'U0BNFGX2UAX'):
+            self.assertNotIn(bad, line)
+
+    def test_full_validated_key_is_inline_code_with_no_60_char_cut(self):
+        # Two 80-character keys that share a 60-character prefix must both be copyable in full.
+        prefix = 'k' * 60
+        first = prefix + 'A' * 20
+        second = prefix + 'B' * 20
+        line = m.render_expired_reminders(ok(
+            row(first, '2026-11-17T07:22:24Z'), row(second, '2026-11-17T07:22:24Z')))
+        self.assertIn(f'`{first}` marked expired Tue 12:52 IST', line)
+        self.assertIn(f'`{second}` marked expired Tue 12:52 IST', line)
+        self.assertNotIn('…', line)
+        overlong = m.render_expired_reminders(ok(row('k' * 81, '2026-11-17T07:22:24Z')))
+        self.assertEqual(overlong, f'{LABEL} listing unavailable')
+        self.assertNotIn('k' * 60, overlong)
 
     def test_many_rows_are_capped_with_a_count(self):
         rows = [row(f'k{i}', '2026-11-17T07:22:24Z') for i in range(m.MAX_EXPIRED_REMINDERS + 2)]
         line = m.render_expired_reminders(ok(*rows))
         self.assertIn('; +2 more', line)
-        self.assertEqual(line.count('no stop obligation'), m.MAX_EXPIRED_REMINDERS)
+        self.assertEqual(line.count('marked expired'), m.MAX_EXPIRED_REMINDERS)
 
     def test_failed_or_malformed_documents_say_listing_unavailable_never_none(self):
         bad_docs = [
@@ -114,7 +130,7 @@ class RenderTests(unittest.TestCase):
 class CollectorTests(unittest.TestCase):
     def test_reads_rows_over_http(self):
         body = json.dumps(ok(row('p1-13062-hourly', '2026-11-16T13:55:09.438Z'))).encode()
-        self.assertIn('p1-13062-hourly expired Mon 19:25 IST, no stop obligation', read_with(body))
+        self.assertIn('`p1-13062-hourly` marked expired Mon 19:25 IST', read_with(body))
 
     def test_empty_list_over_http_says_none(self):
         self.assertEqual(read_with(json.dumps(ok()).encode()), f'{LABEL} none')
@@ -146,7 +162,7 @@ class CollectorTests(unittest.TestCase):
 
 class ComposeWiringTests(unittest.TestCase):
     NOW = datetime(2026, 11, 18, 4, 0, tzinfo=timezone.utc)
-    LINE = f'{LABEL} p1-13062-hourly expired Mon 19:25 IST, no stop obligation'
+    LINE = f'{LABEL} `p1-13062-hourly` marked expired Mon 19:25 IST'
 
     def compose(self, mode, **kw):
         return m.compose(mode, self.NOW, {'top': [], 'all_codes': [], 'total': 0}, {}, [], **kw)
