@@ -38,7 +38,9 @@ def _slice(start, end):
 PICKER = _slice('# OpenCode Go pool: hy4-flash-free', '# Ordinary burn gate for capped roles')
 PICK_FN = _slice('proxy_agent_pick_tier() {', '# Ordinary burn gate for capped roles')
 # proxy_agent_cap_exempt, proxy_agent_pool_live, proxy_agent_pool_blocked.
-CAPS = _slice('proxy_agent_cap_exempt() {', '# Final-primary OpenCode guard')
+# Admission canonicalizes through proxy_agent_router_identity, which sits above the cap helpers.
+CAPS = (_slice('proxy_agent_router_identity() {', '# The two restricted upstreams')
+        + _slice('proxy_agent_cap_exempt() {', '# Final-primary OpenCode guard'))
 GUARD = _slice('proxy_agent_primary_pool_guard() {', '# Primary burn check (CTO REVISE')
 SELECT = _slice('proxy_agent_select() {', '# Model table: alias')
 LOG_FN = _slice('proxy_agent_log_emergency_muse() {', 'proxy_agent_log_emergency_muse primary')
@@ -430,12 +432,77 @@ def test_cap_zero_turns_the_pool_off_even_when_the_process_list_is_unreadable(tm
         probe = f'proxy_agent_pool_blocked {model} && echo blocked || echo free\n'
         zero = _bash(base + probe, tmp_path, {'OPENCODE_PROXY_CAP': '0'})
         assert zero.stdout.strip() == 'blocked', (model, zero.stderr)
-        # Any other numeric cap with an unreadable count keeps the existing fail-open behaviour.
+        # CTO REVISE ts 1795010788.320629: an unreadable OpenCode count skips the id (blocked), it does not fail open.
         three = _bash(base + probe, tmp_path, {'OPENCODE_PROXY_CAP': '3'})
-        assert three.stdout.strip() == 'free', (model, three.stderr)
+        assert three.stdout.strip() == 'blocked', (model, three.stderr)
+        assert 'pool_cap UNAVAILABLE pool=opencode' in three.stderr
     other = _bash(base + 'proxy_agent_pool_blocked claude-haiku-5-5 && echo blocked || echo free\n', tmp_path,
                   {'CLAUDE_PROXY_CAP': '0'})
     assert other.stdout.strip() == 'free', other.stderr
+
+
+def test_decorated_opencode_id_uses_the_same_cap_as_the_canonical_id(tmp_path):
+    # CTO REVISE ts 1795010788.320629: admission matches the router identity, not the literal argv string.
+    base = 'TYPE=hd-builder\nROLE_BRIEF=\nPROXY_AGENT_CAP_OVERRIDE=\n' + CAPS
+    full = _bash(base + f"proxy_agent_pool_blocked '{DEEPSEEK}(high)' && echo blocked || echo free\n",
+                 tmp_path, {'PROXY_AGENT_STUB_POOL_LIVE': '2', 'OPENCODE_PROXY_CAP': '2'})
+    assert full.stdout.strip() == 'blocked', full.stderr
+    room = _bash(base + f"proxy_agent_pool_blocked '{DEEPSEEK}[1m]' && echo blocked || echo free\n",
+                 tmp_path, {'PROXY_AGENT_STUB_POOL_LIVE': '1', 'OPENCODE_PROXY_CAP': '2'})
+    assert room.stdout.strip() == 'free', room.stderr
+    glm = _bash(base + "proxy_agent_pool_blocked 'GLM-5.3(low)' && echo blocked || echo free\n",
+                tmp_path, {'PROXY_AGENT_STUB_POOL_LIVE': '2'})
+    assert glm.stdout.strip() == 'blocked', glm.stderr
+    exempt = _bash('TYPE=ci-repair-agent\n' + base.replace('TYPE=hd-builder\n', '', 1)
+                   + "proxy_agent_pool_blocked 'deepseek-v4.1-flash(high)' && echo blocked || echo free\n",
+                   tmp_path, {'PROXY_AGENT_STUB_POOL_LIVE': '2', 'OPENCODE_PROXY_CAP': '2'})
+    assert exempt.stdout.strip() == 'blocked', exempt.stderr
+    claude = _bash('TYPE=ci-repair-agent\nROLE_BRIEF=\nPROXY_AGENT_CAP_OVERRIDE=\n' + CAPS
+                   + "proxy_agent_pool_blocked 'claude-sonnet-5-5[1m]' && echo blocked || echo free\n",
+                   tmp_path, {'PROXY_AGENT_STUB_POOL_LIVE': '9', 'CLAUDE_PROXY_CAP': '1'})
+    assert claude.stdout.strip() == 'free', claude.stderr
+
+
+def test_unavailable_opencode_count_falls_through_to_the_next_route(tmp_path):
+    body = (
+        'TYPE=hd-builder\nROLE_BRIEF=\nPROXY_AGENT_CAP_OVERRIDE=\n'
+        'proxy_agent_is_capped() { return 1; }\n'
+        'proxy_agent_burn_refused() { return 1; }\n'
+        'proxy_agent_sub_usable() { [[ "$1" == claude-sonnet-5-5 ]] && return 1; return 0; }\n'
+        + CAPS + PICKER + FREE_GUARD_OFF
+        + 'proxy_agent_pool_live() { return 1; }\n'
+        + 'proxy_agent_pick_tier MID && rc=0 || rc=$?\n'
+        + 'printf "rc=%s model=%s reason=%s\\n" "$rc" "${PICK_MODEL-}" "${PICK_REASON-}"\n'
+    )
+    result = _bash(body, tmp_path, {'OPENCODE_PROXY_CAP': '2'})
+    assert result.returncode == 0, result.stderr
+    assert 'pool_cap UNAVAILABLE pool=opencode' in result.stderr
+    assert 'pool_cap skip model=deepseek-v4.1-flash' in result.stderr
+    fields = dict(part.split('=', 1) for part in result.stdout.strip().splitlines()[-1].split(' ', 2))
+    assert fields['rc'] == '0' and fields['model'] == 'grok-4.7', result.stderr
+
+
+def test_live_counter_uses_the_same_router_cut_as_admission():
+    pool_live = _slice('proxy_agent_pool_live() {', 'proxy_agent_pool_blocked() {')
+    identity = _slice('proxy_agent_router_identity() {', '# The two restricted upstreams')
+    assert 're.split(r"[(\\[]"' in pool_live
+    assert 're.split(r"[(\\[]"' in identity
+    for model in ('hy4-flash-free', 'deepseek-v4.1-flash', 'glm-5.3', 'muse-spark-1.3-contributor'):
+        assert f'"{model}"' in pool_live
+
+
+def test_auto_continuation_rechecks_opencode_cap_before_the_fresh_spawn():
+    gate = SRC.index('if proxy_agent_is_opencode_id "$MODEL_ID"')
+    spawn = SRC.index("printf '  %q ' \"$CLAUDE_BIN\" \"${ARGS[@]}\"'", gate)
+    between = SRC[gate:spawn]
+    assert 'proxy_agent_pool_blocked "$MODEL_ID"' in between
+    assert 'PROXY_AGENT_CONTINUE_REFUSED' in between
+    assert 'declare -f proxy_agent_router_identity' in SRC
+    assert 'declare -f proxy_agent_is_opencode_id' in SRC
+    assert 'declare -f proxy_agent_pool_live' in SRC
+    assert 'declare -f proxy_agent_pool_blocked' in SRC
+    # The free-model continuation denial still precedes the loop.
+    assert SRC.index('PROXY_AGENT_NO_CONTINUE=1;; esac') < SRC.index("printf 'while [[ ( \"$rc\" == 0")
 
 
 def test_opencode_cap_zero_is_not_lifted_by_exemption(tmp_path):

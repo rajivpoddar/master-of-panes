@@ -1343,12 +1343,16 @@ proxy_agent_live_count() {
   python3 -I "$HOME/.claude/scripts/proxy-cap-count.py" "$1" || printf '999\n'
 }
 # OpenCode Go pool: hy4-flash-free, deepseek-v4.1-flash, glm-5.3 and muse-spark-1.3-contributor share ONE cap (OPENCODE_PROXY_CAP, default 2).
+# Membership is the router-equivalent identity (CTO REVISE of ec3729ed, C0ALZJHGE49 thread 1795010687.065819, ts 1795010788.320629): a decorated
+# `deepseek-v4.1-flash(high)` is the same pool id as the canonical name. proxy_agent_router_identity is defined just below; bash resolves it at call time.
 proxy_agent_is_opencode_id() {
-  case "$1" in hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor) return 0;; *) return 1;; esac
+  local id
+  id="$(proxy_agent_router_identity "$1")"
+  case "$id" in hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor) return 0;; *) return 1;; esac
 }
 # Muse Spark Contributor trains on prompts: last-resort emergency entry (Rajiv D0AMF0XE6TS thread 1794926930.078169, ts 1794929496.349809).
 proxy_agent_is_emergency_muse() {
-  [[ "$1" == muse-spark-1.3-contributor ]]
+  [[ "$(proxy_agent_router_identity "$1")" == muse-spark-1.3-contributor ]]
 }
 # Free-model guard (Rajiv DM D0AMF0XE6TS ts 1794984605.382609, "yes", to: block free/trial OpenCode models (hy4-flash-free,
 # muse-spark-1.3-contributor) for agents that read customer content or write prod). Trigger 2026-11-18: customer-data and prod-write
@@ -1608,7 +1612,10 @@ for line in out.splitlines():
     match = pat.search(line)
     if not match:
         continue
-    model = match.group(1)
+    raw = match.group(1)
+    # Same cut as proxy_agent_router_identity: lowercase, drop the first '(' or '[' suffix, trim.
+    # A decorated OpenCode primary must count toward OPENCODE_PROXY_CAP (CTO REVISE ts 1795010788.320629).
+    model = re.split(r"[(\[]", raw.lower(), 1)[0].strip()
     kind = "claude" if model.startswith("claude-") else "codex" if model.startswith("gpt-") else "grok" if model.startswith("grok") else "opencode" if model in ("hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor") else ""
     if kind == pool:
         n += 1
@@ -1622,8 +1629,12 @@ PY
 # through to unlimited deepseek-v4.1-flash (2026-11-18: cap 2, 9 live primaries, all ci-repair-agent or growth,
 # logs "reason=cooled:claude-sonnet-5-5" with no pool_cap skip). The process match already counts those primaries;
 # the early exemption return never consulted it. Existing processes are not touched.
+# The id is the router-equivalent identity, so `deepseek-v4.1-flash(high)` is the same admission as the canonical id
+# (CTO REVISE ts 1795010788.320629). An unreadable OpenCode count is not a free pass: the id is skipped and tier
+# selection tries the next route. Claude, Grok and Codex stay fail-open on an unreadable count, and their role exemption stays.
 proxy_agent_pool_blocked() {
-  local id="$1" pool cap live
+  local id pool cap live
+  id="$(proxy_agent_router_identity "$1")"
   case "$id" in
     claude-*) pool=claude; cap="${CLAUDE_PROXY_CAP:-${PROXY_AGENT_CLAUDE_CAP:-5}}";;
     gpt-*) pool=codex; cap="${CODEX_PROXY_CAP:-8}";;
@@ -1637,6 +1648,7 @@ proxy_agent_pool_blocked() {
   if [[ "$pool" == opencode && "$cap" =~ ^0+$ ]]; then return 0; fi
   if ! live="$(proxy_agent_pool_live "$pool")"; then
     printf 'proxy-agent: pool_cap UNAVAILABLE pool=%s\n' "$pool" >&2
+    if [[ "$pool" == opencode ]]; then return 0; fi
     return 1
   fi
   [[ "${live:-0}" -ge "$cap" ]]
@@ -2167,6 +2179,14 @@ CLAUDE_BIN="$(command -v claude)"
   # The case subject is the router-equivalent identity of the launched model (CTO REVISE ts 1794989163.540309), not the literal argument, so a
   # decorated name cannot slip past here either; the original MODEL_ID itself still flows to --model unchanged.
   printf 'case %q in %s) PROXY_AGENT_NO_CONTINUE=1;; esac\n' "$(proxy_agent_router_identity "$MODEL_ID")" "${PROXY_AGENT_FREE_TRIAL_IDS// /|}|auto"
+  # Auto-continuation starts a fresh claude process after the previous one exits, so it is a new admission.
+  # Re-check OPENCODE_PROXY_CAP at that spawn with the same identity, counter and pool_blocked decision (CTO REVISE ts 1795010788.320629).
+  # Role exemption is unchanged: this check runs only for an OpenCode identity, and pool_blocked still skips the exemption for that pool only.
+  printf 'MODEL_ID=%q\n' "$MODEL_ID"
+  declare -f proxy_agent_router_identity
+  declare -f proxy_agent_is_opencode_id
+  declare -f proxy_agent_pool_live
+  declare -f proxy_agent_pool_blocked
   printf 'printf "Continue the task in your brief from exactly where you stopped. Do not end your turn until it is DONE, or BLOCKED with the exact external blocker (or HANDOFF). Do not send interim progress peer messages to PM; send ONE message only for a blocker that needs a PM decision, plus the final Stop.\\n" > %q\n' "$JOB_DIR/continue.md"
   # Also continue after an error_max_turns stop (rc!=0): 4 sol runs died that way on 2026-11-13 with work mid-flight (PM).
   printf 'pa_maxturns() { tail -c 6000 %q 2>/dev/null | grep -q "\\"subtype\\":\\"error_max_turns\\""; }\n' "$JSONL"
@@ -2176,6 +2196,10 @@ CLAUDE_BIN="$(command -v claude)"
   printf '  [[ "$pa_term" == 1 || -z "$pa_sid" ]] && break\n'
   printf '  pa_reason=other; if pa_maxturns; then pa_reason=max_turns; elif [[ "$rc" != 0 ]]; then pa_reason=stream_error; fi\n'
   printf '  pa_n=$((pa_n+1)); printf "[%%s] PROXY_AGENT_CONTINUE n=%%s reason=%%s sid=%%s\\n" "$(date -u +%%FT%%TZ)" "$pa_n" "$pa_reason" "$pa_sid" >> %q\n' "$LOG"
+  printf '  if proxy_agent_is_opencode_id "$MODEL_ID"; then\n'
+  printf '    if [[ -r "$HOME/.claude/state/proxy-caps.env" ]]; then while IFS== read -r _k _v; do [[ "$_k" == OPENCODE_PROXY_CAP && "$_v" =~ ^[0-9]+$ ]] && OPENCODE_PROXY_CAP="$_v"; done < "$HOME/.claude/state/proxy-caps.env"; fi\n'
+  printf '    if proxy_agent_pool_blocked "$MODEL_ID"; then printf "[%%s] PROXY_AGENT_CONTINUE_REFUSED model=%%s reason=opencode_pool_cap\\n" "$(date -u +%%FT%%TZ)" "$MODEL_ID" >> %q; break; fi\n' "$LOG"
+  printf '  fi\n'
   printf '  %q ' "$CLAUDE_BIN" "${ARGS[@]}"
   printf ' --resume "$pa_sid" < %q 2>> %q | python3 -I -u %q %q %q\n' "$JOB_DIR/continue.md" "$LOG" "$HOME/.claude/scripts/proxy-agent-stream.py" "$OUT.c" "$JSONL.c"
   printf '  statuses=("${PIPESTATUS[@]}"); rc=${statuses[0]}; if [[ "$rc" == 0 ]]; then rc=${statuses[1]}; fi\n'
