@@ -101,7 +101,7 @@ Never suggest restoring the Proofread version, overwrite/reload the only unsafe 
 - Queue delays over 30 minutes for P0/P1/deploy/capture, or any six-hour delay, trigger runner/log/autoscaler diagnosis; healthy busy P2+ queues do not page [S64]. EPHEMERAL/no-lease → `autoscaler-fallback-processing`; persistent base OFFLINE → `base-runner-offline-processing`, same turn [S65,S66].
 - [HIGH] P0 E2E preemption [S136]: a P0 E2E run queued 10+ minutes with no free E2E runner → PM cancels the most recently started non-P0 E2E run (never P0/P1, capture, or a run in its last ~5 minutes) and re-admits that PR with `pm-admit-ci.sh` as soon as the P0 run starts. Record both run ids in the P0's alert thread.
 
-- [HIGH] "Shame on you" or a ledger ask → `Skill(shame)` the same turn [S145]: append to `docs/pm/regret-ledger.md` (the only ledger), open the docs PR, read back the diff before saying "added", and make or launch the control-point change.
+- [HIGH] "Fuck you" or a ledger ask → `Skill(fuck-you)` the same turn [S145, renamed S152 from "shame on you"/`Skill(shame)`, Rajiv ts 1794988433.254399]: append to `docs/pm/regret-ledger.md` (the only ledger), open the docs PR, read back the diff before saying "added", and make or launch the control-point change.
 
 ## Scheduled duties, budgets and product holds
 
