@@ -375,7 +375,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-buddhi",
-      "sha256": "549fdb99e739189bb736b65e70b52be56787658ac54f76f24d7aa3498bb53de8",
+      "sha256": "1c91b01121a76b23144d00a83f098c07d971d0260ad29c320f4428f6a032c4a1",
       "source_path": "claude/rules/20-buddhi-pm.md"
     },
     {
@@ -384,7 +384,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-cap-policy",
-      "sha256": "3a83fc3febf1140f8e96a8560130da7ae6a7afecf3f51e23a5e3277827e90573",
+      "sha256": "3b3a704d1093e4ccd0812a87582ab97dd3a84b1d9ae3e06f1e137cd6bc594996",
       "source_path": "claude/rules/99-pm-fable-review-cap.md"
     },
     {
@@ -1644,7 +1644,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-heydonna-product-rules",
-      "sha256": "a731ed33fdbfb81dabcc5746b7b078811b68395f96eeb63637aa448d2699f3fb",
+      "sha256": "cca63fd4d3dd99527bb6c467558a8448daaddb1cee5cb98acfbdde36b67a7268",
       "source_path": "claude/user-rules/33-heydonna-ui-product-rules.md"
     },
     {
