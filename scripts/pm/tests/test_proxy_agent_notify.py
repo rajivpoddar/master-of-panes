@@ -8,8 +8,13 @@ Covers canonical sources under scripts/pm/shared-assets/claude/scripts/:
   - thread lookup precedence is delegated to pm-ops (stubbed); the customer channel is never
     a target even if the lookup returns it;
   - FAIL-OPEN: every lookup/post failure exits 0 and never raises;
-  - posts go out as the Alerts bot (SLACK_SEND_AS=alerts) with the body on stdin, never `-f path`;
   - proxy-agent.sh parses (`bash -n`) and carries both hooks for the four hd-* roles only.
+
+SLACK ALERTS REMOVED (Rajiv DM D0AMF0XE6TS ts 1794992065.308419: "remove the slack alert from the
+proxy assign script. it's causing too much noise."): post() logs
+"skip reason=slack_alerts_removed_rajiv_1794992065" and returns False before any Slack send. Every
+launch/stop scenario therefore asserts NO post: the slack-send stub is never invoked, exit stays 0,
+and no delivery outcome is logged. The lookup, refusal and fail-open guards still run before post().
 
 Hermetic: slack-send, gh, pm-ops and proxy-observe are stubs wired through the helper's
 PROXY_NOTIFY_* env overrides. No live Slack, GitHub or DB.
@@ -33,6 +38,7 @@ CUSTOMER = "C0A56RX6FNW"
 THREAD = "1794296562.075779"
 HEAD40 = "0123456789abcdef0123456789abcdef01234567"
 PLAN = "docs/plans/issue-13671-agent-lane-slack-updates.md"
+SILENCED_LOG = "skip reason=slack_alerts_removed_rajiv_1794992065"
 
 
 def _exe(path: Path, text: str) -> Path:
@@ -121,6 +127,15 @@ def jsonl_result(path: Path, text: str) -> Path:
     return path
 
 
+def assert_silenced(h: Harness, done: subprocess.CompletedProcess[str]) -> None:
+    """The helper ran up to the removed post() and stopped there: exit 0, no Slack call at all."""
+    assert done.returncode == 0, done.stderr
+    assert SILENCED_LOG in done.stderr, done.stderr
+    assert "delivery=" not in done.stderr, "no send was attempted, so no delivery outcome is logged"
+    assert not h.slack_out.exists(), "slack-send stub must never be invoked"
+    assert h.posts() == []
+
+
 def test_sources_present_and_bash_syntax_ok() -> None:
     assert NOTIFY.is_file() and PROXY_AGENT.is_file()
     assert os.access(NOTIFY, os.X_OK), "helper must keep mode 0755 (manifest mode 493)"
@@ -141,32 +156,18 @@ def test_proxy_agent_wires_both_hooks_for_the_four_hd_roles_only() -> None:
     assert "proxy-agent-stop.sh" in text
 
 
-def test_launch_message_with_pr_and_head(tmp_path) -> None:
+def test_launch_never_posts_to_slack(tmp_path) -> None:
     h = Harness(tmp_path)
-    brief = h.brief("MODE: IMPLEMENT\nISSUE: #13671\nPR: #13700\nHEAD: abcdef1234567890abcdef1234567890abcdef12\n")
-    done = h.run("launch", brief=brief)
-    assert done.returncode == 0, done.stderr
-    posts = h.posts()
-    assert len(posts) == 1
-    assert posts[0]["body"].strip() == "hd-builder started on #13671 (PR #13700, head abcdef12, model luna, run px-test-1)"
-    assert posts[0]["as"] == "alerts", "must post as the Alerts bot, never the PM token"
-    assert posts[0]["args"].strip() == f"-c {DEV} -t {THREAD} -f", "body goes on stdin; never -f <path>"
-
-
-def test_launch_message_without_pr_or_head_omits_them(tmp_path) -> None:
-    h = Harness(tmp_path)
-    done = h.run("launch", role="hd-planner", brief=h.brief("ISSUE: 13671\n"), model="")
-    assert done.returncode == 0, done.stderr
-    assert h.posts()[0]["body"].strip() == "hd-planner started on #13671 (model auto, run px-test-1)"
-
-
-def test_launch_head_falls_back_to_gh_pr_head(tmp_path) -> None:
-    h = Harness(tmp_path)
-    done = h.run("launch", role="hd-proof-qa", brief=h.brief("PR: 13700\n"))
-    assert done.returncode == 0, done.stderr
-    body = h.posts()[0]["body"].strip()
-    # PR-only brief: issue resolved through closingIssuesReferences, head through headRefOid.
-    assert body == f"hd-proof-qa started on #13671 (PR #13700, head {HEAD40[:8]}, model luna, run px-test-1)"
+    scenarios = [
+        # PR + head in the brief; ISSUE with a leading '#'.
+        ("hd-builder", "MODE: IMPLEMENT\nISSUE: #13671\nPR: #13700\nHEAD: abcdef1234567890abcdef1234567890abcdef12\n", "luna"),
+        # No PR, no head, no model.
+        ("hd-planner", "ISSUE: 13671\n", ""),
+        # PR-only brief: issue resolved through closingIssuesReferences, head through headRefOid.
+        ("hd-proof-qa", "PR: 13700\n", "luna"),
+    ]
+    for role, text, model in scenarios:
+        assert_silenced(h, h.run("launch", role=role, brief=h.brief(text), model=model))
 
 
 def test_pm_ops_lookup_receives_issue_and_pr(tmp_path) -> None:
@@ -225,111 +226,46 @@ def test_fail_open_on_every_failure_mode(tmp_path) -> None:
         assert "Traceback" not in done.stderr
 
 
-def test_unconfirmed_delivery_is_logged_not_raised(tmp_path) -> None:
+def test_send_failure_modes_are_moot_because_nothing_is_sent(tmp_path) -> None:
     h = Harness(tmp_path)
-    done = h.run("launch", brief=h.brief("ISSUE: 13671\n"), SLACK_STUB_NO_RECEIPT="1")
-    assert done.returncode == 0
-    assert "delivery=unknown" in done.stderr
+    for env in ({"SLACK_STUB_NO_RECEIPT": "1"}, {"SLACK_STUB_FAIL": "1"}):
+        assert_silenced(h, h.run("launch", brief=h.brief("ISSUE: 13671\n"), **env))
 
 
-def test_stop_message_strips_marker_and_posts_status(tmp_path) -> None:
-    h = Harness(tmp_path)
-    jsonl = jsonl_result(tmp_path / "run.jsonl", "working...\nDONE: implemented and pushed abc1234; 3 files changed\n")
-    done = h.run("stop", role="hd-builder", brief=h.brief("ISSUE: 13671\n"), jsonl=str(jsonl))
-    assert done.returncode == 0, done.stderr
-    assert h.posts()[0]["body"].strip() == "hd-builder DONE on #13671: implemented and pushed abc1234; 3 files changed"
-
-
-def test_stop_message_uses_the_last_marker_and_all_three_statuses(tmp_path) -> None:
-    h = Harness(tmp_path)
-    for status in ("DONE", "BLOCKED", "HANDOFF"):
-        (tmp_path / "slack.out").unlink(missing_ok=True)
-        jsonl = jsonl_result(tmp_path / "run.jsonl", f"DONE: early draft\n{status}: final answer\n")
-        h.run("stop", role="hd-investigator", brief=h.brief("ISSUE: 13671\n"), jsonl=str(jsonl))
-        assert h.posts()[0]["body"].strip() == f"hd-investigator {status} on #13671: final answer"
-
-
-def test_stop_message_clips_to_200_chars(tmp_path) -> None:
-    h = Harness(tmp_path)
-    jsonl = jsonl_result(tmp_path / "run.jsonl", "HANDOFF: " + "x" * 500)
-    h.run("stop", role="hd-builder", brief=h.brief("ISSUE: 13671\n"), jsonl=str(jsonl))
-    body = h.posts()[0]["body"].strip()
-    assert body == "hd-builder HANDOFF on #13671: " + "x" * 200 + "…"
-
-
-def test_stop_message_redacts_secrets(tmp_path) -> None:
+def test_stop_never_posts_to_slack_for_any_status_or_content(tmp_path) -> None:
     h = Harness(tmp_path)
     secret = "supersecretvalue123456"
-    jsonl = jsonl_result(
-        tmp_path / "run.jsonl",
-        f"BLOCKED: token={secret} and Bearer abc.def.ghi and ghp_AAAAAAAAAAAAAAAA and env {secret}\n",
-    )
-    h.run("stop", role="hd-builder", brief=h.brief("ISSUE: 13671\n"), jsonl=str(jsonl),
-          SOME_API_TOKEN=secret)
-    body = h.posts()[0]["body"]
-    assert secret not in body
-    assert "abc.def.ghi" not in body and "ghp_AAAA" not in body
-    assert "[REDACTED]" in body
+    scenarios = [
+        # (role, result text, extra env). The message is still built, then dropped by post().
+        ("hd-builder", "working...\nDONE: implemented and pushed abc1234; 3 files changed\n", {}),
+        ("hd-investigator", "DONE: early draft\nBLOCKED: final answer\n", {}),
+        ("hd-investigator", "DONE: early draft\nHANDOFF: final answer\n", {}),
+        ("hd-builder", "HANDOFF: " + "x" * 500, {}),
+        ("hd-builder",
+         f"BLOCKED: token={secret} and Bearer abc.def.ghi and ghp_AAAAAAAAAAAAAAAA and env {secret}\n",
+         {"SOME_API_TOKEN": secret}),
+        ("hd-builder", "DONE: ran `ls -la` <@U123> & more\n", {}),
+        # Planner HANDOFF with a committed plan: plan link verified, observed head, unverified, non-handoff.
+        ("hd-planner", f"HANDOFF: plan committed at {PLAN} head {HEAD40}\n", {"GH_STUB_API_PATH": PLAN}),
+        ("hd-planner", f"HANDOFF: plan {PLAN} (earlier head {'f' * 40})\n",
+         {"GH_STUB_API_PATH": PLAN, "OBSERVE_STUB_HEAD": HEAD40}),
+        ("hd-planner", f"HANDOFF: plan {PLAN} head {HEAD40}\n", {"GH_STUB_API_PATH": "docs/plans/some-other-file.md"}),
+        ("hd-planner", f"DONE: wrote {PLAN} head {HEAD40}\n", {"GH_STUB_API_PATH": PLAN}),
+    ]
+    for role, text, env in scenarios:
+        jsonl = jsonl_result(tmp_path / "run.jsonl", text)
+        done = h.run("stop", role=role, brief=h.brief("ISSUE: 13671\n"), jsonl=str(jsonl), **env)
+        assert_silenced(h, done)
+        assert secret not in done.stderr, "the skip log must never echo agent text"
 
 
-def test_stop_message_is_slack_safe(tmp_path) -> None:
-    h = Harness(tmp_path)
-    jsonl = jsonl_result(tmp_path / "run.jsonl", "DONE: ran `rm -rf` <@U123> & more\n")
-    h.run("stop", brief=h.brief("ISSUE: 13671\n"), jsonl=str(jsonl))
-    body = h.posts()[0]["body"]
-    assert "`" not in body, "no backticks in the posted text"
-    assert "<@U123>" not in body, "no live mentions from agent text"
-    assert "&lt;@U123&gt; &amp; more" in body
-
-
-def test_stop_falls_back_to_out_file_and_skips_without_marker(tmp_path) -> None:
+def test_stop_out_file_fallback_is_silenced_and_no_marker_skips_earlier(tmp_path) -> None:
     h = Harness(tmp_path)
     out = tmp_path / "run.out"
     out.write_text("noise\nDONE: from the rendered out file\n")
-    h.run("stop", brief=h.brief("ISSUE: 13671\n"), jsonl=str(tmp_path / "absent.jsonl"), out=str(out))
-    assert h.posts()[0]["body"].strip() == "hd-builder DONE on #13671: from the rendered out file"
-    (tmp_path / "slack.out").unlink()
+    assert_silenced(h, h.run("stop", brief=h.brief("ISSUE: 13671\n"), jsonl=str(tmp_path / "absent.jsonl"), out=str(out)))
     out.write_text("finished with no terminal marker at all\n")
     done = h.run("stop", brief=h.brief("ISSUE: 13671\n"), jsonl=str(tmp_path / "absent.jsonl"), out=str(out))
     assert done.returncode == 0 and h.posts() == []
     assert "no_terminal_marker" in done.stderr
-
-
-def test_planner_handoff_with_plan_includes_path_and_verified_blob_link(tmp_path) -> None:
-    h = Harness(tmp_path)
-    jsonl = jsonl_result(tmp_path / "run.jsonl", f"HANDOFF: plan committed at {PLAN} head {HEAD40}\n")
-    done = h.run("stop", role="hd-planner", brief=h.brief("ISSUE: 13671\n"), jsonl=str(jsonl),
-                 GH_STUB_API_PATH=PLAN)
-    assert done.returncode == 0, done.stderr
-    body = h.posts()[0]["body"].strip()
-    assert body.startswith("hd-planner HANDOFF on #13671: plan committed at ")
-    assert f" Plan: {PLAN}" in body
-    assert f"<https://github.com/Scribie/heydonna-app/blob/{HEAD40}/{PLAN}|plan at {HEAD40[:8]}>" in body
-
-
-def test_planner_handoff_uses_observed_pushed_head_over_text(tmp_path) -> None:
-    h = Harness(tmp_path)
-    other = "f" * 40
-    jsonl = jsonl_result(tmp_path / "run.jsonl", f"HANDOFF: plan {PLAN} (earlier head {other})\n")
-    h.run("stop", role="hd-planner", brief=h.brief("ISSUE: 13671\n"), jsonl=str(jsonl),
-          GH_STUB_API_PATH=PLAN, OBSERVE_STUB_HEAD=HEAD40)
-    assert f"/blob/{HEAD40}/{PLAN}|plan at {HEAD40[:8]}>" in h.posts()[0]["body"]
-
-
-def test_planner_handoff_unverified_plan_gets_path_but_no_link(tmp_path) -> None:
-    h = Harness(tmp_path)
-    jsonl = jsonl_result(tmp_path / "run.jsonl", f"HANDOFF: plan {PLAN} head {HEAD40}\n")
-    h.run("stop", role="hd-planner", brief=h.brief("ISSUE: 13671\n"), jsonl=str(jsonl),
-          GH_STUB_API_PATH="docs/plans/some-other-file.md")
-    body = h.posts()[0]["body"]
-    assert f"Plan: {PLAN}" in body
-    assert "blob" not in body, "never claim a blob link the plan is not at"
-
-
-def test_plan_link_is_planner_handoff_only(tmp_path) -> None:
-    h = Harness(tmp_path)
-    jsonl = jsonl_result(tmp_path / "run.jsonl", f"DONE: wrote {PLAN} head {HEAD40}\n")
-    h.run("stop", role="hd-planner", brief=h.brief("ISSUE: 13671\n"), jsonl=str(jsonl), GH_STUB_API_PATH=PLAN)
-    h.run("stop", role="hd-builder", brief=h.brief("ISSUE: 13671\n"), jsonl=str(jsonl), GH_STUB_API_PATH=PLAN)
-    for post in h.posts():
-        assert "Plan:" not in post["body"] and "blob" not in post["body"]
+    assert SILENCED_LOG not in done.stderr, "no marker: the helper skips before it reaches the removed post()"
