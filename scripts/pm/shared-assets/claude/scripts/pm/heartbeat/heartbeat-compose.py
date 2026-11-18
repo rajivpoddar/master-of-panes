@@ -1307,51 +1307,44 @@ def remote_boxes_line(timeout: int = 20) -> str:
 # ---------------------------------------------------------------------------
 # CI selection (regret-ledger control point, docs/pm/regret-ledger.md 2026-11-18, PR #14018): any PM
 # "live" / "saving" claim must cite this line. Source: the newest COMPLETED pull_request runs of
-# .github/workflows/ci.yml, ignoring conclusion "skipped" duplicates. Every unit-tests (N) shard log
-# carries "##[notice]unit selection mode=<m> reason=<r>" near its start and the vitest
-# "Test Files N passed (M)" summary near its end, so only a bounded head and tail byte window of each
-# ~12 MB log is read (gh api -i with a Range header; shard 1 prints the vitest inventory before the
-# notice, so a head window without it falls back to the same notice as a check-run annotation).
-# Read-only GETs under one wall-clock deadline. Fail-open: any read error renders
-# "unavailable (<reason>)", never an empty or "none" line, and the result is never served from a
-# last-good cache (see parallel_collect).
+# .github/workflows/ci.yml, ignoring conclusion "skipped" duplicates. CTO REVISE 2026-11-18
+# (C0ALZJHGE49 thread 1794296562.075779, ts 1794968959.921749):
+#   1. Coverage is bound to ONE run id + run_attempt + head_sha. Jobs come from
+#      /actions/runs/{id}/attempts/{n}/jobs and every unit-tests job must carry exactly that run id,
+#      attempt and head. The expected shard set is the unit-tests matrix of the workflow at that head,
+#      cross-checked with the "of" of the shards' own executed-unit receipt. Expected vs ok vs
+#      cancelled vs skipped vs missing vs unreadable shards are counted. No expected set, attempt or head
+#      means "coverage UNKNOWN", never a guess.
+#   2. No borrowed baseline. Counts come only from the shard's own "functional selection report" row
+#      (workflow step "Report functional selection": effective mode, FULL reason, selected/configured
+#      inventory, executed files from that shard's own Vitest JSON report). The human "Test Files" summary
+#      is never read (shard 1 prints a second, NYSD, summary). A missing or mismatched row makes the shard
+#      unreadable; a selected count is shown only when the run's own rows supply it.
+#   3. Compaction keeps a per-run PARTIAL / coverage-UNKNOWN marker: reasons, then branch names, then the
+#      detail go first; only COMPLETE entries are ever omitted ("+N omitted").
+# Read-only GETs under one wall-clock deadline. Fail-open: any list/read error renders
+# "unavailable (<reason>)" or a per-run marker, never an empty or "none" line, and the result is never
+# served from a last-good cache (see parallel_collect).
 # ---------------------------------------------------------------------------
 CI_SELECTION_REPO = "Scribie/heydonna-app"
 CI_SELECTION_RUNS = 3
 CI_SELECTION_SCAN = 40  # completed pull_request runs listed to find CI_SELECTION_RUNS non-skipped ones
 CI_SELECTION_MAX_CHARS = 299  # the whole line stays under 300 chars
 CI_LOG_WINDOW = 256 * 1024
+CI_WORKFLOW_PATH = ".github/workflows/ci.yml"
+CI_MAX_SHARDS = 64
 _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-_UNIT_SELECTION = re.compile(r"##\[notice\]unit selection mode=(\S+) reason=(\S+)")
-_UNIT_SELECTION_ANNOTATION = re.compile(r"^unit selection mode=(\S+) reason=(\S+)$")
-_VITEST_FILES = re.compile(r"Test Files\s+([^()\n]*?)\s*\((\d+)\)")
+_SELECTION_ROW = re.compile(r"functional selection report (\{[^\n]*\})")
+_SHARD_RECEIPT = re.compile(r'\{"head":"[0-9a-f]{40}","shard":(\d+),"of":(\d+),')
 _UNIT_SHARD_JOB = re.compile(r"^unit-tests \((\d+)\)$")
 _CONTENT_RANGE = re.compile(r"(?im)^content-range:\s*bytes\s+\d+-\d+/(\d+)\s*$")
+_SHA = re.compile(r"[0-9a-f]{40}")
+# (branch width, keep reasons, keep detail): tried in order until the line fits.
+CI_COMPACTION = ((24, True, True), (24, False, True), (12, False, True), (0, False, True), (0, False, False))
 
 
 class CiSelectionError(Exception):
     """A CI selection read failed; str(exc) is the reason shown after "unavailable"."""
-
-
-def parse_unit_selection(text: str) -> tuple[str, str] | None:
-    """First "##[notice]unit selection mode=<m> reason=<r>" line of a job log window, else None."""
-    match = _UNIT_SELECTION.search(_ANSI.sub("", text))
-    return (match.group(1), match.group(2)) if match else None
-
-
-def parse_vitest_files(text: str) -> tuple[int, int] | None:
-    """(passed, total) from the vitest "Test Files ... (M)" summary of a job log window.
-
-    Shard 1 also runs the isolated NYSD suite after the main run, so several summaries can share a
-    window; the main run is the one with the most files.
-    """
-    best = None
-    for body, total in _VITEST_FILES.findall(_ANSI.sub("", text)):
-        passed = re.search(r"(\d+)\s+passed", body)
-        row = (int(passed.group(1)) if passed else 0, int(total))
-        if best is None or row[1] > best[1]:
-            best = row
-    return best
 
 
 def split_http(raw: str) -> tuple[int, str, str]:
@@ -1363,43 +1356,174 @@ def split_http(raw: str) -> tuple[int, str, str]:
     return int(first[1]), head, body
 
 
-def ci_log_windows(job_id: int, gh, window: int = CI_LOG_WINDOW) -> tuple[str, str]:
-    """(head, tail) byte windows of one job log. The first ranged read reports the total size."""
+def ci_log_tail(job_id: int, gh, window: int = CI_LOG_WINDOW) -> str:
+    """Tail window of one job log. A one-byte ranged read reports the total size first."""
     def read(span: str) -> tuple[int, str, str]:
         return split_http(gh(["api", "-i", "-H", f"Range: bytes={span}",
                               f"repos/{CI_SELECTION_REPO}/actions/jobs/{job_id}/logs"]))
-    status, headers, head = read(f"0-{window - 1}")
+    status, headers, first = read("0-0")
     if status == 200:  # Range ignored: the body is the whole log
-        return head, head
+        return first
     total = _CONTENT_RANGE.search(headers)
-    if status != 206 or not total:
+    if status != 206 or not total or int(total.group(1)) <= 0:
         raise CiSelectionError(f"log http {status}")
     size = int(total.group(1))
-    if size <= window:
-        return head, head
-    return head, read(f"{max(window, size - window)}-{size - 1}")[2]
+    return read(f"{max(0, size - window)}-{size - 1}")[2]
 
 
-def ci_annotation_selection(job_id: int, gh) -> tuple[str, str] | None:
-    """The same notice as a check-run annotation (the job id is the check-run id)."""
-    for note in json.loads(gh(["api", f"repos/{CI_SELECTION_REPO}/check-runs/{job_id}/annotations?per_page=100"])):
-        match = _UNIT_SELECTION_ANNOTATION.match(str(note.get("message", "")).strip())
+def parse_selection_row(text: str) -> dict | None:
+    """The shard's own "functional selection report {...}" row (scripts/ci/functional_selection_receipts.py
+    selection-report), or None when the window has none. Two different rows are ambiguous, never merged."""
+    rows = {found.group(1).strip() for found in _SELECTION_ROW.finditer(_ANSI.sub("", text))}
+    if not rows:
+        return None
+    if len(rows) > 1:
+        raise CiSelectionError("ambiguous selection rows")
+    try:
+        row = json.loads(rows.pop())
+    except ValueError:
+        raise CiSelectionError("invalid selection row") from None
+    if not isinstance(row, dict) or row.get("effective_mode") not in ("full", "selected") \
+            or not str(row.get("shard", "")).isdigit():
+        raise CiSelectionError("invalid selection row")
+
+    def count(value):
+        return value if type(value) is int and value >= 0 else None  # "UNKNOWN" and null stay unknown
+    reason = row.get("full_reason")
+    return {"shard": int(row["shard"]), "mode": row["effective_mode"],
+            "reason": reason if isinstance(reason, str) else None,
+            "files": count(row.get("executed_files")), "tests": count(row.get("executed_tests")),
+            "selected": count(row.get("selected_inventory_count")),
+            "configured": count(row.get("configured_inventory_count"))}
+
+
+def parse_shard_receipt(text: str) -> tuple[int, int] | None:
+    """(shard, of) from the shard's executed-unit receipt line, or None when the window lacks it."""
+    found = {(int(a), int(b)) for a, b in _SHARD_RECEIPT.findall(_ANSI.sub("", text))}
+    if len(found) > 1:
+        raise CiSelectionError("ambiguous shard receipts")
+    receipt = next(iter(found), None)
+    if receipt and not 1 <= receipt[1] <= CI_MAX_SHARDS:
+        raise CiSelectionError("invalid shard receipt")
+    return receipt
+
+
+def ci_unit_shard(job_id: int, shard: int, gh) -> dict:
+    """One shard's bound evidence: its selection row plus the "of" of its receipt (None when not in the window)."""
+    tail = ci_log_tail(job_id, gh)
+    row = parse_selection_row(tail)
+    if row is None:
+        raise CiSelectionError("selection row missing")
+    if row["shard"] != shard:
+        raise CiSelectionError("selection row names another shard")
+    receipt = parse_shard_receipt(tail)
+    if receipt and receipt[0] != shard:
+        raise CiSelectionError("shard receipt names another shard")
+    row["of"] = receipt[1] if receipt else None
+    return row
+
+
+def parse_unit_matrix(text: str) -> set[int] | None:
+    """The unit-tests job's matrix shard set from a ci.yml text, or None when it cannot be established."""
+    block = re.search(r"(?ms)^  unit-tests:[ \t]*\n(.*?)(?=^  [A-Za-z0-9_-]+:[ \t]*\n|\Z)", text)
+    found = re.findall(r"(?m)^[ \t]+shard:[ \t]*\[([0-9, \t]+)\][ \t]*$", block.group(1)) if block else []
+    if len(found) != 1:
+        return None
+    shards = {int(n) for n in re.findall(r"\d+", found[0])}
+    return shards if shards and all(1 <= n <= CI_MAX_SHARDS for n in shards) else None
+
+
+def ci_expected_shards(matrix: set[int] | None, receipts_of: set[int]) -> tuple[set[int] | None, str]:
+    """(expected shard set, why-not). The matrix and the receipts' "of" must agree when both exist."""
+    if len(receipts_of) > 1:
+        return None, "shard receipts disagree"
+    declared = set(range(1, next(iter(receipts_of)) + 1)) if receipts_of else None
+    if matrix and declared and matrix != declared:
+        return None, "matrix and receipt shard sets differ"
+    expected = matrix or declared
+    return (expected, "") if expected else (None, "expected shards unknown")
+
+
+def ci_classify_jobs(entry: dict, jobs: list) -> list[tuple[int, int, bool]]:
+    """Fill entry["shards"] / entry["group_skipped"] from ONE attempt's jobs.
+
+    Returns the (shard, job id, failed) logs still to read. Raises CiSelectionError when a unit-tests job
+    does not carry exactly this run id, attempt and head, so a foreign record can never count as coverage.
+    """
+    by_shard: dict[int, list[dict]] = {}
+    for job in jobs:
+        if not isinstance(job, dict):
+            raise CiSelectionError("invalid jobs page")
+        name = str(job.get("name"))
+        match = _UNIT_SHARD_JOB.match(name)
+        if not match and name != "unit-tests":
+            continue
+        if (type(job.get("id")) is not int or job["id"] <= 0 or str(job.get("run_id")) != str(entry["id"])
+                or str(job.get("run_attempt")) != str(entry["attempt"]) or job.get("head_sha") != entry["head"]):
+            raise CiSelectionError("job is not of this run attempt and head")
         if match:
-            return match.group(1), match.group(2)
-    return None
+            by_shard.setdefault(int(match.group(1)), []).append(job)
+        elif job.get("status") == "completed" and job.get("conclusion") == "skipped":
+            entry["group_skipped"] = True  # GitHub records a skipped matrix job as ONE unexpanded record
+        else:
+            raise CiSelectionError("unexpected unit-tests record")
+    if entry.get("group_skipped") and by_shard:
+        raise CiSelectionError("unit-tests records disagree")
+    to_read = []
+    for shard, found in sorted(by_shard.items()):
+        job = found[0]
+        if len(found) > 1 or job.get("status") != "completed":
+            entry["shards"][shard] = {"state": "unreadable"}
+        elif job.get("conclusion") == "cancelled":
+            entry["shards"][shard] = {"state": "cancelled"}
+        elif job.get("conclusion") == "skipped":
+            entry["shards"][shard] = {"state": "skipped"}
+        elif job.get("conclusion") in ("success", "failure"):
+            entry["shards"][shard] = {"state": "unreadable"}  # replaced once the shard's row is read
+            to_read.append((shard, job["id"], job["conclusion"] == "failure"))
+        else:
+            entry["shards"][shard] = {"state": "unreadable"}
+    return to_read
 
 
-def ci_unit_shard(job_id: int, gh) -> dict:
-    head, tail = ci_log_windows(job_id, gh)
-    selection = parse_unit_selection(head)
-    if selection is None:
-        try:
-            selection = ci_annotation_selection(job_id, gh)
-        except (CiSelectionError, ValueError, TypeError, AttributeError):
-            selection = None  # the shard is then reported as "notice missing", not as unreadable
-    files = parse_vitest_files(tail)
-    return {"mode": selection[0] if selection else None, "reason": selection[1] if selection else None,
-            "passed": files[0] if files else None, "total": files[1] if files else None}
+def ci_coverage(run: dict) -> dict:
+    """Pure: one run attempt's coverage from its collected evidence.
+
+    status is COMPLETE (every expected shard has its own row), PARTIAL (some are cancelled, skipped, missing or
+    unreadable) or UNKNOWN (the attempt/head binding failed, or no expected shard set can be established).
+    Counts are never compared with, or completed from, another run.
+    """
+    ident = {key: run.get(key) for key in ("id", "attempt", "head", "branch")}
+    if run.get("error"):
+        return {**ident, "status": "UNKNOWN", "reason": str(run["error"])}
+    shards = run.get("shards", {})
+    receipts = {s["row"]["of"] for s in shards.values() if s.get("row") and s["row"].get("of") is not None}
+    expected, why = ci_expected_shards(run.get("matrix"), receipts)
+    if expected is None:
+        return {**ident, "status": "UNKNOWN", "reason": why}
+    if not set(shards) <= expected:
+        return {**ident, "status": "UNKNOWN", "reason": "shard job outside the expected set"}
+    states = [s["state"] for s in shards.values()]
+    rows = [s["row"] for s in shards.values() if s["state"] == "ok"]
+    grouped = bool(run.get("group_skipped"))
+    cov = {**ident, "expected": len(expected), "ok": len(rows),
+           "failed": sum(1 for s in shards.values() if s["state"] == "ok" and s.get("failed")),
+           "cancelled": states.count("cancelled"),
+           "skipped": len(expected) if grouped else states.count("skipped"),
+           "missing": 0 if grouped else len(expected - set(shards)),
+           "unreadable": states.count("unreadable")}
+    cov["status"] = "COMPLETE" if cov["ok"] == cov["expected"] else "PARTIAL"
+    cov["files"] = sum(r["files"] for r in rows) if rows and all(r["files"] is not None for r in rows) else None
+    groups: dict[tuple[str, str], int] = {}
+    for r in rows:
+        key = (r["mode"], _ci_clean(r["reason"] or "UNKNOWN")[:40] if r["mode"] == "full" else "")
+        groups[key] = groups.get(key, 0) + 1
+    cov["groups"] = sorted(((mode, reason, n) for (mode, reason), n in groups.items()),
+                           key=lambda g: (-g[2], g[0], g[1]))
+    pairs = {(r["selected"], r["configured"]) for r in rows if r["mode"] == "selected"}
+    only = next(iter(pairs)) if len(pairs) == 1 else None
+    cov["selected"] = only if only and None not in only else ("UNKNOWN" if pairs else None)
+    return cov
 
 
 def _ci_clean(text: str) -> str:
@@ -1414,83 +1538,80 @@ def _ci_short(branch: str, width: int) -> str:
     return branch if len(branch) <= width else branch[:max(1, width - 1)] + "…"
 
 
-def _ci_groups(shards: list[dict]) -> dict[str, int]:
-    """Shard counts by selection notice. Cancelled and unreadable shards are counted elsewhere."""
-    groups: dict[str, int] = {}
-    for s in shards:
-        if s.get("cancelled") or s.get("error"):
-            continue
-        key = f"mode={_ci_clean(s['mode'])} reason={_ci_clean(s['reason'])}" if s.get("mode") else "notice missing"
-        groups[key] = groups.get(key, 0) + 1
-    return groups
+def _ci_notes(cov: dict) -> str:
+    parts = [f"{cov[key]} {key}" for key in ("failed", "cancelled", "skipped", "missing", "unreadable") if cov.get(key)]
+    return f" ({', '.join(parts)})" if parts else ""
 
 
-def _ci_group_text(groups: dict[str, int]) -> str:
-    return ", ".join(f"{key} ×{n}" for key, n in sorted(groups.items(), key=lambda kv: (-kv[1], kv[0])))
+def _ci_modes(cov: dict, reasons: bool) -> str:
+    """Mode groups. Mixed modes are listed side by side and flagged, never folded into one mode."""
+    groups = cov["groups"]
+    if not reasons:
+        by_mode: dict[str, int] = {}
+        for mode, _, n in groups:
+            by_mode[mode] = by_mode.get(mode, 0) + n
+        groups = [(mode, "", n) for mode, n in sorted(by_mode.items(), key=lambda kv: (-kv[1], kv[0]))]
+    text = ", ".join(f"{mode}{':' + reason if reasons and reason else ''} ×{n}" for mode, reason, n in groups)
+    return ("mixed " if len({mode for mode, _, _ in cov["groups"]}) > 1 else "") + text if text else ""
 
 
-def _ci_run_body(shards: list[dict], baseline: int | None, notes: bool = True) -> str:
-    """Files part of one run: "files P/T", or "narrowed: X of Y files" when any shard selected."""
-    if not shards:
-        return "no unit shards ran"
-    cancelled = sum(1 for s in shards if s.get("cancelled"))
-    unreadable = sum(1 for s in shards if s.get("error"))
-    ran = len(shards) - cancelled
-    read = [s for s in shards if s.get("total") is not None]
-    total = sum(s["total"] for s in read)
-    if not ran:
-        return f"all {cancelled} shards cancelled"
-    if not read:
-        files = "files n/a"
-    elif any(s.get("mode") == "selected" for s in shards):
-        files = f"narrowed: {total} of {baseline} files" if baseline else f"narrowed: {total} files (full n/a)"
-    else:
-        files = f"files {sum(s['passed'] for s in read)}/{total}"
-    if notes:
-        if read and len(read) < ran:
-            files += f" ({len(read)}/{ran} read)"
-        if cancelled:
-            files += f", {cancelled} cancelled"
-        if unreadable:
-            files += f", {unreadable} unreadable"
-    return files
+def _ci_segment(cov: dict, width: int, reasons: bool, detail: bool, head: bool = True) -> str:
+    """<run>#<attempt>/<head8> [branch]: coverage. A PARTIAL or UNKNOWN marker is part of every level."""
+    ident = f"{cov.get('id') or '?'}#{cov.get('attempt') or '?'}"
+    if head and cov.get("head"):
+        ident += "/" + str(cov["head"])[:8]
+    branch = _ci_short(cov.get("branch") or "", width)
+    name = f"{ident} {branch}" if branch else ident
+    if cov["status"] == "UNKNOWN":
+        why = f" ({_ci_clean(cov['reason'])[:40]})" if reasons and detail else ""
+        return f"{name}: coverage UNKNOWN{why}"
+    body = ("PARTIAL " if cov["status"] == "PARTIAL" else "") + f"{cov['ok']}/{cov['expected']} shards"
+    if not detail:
+        return f"{name}: {body}"
+    body += _ci_notes(cov)
+    if cov["ok"]:
+        if cov["files"] is None:
+            body += " files UNKNOWN"
+        else:
+            body += f" ran {cov['files']} files" + (" in them" if cov["status"] == "PARTIAL" else "")
+    modes = _ci_modes(cov, reasons)
+    if modes:
+        body += "; " + modes
+    if isinstance(cov["selected"], tuple):
+        body += f"; selected {cov['selected'][0]} of {cov['selected'][1]} files"
+    elif cov["selected"] == "UNKNOWN":
+        body += "; selected counts UNKNOWN"
+    return f"{name}: {body}"
 
 
 def render_ci_selection(runs: list[dict]) -> str:
-    """One "*CI selection:*" line, under 300 chars. Pure: runs come from ci_selection_line().
+    """One "*CI selection:*" line, under 300 chars. Pure: runs are the evidence dicts ci_selection_line() collects.
 
-    A run is {"id", "branch", "shards": [...]} or {"id", "branch", "error": reason}. When the line is
-    too long, branch names shrink to 12 chars, then the cancelled/read/unreadable notes go, then the
-    branch names; the file counts
-    and the selection notice groups ("mode=full reason=merge_parent_mismatch ×5") are never dropped.
+    Compaction order: verbose reasons, then branch names, then the per-run detail go first. A PARTIAL or
+    coverage-UNKNOWN marker is never dropped; only COMPLETE entries can be omitted ("+N omitted").
     """
     prefix = "*CI selection:* "
-    live = [r for r in runs if not r.get("error")]
-    if not live:
-        reason = runs[0]["error"] if runs else "no completed non-skipped pull_request runs"
-        return f"{prefix}unavailable ({reason})"
-    # A "full" file total is only ever an observed one: the newest fully read run that did not narrow.
-    baseline = next((sum(s["total"] for s in r["shards"]) for r in live
-                     if r["shards"] and all(s.get("total") is not None and s.get("mode") != "selected"
-                                            for s in r["shards"])), None)
-    line = prefix
-    for width, notes in ((24, True), (18, True), (12, True), (24, False), (18, False), (12, False), (0, False)):
-        segments = []
-        for r in runs:
-            head = " ".join(part for part in (str(r["id"]), _ci_short(r["branch"], width)) if part)
-            if r.get("error"):
-                segments.append(f"{head}: unavailable ({r['error']})")
-                continue
-            parts = [_ci_run_body(r["shards"], baseline, notes), _ci_group_text(_ci_groups(r["shards"]))]
-            segments.append(f"{head}: " + "; ".join(p for p in parts if p))
-        line = prefix + " | ".join(segments)
+    if not runs:
+        return f"{prefix}unavailable (no completed non-skipped pull_request runs)"
+    covs = [ci_coverage(run) for run in runs]
+    for width, reasons, detail in CI_COMPACTION:
+        line = prefix + " | ".join(_ci_segment(cov, width, reasons, detail) for cov in covs)
+        if len(line) <= CI_SELECTION_MAX_CHARS:
+            return line
+    kept = [cov for cov in covs if cov["status"] != "COMPLETE"]
+    omitted = len(covs) - len(kept)
+    for head in (True, False):
+        parts = [_ci_segment(cov, 0, False, False, head) for cov in kept]
+        if omitted:
+            parts.append(f"+{omitted} omitted")
+        line = prefix + " | ".join(parts)
         if len(line) <= CI_SELECTION_MAX_CHARS:
             return line
     return line[:CI_SELECTION_MAX_CHARS - 1] + "…"
 
 
 def ci_selection_line(run=subprocess.run, timeout: int = COLLECTOR_TIMEOUTS["ci-selection"]) -> str:
-    """Collect and render the CI selection line. Never raises; every failure is "unavailable (<reason>)"."""
+    """Collect and render the CI selection line. Never raises; every failure is "unavailable (<reason>)" or a per-run marker."""
     from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
     deadline = monotonic() + timeout
 
@@ -1508,14 +1629,19 @@ def ci_selection_line(run=subprocess.run, timeout: int = COLLECTOR_TIMEOUTS["ci-
             raise CiSelectionError(f"gh rc={proc.returncode}")
         return proc.stdout
 
-    def jobs_of(run_id: int) -> list[tuple[int, int, str]]:
-        doc = json.loads(gh(["api", f"repos/{CI_SELECTION_REPO}/actions/runs/{run_id}/jobs?per_page=100"]))
-        shards = []
-        for job in doc["jobs"]:
-            match = _UNIT_SHARD_JOB.match(str(job.get("name")))
-            if match and job.get("status") == "completed" and job.get("conclusion") != "skipped":
-                shards.append((int(match.group(1)), int(job["id"]), str(job.get("conclusion"))))
-        return sorted(shards)
+    def attempt_jobs(entry: dict) -> list:
+        doc = json.loads(gh(["api", f"repos/{CI_SELECTION_REPO}/actions/runs/{entry['id']}/attempts/{entry['attempt']}/jobs?per_page=100"]))
+        jobs, total = doc["jobs"], doc["total_count"]
+        if type(total) is not int or not isinstance(jobs, list) or len(jobs) != total:
+            raise CiSelectionError("incomplete jobs page")
+        return jobs
+
+    def workflow_matrix(head: str) -> set[int] | None:
+        try:
+            return parse_unit_matrix(gh(["api", "-H", "Accept: application/vnd.github.raw",
+                                         f"repos/{CI_SELECTION_REPO}/contents/{CI_WORKFLOW_PATH}?ref={head}"]))
+        except CiSelectionError:
+            return None  # the shards' receipts may still establish the expected set
 
     def wait(future):
         try:
@@ -1531,34 +1657,40 @@ def ci_selection_line(run=subprocess.run, timeout: int = COLLECTOR_TIMEOUTS["ci-
     try:
         listing = json.loads(gh(["run", "list", "--repo", CI_SELECTION_REPO, "--workflow", "ci.yml",
                                  "--event", "pull_request", "--status", "completed",
-                                 "--limit", str(CI_SELECTION_SCAN), "--json", "databaseId,headBranch,conclusion"]))
+                                 "--limit", str(CI_SELECTION_SCAN), "--json", "databaseId,headBranch,headSha,attempt,conclusion"]))
         picked = [r for r in listing if r.get("conclusion") != "skipped"][:CI_SELECTION_RUNS]
         if not picked:
             raise CiSelectionError(f"no completed non-skipped pull_request runs in the last {CI_SELECTION_SCAN}")
-        runs = [{"id": int(r["databaseId"]), "branch": str(r.get("headBranch") or "?")} for r in picked]
-        job_futures = [pool.submit(jobs_of, r["id"]) for r in runs]
+        runs = []
+        for r in picked:
+            entry = {"id": int(r["databaseId"]), "branch": str(r.get("headBranch") or "?"),
+                     "head": r.get("headSha"), "attempt": r.get("attempt"), "shards": {}}
+            if not (isinstance(entry["head"], str) and _SHA.fullmatch(entry["head"])
+                    and type(entry["attempt"]) is int and entry["attempt"] > 0):
+                entry["error"] = "run attempt or head unknown"
+            runs.append(entry)
+        first = [(e, pool.submit(attempt_jobs, e), pool.submit(workflow_matrix, e["head"])) for e in runs if not e.get("error")]
         pending = []
-        for r, future in zip(runs, job_futures):
+        for entry, jobs_future, matrix_future in first:
             try:
-                jobs = wait(future)
+                to_read = ci_classify_jobs(entry, wait(jobs_future))
             except CiSelectionError as exc:
-                r["error"] = str(exc)
+                entry["error"] = str(exc)
                 continue
-            # A cancelled shard (matrix fail-fast) has no complete log; it is counted, not read.
-            r["shards"] = [{"cancelled": True} if conclusion == "cancelled" else None for _, _, conclusion in jobs]
-            pending.append((r, [(i, pool.submit(ci_unit_shard, job_id, gh))
-                                for i, (_, job_id, conclusion) in enumerate(jobs) if conclusion != "cancelled"]))
-        for r, futures in pending:
-            for i, future in futures:
+            try:
+                entry["matrix"] = wait(matrix_future)
+            except CiSelectionError:
+                entry["matrix"] = None
+            pending.append((entry, [(n, failed, pool.submit(ci_unit_shard, job_id, n, gh)) for n, job_id, failed in to_read]))
+        for entry, reads in pending:
+            for n, failed, future in reads:
                 try:
-                    r["shards"][i] = wait(future)
-                except CiSelectionError as exc:
-                    r["shards"][i] = {"error": str(exc)}
-            if futures and all("error" in s for s in r["shards"] if not s.get("cancelled")):
-                r["error"] = next(s["error"] for s in r["shards"] if "error" in s)
+                    entry["shards"][n] = {"state": "ok", "failed": failed, "row": wait(future)}
+                except CiSelectionError:
+                    entry["shards"][n] = {"state": "unreadable"}
         return render_ci_selection(runs)
     except CiSelectionError as exc:
-        return render_ci_selection([{"id": 0, "branch": "", "error": str(exc)}])
+        return f"*CI selection:* unavailable ({exc})"
     except (ValueError, KeyError, TypeError):
         return "*CI selection:* unavailable (invalid GitHub response)"
     except Exception as exc:  # fail-open backstop: the hourly must still post
