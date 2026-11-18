@@ -2018,7 +2018,7 @@ SAFETY_SETTINGS="$(mktemp "${TMPDIR:-/tmp}/proxy-agent-safety.XXXXXX")"
 # helper ran an unauthorized "gh run rerun" for #13844 (Rajiv D0AMF0XE6TS 1794787507.634289; PM trace 12:10 IST).
 _HELPER_READONLY=0
 if [[ "${PROXY_AGENT_NAME:-}" == *heartbeat* || "${PROXY_AGENT_NAME:-}" == *hourly* ]] || head -1 "$PROMPT_FILE" 2>/dev/null | grep -qiE '^MODE:[[:space:]]*(heartbeat|hourly)'; then _HELPER_READONLY=1; fi
-HELPER_READONLY="$_HELPER_READONLY" python3 - "/Users/rajiv/Downloads/projects/heydonna-app/.claude/settings.json" "$SAFETY_SETTINGS" <<'PY'
+HELPER_READONLY="$_HELPER_READONLY" PROXY_AGENT_TYPE_FOR_SANDBOX="$TYPE" PROXY_AGENT_SANDBOX="${PROXY_AGENT_SANDBOX:-0}" python3 - "/Users/rajiv/Downloads/projects/heydonna-app/.claude/settings.json" "$SAFETY_SETTINGS" <<'PY'
 import json, sys
 src, out = sys.argv[1], sys.argv[2]
 want = ("block-cto-mention-without-ladder", "block-invalid-backlog-issue-create",
@@ -2084,11 +2084,25 @@ allowed_domains = [
     "api.github.com",
     "codeload.github.com",
 ]
+# Ops-repair lanes must write MoP/autoscaler repos, ~/.claude/scripts and restart launchd (sandbox9 BLOCKED
+# 2026-11-18 21:03 IST: "Sandbox denies MoP repository metadata writes and launchd access"). They run
+# unsandboxed; deletion/cleanup briefs never go to these types (launch-agent rule, Rajiv ts 1795011960.567969).
+_ops_lane = (os.environ.get("PROXY_AGENT_TYPE_FOR_SANDBOX", "") in ("mop-main-repair", "autoscaler-main-repair", "pm-ops-tooling", "pm-triage-agent", "pm-backlog-promoter")
+             or os.environ.get("HELPER_READONLY") == "1")
+# Ops/state lanes (MoP + autoscaler repair, PM ops tooling, triage, heartbeat/hourly helpers) must write ~/.claude
+# state (pm-ops.db, state files) and restart launchd. Claude Code's sandbox protects .claude paths even when they are
+# allow-listed (21:06 IST heartbeat: 16 ops failed with EPERM / "unable to open database file"), so these lanes run
+# unsandboxed. Cleanup/deletion briefs never go to these types (launch-agent rule, Rajiv ts 1795011960.567969).
+# 2026-11-18 21:08 IST PM: fence is OPT-IN (PROXY_AGENT_SANDBOX=1) until a lane-owned worktree helper is proven through
+# this launcher (CTO REVISE on f203baec). Compound commands ("cd x && git worktree add ...") don't match the exclusion
+# patterns, so the always-on fence broke ordinary lanes (mm14039b) and the 21:06 heartbeat. Cleanup/deletion lanes MUST
+# launch with PROXY_AGENT_SANDBOX=1 (launch-agent rule).
+_fence_on = os.environ.get("PROXY_AGENT_SANDBOX") == "1" and not _ops_lane
 json.dump({"hooks": {"PreToolUse": keep},
            "permissions": {"deny": deny},
            "sandbox": {
-               "enabled": True,
-               "failIfUnavailable": True,
+               "enabled": _fence_on,
+               "failIfUnavailable": _fence_on,
                "autoAllowBashIfSandboxed": True,
                "allowUnsandboxedCommands": False,
                "enableWeakerNetworkIsolation": True,
