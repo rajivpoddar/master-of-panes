@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Live open-PR snapshot shared by the hourly drive and the 3h heartbeat.
 
-Gate color comes from live GitHub (`gh pr list` statusCheckRollup on the
-current headRefOid). A red PR is "unowned" only when it has no MoP slot
+Gate color comes from live GitHub (statusCheckRollup on the current headRefOid,
+read per non-draft PR after a light bulk `gh pr list`; see the collector budget
+below). A PR whose per-PR read fails is reported unknown. A red PR is "unowned" only when it has no MoP slot
 owner, no slot:N label, and no PM-owned wait (CI still running, review hold,
 or a capture/CI/review obligation owner). Read-only; takes no PR actions.
 
@@ -67,12 +68,29 @@ def _memoize(fn):
     return wrapped
 
 
+def _deadline_guard(fn):
+    """Refuse a new 12b network read once the run's verdict window has closed.
+
+    The gate's own `api` timeout is 60s, so a read that starts just before the
+    window closes still ends inside the 210s collector budget. A refused read
+    raises, which _latest_12b_verdict already treats as indeterminate (never PASS).
+    """
+    def wrapped(*args, **kwargs):
+        if _budget_left(60, VERDICT_UNTIL_SECONDS) < 2:
+            raise TimeoutError("collector budget exhausted")
+        return fn(*args, **kwargs)
+
+    return wrapped
+
+
 def _install_read_memo() -> None:
     """Collapse repeated 12b carry-forward reads (gh compare, commits/main, git)."""
     for name in ("api", "resolve_commit", "main_merges_only"):
         current = getattr(_REVIEW_GATE, name)
         if getattr(current, "_snapshot_memo", False):
             continue
+        if name == "api":
+            current = _deadline_guard(current)
         setattr(_REVIEW_GATE, name, _memoize(current))
 
 
@@ -82,6 +100,89 @@ REPO = "Scribie/heydonna-app"
 # Shared with every other hook/heartbeat caller. A fresh file skips both the
 # `gh pr list` GraphQL read and the review-thread query.
 SNAPSHOT_TTL = gh_budget.DEFAULT_TTL
+
+# --- Collector budget. heartbeat-compose gives this collector 210s
+# (COLLECTOR_TIMEOUTS["pr-open-snapshot"]). One `gh pr list --json
+# ...statusCheckRollup,files,body,comments` over every open PR timed out 3 x 60s
+# (184s) and killed the run. The bulk list is now light; the heavy fields are read
+# per PR only where classification consumes them. Every phase ends a fixed number
+# of seconds after the run start, so a slow GitHub degrades to UNAVAILABLE or to an
+# explicit unknown row and never to a 210s kill.
+LIST_FIELDS = "number,headRefOid,title,isDraft,labels,updatedAt"
+DETAIL_FIELDS = "headRefOid,statusCheckRollup,files,body,comments"
+LIST_TIMEOUT_SECONDS, LIST_ATTEMPTS, LIST_UNTIL_SECONDS = 20, 3, 45
+DETAIL_TIMEOUT_SECONDS, DETAIL_ATTEMPTS, DETAIL_UNTIL_SECONDS, DETAIL_WORKERS = 25, 2, 90, 6
+THREADS_TIMEOUT_SECONDS, THREADS_UNTIL_SECONDS = 30, 60
+# 12b carry-forward reads (gh compare latency varies 1-19s per call): no new read
+# starts after this offset; one started just before it ends within the 60s gate
+# timeout, leaving the rest of the 210s for claims and classification.
+VERDICT_UNTIL_SECONDS = 130
+_RUN_STARTED: float | None = None
+
+
+def _budget_left(cap: float, until: float) -> float:
+    """Seconds one read may use: `cap`, trimmed so its phase ends `until` s after the run start."""
+    if _RUN_STARTED is None:
+        return cap
+    return min(cap, until - (time.monotonic() - _RUN_STARTED))
+
+
+def _run_gh_json(cmd: list[str], *, timeout: float, attempts: int, until: float) -> tuple[object | None, str]:
+    """Bounded `gh ... --json` read: (value, error). value is None on failure; never raises."""
+    error = "unknown error"
+    for attempt in range(attempts):
+        budget = _budget_left(timeout, until)
+        if budget < 2:
+            return None, (error + "; " if attempt else "") + "collector budget exhausted"
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=budget)
+            if proc.returncode == 0:
+                return json.loads(proc.stdout), ""
+            error = proc.stderr.strip()[:200] or f"exit {proc.returncode}"
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            error = str(exc)[:200]
+        if attempt < attempts - 1:
+            time.sleep(2 ** attempt)
+    return None, error
+
+
+def _read_pr_details_uncached(number: int, head: str, updated_at: str) -> dict | None:
+    """Heavy per-PR fields for exactly this head. None (not cached) when the read fails or the head moved."""
+    value, _error = _run_gh_json(
+        ["gh", "pr", "view", str(number), "--repo", REPO, "--json", DETAIL_FIELDS],
+        timeout=DETAIL_TIMEOUT_SECONDS, attempts=DETAIL_ATTEMPTS, until=DETAIL_UNTIL_SECONDS,
+    )
+    if not isinstance(value, dict) or value.get("headRefOid") != head:
+        return None  # a push between the list and this read: fail closed, next run resolves it
+    return value
+
+
+# Keyed (number, head, updatedAt); only successful reads are kept (see _memoize).
+_read_pr_details = _memoize(_read_pr_details_uncached)
+
+
+def _attach_details(prs: list[dict]) -> None:
+    """Read CI rollup, files, body and comments for each PR classification consumes.
+
+    Drafts are classified from labels alone (state "draft"), so their heavy fields are
+    never read. A PR whose read fails is flagged detailsUnavailable; classify_pr reports
+    it as unknown instead of classifying from empty CI, files and comments.
+    """
+    def one(pr: dict) -> None:
+        number = pr.get("number")
+        details = None
+        if isinstance(number, int):
+            details = _read_pr_details(number, pr.get("headRefOid") or "", pr.get("updatedAt") or "")
+        if details is None:
+            pr["detailsUnavailable"] = True
+            return
+        for key in ("statusCheckRollup", "files", "body", "comments"):
+            pr[key] = details.get(key)
+
+    todo = [pr for pr in prs if isinstance(pr, dict) and not pr.get("isDraft")]
+    if todo:
+        with ThreadPoolExecutor(max_workers=min(DETAIL_WORKERS, len(todo))) as pool:
+            list(pool.map(one, todo))
 RED = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"}
 PENDING = {"", "PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "EXPECTED", "REQUESTED"}
 # Required merge gates: the CI `test` aggregate job (ci.yml) and the E2E `e2e` job
@@ -823,6 +924,22 @@ def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int
     # only names the owner before admission.
     owner = "PM" if admitted or not slots else f"S{slots[0]}"
     stale_admission = any(x.startswith("ci-head:") for x in labels) and not admitted
+    if pr.get("detailsUnavailable") and not pr.get("isDraft"):
+        # The per-PR read failed, so CI, files, body and 12b comments are unknown.
+        # Never classify (or raise an action) from empty data; a rerun resolves it.
+        return {
+            "number": pr.get("number"),
+            "head": head[:7],
+            "head_full": head,
+            "title": (pr.get("title") or "")[:60],
+            "isDraft": False,
+            "draft": False,
+            "admitted": admitted,
+            "state": "unknown: PR details unavailable",
+            "owner": owner,
+            "next": "rerun snapshot (per-PR read failed)",
+            "actions": [],
+        }
     # The Codex wait comes from live review threads, never the pm-blocked:codex label.
     codex = codex_threads(pr.get("reviewThreads"))
     has_codex_label = CODEX_LABEL in labels
@@ -979,27 +1096,17 @@ def fetch_open_prs(with_threads: bool = True) -> list[dict]:
 def _fetch_open_prs_live(with_threads: bool = True) -> list[dict]:
     with ThreadPoolExecutor(max_workers=2) as pool:
         threads_future = pool.submit(fetch_review_threads) if with_threads else None
-        # Every field is consumed by classification, ownership or review checks.
+        # Light bulk list only; CI rollup, files, body and comments are read per PR below.
         cmd = [
             "gh", "pr", "list", "--repo", REPO, "--state", "open", "--limit", "200",
-            "--json", "number,headRefOid,title,isDraft,labels,statusCheckRollup,files,body,comments",
+            "--json", LIST_FIELDS,
         ]
-        error = "unknown error"
-        for attempt in range(3):
-            try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=60)
-                if proc.returncode == 0:
-                    prs = json.loads(proc.stdout)
-                    if not isinstance(prs, list):
-                        raise ValueError("expected a PR list")
-                    break
-                error = proc.stderr.strip()[:200] or f"exit {proc.returncode}"
-            except (OSError, subprocess.SubprocessError, ValueError) as exc:
-                error = str(exc)[:200]
-            if attempt < 2:
-                time.sleep(2 ** attempt)
-        else:
+        prs, error = _run_gh_json(cmd, timeout=LIST_TIMEOUT_SECONDS, attempts=LIST_ATTEMPTS, until=LIST_UNTIL_SECONDS)
+        if prs is not None and not isinstance(prs, list):
+            prs, error = None, "expected a PR list"
+        if prs is None:
             raise RuntimeError(f"UNAVAILABLE: gh pr list failed: {error}")
+        _attach_details(prs)
         threads = threads_future.result() if threads_future else None
     for pr in prs:
         pr["reviewThreads"] = None if threads is None else threads.get(pr.get("number"), [])
@@ -1025,7 +1132,10 @@ def fetch_review_threads() -> dict[int, list[dict]] | None:
                    "-F", f"owner={owner}", "-F", f"name={name}"]
             if after:
                 cmd += ["-F", f"after={after}"]
-            proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=120)
+            budget = _budget_left(THREADS_TIMEOUT_SECONDS, THREADS_UNTIL_SECONDS)
+            if budget < 2:
+                return None
+            proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=budget)
             if proc.returncode != 0:
                 return None
             page = json.loads(proc.stdout)["data"]["repository"]["pullRequests"]
@@ -1073,6 +1183,8 @@ def main() -> int:
         # incident, admission hold, or pending handoff with the same PR/kind.
         print(json.dumps({"obligations_synced": []}))
         return 0
+    global _RUN_STARTED
+    _RUN_STARTED = time.monotonic()
     mop_owned_prs = fetch_mop_owned_prs()
     raw_prs = fetch_open_prs()
     _prewarm_12b_verdicts(raw_prs)
