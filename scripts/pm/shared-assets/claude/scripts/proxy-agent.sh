@@ -1573,15 +1573,6 @@ proxy_agent_pick_tier() {
     printf 'proxy-agent: REFUSED no usable tier model (%s)\n' "$skipped" >&2
     return 75
   fi
-  # Cap enforcement on the fallback path (MoP proxy cap repair 2026-11-19): the best-effort fallback of a non-enforced role is never a way
-  # past a pool cap. `last` is recorded before the pool check above, so it can be a pool-capped id (or empty when every id was refused);
-  # exporting it would launch (or, for the nested aliases, hand the child) a model the picker had just skipped as pool_cap. Same fail-closed
-  # 75 as the enforced branch. Exempt roles and a valid P0 override still pass proxy_agent_pool_blocked; an unreadable Claude/Grok/Codex count stays fail-open.
-  if [[ -z "$last" ]] || proxy_agent_pool_blocked "$last"; then
-    PICK_MODEL=""
-    printf 'proxy-agent: REFUSED fallback_last %s (%s)\n' "${last:-none}" "$([[ -z "$last" ]] && echo no_candidate || echo pool_cap)" >&2
-    return 75
-  fi
   PICK_MODEL="$last"; PICK_REASON="fallback_last"
 }
 
@@ -1715,26 +1706,6 @@ proxy_agent_primary_pool_guard() {
       fi
       if proxy_agent_pool_blocked "$_guard_id"; then
         printf 'proxy-agent: REFUSED primary %s (codex pool_cap)\n' "$_guard_id" >&2
-        return 75
-      fi
-      return 0;;
-  esac
-  # Cap enforcement on every primary path (MoP proxy cap repair 2026-11-19). A raw `--model claude-*` / `--model grok` (and a --resume of
-  # one) skips proxy_agent_pick_tier, and only the Codex and OpenCode pools were re-checked here, so an explicit Claude or Grok primary
-  # launched past CLAUDE_PROXY_CAP / GROK_PROXY_CAP (even 0) while the same role on `--model auto` was skipped as pool_cap. Same
-  # pool_blocked decision as the picker (role exemptions and a valid P0 override still apply), on the router-equivalent identity so a
-  # decorated or upper-case id is the same admission. A tier-picked primary was already admitted by that decision, so this only
-  # re-confirms it.
-  case "$(proxy_agent_router_identity "$_guard_id")" in
-    claude-*)
-      if proxy_agent_pool_blocked "$_guard_id"; then
-        printf 'proxy-agent: REFUSED primary %s (claude pool_cap)\n' "$_guard_id" >&2
-        return 75
-      fi
-      return 0;;
-    grok-4.7|grok)
-      if proxy_agent_pool_blocked "$_guard_id"; then
-        printf 'proxy-agent: REFUSED primary %s (grok pool_cap)\n' "$_guard_id" >&2
         return 75
       fi
       return 0;;
