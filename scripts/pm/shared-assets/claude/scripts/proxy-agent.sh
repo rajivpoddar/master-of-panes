@@ -1392,6 +1392,15 @@ proxy_agent_is_free_trial_id() {
 proxy_agent_free_guard_refuses() {
   proxy_agent_is_free_trial_id "$(proxy_agent_router_identity "$1")"
 }
+# Unresolved automatic selection (CTO REVISE of c901e33 / f1a7f8a, C0ALZJHGE49 thread 1794985651.254889, ts 1794991405.296039). Only the LITERAL
+# `auto` is a tier request in proxy_agent_select; a decorated `auto(high)` / `AUTO` / `auto[1m]` falls through to RAW and reaches the router
+# verbatim, and CLIProxyAPI 8.0.50 derives the base identity `auto` before resolving it and may pick ANY registered model (including the two
+# restricted ones), so the free-model deny above, which sees only the identity `auto`, never fires. A resolved primary is a concrete model:
+# literal `auto` was replaced by the tier pick before the primary guard, so an `auto` identity here (fresh launch, --resume --model, or a
+# generated continuation) is always an unvetted router choice and is refused.
+proxy_agent_is_unresolved_auto() {
+  [[ "$(proxy_agent_router_identity "$1")" == auto ]]
+}
 # Ordered tiers; escalation after a stall is LIGHT -> MID -> TOP. This is the single source of the tier lists: the picker and the
 # emergency eligibility check (proxy_agent_emergency_open) both read it. Prints the model ids, no-Codex flag applied.
 proxy_agent_tier_models() {
@@ -1640,6 +1649,10 @@ proxy_agent_primary_pool_guard() {
   # A raw `--model <restricted>` (or its alias) and a --resume of one have no tier to fall back within.
   if proxy_agent_free_guard_refuses "$_guard_id"; then
     printf 'proxy-agent: REFUSED free-model guard primary %s identity=%s type=%s (free/trial ids are unconditionally ineligible; name a vetted model)\n' "$_guard_id" "$(proxy_agent_router_identity "$_guard_id")" "${TYPE:-}" >&2
+    return 75
+  fi
+  if proxy_agent_is_unresolved_auto "$_guard_id"; then
+    printf 'proxy-agent: REFUSED unresolved automatic selection primary %s identity=auto type=%s (a decorated auto lets the router pick any model; use literal auto for the tier path or name a model)\n' "$_guard_id" "${TYPE:-}" >&2
     return 75
   fi
   case "$_guard_id" in
@@ -2098,7 +2111,7 @@ CLAUDE_BIN="$(command -v claude)"
   # already refuses the restricted ids, and this is the same unconditional denial at the continuation boundary (CTO REVISE 1794987952.900739).
   # The case subject is the router-equivalent identity of the launched model (CTO REVISE ts 1794989163.540309), not the literal argument, so a
   # decorated name cannot slip past here either; the original MODEL_ID itself still flows to --model unchanged.
-  printf 'case %q in %s) PROXY_AGENT_NO_CONTINUE=1;; esac\n' "$(proxy_agent_router_identity "$MODEL_ID")" "${PROXY_AGENT_FREE_TRIAL_IDS// /|}"
+  printf 'case %q in %s) PROXY_AGENT_NO_CONTINUE=1;; esac\n' "$(proxy_agent_router_identity "$MODEL_ID")" "${PROXY_AGENT_FREE_TRIAL_IDS// /|}|auto"
   printf 'printf "Continue the task in your brief from exactly where you stopped. Do not end your turn until it is DONE, or BLOCKED with the exact external blocker (or HANDOFF). Do not send interim progress peer messages to PM; send ONE message only for a blocker that needs a PM decision, plus the final Stop.\\n" > %q\n' "$JOB_DIR/continue.md"
   # Also continue after an error_max_turns stop (rc!=0): 4 sol runs died that way on 2026-11-13 with work mid-flight (PM).
   printf 'pa_maxturns() { tail -c 6000 %q 2>/dev/null | grep -q "\\"subtype\\":\\"error_max_turns\\""; }\n' "$JSONL"

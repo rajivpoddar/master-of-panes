@@ -35,6 +35,10 @@ MUSE_ALIAS = 'opencode-go-muse-spark-1.3-contributor'
 # Code context suffix: each used to pass the literal compare and reach the router.
 DECORATED_FREE = (f'{HY4}(high)', f'{HY4}(8192)', f'{HY4}(none)', f'{MUSE}(xhigh)', f'{MUSE}[1m]', f'{MUSE}[2m]', 'HY4-Flash-Free(High)',
                   f'{HY4_ALIAS}(low)', f'{MUSE_ALIAS}(high)', f' {HY4}(high)', f'{HY4}()')
+# Decorated automatic selections (CTO REVISE of c901e33, ts 1794991405.296039): only the LITERAL `auto` is a tier request, so these fell to RAW,
+# where the router derives the base identity `auto` and may choose ANY registered model. Each must be refused at the raw primary boundary.
+DECORATED_AUTO = ('auto(high)', 'auto(8192)', 'auto(none)', 'auto()', 'auto[1m]', 'auto(xhigh)[1m]', 'AUTO', 'Auto(High)', ' auto(low) ',
+                  'auto (high)', 'AUTO[2m]')
 # The exact declaration 9ea1b9b treated as "verified", and the QA mode it paired with it.
 VERIFIED_FLAGS = ('--data-scope', 'no-customer-content,no-prod-write', '--qa-mode', 'replay-only')
 BENIGN = 'Fix the sidebar spacing.\n'
@@ -225,14 +229,16 @@ def test_a_raw_free_primary_is_refused_by_the_guard_not_the_emergency_gate(tmp_p
 def _continuation_line():
     runner = _slice("  case \"$TYPE\" in\n    pm-lock-release|prod-*|manual-lease-release", "  printf 'printf \"Continue the task")
     line = re.search(r"^  printf 'case %q in %s\) PROXY_AGENT_NO_CONTINUE=1;; esac\\n' \"\$\(proxy_agent_router_identity \"\$MODEL_ID\"\)\" "
-                     r"\"\$\{PROXY_AGENT_FREE_TRIAL_IDS// /\|\}\"$", runner, re.M)
+                     r"\"\$\{PROXY_AGENT_FREE_TRIAL_IDS// /\|\}\|auto\"$", runner, re.M)
     assert line, runner
     return line.group(0).strip()
 
 
 @pytest.mark.parametrize('model_id,expected', (
     (HY4, '1'), (MUSE, '1'), (HY4_ALIAS, '1'), (MUSE_ALIAS, '1'), *((d, '1') for d in DECORATED_FREE),
-    (DEEPSEEK, '0'), (f'{DEEPSEEK}(high)', '0'), ('claude-haiku-5-5', '0'), ('claude-opus-5-5[1m]', '0'), ('gpt-6.1-terra', '0')))
+    *((a, '1') for a in DECORATED_AUTO), ('auto', '1'),
+    (DEEPSEEK, '0'), (f'{DEEPSEEK}(high)', '0'), ('claude-haiku-5-5', '0'), ('claude-opus-5-5[1m]', '0'), ('gpt-6.1-terra', '0'),
+    ('x(auto)', '0'), ('autoscale-9(high)', '0')))
 def test_the_generated_runner_never_continues_a_free_id_run(tmp_path, model_id, expected):
     # Run the launcher's real generator line (with its real identity helper and list), then the generated line, and read the flag the
     # continuation loop tests. The generated case is keyed on the router-equivalent identity, so a decorated id cannot continue either.
@@ -280,6 +286,7 @@ def _primary_raw(tmp_path, model, resume='', sidecar=None):
 
 
 IDENTITY_CASES = ((HY4, HY4), (f'{HY4}(high)', HY4), ('HY4-Flash-Free(High)', HY4), (f' {HY4}(8192) ', HY4), (f'{MUSE}[1m]', MUSE),
+                  ('auto(high)', 'auto'), ('AUTO[1m]', 'auto'), ('x(auto)', 'x'),
                   (f'{MUSE}(xhigh)[1m]', MUSE), ('claude-opus-5-5[1m]', 'claude-opus-5-5'), (f'{DEEPSEEK}(high)', DEEPSEEK), (GLM, GLM),
                   (f'x({HY4})', 'x'), ('', ''))
 
@@ -305,6 +312,47 @@ def test_a_permitted_decorated_model_is_not_denied_and_keeps_its_original_argume
     rc, model_after, stderr = _primary_raw(tmp_path, model_id)
     assert rc == '0' and 'free-model guard' not in stderr
     assert model_after == model_id  # the guard never rewrites MODEL; the launcher still passes the original string to --model
+
+
+# ---- unresolved automatic selection (CTO REVISE of c901e33, ts 1794991405.296039) --------------------------------------
+# Only the literal `auto` is a tier request. A decorated `auto(high)` is RAW; CLIProxyAPI 8.0.50 derives the base identity before resolving
+# `auto` and may choose any registered model (including the two restricted ones), so the raw primary guard refuses it, on a fresh launch,
+# a --resume --model, and (keyed on the same identity) the generated continuation. Literal auto keeps the vetted tier path.
+
+@pytest.mark.parametrize('resume', ('', 'run1'))
+@pytest.mark.parametrize('model_id', DECORATED_AUTO)
+def test_a_decorated_automatic_primary_is_refused_at_raw_selection_and_resume(tmp_path, model_id, resume):
+    rc, model_after, stderr = _primary_raw(tmp_path, model_id, resume=resume, sidecar=_verified_sidecar(BENIGN) if resume else None)
+    assert rc == '75' and 'REFUSED unresolved automatic selection primary' in stderr and 'identity=auto' in stderr
+    assert 'emergency_gate' not in stderr and 'free-model guard' not in stderr
+    assert model_after == model_id  # refused, never rewritten
+
+
+@pytest.mark.parametrize('model_id', (f'{DEEPSEEK}(high)', 'claude-opus-5-5[1m]', 'gpt-6.1-terra(high)', 'grok-4.7', 'x(auto)', 'autoscale-9(high)',
+                                      'auto-x', 'xauto(high)'))
+def test_decorated_arguments_for_explicitly_permitted_models_are_preserved(tmp_path, model_id):
+    rc, model_after, stderr = _primary_raw(tmp_path, model_id)
+    assert rc == '0' and 'unresolved automatic selection' not in stderr
+    assert model_after == model_id
+
+
+@pytest.mark.parametrize('tier', ('LIGHT', 'MID', 'PLAN', 'BUILD1', 'REVIEW'))
+def test_literal_auto_keeps_the_vetted_tier_path_and_the_picked_model_passes_the_guard(tmp_path, tier):
+    rc, model, _ = _pick(tmp_path, 'hd-builder', tier, cooled='')
+    assert rc == '0' and model
+    guard_rc, _, stderr = _primary_raw(tmp_path, model)
+    assert guard_rc == '0' and 'unresolved automatic selection' not in stderr
+
+
+def test_the_literal_auto_tier_request_is_unchanged_and_the_refusal_runs_on_the_post_pick_primary():
+    select = _slice('proxy_agent_select() {', '# Model table: alias')
+    assert re.search(r'case "\$requested" in\n    auto\)\n', select)  # still the literal-only tier request
+    assert select.index('MODEL="$PICK_MODEL"') < select.index('proxy_agent_primary_pool_guard || return 75')
+    assert GUARD.index('proxy_agent_free_guard_refuses "$_guard_id"') < GUARD.index('proxy_agent_is_unresolved_auto "$_guard_id"') \
+        < GUARD.index('case "$_guard_id" in\n    gpt-*)')
+    assert GUARD.count('proxy_agent_is_unresolved_auto') == 1
+    # resume and fresh launch share the one select call, so the refusal covers --resume --model <decorated auto> too
+    assert SRC.count('proxy_agent_select || exit 75') == 1 and SRC.index('resume_requires_explicit_model_and_original_cwd') < SRC.index('proxy_agent_select || exit 75')
 
 
 def test_the_free_guard_precedes_the_exact_opencode_id_early_return_and_launch_keeps_the_original_argument():
