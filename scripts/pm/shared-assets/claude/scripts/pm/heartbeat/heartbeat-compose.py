@@ -2808,6 +2808,11 @@ PACE_DEFAULT_ACCOUNTS = (
      "horizon": "2026-11-20T07:04:00Z", "baseline_from": "2026-11-17T00:45:00Z",
      "display": "Codex: rajiv-scribie CLI"},
 )
+# Alias key (Rajiv 2026-11-18): an account whose key is claude:keychain:weekly follows the PM pane keychain across account
+# switches. It reads the newest weekly keychain row (claude:keychain-<identity>:weekly, or the old literal key) and
+# restarts the baseline at the first sample of a new identity or a new weekly reset stamp (_pace_keychain_segment).
+PACE_KEYCHAIN_KEY = "claude:keychain:weekly"
+_PACE_KEYCHAIN_ROW = re.compile(r"^claude:keychain(?:-(?P<identity>[^\s:]+))?:weekly$")
 PACE_MIN_WINDOW_HOURS = 0.25   # a baseline this young carries no rate at all
 PACE_THIN_HOURS = 2.0          # under this the rate is shown but flagged, whole-percent steps still dominate
 PACE_MAX_ETA_HOURS = 24 * 365
@@ -2862,15 +2867,26 @@ def _pace_display(acct: dict) -> str:
 
 def _pace_scan(snapshot: Path, wanted: dict[str, float | None]) -> dict[str, dict]:
     """One pass over the usage log. Per wanted key: the newest valid row, and every valid row at or after that key's
-    baseline instant, across all weekly windows (the clause binds them to one window by reset stamp)."""
+    baseline instant, across all weekly windows (the clause binds them to one window by reset stamp).
+
+    The alias key PACE_KEYCHAIN_KEY reads every weekly keychain row, whichever account the keychain held when the
+    sampler ran (claude:keychain-<identity>:weekly, or the old literal claude:keychain:weekly). Those rows also go to
+    slot["keychain"] as (ts, pct, reset, identity) so _pace_keychain_segment can find the current segment."""
     found: dict[str, dict] = {key: {"latest": None, "rows": []} for key in wanted}
+    if PACE_KEYCHAIN_KEY in found:
+        found[PACE_KEYCHAIN_KEY]["keychain"] = []
     with open(snapshot) as handle:
         for line in handle:
             try:
                 row = json.loads(line)
             except ValueError:
                 continue
-            slot = found.get(row.get("key")) if isinstance(row, dict) else None
+            key = row.get("key") if isinstance(row, dict) else None
+            identity = None
+            keychain = _PACE_KEYCHAIN_ROW.match(key) if PACE_KEYCHAIN_KEY in found and isinstance(key, str) else None
+            if keychain:
+                key, identity = PACE_KEYCHAIN_KEY, keychain.group("identity") or ""
+            slot = found.get(key) if isinstance(key, str) else None
             ts, pct = (row.get("ts"), row.get("pct")) if slot is not None else (None, None)
             if slot is None or not _pace_number(ts) or not _pace_number(pct) or not 0 <= pct <= 100:
                 continue
@@ -2878,10 +2894,42 @@ def _pace_scan(snapshot: Path, wanted: dict[str, float | None]) -> dict[str, dic
             sample = (float(ts), float(pct), reset)
             if slot["latest"] is None or ts >= slot["latest"][0]:
                 slot["latest"] = sample
-            start = wanted[row["key"]]
+            start = wanted[key]
             if start is not None and ts >= start:
                 slot["rows"].append(sample)
+                if identity is not None:
+                    slot["keychain"].append(sample + (identity,))
     return found
+
+
+def _pace_keychain_segment(entry: dict, stamp) -> tuple[dict, str | None, str | None]:
+    """(entry, baseline stamp, IST note) for the claude:keychain:weekly alias account.
+
+    The newest weekly keychain row is the sample. The baseline is the latest of: the configured baseline_from (rows
+    before it are never read), the first sample of the current keychain identity, and the first sample after the weekly
+    reset stamp changed. So a keychain account switch or a weekly roll restarts the measurement at its first sample
+    instead of reading UNKNOWN or averaging across two accounts. The configured horizon is never touched. The note
+    names the IST time of that restart; it is None when nothing restarted inside the configured window. The returned
+    stamp stays the configured one without a restart and becomes the restart instant otherwise, so a cached baseline
+    can never outlive its segment."""
+    sequence = sorted(entry.get("keychain") or (), key=lambda r: r[0])
+    segment: list[tuple] = []
+    note, last_reset = None, None
+    for row in sequence:
+        if segment and row[3] != segment[-1][3]:
+            old, new = segment[-1][3] or "keychain", row[3] or "keychain"
+            note = f"keychain switched {old} → {new} at {_ist(row[0], '%a %d %b %H:%M')}, baseline reset there"
+            segment, last_reset = [], None
+        elif segment and last_reset is not None and row[2] is not None and not _pace_same_window(row[2], last_reset):
+            note = f"keychain weekly reset stamp changed at {_ist(row[0], '%a %d %b %H:%M')}, baseline reset there"
+            segment = []
+        segment.append(row)
+        if row[2] is not None:
+            last_reset = row[2]
+    if note is None or not segment:
+        return {**entry, "rows": [r[:3] for r in segment]}, stamp, None
+    restart = datetime.fromtimestamp(segment[0][0], timezone.utc).isoformat()
+    return {**entry, "rows": [r[:3] for r in segment]}, restart, note
 
 
 def _pace_same_window(a, b) -> bool:
@@ -2991,7 +3039,13 @@ def _pace_resolve(now: datetime, snapshot: Path, config: Path, state: Path, pers
     stored = stored if isinstance(stored, dict) else {}
     resolved, keep = [], {}
     for acct in accounts:
-        clause, cache, cells = _pace_clause(acct, found[acct["key"]], stored.get(acct["key"]), ts_now)
+        entry, note = found[acct["key"]], None
+        if acct["key"] == PACE_KEYCHAIN_KEY:
+            entry, stamp, note = _pace_keychain_segment(entry, acct.get("baseline_from"))
+            acct = {**acct, "baseline_from": stamp}
+        clause, cache, cells = _pace_clause(acct, entry, stored.get(acct["key"]), ts_now)
+        if note and cells.get("used") is not None:
+            clause, cells = f"{clause} ({note})", {**cells, "note": note}
         resolved.append((acct, clause, cells))
         if cache:
             keep[acct["key"]] = cache
@@ -3051,6 +3105,8 @@ def _pace_table_lines(resolved: list[tuple]) -> list[str]:
             burn_cell = f"{rate:.2f} {marker}"
             target_cell = f"≤{cells['ceiling']:.2f} to {cells['to']}"
             runs_cell = cells["runs_out"]
+            if cells.get("note"):   # keychain switch / weekly roll (claude:keychain:weekly alias): one IST note line
+                notes.append(f"{PACE_NOTE_PREFIX}{display}: {cells['note']}")
         rows.append([display, used_cell, burn_cell, target_cell, runs_cell])
 
     def row(cols: list[str]) -> str:

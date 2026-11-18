@@ -184,6 +184,82 @@ def test_stored_baseline_from_a_previous_window_is_never_reused(tmp_path):
     assert 'ABOVE' not in clause and 'BELOW' not in clause
 
 
+# claude:keychain:weekly alias (Rajiv 2026-11-18): the account follows the PM pane keychain across account switches.
+# The newest weekly keychain row is the sample; the baseline is the latest of the configured baseline_from, the first
+# sample of the current identity and the first sample after the weekly reset stamp changed; an IST note names the
+# restart; the configured horizon is untouched. Synthetic sequences only (not executed by the MoP repair run).
+ALIAS = 'claude:keychain:weekly'
+KEYCHAIN_DEV = 'claude:keychain-dev@scribie.com:weekly'
+KEYCHAIN_RAJIV = 'claude:keychain-rajiv@scribie.com:weekly'
+WINDOW_RAJIV = WINDOW + 2 * 86400
+
+
+def _alias_config(path, baseline_from=BASE):
+    path.write_text(json.dumps({'accounts': [
+        {'label': 'Claude', 'name': 'keychain', 'key': ALIAS, 'horizon': CLAUDE_HORIZON,
+         'baseline_from': _iso(baseline_from), 'display': 'Claude: PM pane (keychain)'}]}))
+    return path
+
+
+def test_keychain_alias_identity_switch_restarts_the_baseline_and_annotates_the_ist_switch(tmp_path):
+    now = BASE + 8 * H
+    rows = [(BASE, KEYCHAIN_DEV, 40, WINDOW), (BASE + 2 * H, KEYCHAIN_DEV, 44, WINDOW),
+            (BASE + 4 * H, KEYCHAIN_RAJIV, 10, WINDOW_RAJIV), (BASE + 6 * H, KEYCHAIN_RAJIV, 13, WINDOW_RAJIV),
+            (BASE + 8 * H, KEYCHAIN_RAJIV, 16, WINDOW_RAJIV)]
+    cfg = _alias_config(tmp_path / 'cfg.json')
+    clause = _clause(_pace(tmp_path, rows, now, config=cfg), 'Claude')
+    # baseline = the new identity's first sample (10% at 10:15 IST), never averaged with the 40-44% rows of the old one:
+    # (16-10)/4.0h = 1.50 %/h; ceiling 84/19.25h = 4.36 %/h to the UNCHANGED configured horizon.
+    assert ('Claude keychain 16% used at 14:15 IST (sample 0.0h old), measured 1.50 %/h over 4.0h '
+            'vs ceiling 4.36 %/h (to Wed 11-18 09:30 IST) → BELOW') in clause
+    assert 'keychain switched dev@scribie.com → rajiv@scribie.com at Tue 17 Nov 10:15 IST, baseline reset there' in clause
+    assert 'UNKNOWN' not in clause
+    table = composer.pace_table(_at(now), snapshot=tmp_path / 'log.jsonl', config=cfg, state=tmp_path / 'state.json')
+    lines = table.splitlines()
+    assert _cells(_pipe_row(table, 'Claude: PM pane (keychain)'))[2] == '1.50 ✅'
+    assert lines[-1] == ('Pace note: Claude: PM pane (keychain): keychain switched dev-scribie.com → rajiv-scribie.com '
+                         'at Tue 17 Nov 10:15 IST, baseline reset there')
+    assert len(lines) == 4 and '@' not in table
+
+
+def test_keychain_alias_weekly_reset_stamp_change_restarts_the_baseline_and_caches_it(tmp_path):
+    now = BASE + 9 * H
+    rolled = WINDOW + 7 * 86400
+    rows = [(BASE, KEYCHAIN_DEV, 60, WINDOW), (BASE + 3 * H, KEYCHAIN_DEV, 70, WINDOW),
+            (BASE + 5 * H, KEYCHAIN_DEV, 2, rolled), (BASE + 7 * H, KEYCHAIN_DEV, 5, rolled + 0.7),   # sub-second jitter
+            (BASE + 9 * H, KEYCHAIN_DEV, 8, rolled)]
+    cfg, state = _alias_config(tmp_path / 'cfg.json'), tmp_path / 'state.json'
+    clause = _clause(_pace(tmp_path, rows, now, persist=True, config=cfg, state=state), 'Claude')
+    # same identity, new weekly reset stamp: baseline = first sample after it (2% at 11:15 IST); (8-2)/4.0h = 1.50 %/h,
+    # no UNKNOWN for the window change, no 60-70% rows from the old window in the average.
+    assert 'Claude keychain 8% used at 15:15 IST (sample 0.0h old), measured 1.50 %/h over 4.0h' in clause
+    assert 'vs ceiling 5.04 %/h (to Wed 11-18 09:30 IST) → BELOW' in clause
+    assert 'keychain weekly reset stamp changed at Tue 17 Nov 11:15 IST, baseline reset there' in clause
+    assert 'switched' not in clause and 'UNKNOWN' not in clause
+    cached = json.loads(state.read_text())['baselines'][ALIAS]
+    assert cached == {'from': '2026-11-17T05:45:00+00:00', 'ts': BASE + 5 * H, 'pct': 2.0, 'reset': rolled}
+    again = _clause(_pace(tmp_path, rows, now, persist=False, config=cfg, state=state), 'Claude')
+    assert again == clause                                                    # the cached restart baseline is stable
+
+
+def test_keychain_alias_latest_configured_baseline_wins_and_other_keychain_rows_are_ignored(tmp_path):
+    now = BASE + 8 * H
+    rows = [(BASE, KEYCHAIN_DEV, 40, WINDOW), (BASE + 2 * H, KEYCHAIN_RAJIV, 20, WINDOW_RAJIV),   # switch before baseline
+            (BASE + 5 * H, KEYCHAIN_RAJIV, 22, WINDOW_RAJIV),
+            (BASE + 6 * H, KEYCHAIN_RAJIV + ' Fable', 99, WINDOW_RAJIV), (BASE + 7 * H, 'claude:keychain:5h', 100, WINDOW_RAJIV),
+            (BASE + 8 * H, KEYCHAIN_RAJIV, 26, WINDOW_RAJIV)]
+    cfg = _alias_config(tmp_path / 'cfg.json', baseline_from=BASE + 4 * H)
+    line = _pace(tmp_path, rows, now, config=cfg)
+    clause = _clause(line, 'Claude')
+    # the configured baseline (10:15 IST) is later than the switch, so it is the baseline: first sample at/after it is
+    # 22% at 11:15 IST, (26-22)/3.0h = 1.33 %/h. Fable and 5h rows are not weekly keychain rows. No annotation.
+    assert ('Claude keychain 26% used at 14:15 IST (sample 0.0h old), measured 1.33 %/h over 3.0h '
+            'vs ceiling 3.84 %/h (to Wed 11-18 09:30 IST) → BELOW') in clause
+    assert 'switched' not in clause and 'reset stamp changed' not in clause and 'UNKNOWN' not in clause
+    table = composer.pace_table(_at(now), snapshot=tmp_path / 'log.jsonl', config=cfg, state=tmp_path / 'state.json')
+    assert 'Pace note: ' not in table and len(table.splitlines()) == 3
+
+
 # Fixed-time static fixture table (CTO proof request, ts 1794879652.704859). Times are UTC.
 #   NOW          Tue 11-17 12:00Z (17:30 IST), the report time
 #   sample       the last observation, 1h before NOW
