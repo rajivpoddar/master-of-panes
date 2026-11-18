@@ -162,14 +162,40 @@ def test_cap_blocks_each_model_when_pool_is_full(tmp_path, model):
     assert raised.stdout.strip() == 'free', raised.stderr
 
 
-def test_cap_exempt_role_and_other_pools_are_not_affected(tmp_path):
+def test_opencode_cap_binds_exempt_roles_other_pools_stay_exempt(tmp_path):
+    # 2026-11-18: ci-repair-agent and growth are cap-exempt, so pool_blocked returned before the
+    # OpenCode count and cooled Claude fell through to deepseek with no pool_cap skip.
     base = 'ROLE_BRIEF=\nPROXY_AGENT_CAP_OVERRIDE=\n' + CAPS
-    exempt = _bash('TYPE=mop-main-repair\n' + base + f'proxy_agent_pool_blocked {MUSE} && echo blocked || echo free\n',
-                   tmp_path, {'PROXY_AGENT_STUB_POOL_LIVE': '9'})
-    assert exempt.stdout.strip() == 'free', exempt.stderr
+    exempt = _bash('TYPE=ci-repair-agent\n' + base + f'proxy_agent_pool_blocked {DEEPSEEK} && echo blocked || echo free\n',
+                   tmp_path, {'PROXY_AGENT_STUB_POOL_LIVE': '2', 'OPENCODE_PROXY_CAP': '2'})
+    assert exempt.stdout.strip() == 'blocked', exempt.stderr
+    p0 = _bash('TYPE=hd-builder\n' + base.replace('PROXY_AGENT_CAP_OVERRIDE=\n', 'PROXY_AGENT_CAP_OVERRIDE=P0:14000\n', 1)
+               + f'proxy_agent_pool_blocked {DEEPSEEK} && echo blocked || echo free\n',
+               tmp_path, {'PROXY_AGENT_STUB_POOL_LIVE': '2', 'OPENCODE_PROXY_CAP': '2'})
+    assert p0.stdout.strip() == 'blocked', p0.stderr
+    # The same exemption still skips Claude/Grok/Codex caps.
+    claude_exempt = _bash('TYPE=ci-repair-agent\n' + base + 'proxy_agent_pool_blocked claude-sonnet-5-5 && echo blocked || echo free\n',
+                          tmp_path, {'PROXY_AGENT_STUB_POOL_LIVE': '9', 'CLAUDE_PROXY_CAP': '1'})
+    assert claude_exempt.stdout.strip() == 'free', claude_exempt.stderr
     claude = _bash('TYPE=hd-builder\n' + base + 'proxy_agent_pool_blocked claude-haiku-5-5 && echo blocked || echo free\n',
                    tmp_path, {'PROXY_AGENT_STUB_POOL_LIVE': '2', 'OPENCODE_PROXY_CAP': '1'})
     assert claude.stdout.strip() == 'free', claude.stderr
+
+
+def test_exempt_mid_falls_through_when_opencode_is_at_cap(tmp_path):
+    body = (
+        'TYPE=ci-repair-agent\nROLE_BRIEF=\nPROXY_AGENT_CAP_OVERRIDE=\n'
+        'proxy_agent_burn_refused() { return 1; }\n'
+        'proxy_agent_sub_usable() { [[ "$1" == claude-sonnet-5-5 ]] && return 1; return 0; }\n'
+        + CAPS + PICKER + FREE_GUARD_OFF
+        + 'proxy_agent_pick_tier MID && rc=0 || rc=$?\n'
+        + 'printf "rc=%s model=%s reason=%s\\n" "$rc" "${PICK_MODEL-}" "${PICK_REASON-}"\n'
+    )
+    result = _bash(body, tmp_path, {'PROXY_AGENT_STUB_POOL_LIVE': '2', 'OPENCODE_PROXY_CAP': '2'})
+    assert result.returncode == 0, result.stderr
+    assert 'pool_cap skip model=deepseek-v4.1-flash' in result.stderr
+    fields = dict(part.split('=', 1) for part in result.stdout.strip().splitlines()[-1].split(' ', 2))
+    assert fields['rc'] == '0' and fields['model'] == 'grok-4.7', result.stderr
 
 
 def test_shared_cap_stops_a_pool_member_even_when_another_is_cooled(tmp_path):
@@ -412,14 +438,18 @@ def test_cap_zero_turns_the_pool_off_even_when_the_process_list_is_unreadable(tm
     assert other.stdout.strip() == 'free', other.stderr
 
 
-def test_cap_zero_keeps_actual_scoped_exemptions(tmp_path):
+def test_opencode_cap_zero_is_not_lifted_by_exemption(tmp_path):
+    # Cap 0 turns the pool off for every launch. Role exemptions and P0 still apply to other pools.
     base = ('ROLE_BRIEF=\nPROXY_AGENT_CAP_OVERRIDE=\n' + CAPS + 'proxy_agent_pool_live() { return 1; }\n')
     probe = f'proxy_agent_pool_blocked {HY4} && echo blocked || echo free\n'
     exempt = _bash('TYPE=mop-main-repair\n' + base + probe, tmp_path, {'OPENCODE_PROXY_CAP': '0'})
-    assert exempt.stdout.strip() == 'free', exempt.stderr
+    assert exempt.stdout.strip() == 'blocked', exempt.stderr
     p0 = _bash('TYPE=hd-builder\n' + base.replace('PROXY_AGENT_CAP_OVERRIDE=\n', 'PROXY_AGENT_CAP_OVERRIDE=P0:13900\n', 1) + probe,
                tmp_path, {'OPENCODE_PROXY_CAP': '0'})
-    assert p0.stdout.strip() == 'free', p0.stderr
+    assert p0.stdout.strip() == 'blocked', p0.stderr
+    claude = _bash('TYPE=mop-main-repair\n' + base + 'proxy_agent_pool_blocked claude-haiku-5-5 && echo blocked || echo free\n',
+                   tmp_path, {'PROXY_AGENT_STUB_POOL_LIVE': '9', 'CLAUDE_PROXY_CAP': '0'})
+    assert claude.stdout.strip() == 'free', claude.stderr
 
 
 def test_an_exemption_is_not_muse_permission(tmp_path):

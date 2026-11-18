@@ -1616,9 +1616,13 @@ print(n)
 PY
 }
 
-# 0 when this model id is at or over its own pool cap. Exempt launches and an unreadable count are not blocked.
+# 0 when this model id is at or over its own pool cap. Exempt launches and an unreadable count are not blocked
+# for Claude, Grok and Codex. The OpenCode Go pool is the exception: it has no %/h burn meter, so OPENCODE_PROXY_CAP
+# applies to every new launch, including cap-exempt roles and a P0 override. Otherwise a cooled Claude tier falls
+# through to unlimited deepseek-v4.1-flash (2026-11-18: cap 2, 9 live primaries, all ci-repair-agent or growth,
+# logs "reason=cooled:claude-sonnet-5-5" with no pool_cap skip). The process match already counts those primaries;
+# the early exemption return never consulted it. Existing processes are not touched.
 proxy_agent_pool_blocked() {
-  proxy_agent_cap_exempt "$TYPE" && return 1
   local id="$1" pool cap live
   case "$id" in
     claude-*) pool=claude; cap="${CLAUDE_PROXY_CAP:-${PROXY_AGENT_CLAUDE_CAP:-5}}";;
@@ -1627,6 +1631,7 @@ proxy_agent_pool_blocked() {
     hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor) pool=opencode; cap="${OPENCODE_PROXY_CAP:-2}";;
     *) return 1;;
   esac
+  if [[ "$pool" != opencode ]] && proxy_agent_cap_exempt "$TYPE"; then return 1; fi
   case "$cap" in ''|*[!0-9]*) return 1;; esac
   # OpenCode cap 0 means the pool is off: blocked without counting, so an unreadable process list cannot let a launch through.
   if [[ "$pool" == opencode && "$cap" =~ ^0+$ ]]; then return 0; fi
@@ -1639,8 +1644,9 @@ proxy_agent_pool_blocked() {
 # Final-primary OpenCode guard (CTO REVISE 2026-11-17, C0ALZJHGE49 thread 1794931098.013929, ts 1794932145.795929). Runs in
 # proxy_agent_select on the RESOLVED primary, RAW included: a raw `--model hy4-flash-free` skips proxy_agent_pick_tier and the burn
 # check treats OpenCode ids as unmetered, so without this an explicit pool id launched past OPENCODE_PROXY_CAP (even 0), and an
-# explicit Muse skipped the emergency gate. Same pool_blocked decision as the picker, so actual scoped cap exemptions still apply;
-# an exemption is never emergency permission for Muse. Returns 75 on refusal, 0 otherwise.
+# explicit Muse skipped the emergency gate. Same pool_blocked decision as the picker: Claude/Grok/Codex exemptions
+# still apply, the OpenCode pool cap does not (see proxy_agent_pool_blocked). An exemption is never emergency
+# permission for Muse. Returns 75 on refusal, 0 otherwise.
 proxy_agent_primary_pool_guard() {
   local _guard_id _guard_window _guard_max
   read -r _guard_id _guard_window _guard_max < <(resolve_model "$MODEL")
