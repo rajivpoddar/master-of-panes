@@ -834,7 +834,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "1d8ec37227d431851955c7d957090918c3064e488f844bc88bc3831c6d4a920a",
+      "sha256": "09a12c3aa746f56fb3f0cb2941147416fbe50b0cdfc424dd8ba57f0446709da2",
       "source_path": "claude/scripts/pm/heartbeat/pr-open-snapshot.py"
     },
     {

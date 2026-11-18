@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Live open-PR snapshot shared by the hourly drive and the 3h heartbeat.
 
-Gate color comes from live GitHub (statusCheckRollup on the current headRefOid,
-read per non-draft PR after a light bulk `gh pr list`; see the collector budget
-below). A PR whose per-PR read fails is reported unknown. A red PR is "unowned" only when it has no MoP slot
-owner, no slot:N label, and no PM-owned wait (CI still running, review hold,
-or a capture/CI/review obligation owner). Read-only; takes no PR actions.
+Gate color comes from live GitHub (`gh pr list` statusCheckRollup on the
+current headRefOid). files, body and comments are read per PR, only for a PR
+whose classification touches them; a PR whose read fails, whose 12b verdict
+timed out, or that the whole-run budget (see below) did not reach, is reported
+unknown. A red PR is "unowned" only when it has no MoP slot owner, no slot:N
+label, and no PM-owned wait (CI still running, review hold, or a
+capture/CI/review obligation owner). Read-only; takes no PR actions.
 
 Output (JSON, or --text one line per PR):
   {number, head, title, draft, state, owner, next}
@@ -18,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 import datetime
 import importlib.util
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -151,17 +154,19 @@ REPO = "Scribie/heydonna-app"
 # `gh pr list` GraphQL read and the review-thread query.
 SNAPSHOT_TTL = gh_budget.DEFAULT_TTL
 
-# --- Collector budget. heartbeat-compose gives this collector 210s
-# (COLLECTOR_TIMEOUTS["pr-open-snapshot"]). One `gh pr list --json
+# --- Collector budget. heartbeat-compose runs this collector under a hard 210s
+# wall-clock kill (COLLECTOR_TIMEOUTS["pr-open-snapshot"]). One `gh pr list --json
 # ...statusCheckRollup,files,body,comments` over every open PR timed out 3 x 60s
-# (184s) and killed the run. The bulk list is now light; the heavy fields are read
-# per PR only where classification consumes them. Every phase ends a fixed number
-# of seconds after the run start, so a slow GitHub degrades to UNAVAILABLE or to an
-# explicit unknown row and never to a 210s kill.
-LIST_FIELDS = "number,headRefOid,title,isDraft,labels,updatedAt"
-DETAIL_FIELDS = "headRefOid,statusCheckRollup,files,body,comments"
-LIST_TIMEOUT_SECONDS, LIST_ATTEMPTS, LIST_UNTIL_SECONDS = 20, 3, 45
-DETAIL_TIMEOUT_SECONDS, DETAIL_ATTEMPTS, DETAIL_UNTIL_SECONDS, DETAIL_WORKERS = 25, 2, 90, 6
+# (184s) and killed the run. The bulk list now carries the CI rollup but not
+# files/body/comments (body+comments are about 1.96 of the 2.2 MB payload); those
+# are read per PR, only for a PR whose classification touches them. Every phase
+# ends a fixed number of seconds after the run start, and a whole-run watchdog
+# prints what is known (honest "unknown" rows for the rest) before the 210s kill.
+LIST_FIELDS = "number,headRefOid,title,isDraft,labels,statusCheckRollup"
+DETAIL_KEYS = ("files", "body", "comments")
+DETAIL_FIELDS = "headRefOid," + ",".join(DETAIL_KEYS)
+LIST_TIMEOUT_SECONDS, LIST_ATTEMPTS, LIST_UNTIL_SECONDS = 30, 3, 60
+DETAIL_TIMEOUT_SECONDS, DETAIL_ATTEMPTS, DETAIL_UNTIL_SECONDS, DETAIL_WORKERS = 25, 2, 100, 6
 THREADS_TIMEOUT_SECONDS, THREADS_UNTIL_SECONDS = 30, 60
 # The whole 12b verdict pass (gh compare latency varies 1-19s per call, plus the
 # gate's sequential local git reads and the reviewer login read) shares ONE window
@@ -171,6 +176,8 @@ THREADS_TIMEOUT_SECONDS, THREADS_UNTIL_SECONDS = 30, 60
 # out" (classify_pr), never classified from a missing verdict; rows that do not need
 # a verdict still emit. The rest of the 210s is for claims and classification.
 VERDICT_UNTIL_SECONDS = 130
+# Whole-run hard stop, 20s inside the 210s kill (interpreter start, import, exit).
+WHOLE_RUN_SECONDS = 190
 _RUN_STARTED: float | None = None
 
 
@@ -200,8 +207,8 @@ def _run_gh_json(cmd: list[str], *, timeout: float, attempts: int, until: float)
     return None, error
 
 
-def _read_pr_details_uncached(number: int, head: str, updated_at: str) -> dict | None:
-    """Heavy per-PR fields for exactly this head. None (not cached) when the read fails or the head moved."""
+def _read_pr_details_uncached(number: int, head: str) -> dict | None:
+    """files, body and comments for exactly this head. None (not cached) when the read fails or the head moved."""
     value, _error = _run_gh_json(
         ["gh", "pr", "view", str(number), "--repo", REPO, "--json", DETAIL_FIELDS],
         timeout=DETAIL_TIMEOUT_SECONDS, attempts=DETAIL_ATTEMPTS, until=DETAIL_UNTIL_SECONDS,
@@ -211,32 +218,77 @@ def _read_pr_details_uncached(number: int, head: str, updated_at: str) -> dict |
     return value
 
 
-# Keyed (number, head, updatedAt); only successful reads are kept (see _memoize).
+# Keyed (number, head); only successful reads are kept (see _memoize).
 _read_pr_details = _memoize(_read_pr_details_uncached)
 
 
 def _attach_details(prs: list[dict]) -> None:
-    """Read CI rollup, files, body and comments for each PR classification consumes.
+    """Read files, body and comments for each PR in `prs`; the CI rollup is already on the PR.
 
-    Drafts are classified from labels alone (state "draft"), so their heavy fields are
-    never read. A PR whose read fails is flagged detailsUnavailable; classify_pr reports
-    it as unknown instead of classifying from empty CI, files and comments.
+    A PR whose read fails gets unknownReason; classify_pr reports it as unknown
+    instead of classifying from empty files, body and comments.
     """
     def one(pr: dict) -> None:
+        if all(key in pr for key in DETAIL_KEYS):
+            return  # already complete (an older cached payload, or a caller that supplied them)
         number = pr.get("number")
-        details = None
-        if isinstance(number, int):
-            details = _read_pr_details(number, pr.get("headRefOid") or "", pr.get("updatedAt") or "")
+        details = _read_pr_details(number, pr.get("headRefOid") or "") if isinstance(number, int) else None
         if details is None:
-            pr["detailsUnavailable"] = True
+            pr["unknownReason"] = "PR details unavailable"
             return
-        for key in ("statusCheckRollup", "files", "body", "comments"):
+        for key in DETAIL_KEYS:
             pr[key] = details.get(key)
 
-    todo = [pr for pr in prs if isinstance(pr, dict) and not pr.get("isDraft")]
+    todo = [pr for pr in prs if isinstance(pr, dict)]
     if todo:
         with ThreadPoolExecutor(max_workers=min(DETAIL_WORKERS, len(todo))) as pool:
             list(pool.map(one, todo))
+
+
+class _ProbePR(dict):
+    """Shallow copy of a listed PR that records whether classification reads files, body or comments.
+
+    The bulk list carries none of them, so a read returns the empty default. A PR whose
+    classification never touches one is already classified exactly; only the others
+    need their per-PR read (the touch always precedes any branch that depends on the data).
+    """
+    touched = False
+
+    def get(self, key, default=None):
+        if key in DETAIL_KEYS:
+            self.touched = True
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        if key in DETAIL_KEYS:
+            self.touched = True
+        return super().__getitem__(key)
+
+
+class _PRHold:
+    """`holds` for one PR, computed only if classification asks (it reads comments and files).
+
+    Delegates to _admission_holds, so a hold computed while a verdict read timed out is
+    dropped there exactly as for the eager pass.
+    """
+
+    def __init__(self, pr: dict):
+        self._pr = pr
+        self._done = False
+        self._value = None
+
+    def __bool__(self) -> bool:
+        return True
+
+    def get(self, number, default=None):
+        if number != self._pr.get("number"):
+            return default
+        if not self._done:
+            self._value = _admission_holds([self._pr]).get(number)
+            self._done = True
+        return self._value or default
+
+
 RED = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE", "ERROR"}
 PENDING = {"", "PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "EXPECTED", "REQUESTED"}
 # Required merge gates: the CI `test` aggregate job (ci.yml) and the E2E `e2e` job
@@ -1000,11 +1052,11 @@ def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int
     stale_admission = any(x.startswith("ci-head:") for x in labels) and not admitted
     base_owner = owner
     verdict_timeouts = _verdict_timeouts()
-    if pr.get("detailsUnavailable") and not pr.get("isDraft"):
-        # The per-PR read failed, so CI, files, body and 12b comments are unknown.
-        # Never classify (or raise an action) from empty data; a rerun resolves it.
-        return _unknown_row(pr, head, admitted, owner, "unknown: PR details unavailable",
-                            "rerun snapshot (per-PR read failed)")
+    reason = pr.get("unknownReason")
+    if reason and not pr.get("isDraft"):
+        # files, body or 12b comments could not be read (or the run budget ran out), so
+        # never classify or raise an action from empty data; a rerun resolves it.
+        return _unknown_row(pr, head, admitted, owner, f"unknown: {reason}", "rerun snapshot")
     # The Codex wait comes from live review threads, never the pm-blocked:codex label.
     codex = codex_threads(pr.get("reviewThreads"))
     has_codex_label = CODEX_LABEL in labels
@@ -1167,7 +1219,7 @@ def fetch_open_prs(with_threads: bool = True) -> list[dict]:
 def _fetch_open_prs_live(with_threads: bool = True) -> list[dict]:
     with ThreadPoolExecutor(max_workers=2) as pool:
         threads_future = pool.submit(fetch_review_threads) if with_threads else None
-        # Light bulk list only; CI rollup, files, body and comments are read per PR below.
+        # Bulk list: CI rollup yes; files, body and comments are read per PR, only where classification needs them.
         cmd = [
             "gh", "pr", "list", "--repo", REPO, "--state", "open", "--limit", "200",
             "--json", LIST_FIELDS,
@@ -1177,7 +1229,6 @@ def _fetch_open_prs_live(with_threads: bool = True) -> list[dict]:
             prs, error = None, "expected a PR list"
         if prs is None:
             raise RuntimeError(f"UNAVAILABLE: gh pr list failed: {error}")
-        _attach_details(prs)
         threads = threads_future.result() if threads_future else None
     for pr in prs:
         pr["reviewThreads"] = None if threads is None else threads.get(pr.get("number"), [])
@@ -1258,6 +1309,58 @@ def _admission_holds(prs: list[dict]) -> dict[int, str]:
     return holds
 
 
+_OUT_LOCK = threading.Lock()
+# Shared with the watchdog: the listed PRs and every row already final.
+_RUN: dict = {"prs": None, "rows": {}, "done": False}
+
+
+def _output(rows: list[dict], text: bool) -> None:
+    stale = gh_budget.stale_info()
+    if stale:
+        for row in rows:
+            row["stale"] = True
+            row["stale_reason"] = stale
+    if text:
+        if stale:
+            print(f"STALE: {stale}")
+        print("\n".join(format_line(r) for r in rows))
+        for r in rows:
+            for a in r["actions"]:
+                print(f"ACTION: {a}")
+    else:
+        print(json.dumps(rows, indent=2))
+    sys.stdout.flush()
+
+
+def _partial_rows(prs: list[dict], done: dict) -> list[dict]:
+    """Every listed PR: its final row if known, else an honest unknown row. Reads nothing."""
+    rows = [
+        done.get(pr.get("number")) or classify_pr({**pr, "unknownReason": "collector budget exhausted"})
+        for pr in prs
+    ]
+    return sorted(rows, key=lambda r: -int(r["number"]))
+
+
+def _watchdog(finished: threading.Event, text: bool) -> None:
+    """Whole-run hard stop: print what is known, honest unknowns for the rest, exit before the 210s kill."""
+    if finished.wait(max(0.0, WHOLE_RUN_SECONDS - (time.monotonic() - _RUN_STARTED))):
+        return
+    with _OUT_LOCK:
+        if _RUN["done"]:
+            return
+        _RUN["done"] = True
+        prs = _RUN["prs"]
+        if prs is None:
+            print("UNAVAILABLE: collector budget exhausted before the PR list was read", file=sys.stderr, flush=True)
+            os._exit(1)
+        rows = _partial_rows(prs, dict(_RUN["rows"]))
+        _output(rows, text)
+        unknown = sum(1 for r in rows if r["state"].startswith("unknown:"))
+        print(f"PARTIAL: budget exhausted at {WHOLE_RUN_SECONDS}s; {unknown} of {len(rows)} rows unknown",
+              file=sys.stderr, flush=True)
+        os._exit(0)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Live open-PR snapshot")
     parser.add_argument("--text", action="store_true")
@@ -1273,29 +1376,34 @@ def main() -> int:
         return 0
     global _RUN_STARTED
     _RUN_STARTED = time.monotonic()
+    _RUN.update(prs=None, rows={}, done=False)
+    finished = threading.Event()
+    threading.Thread(target=_watchdog, args=(finished, args.text), daemon=True).start()
     mop_owned_prs = fetch_mop_owned_prs()
     raw_prs = fetch_open_prs()
-    _prewarm_12b_verdicts(raw_prs)
+    _RUN["prs"] = raw_prs
     claims = fetch_live_claims(raw_prs)
-    holds = _admission_holds(raw_prs)
-    rows = sorted(
-        (classify_pr(pr, mop_owned_prs, holds, claims) for pr in raw_prs),
-        key=lambda r: -int(r["number"]),
-    )
-    stale = gh_budget.stale_info()
-    if stale:
-        for row in rows:
-            row["stale"] = True
-            row["stale_reason"] = stale
-    if args.text:
-        if stale:
-            print(f"STALE: {stale}")
-        print("\n".join(format_line(r) for r in rows))
-        for r in rows:
-            for a in r["actions"]:
-                print(f"ACTION: {a}")
-    else:
-        print(json.dumps(rows, indent=2))
+    # Classify from the bulk list alone first. A PR whose classification never reads
+    # files, body or comments (drafts, slot rework, held, CI running, not admitted
+    # green, ...) is final; only the rest get a per-PR read and a second pass.
+    need = []
+    for pr in raw_prs:
+        probe = _ProbePR(pr)
+        row = classify_pr(probe, mop_owned_prs, _PRHold(probe), claims)
+        if probe.touched:
+            need.append(pr)
+        else:
+            _RUN["rows"][pr.get("number")] = row
+    _attach_details(need)
+    _prewarm_12b_verdicts([pr for pr in need if not pr.get("unknownReason")])
+    for pr in need:
+        _RUN["rows"][pr.get("number")] = classify_pr(pr, mop_owned_prs, _PRHold(pr), claims)
+    rows = sorted((_RUN["rows"][pr.get("number")] for pr in raw_prs), key=lambda r: -int(r["number"]))
+    with _OUT_LOCK:
+        if not _RUN["done"]:
+            _RUN["done"] = True
+            _output(rows, args.text)
+    finished.set()
     return 0
 
 
