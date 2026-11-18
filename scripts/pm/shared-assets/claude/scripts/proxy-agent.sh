@@ -2038,6 +2038,11 @@ import os
 deny = ["Bash(git reset --hard*)", "Bash(git restore *)",
         "Bash(gh pr merge *)", "Bash(git push --force*)",
         "Bash(git push -f*)"]
+deny += ["Bash(ssh *localhost*)", "Bash(ssh *127.0.0.1*)", "Bash(ssh *::1*)", "Bash(ssh *0.0.0.0*)",
+         "Bash(ssh *heydonna.local*)", "Bash(ssh *heydonna *)", "Bash(ssh heydonna)", "Bash(ssh *192.168.68.111*)",
+         "Bash(ssh *ProxyCommand*)", "Bash(ssh *LocalCommand*)", "Bash(ssh *PermitLocalCommand*)",
+         "Bash(*ssh *localhost*)", "Bash(*ssh *127.0.0.1*)", "Bash(*ssh *192.168.68.111*)", "Bash(*ssh *heydonna.local*)"]
+# ^ Rajiv ts 1795017876.764629: Remote Login stays on, so ssh back to this Mac is denied (it would run outside the fence).
 if os.environ.get("HELPER_READONLY") == "1":
     deny += ["Bash(gh run rerun*)", "Bash(gh run cancel*)", "Bash(gh workflow run*)",
              "Bash(gh pr ready*)", "Bash(gh pr close*)", "Bash(gh pr edit*)",
@@ -2075,8 +2080,8 @@ excluded_commands = [
     "/Users/rajiv/.claude/scripts/remote-browser-box.sh *",
     # Trusted worktree helper (lane-worktree.sh add|remove <path>): lane-prefixed /private/tmp targets only. Run it as a
     # standalone command; compound commands ("cd x && ...") do not match an exclusion and stay sandboxed.
-    "~/.claude/scripts/lane-worktree.sh *",
-    "/Users/rajiv/.claude/scripts/lane-worktree.sh *",
+    # Rajiv D0AMF0XE6TS ts 1795017876.764629: exempt ssh; ssh back to this Mac is denied by the permission rules below.
+    "ssh *",
 ]
 allowed_domains = [
     "registry.npmjs.org",

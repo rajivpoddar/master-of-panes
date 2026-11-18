@@ -5,8 +5,9 @@ Rajiv DM D0AMF0XE6TS thread 1795004502.133389, ts 1795006580.326659; layer 2 app
 Proxy Bash runs inside Claude Code's sandbox: writes only to /tmp, the package caches
 and the two ~/.claude state dirs; no repo root, no $HOME and no .git entry is writable.
 The network is limited to the package and GitHub hosts. Only the remote-box scripts and
-the lane-worktree.sh helper run outside the sandbox (raw ssh and "git worktree *" were removed
-after the CTO REVISE on f203baec, C0ALZJHGE49 thread 1795015806.949919, ts 1795015902.846089).
+ssh run outside the sandbox ("git worktree *" was removed after the CTO REVISE on f203baec,
+C0ALZJHGE49 thread 1795015806.949919, ts 1795015902.846089; Rajiv D0AMF0XE6TS ts 1795017876.764629
+then exempted ssh and denies ssh back to this Mac).
 The fence is default-ON again (PM live edit 21:17 IST, Rajiv "sandbox now", DM D0AMF0XE6TS ts
 1795016785.315309; opt-out PROXY_AGENT_SANDBOX=0) and never applies to ops/state lanes.
 The PM pane does not load this file.
@@ -64,18 +65,24 @@ def test_network_is_limited_to_package_and_github_hosts():
     ]
 
 
-def test_only_remote_box_scripts_and_lane_worktree_helper_run_outside_the_sandbox():
+def test_only_remote_box_scripts_and_ssh_run_outside_the_sandbox():
+    # Live contract (Rajiv D0AMF0XE6TS ts 1795017876.764629): ssh is exempt, and ssh back to this Mac is denied below.
     assert _list("excluded_commands") == [
         "~/.claude/scripts/remote-test-box.sh *",
         "/Users/rajiv/.claude/scripts/remote-test-box.sh *",
         "~/.claude/scripts/remote-browser-box.sh *",
         "/Users/rajiv/.claude/scripts/remote-browser-box.sh *",
-        "~/.claude/scripts/lane-worktree.sh *",
-        "/Users/rajiv/.claude/scripts/lane-worktree.sh *",
+        "ssh *",
     ]
     for command in _list("excluded_commands"):
         first = command.split()[0]
-        assert first not in ("gh", "python", "python3", "node", "npm", "npx", "bash", "sh", "bun", "ssh", "git", "rtk")
+        assert first not in ("gh", "python", "python3", "node", "npm", "npx", "bash", "sh", "bun", "git", "rtk")
+
+
+def test_ssh_back_to_this_mac_is_denied():
+    deny = SRC.split("deny += [\"Bash(ssh *localhost*)\"", 1)[1].split("\nif os.environ.get(\"HELPER_READONLY\")", 1)[0]
+    for target in ("localhost", "127.0.0.1", "heydonna.local", "192.168.68.111"):
+        assert "ssh *" + target + "*" in deny
 
 
 def test_runner_resolves_gh_token_at_run_time_and_never_writes_it():
