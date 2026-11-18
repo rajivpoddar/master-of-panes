@@ -1343,6 +1343,31 @@ proxy_agent_is_opencode_id() {
 proxy_agent_is_emergency_muse() {
   [[ "$1" == muse-spark-1.3-contributor ]]
 }
+# Free-model guard (Rajiv DM D0AMF0XE6TS ts 1794984605.382609, "yes", to: block free/trial OpenCode models (hy4-flash-free,
+# muse-spark-1.3-contributor) for agents that read customer content or write prod). Trigger 2026-11-18: customer-data and prod-write
+# launches landed on unvetted free models. Only these two ids; deepseek-v4.1-flash and glm-5.3 are not part of that decision.
+proxy_agent_is_free_trial_id() {
+  case "$1" in hy4-flash-free|muse-spark-1.3-contributor) return 0;; *) return 1;; esac
+}
+# 0 when this launch reads customer content or writes prod: by agent type, or because the brief text names beloved-cardinal-941,
+# prod/production or customer. remote-qa-runner counts while it captures on miss (its default; --strict-replay opts out).
+# An unreadable brief never proves a launch is safe for a remote-qa-runner; for other types it adds no signal.
+proxy_agent_sensitive_launch() {
+  local _brief="${ROLE_BRIEF:-}" _readable=0
+  if [[ -n "$_brief" && -r "$_brief" ]]; then _readable=1; fi
+  case "${TYPE:-}" in
+    customer-artifact-investigator|hd-investigator|sync-manager-specialist|*lockout*|pm-lock-release|prod-admin*|prod-modal-deploy*) return 0;;
+    remote-qa-runner)
+      if [[ "$_readable" != 1 ]] || grep -Eiq -- 'capture[- _]on[- _]miss' "$_brief" || ! grep -Fq -- '--strict-replay' "$_brief"; then return 0; fi;;
+  esac
+  [[ "$_readable" == 1 ]] || return 1
+  grep -Eiq -- 'beloved-cardinal-941|(^|[^[:alnum:]_])prod(uction)?($|[^[:alnum:]_])|customer' "$_brief"
+}
+# 0 when model id $1 is a free/trial id AND this launch is sensitive: the pick falls back to the next tier model (or refuses a raw id).
+proxy_agent_free_guard_refuses() {
+  proxy_agent_is_free_trial_id "$1" || return 1
+  proxy_agent_sensitive_launch
+}
 # Ordered tiers; escalation after a stall is LIGHT -> MID -> TOP. This is the single source of the tier lists: the picker and the
 # emergency eligibility check (proxy_agent_emergency_open) both read it. Prints the model ids, no-Codex flag applied.
 proxy_agent_tier_models() {
@@ -1429,6 +1454,12 @@ proxy_agent_pick_tier() {
     models="$_kept"
   fi
   for id in $models; do
+    # Free-model guard: before the emergency gate and before `last` is set, so a refused id can never become the fallback pick.
+    if proxy_agent_free_guard_refuses "$id"; then
+      skipped="${skipped:+$skipped,}$id:free_model_guard"
+      printf 'proxy-agent: REFUSED free-model guard model=%s type=%s (customer-content/prod launch; trying the next tier model)\n' "$id" "${TYPE:-}" >&2
+      continue
+    fi
     if proxy_agent_is_emergency_muse "$id"; then
       # Emergency only. Rung-local: an earlier probe failure in this rung is unknown, not exhausted. Global: every eligible
       # non-emergency route in every tier list must also be capped, burn-refused or cooled (proxy_agent_emergency_open).
@@ -1593,6 +1624,11 @@ proxy_agent_primary_pool_guard() {
       return 0;;
   esac
   proxy_agent_is_opencode_id "$_guard_id" || return 0
+  # Free-model guard on the resolved primary: a raw `--model hy4-flash-free|muse-spark-1.3-contributor` has no tier to fall back within.
+  if proxy_agent_free_guard_refuses "$_guard_id"; then
+    printf 'proxy-agent: REFUSED free-model guard primary %s type=%s (customer-content/prod launch; name a vetted model)\n' "$_guard_id" "${TYPE:-}" >&2
+    return 75
+  fi
   if proxy_agent_pool_blocked "$_guard_id"; then
     printf 'proxy-agent: REFUSED primary %s (opencode pool_cap)\n' "$_guard_id" >&2
     return 75
