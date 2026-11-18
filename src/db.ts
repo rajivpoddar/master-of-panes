@@ -2846,6 +2846,23 @@ export class MoPDatabase {
     }
   }
 
+  /**
+   * Terminal completion of a PM-only exit episode as ONE SQLite transaction: clear pending (setExitPending(false) also
+   * resets pm_only and the delivery marker), restore the final `delivered` marker and log `exit_pending_complete`. As
+   * separate writes a crash between them left pending=true with neither the PM-only flag nor the attempted marker (the PM
+   * recovery path skipped it, generic completion waited on dev slots, the RSS guard refused a new arm), or pending=false
+   * with only incomplete status and no completion record. Now a crash leaves the episode exactly as it was, the confirmed
+   * delivery receipt stays the no-resend authority and the next tick finishes it; a commit leaves all three together
+   * (CTO REVISE C0ALZJHGE49 thread 1794970059.617269, ts 1794975890.713959). Returns the completion event id.
+   */
+  completePMOnlyExitEpisode(episode: string | null, source: string, reason: string): number {
+    return this.db.transaction((): number => {
+      this.setExitPending(false);
+      this.setConfig("exit_pending_continuation_delivery", "delivered");
+      return this.logEvent(0, "exit_pending_complete", null, null, { source, episode, reason });
+    })();
+  }
+
   getExitAttempt(slot: number): import("./devExitAttempt.js").DevExitAttempt | null {
     try {
       const attempt = JSON.parse(this.getConfig(`exit_attempt_${slot}`) || "null");

@@ -1534,8 +1534,9 @@ export class ProcessHealthChecker {
    * A PM-only episode (pm_only, not with_devs) ends the moment its continuation is delivered: pending clears, the episode
    * reads `delivered` and `exit_pending_complete` is logged. Dev slots are never armed (Rajiv C0ALZJHGE49 thread
    * 1794970059.617269, ts 1794971912.636829; the RSS arm and pm-respawn.sh both promise a PM-only restart, and the
-   * 2026-11-09 global exit-pending restarted a dev slot mid-task). setExitPending(false) resets the delivery marker, so it
-   * is written after. An /exit dialog confirmation still open for the episode defers the clear to the next health tick
+   * 2026-11-09 global exit-pending restarted a dev slot mid-task). setExitPending(false) resets the delivery marker, so the
+   * final marker is written after it, and the clear, the marker and the completion record commit as one transaction
+   * (db.completePMOnlyExitEpisode). An /exit dialog confirmation still open for the episode defers the clear to the next health tick
    * (checkExitPending); the episode already reads `delivered`, so the continuation is never resent.
    */
   private completePMOnlyEpisode(episode: string | null, source: string): void {
@@ -1543,11 +1544,8 @@ export class ProcessHealthChecker {
       this.db.setConfig("exit_pending_continuation_delivery", "delivered");
       return;
     }
-    this.db.setExitPending(false);
-    this.db.setConfig("exit_pending_continuation_delivery", "delivered");
-    this.db.logEvent(0, "exit_pending_complete", null, null, {
-      source, episode, reason: "PM-only episode: continuation delivered, dev slots untouched",
-    });
+    // One transaction (CTO REVISE ts 1794975890.713959): a crash inside the terminal clear leaves the episode as it was.
+    this.db.completePMOnlyExitEpisode(episode, source, "PM-only episode: continuation delivered, dev slots untouched");
     this.unresponsiveStates.delete(0);
   }
 
