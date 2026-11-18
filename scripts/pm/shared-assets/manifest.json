@@ -870,7 +870,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "bffe9710119e4cb953d778cba532fb6cef4c75c97d52f09450a98cb2b15c2e45",
+      "sha256": "454b47b2b9ec35c8491828cbf0ca76b88c60ee9a27a07b7ecc1c70ec76be155c",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -1385,7 +1385,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-skill",
-      "sha256": "59f3b538209914aa90b88a978705140167263268086d02fbb479abc6e8ecfaa1",
+      "sha256": "9579a79ee06b996139e4d0add66d020f72c6409bf946802f37028711f1cb6931",
       "source_path": "claude/skills/proxy-agent/SKILL.md"
     },
     {
