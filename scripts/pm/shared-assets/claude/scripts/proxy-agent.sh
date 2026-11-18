@@ -2078,9 +2078,6 @@ excluded_commands = [
     "/Users/rajiv/.claude/scripts/remote-test-box.sh *",
     "~/.claude/scripts/remote-browser-box.sh *",
     "/Users/rajiv/.claude/scripts/remote-browser-box.sh *",
-    # Read-only production reader (fixed CTO-reviewed profiles, no writes); needs network + its own state outside the fence.
-    "~/.claude/scripts/prod-read-safe.sh *",
-    "/Users/rajiv/.claude/scripts/prod-read-safe.sh *",
     # Rajiv D0AMF0XE6TS ts 1795017876.764629: exempt ssh; ssh back to this Mac is denied by the permission rules below.
     "ssh *",
 ]
