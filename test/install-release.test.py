@@ -132,6 +132,29 @@ class ReleaseInstallerTests(unittest.TestCase):
         self.assertEqual(self.current.resolve(), self.old.resolve())
         self.assertTrue(self.delete_file.exists())
 
+    def test_bundle_marked_unsafe_refuses_restore_and_keeps_pinned_preimages(self):
+        target = self.root / "shared" / "tool.sh"
+        target.parent.mkdir()
+        target.write_text("preimage\n")
+        legacy = self.root / "legacy-cutover"
+        module.create_rollback_bundle([], legacy)
+        module.create_rollback_bundle([target], legacy / "shared-preimages")
+        (legacy / "CUTOVER.json").write_text("{}\n")
+        pinned = legacy / "shared-preimages" / "payload" / "0000"
+        pinned_sha = module.sha256(pinned)
+        target.write_text("fresh live bytes\n")
+        (legacy / module.UNSAFE_RESTORE_MARKER).write_text(json.dumps({"reason": "carries the sandbox exclusion."}))
+        for unsafe in (legacy, legacy / "shared-preimages"):
+            with self.assertRaisesRegex(module.InstallerError, "UNSAFE for operational restore"):
+                module.restore_rollback_bundle(unsafe)
+        self.assertEqual(target.read_text(), "fresh live bytes\n")
+        self.assertEqual(module.sha256(pinned), pinned_sha)
+        fresh = self.root / "fresh-bundle"
+        module.create_rollback_bundle([target], fresh)
+        target.write_text("changed\n")
+        module.restore_rollback_bundle(fresh)
+        self.assertEqual(target.read_text(), "fresh live bytes\n")
+
     def test_delete_target_drift_refuses_cleanup_and_restores(self):
         def canary():
             self.delete_file.write_text("changed after capture\n")

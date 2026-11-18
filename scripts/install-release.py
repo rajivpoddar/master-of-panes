@@ -29,6 +29,8 @@ from typing import Any, Callable, Iterable
 SCHEMA = "master_of_panes_release"
 MANIFEST = "RELEASE_MANIFEST.json"
 ROLLBACK_MANIFEST = "ROLLBACK_MANIFEST.json"
+# A bundle holding this file beside its manifest is evidence only: restore refuses.
+UNSAFE_RESTORE_MARKER = "UNSAFE_FOR_RESTORE.json"
 SHARED_ASSET_MANIFEST = "scripts/pm/shared-assets/manifest.json"
 RUNTIME_ONLY_RECORD = "RUNTIME_ONLY.json"
 EXIT_RUNTIME_PATHS = {"src/hooks.ts", "src/relay.ts", "src/health.ts"}
@@ -1173,6 +1175,34 @@ def _current_digest(path: Path) -> str | None:
     return sha256(path)
 
 
+def _refuse_unsafe_restore(bundle: Path) -> None:
+    """Refuse to restore a bundle marked UNSAFE for operational restore.
+
+    The marker is an added file; the bundle's hash-pinned preimages stay in place
+    as evidence. A cutover bundle's children (shared-preimages, shared-one-NNNN)
+    are covered by the marker on their parent. Any marker, even an unreadable or
+    dangling one, refuses (fail closed). Fresh bundles never carry a marker.
+    """
+    directories = [bundle]
+    if (bundle.parent / "CUTOVER.json").is_file():
+        directories.append(bundle.parent)
+    for directory in directories:
+        marker = directory / UNSAFE_RESTORE_MARKER
+        if not (marker.exists() or marker.is_symlink()):
+            continue
+        try:
+            details = json.loads(marker.read_text(encoding="utf-8"))
+            reason = details.get("reason", "no reason recorded")
+            alternative = details.get("safe_alternative", "select a clean release explicitly")
+        except (OSError, ValueError, AttributeError):
+            reason, alternative = "marker is unreadable", "select a clean release explicitly"
+        raise InstallerError(
+            f"REFUSE: rollback bundle is marked UNSAFE for operational restore: {bundle} "
+            f"(marker: {marker}). Reason: {reason} Its preimages are kept as evidence only. "
+            f"Instead: {alternative}"
+        )
+
+
 def restore_rollback_bundle(bundle: Path, *, only_if_current: dict[str, str] | None = None) -> dict[str, Any]:
     """Restore a rollback bundle.
 
@@ -1180,7 +1210,9 @@ def restore_rollback_bundle(bundle: Path, *, only_if_current: dict[str, str] | N
     normal entry only when the target still holds exactly what this run wrote.
     A target that was never replaced, or was changed again after replacement,
     keeps its fresh bytes: recovery must never overwrite them with an older backup.
+    A bundle marked UNSAFE (``UNSAFE_RESTORE_MARKER``) is refused before any read or write.
     """
+    _refuse_unsafe_restore(bundle)
     manifest = json.loads((bundle / ROLLBACK_MANIFEST).read_text(encoding="utf-8"))
     compatibility_entries = manifest.get("compatibility_entries", [])
     normal_entries = manifest.get("entries", [])
