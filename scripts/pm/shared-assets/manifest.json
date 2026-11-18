@@ -375,7 +375,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-buddhi",
-      "sha256": "3c3e6767ecb142f6035a7fba1d1dc4ba9f173ac6e25b4b48570a4707f0de04d7",
+      "sha256": "575c3d80043b7e40f1e274f48a6c0575cafd4ea63e24e4c36ed8de742e7bd5d2",
       "source_path": "claude/rules/20-buddhi-pm.md"
     },
     {
@@ -1644,7 +1644,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-heydonna-product-rules",
-      "sha256": "cca63fd4d3dd99527bb6c467558a8448daaddb1cee5cb98acfbdde36b67a7268",
+      "sha256": "6f1dd1efd58f8b97c4f9839456de43b731d7f708ca9ae2308dcb1e6c27234af6",
       "source_path": "claude/user-rules/33-heydonna-ui-product-rules.md"
     },
     {

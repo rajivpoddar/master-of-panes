@@ -1,6 +1,6 @@
 # HeyDonna UI Product Rules
 
-Product-level rules for every HeyDonna planner, implementer, and reviewer. Pre-trim: `heydonna-app/.claude/archive/33-heydonna-ui-product-rules-2026-11-18-pre-trim.md`.
+Product-level rules for every HeyDonna planner, implementer, and reviewer. Pre-trim: `.claude/archive/33-heydonna-ui-product-rules-2026-11-18-pre-trim.md`.
 Source: Rajiv, #heydonna-dev (C0ALZJHGE49) ts 1790433311.413529.
 
 ## No disabled precondition buttons
@@ -16,7 +16,7 @@ Allowed: `disabled={isSubmitting}` / `disabled={isPending}` guarding button's ow
 
 Rajiv 2026-10-09 (C0ALZJHGE49 thread 1791537587.688969, ts 1791537815.457389): *"why is the error message in the menu item? that's an anti pattern. it…"*.
 
-Rajiv 2026-10-24 (DM D0AMF0XE6TS thread 1792847569.139939): *"menus should not have any error messages ... check the app for more…"* Trigger: editor's floating selection toolbar showed inline "Select text in the transcript before adding a comment." scope below explicitly includes toolbars.
+Rajiv 2026-10-24 (DM D0AMF0XE6TS thread 1792847569.139939): *"menus should not have any error messages ... check the app for more…"* Trigger: floating selection toolbar showed inline "Select text in the transcript before adding a comment."; scope below includes toolbars.
 
 For menu / menubar / context-menu / dropdown / popover / floating or bubble toolbar / toolbar-button / command-palette actions, refused action shows toast ONLY. Never render inline error text inside menu item, and don't hold menu open for error. Item stays enabled (no-disabled-precondition rule still applies). Inline field-error pattern above is for form controls, not menu items.
 
