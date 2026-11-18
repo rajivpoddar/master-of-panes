@@ -15,7 +15,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "2916765538fc25242a0e345a6d1ccaa262f3cb741e0360d35a5b97de39a4452e",
+      "sha256": "fe483699c750b7db3e847623dc1934c9e26ac5cc10fa8da34381d0e4f33ab990",
       "source_path": "claude/agents/codex-code-reviewer.md"
     },
     {
@@ -24,7 +24,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "87eb66b983b92788d3b4bde3f174783dc1938205eea7f134fd257a2ddb61c698",
+      "sha256": "b6158ec7f0046b3437d3d5aeba0ffefcab2a9b8f6dfdd66000e0e0e8284cdb1d",
       "source_path": "claude/agents/codex-plan-reviewer.md"
     },
     {
@@ -33,7 +33,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-planning-agents",
-      "sha256": "196843bcbfa25aa23e8e123122588e68632b9819e30fb3cc2c9dc63250fba56f",
+      "sha256": "caa64c298b6de5d1ecda0ef9883c645e9aac5d106ab419927c02fe7371d5b62d",
       "source_path": "claude/agents/plan-agent.md"
     },
     {
@@ -42,7 +42,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "5d2fea01c5fbf83f61fb0a14da86bb34888de471731ab10d625d449f78b0bcbd",
+      "sha256": "0e4aed49078c373b58c94da436875e6e7c1f5acf57293e0f63cbbe9700ae300c",
       "source_path": "claude/agents/remote-qa-runner.md"
     },
     {
@@ -357,7 +357,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "210d6e3ba6401d41386307ac1ba5abe0c09991704dc1b8f4ef6fd1cb8b8fe5c9",
+      "sha256": "88d594645c58d6392bd899d8d504d01eaf89d94a0f21534c15c079aec7932f0b",
       "source_path": "claude/project-agents/pm-code-reviewer.md"
     },
     {
@@ -366,7 +366,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "adeb0595887b2041f257765007c3e57237725186cbff5bae9deff3fc91ed3f1c",
+      "sha256": "3606003aa8bb89308c5306df347585f35fab65821bb6bbd19d80e47c91284b09",
       "source_path": "claude/project-agents/pm-plan-reviewer.md"
     },
     {
@@ -375,7 +375,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-buddhi",
-      "sha256": "0b740de78181db99b456e3fa0d24f1c2cdede721fdaa8040e915eb8c2cda5402",
+      "sha256": "dff368d529fa3157b4f095016dd1726c330a36eb5ed6d25c9ee4342de8006b56",
       "source_path": "claude/rules/20-buddhi-pm.md"
     },
     {
@@ -879,7 +879,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "3df871d03bc107fc6a6ec90830ae397bac59c09183a4e0511c1cd408691a07ea",
+      "sha256": "040445b53e5edfef793ae3e2a36d74dfd38214407d5b7f0e78747823b8b3b4f4",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -953,7 +953,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "efe4ccb4934e210db692a628b80fc3eb5a3aedef650b5d23938bf2d14db75050",
+      "sha256": "dee3772a43c4ce5c728090ba591d44268e7f24aeb30890a1a1a507d1dd9b7aff",
       "source_path": "claude/scripts/remote-qa-spec.sh"
     },
     {

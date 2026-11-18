@@ -2018,7 +2018,13 @@ SAFETY_SETTINGS="$(mktemp "${TMPDIR:-/tmp}/proxy-agent-safety.XXXXXX")"
 # helper ran an unauthorized "gh run rerun" for #13844 (Rajiv D0AMF0XE6TS 1794787507.634289; PM trace 12:10 IST).
 _HELPER_READONLY=0
 if [[ "${PROXY_AGENT_NAME:-}" == *heartbeat* || "${PROXY_AGENT_NAME:-}" == *hourly* ]] || head -1 "$PROMPT_FILE" 2>/dev/null | grep -qiE '^MODE:[[:space:]]*(heartbeat|hourly)'; then _HELPER_READONLY=1; fi
-HELPER_READONLY="$_HELPER_READONLY" PROXY_AGENT_TYPE_FOR_SANDBOX="$TYPE" PROXY_AGENT_SANDBOX="${PROXY_AGENT_SANDBOX:-1}" python3 - "/Users/rajiv/Downloads/projects/heydonna-app/.claude/settings.json" "$SAFETY_SETTINGS" <<'PY'
+# PM admission dispatch (adm<PR> lanes) uses a "MODE: heartbeat-style single task (PM admission dispatch)" brief, so it matched the
+# heartbeat read-only denies and could not run ~/.claude/scripts/ci/pm-admit-ci.sh (adm14103, 2026-11-19: "Bash permission denied by
+# the harness"; deny source = the Bash(*pm-admit-ci.sh*) rule below). Only that exact first-line marker lifts that ONE deny, and the
+# override flags stay denied (see ADMIT_DISPATCH below). Real heartbeat/hourly lanes keep the full deny. 2026-11-19 pm-ops-tooling.
+_ADMIT_DISPATCH=0
+if [[ "$_HELPER_READONLY" == 1 ]] && head -1 "$PROMPT_FILE" 2>/dev/null | grep -qiE '^MODE:[[:space:]]*heartbeat-style single task[[:space:]]*\(PM admission dispatch\)'; then _ADMIT_DISPATCH=1; fi
+HELPER_READONLY="$_HELPER_READONLY" ADMIT_DISPATCH="$_ADMIT_DISPATCH" PROXY_AGENT_TYPE_FOR_SANDBOX="$TYPE" PROXY_AGENT_SANDBOX="${PROXY_AGENT_SANDBOX:-1}" python3 - "/Users/rajiv/Downloads/projects/heydonna-app/.claude/settings.json" "$SAFETY_SETTINGS" <<'PY'
 import json, sys
 src, out = sys.argv[1], sys.argv[2]
 want = ("block-cto-mention-without-ladder", "block-invalid-backlog-issue-create",
@@ -2046,7 +2052,15 @@ deny += ["Bash(ssh *localhost*)", "Bash(ssh *127.0.0.1*)", "Bash(ssh *::1*)", "B
 if os.environ.get("HELPER_READONLY") == "1":
     deny += ["Bash(gh run rerun*)", "Bash(gh run cancel*)", "Bash(gh workflow run*)",
              "Bash(gh pr ready*)", "Bash(gh pr close*)", "Bash(gh pr edit*)",
-             "Bash(*pm-admit-ci.sh*)", "Bash(git push*)"]
+             "Bash(git push*)"]
+    if os.environ.get("ADMIT_DISPATCH") == "1":
+        # PM admission dispatch: allow `pm-admit-ci.sh <PR>` (plus its read-only/no-op modes) but keep every override
+        # flag of the script denied, so the lane can only run the standard admission.
+        deny += ["Bash(*pm-admit-ci.sh*--no-12b-gate*)", "Bash(*pm-admit-ci.sh*--skip-related-tests*)",
+                 "Bash(*pm-admit-ci.sh*--force-ci*)", "Bash(*pm-admit-ci.sh*--allow-main-red*)",
+                 "Bash(*pm-admit-ci.sh*--reason*)"]
+    else:
+        deny += ["Bash(*pm-admit-ci.sh*)"]
 # Bash sandbox for proxy agents only (this --settings file). Not the PM pane.
 # Rajiv DM D0AMF0XE6TS thread 1795004502.133389, ts 1795006580.326659; layer 2 approved
 # ("ok", ts 1795011133.027879): agents must not delete directories with Python shutil.
@@ -2073,6 +2087,15 @@ allow_write = [
     "/tmp/proxy-agent",
     "/tmp/agent-progress",
 ]
+# Codex review companion (CODEX_HOME=~/.codex-companions, set in user settings env). Fenced reviewer/builder lanes failed with
+# "EPERM initializing ~/.codex-companions" (bd14102c, rw14103, 2026-11-18/19) because the app-server writes its sqlite/log/session
+# state there. Only the roles that run the companion get it; nothing else is widened. Its other writes already fit the list above
+# (markers under /tmp/codex-app-*.txt and /tmp/codex-review-companion, plan history under ~/.claude/state/codex-review-companion);
+# the skill dir is read-only. ~/.codex (auth.json symlink target) is NOT writable: no credential-store write access.
+_COMPANION_ROLES = ("codex-diag-reviewer", "codex-plan-reviewer", "codex-code-reviewer", "codex-qa-reviewer",
+                    "codex-arch-reviewer", "hd-planner", "hd-builder", "hd-proof-qa", "pm-hotfix", "pm-proof-qa")
+if os.environ.get("PROXY_AGENT_TYPE_FOR_SANDBOX", "") in _COMPANION_ROLES:
+    allow_write.append("/Users/rajiv/.codex-companions")
 excluded_commands = [
     "~/.claude/scripts/remote-test-box.sh *",
     "/Users/rajiv/.claude/scripts/remote-test-box.sh *",

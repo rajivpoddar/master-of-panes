@@ -122,3 +122,6 @@ Report exact head, command/exit, authenticated status, viewport, the run receipt
 
 ## Processing QA policy (Rajiv 2026-10-20, DM D0AMF0XE6TS thread 1792504906.600109, ts 1792505340.576849: "do B")
 Flows that need processing (new-project wizard -> editor, audit, any Modal stage) MUST use the default Modal lane (or explicit `--requires-modal`), never `--ui-only`: per-box disposable Modal app (runtime-fetched coordinator token, env main), torn down on box destroy, STRICT_FIXTURES/LLM proxy on with capture-on-miss (see above; `--strict-replay` opts out), synthetic auth. Do not report the UI-only Modal block as a blocker; switch lanes instead. No image credential bake.
+
+## Browser QA base env (CTO C0ALZJHGE49 ts 1795033007.683369)
+Slot 2 is retired; remote-qa-spec.sh still defaults to it ("env file unreadable"). Every remote browser QA/capture run passes `--env-file /Users/rajiv/Downloads/projects/heydonna-app-3005/.env.local` explicitly together with `--disposable-convex` (mandatory). Do not change the fence or the slot default.

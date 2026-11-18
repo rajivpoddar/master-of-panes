@@ -2,6 +2,8 @@
 # Remote single-spec E2E repro lane: ephemeral box at an EXACT head -> canonical local-repro-preflight --spec, strict replay,
 # synthetic-JWT auth (rule 41, no live Clerk), LLM proxy on, the box's disposable Modal (-qa-<id>) + the slot's own dev Convex.
 # GREEN, or GREEN -> RED (--mutate-patch applied for the RED leg only) -> GREEN on the SAME box. Always destroys the box.
+# --env-file F (optional): base env for the mandatory --disposable-convex. Default = slot 5's dev env
+# ($HOME/Downloads/projects/heydonna-app-3005/.env.local) whatever --slot is; --slot never selects the env file.
 #   remote-browser-box.sh spec --slot N --branch B --head SHA --spec tests/e2e/specs/... --out DIR --allow-seed-replace
 #       [--mutate-patch FILE] [--test-line N] [--project core-rest] [--env-file F] [--config JSON] [--provider auto] [--ttl 150m] [--timeout SECS]
 #   [--prod-build] [--trace] [--dry-run]: --prod-build forwards to preflight; --trace records Playwright trace (on) + video for every test;
@@ -145,7 +147,11 @@ if [ "$dry_run" = yes ]; then echo "DRY_RUN slot=$slot head=$head spec=$spec leg
 trap 'rc=$?; printf "QA_SPEC_ERROR: command failed at line %s (rc=%s)\n" "$LINENO" "$rc" >&2' ERR
 # Shared slot Convex may still use production storage; never start a QA box against it.
 [ "$disposable_convex" = 1 ] || { echo 'QA_R2_REFUSED: --disposable-convex required for isolated storage' >&2; exit 2; }
-env_file="${env_file:-$HOME/Downloads/projects/heydonna-app-300$slot/.env.local}"
+# Default BASE env when --env-file is omitted: slot 5's dev env (CTO OK C0ALZJHGE49 ts 1795034415.355669; slot 2 is retired).
+# Deliberately NOT derived from --slot: --slot stays the run's assigned slot (box checkout name), the env file is only the
+# --disposable-convex base template. An explicit --env-file overrides. An unreadable default keeps the existing refusal (no fallback
+# to another slot's file); remote-qa-convex.py create still refuses a production base env before any request.
+env_file="${env_file:-$HOME/Downloads/projects/heydonna-app-3005/.env.local}"
 [ -r "$env_file" ] || { echo 'Env file unreadable' >&2; exit 2; }
 val() { grep -E "^$1=" "$env_file" | head -1 | cut -d= -f2- | tr -d "\"'" | awk '{print $1}'; }
 disposable_cleanup() {
