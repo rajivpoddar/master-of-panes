@@ -375,7 +375,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-buddhi",
-      "sha256": "306e94c07b8dfb461be9051678575f5a739f3220ddf1715eb60a01a21f0a6a61",
+      "sha256": "f479c3182c54397a4251762cfd7f94d18b21de181578d73bd597770a82d18828",
       "source_path": "claude/rules/20-buddhi-pm.md"
     },
     {
@@ -384,7 +384,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-cap-policy",
-      "sha256": "948f3397a30a26b3811bc91b2ad5e58cb69b36e213608e3eaf40749fea879437",
+      "sha256": "efb0514a1811031a3b3dfb4209d1e82af4c08ab608b562052c88b1cc001d4e4b",
       "source_path": "claude/rules/99-pm-fable-review-cap.md"
     },
     {
