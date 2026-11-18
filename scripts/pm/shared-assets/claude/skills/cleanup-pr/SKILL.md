@@ -177,7 +177,7 @@ if printf '%s\n' "$ISSUE_BODY" | grep -qiE 'adminRetryAutoProcess|Recovery post-
 fi
 ```
 
-**Production-metric gate (regret ledger 2026-11-17, PR #13981; Rajiv C0ALZJHGE49 thread 1794720118.429839 ts 1794925893.305199).** If the issue's ACs name a production metric/volume/rate (for example an Axiom row count, a "drops by N%" target, an error rate or a cost/latency number), the merge is NOT the terminal condition:
+**Production-metric gate (regret ledger 2026-11-17, PR #13981; Rajiv C0ALZJHGE49 thread 1794720118.429839 ts 1794925720.030929 and ts 1794573604.453199; shame ts 1794925893.305199). Applies only to ACs that name an actual production metric (CTO ts 1794927488.923279).** If the issue's ACs name a production metric/volume/rate (for example an Axiom row count, a "drops by N%" target, an error rate or a cost/latency number), the merge is NOT the terminal condition:
 
 ```bash
 METRIC_GATED=0
