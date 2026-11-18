@@ -121,8 +121,9 @@ for (const devsDone of [false, true]) {
         deliverGuardedToSlot: async (_slot: number, text: string) => { messages.push(text); return { outcome: "delivered" }; },
         hasPendingExitConfirmation: () => false,
       } as any) as any;
-      await health.deliverPMRestartContinuation("%40");
-      await health.deliverPMRestartContinuation("%40");
+      const boot = db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "replacement", source: "startup" });
+      await health.deliverPMRestartContinuation("%40", boot, "exit", episode);
+      await health.deliverPMRestartContinuation("%40", boot, "exit", episode);
       assert.deepEqual(messages, ["saved continuation"]);
       const status = db.getExitStatus();
       assert.equal(status.pm_only, false);

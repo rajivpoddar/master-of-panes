@@ -32,8 +32,10 @@ const FAULTS: FaultPoint[] = [
 // Which tick finishes a PM-only episode whose continuation is already confirmed.
 type Entry = { name: string; marker: "attempted" | "delivered"; run: (health: any) => Promise<void> };
 const ENTRIES: Entry[] = [
-  // MoP died between the delivered receipt and finishPMContinuation: the claim still reads "attempted".
-  { name: "settle from the recorded receipt", marker: "attempted", run: (health) => health.reconcilePMRestartContinuation() },
+  // MoP died between the delivered receipt and finishPMContinuation: the claim still reads "attempted", and the restart
+  // flow's continuation step settles it from the recorded receipt instead of sending again.
+  { name: "settle from the recorded receipt", marker: "attempted",
+    run: (health) => health.deliverPMRestartContinuation("%40", 1, "exit", health.db.getExitStatus().episode) },
   // The /exit dialog confirmation held the clear: the episode already reads delivered; the health observer ends it.
   { name: "health observer after a held dialog confirmation", marker: "delivered", run: (health) => health.checkExitPending() },
 ];
@@ -99,7 +101,7 @@ for (const entry of ENTRIES) {
 test("an uninterrupted PM-only terminal clear commits pending=false, the delivered marker and one completion record together", async () => {
   const { db, episode, sends, build } = fresh("attempted");
   try {
-    await build().reconcilePMRestartContinuation();
+    await build().deliverPMRestartContinuation("%40", 1, "exit", episode);
     assert.deepEqual(state(db), { pending: false, pm_only: false, with_devs: false, dev_only: false, marker: "delivered", completes: 1 });
     const record = JSON.parse(db.getEvents(0, 1, "exit_pending_complete")[0]!.payload);
     assert.equal(record.episode, episode);

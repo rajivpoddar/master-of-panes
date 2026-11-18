@@ -19,6 +19,16 @@ function markPmCycled(db: MoPDatabase) {
   db.markSlotExitCycled(0);
 }
 
+// Step 4 of the restart flow, called the way runPMFreshRestart calls it: (pane, boot SessionStart id, trigger, episode).
+// A zero PM_PROMPT_TIMEOUT_MS keeps a proven pre-effect refusal from re-polling in these fixtures.
+function bootOf(db: MoPDatabase) {
+  return db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "replacement", source: "startup" });
+}
+function deliver(health: any, db: MoPDatabase, boot: number) {
+  health.PM_PROMPT_TIMEOUT_MS = 0;
+  return health.deliverPMRestartContinuation("%40", boot, "exit", db.getExitStatus().episode);
+}
+
 test("PM-only arming persists the prompt without resetting any dev flag; health scan sends nothing", async () => {
   const db = database();
   try {
@@ -69,6 +79,7 @@ for (const prompt of [undefined, "Read /some/path. It's PM's saved prompt.\nResu
     try {
       db.setExitPending(true, false, true, prompt);
       markPmCycled(db);
+      const boot = bootOf(db);
       const health = new ProcessHealthChecker(db, {
         deliverGuardedToSlot: async (slot: number, text: string, guard: any) => {
           assert.equal(slot, 0); assert.equal(guard.bracketedPaste, true);
@@ -78,8 +89,8 @@ for (const prompt of [undefined, "Read /some/path. It's PM's saved prompt.\nResu
           messages.push(text); return { outcome: "delivered" };
         },
       } as any) as any;
-      await health.deliverPMRestartContinuation("%40");
-      await health.deliverPMRestartContinuation("%40");
+      await deliver(health, db, boot);
+      await deliver(health, db, boot);
       // Fresh PM launch: the fallback is the handoff-pointing continuation, never bare "continue".
       assert.deepEqual(messages, [prompt ?? PM_RESTART_CONTINUATION_PROMPT]);
       // PM-only means PM only (Rajiv C0ALZJHGE49 thread 1794970059.617269, ts 1794971912.636829): the episode ends with its
@@ -105,11 +116,12 @@ for (const outcome of ["refused_pre_effect", "uncertain"]) {
     const db = database(); let sends = 0;
     try {
       db.setExitPending(true, false, true, "resume"); markPmCycled(db);
+      const boot = bootOf(db);
       const health = new ProcessHealthChecker(db, {
         deliverGuardedToSlot: async () => { sends++; return { outcome }; },
       } as any) as any;
-      await health.deliverPMRestartContinuation("%40");
-      await health.deliverPMRestartContinuation("%40");
+      await deliver(health, db, boot);
+      await deliver(health, db, boot);
       assert.equal(sends, outcome === "refused_pre_effect" ? 2 : 1, "zero effect is retried; an uncertain prompt is never repeated");
       assert.equal(db.getExitStatus().pm_only, true); assert.equal(db.getExitStatus().dev_only, false);
       assert.equal(db.getExitStatus().continuation_delivery, outcome === "refused_pre_effect" ? "waiting" : "attempted");
@@ -122,13 +134,14 @@ test("rearming the same prompt during continuation cannot reset successor dev fl
   try {
     db.setExitPending(true, false, true, "resume");
     markPmCycled(db);
+    const boot = bootOf(db);
     const health = new ProcessHealthChecker(db, {
       deliverGuardedToSlot: async () => {
         db.setExitPending(true, false, true, "resume");
         return { outcome: "delivered" };
       },
     } as any) as any;
-    await health.deliverPMRestartContinuation("%40");
+    await deliver(health, db, boot);
     assert.equal(db.getExitStatus().pm_only, true);
     assert.equal(db.getExitStatus().pending, true, "the newer episode is untouched");
     assert.equal(db.getExitStatus().continuation_delivery, "waiting");
@@ -161,7 +174,7 @@ test("new work after Stop does not refuse the exit attempt (no work fence; Rajiv
 });
 
 for (const command of ["claude", "2.1.312"]) {
-test(`existing post-respawn timer dispatches PM continuation for ${command} rather than generic continue`, async () => {
+test(`post-respawn timer sends no generic continue for a PM-only episode on ${command}: the restart flow owns the continuation`, async () => {
   const { readFileSync } = await import("node:fs");
   const { default: ts } = await import("typescript");
   const source = readFileSync(new URL("../src/health.ts", import.meta.url), "utf8");
@@ -195,7 +208,6 @@ test(`existing post-respawn timer dispatches PM continuation for ${command} rath
       },
     } as any) as any;
     health.getPaneCommand = async () => command;
-    health.reconcilePMRestartContinuation = async () => health.deliverPMRestartContinuation("%40");
     const schedule = new Function("verifyPaneIdentity", "execShell", "setTimeout",
       `${js}; return Probe.prototype.scheduleContinueInjection;`)(
       async () => ({ ok: true, snapshot: { paneId: "%40" } }),
@@ -204,9 +216,9 @@ test(`existing post-respawn timer dispatches PM continuation for ${command} rath
     );
     schedule.call(health, 0);
     await callback!();
-    assert.deepEqual(sent, ["saved continuation"]);
-    assert.deepEqual(generic, []);
-    assert.equal(db.getExitStatus().pending, false, "the PM-only episode ends with its continuation");
+    assert.deepEqual(sent, [], "the timer never injects the saved prompt itself");
+    assert.deepEqual(generic, [], "and never a bare continue over a PM-only episode");
+    assert.equal(db.getExitStatus().pending, true, "the episode is ended by the restart flow's continuation, not this timer");
     assert.equal(db.getExitStatus().dev_only, false);
   } finally { db.close(); }
 });
@@ -234,6 +246,7 @@ function continuationFixture(relayExtra: Record<string, unknown> = {}) {
     ...relayExtra,
   };
   const health = new ProcessHealthChecker(db, relay as any) as any;
+  health.PM_PROMPT_TIMEOUT_MS = 0;
   return { db, messages, bootId, health };
 }
 
@@ -249,7 +262,7 @@ test("old-process poll_event prompts after the replacement boot do not withhold 
   const f = continuationFixture();
   try {
     f.db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "old", source: "poll_event" });
-    await f.health.deliverPMRestartContinuation("%40", f.bootId);
+    await deliver(f.health, f.db, f.bootId);
     assert.deepEqual(f.messages, ["resume"]);
     assertEpisodeComplete(f.db);
   } finally { f.db.close(); }
@@ -259,8 +272,8 @@ test("real input already accepted by the replacement boot does NOT withhold the 
   const f = continuationFixture();
   try {
     f.db.logEvent(0, "UserPromptSubmit", "UserPromptSubmit", null, { session_id: "replacement" }); // a Slack inbound 6s after boot (33fdff94)
-    await f.health.deliverPMRestartContinuation("%40", f.bootId);
-    await f.health.deliverPMRestartContinuation("%40", f.bootId);
+    await deliver(f.health, f.db, f.bootId);
+    await deliver(f.health, f.db, f.bootId);
     assert.deepEqual(f.messages, ["resume"]);
     assertEpisodeComplete(f.db);
     assert.equal(f.db.getEvents(0, 5, "pm_restart_continuation_withheld").length, 0);
@@ -272,7 +285,7 @@ test("pending PM inbound does NOT withhold the continuation", async () => {
   const f = continuationFixture({ hasPendingPMInbound: () => true });
   try {
     f.db.enqueuePendingPMEvent(1, "handoff", "inbound");
-    await f.health.deliverPMRestartContinuation("%40", f.bootId);
+    await deliver(f.health, f.db, f.bootId);
     assert.deepEqual(f.messages, ["resume"]);
     assertEpisodeComplete(f.db);
   } finally { f.db.close(); }
@@ -284,7 +297,7 @@ test("a delivery already on record is never repeated: no second injection, the e
     f.db.logEvent(0, "pm_restart_continuation", null, null, {
       episode: f.db.getExitStatus().episode, boot_event_id: f.bootId, delivery: "delivered",
     });
-    await f.health.deliverPMRestartContinuation("%40", f.bootId);
+    await deliver(f.health, f.db, f.bootId);
     assert.deepEqual(f.messages, []);
     assertEpisodeComplete(f.db);
   } finally { f.db.close(); }
@@ -299,12 +312,12 @@ test("a zero-effect refusal hands the claim back and the next attempt delivers",
     },
   });
   try {
-    await f.health.deliverPMRestartContinuation("%40", f.bootId);
+    await deliver(f.health, f.db, f.bootId);
     assert.deepEqual(f.messages, []);
     assert.equal(f.db.getExitStatus().continuation_delivery, "waiting");
     assert.equal(f.db.getExitStatus().pending, true);
     refuse = false;
-    await f.health.deliverPMRestartContinuation("%40", f.bootId);
+    await deliver(f.health, f.db, f.bootId);
     assert.deepEqual(f.messages, ["resume"]);
     assertEpisodeComplete(f.db);
   } finally { f.db.close(); }

@@ -38,8 +38,6 @@ test("replacement credit requires launch and owned boot provenance; delayed evid
   assert.ok(observer.includes("receipt.bootSession"));
   assert.ok(observer.includes("delayedReceiptRetention"));
   assert.ok(!observer.includes('if (!bound) { db.retainExitSlot'));
-  const pm = health.slice(health.indexOf("// 3. Claude input prompt"), health.indexOf("// 4. ONE continuation"));
-  assert.ok(pm.indexOf('launch_boot_process_unowned') < pm.indexOf('"exit_replacement_bound"'));
   assert.ok(health.includes('boots.length !== 1'));
   assert.ok(health.includes('ownedAgain !== ownedProcess'));
 });
@@ -95,9 +93,9 @@ test("an unresolved continuation Enter holds automated paste only: no clearing k
   assert.ok(relay.includes("deliveryConfirmed = true;"));
 });
 test("continuation draft ownership is physical (same boot + owned process), never the input fence", () => {
-  const owner = health.slice(health.indexOf("const sameBoot ="), health.indexOf("const result = await this.relay.deliverGuardedToSlot(0, prompt"));
+  const owner = health.slice(health.indexOf("const sameBoot ="), health.indexOf("const send = () => this.relay.deliverGuardedToSlot(0, prompt"));
   assert.ok(owner.includes("continuationDraft"));
-  assert.ok(owner.includes("latestSessionStartEventId(this.db, 0) === boot"));
-  assert.ok(owner.includes("processGuard"));
+  assert.ok(owner.includes("latestSessionStartEventId(this.db, 0) === bootId"));
+  assert.ok(owner.includes("ProcessHealthChecker.ownedAgent(await this.pmAgentProcess(paneId))"));
   assert.ok(!owner.includes("inputFence") && !owner.includes("continuationInputRefusal"), "inbound/real input cancels the Enter, not ownership");
 });

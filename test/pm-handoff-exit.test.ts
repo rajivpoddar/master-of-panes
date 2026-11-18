@@ -263,7 +263,8 @@ test("full sequence: saved exit -> watchdog boot -> continuation -> the PM-only 
     const health = new ProcessHealthChecker(f.db, {
       deliverGuardedToSlot: async (_s: number, text: string) => { messages.push(text); return { outcome: "delivered" }; },
     } as any) as any;
-    await health.deliverPMRestartContinuation("%40");
+    const bootId = f.db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "replacement", source: "startup" });
+    await health.deliverPMRestartContinuation("%40", bootId, "exit", f.db.getExitStatus().episode);
     assert.deepEqual(messages, ["Read resume. Resume PM."]);
     const status = f.db.getExitStatus();
     assert.equal(status.pending, false);

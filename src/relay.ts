@@ -2540,7 +2540,9 @@ export class TmuxRelay {
           }
         }
         await fs.unlink(tmpFile).catch(() => undefined);
-        if (enterSent > 0 && opts.exitEpisode && exitProcess) {
+        // The PM's exit menu is answered by the PM restart flow (health.ts waitForPMShellPrompt: 1, then the launch command);
+        // a second sender of 1 would corrupt the typed launch command. Dev slots keep this confirmation.
+        if (enterSent > 0 && opts.exitEpisode && exitProcess && slotNum !== 0) {
           // Preserve the original /exit disposition, including UNKNOWN. This
           // answers only its visible dialog; it never resends /exit.
           this.scheduleExitConfirmation(slotNum, paneId, opts.exitEpisode, exitProcess, exitOwner, opts.exitOwnerPin);

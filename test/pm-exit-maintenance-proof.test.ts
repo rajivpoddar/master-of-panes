@@ -217,6 +217,12 @@ async function boot(h: H, session = "pm", source = "startup") {
   await h.hook("SessionStart", { session_id: session, source, cwd: "/Users/rajiv/Downloads/projects/heydonna-app" });
 }
 
+// Step 4 of the PM restart as runPMFreshRestart calls it: (pane, the boot's SessionStart id, trigger, episode).
+async function restartContinuation(h: H, health: any, episode: string | null = h.status().episode) {
+  const bootId = h.db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "replacement", source: "startup" });
+  return health.deliverPMRestartContinuation("%1", bootId, "exit", episode);
+}
+
 test("healthy flow: save -> natural Stop -> one /exit -> continuation -> dev-only (no ACK)", async () => {
   const h = harness();
   try {
@@ -237,7 +243,7 @@ test("healthy flow: save -> natural Stop -> one /exit -> continuation -> dev-onl
     const health = new ProcessHealthChecker(h.db, {
       deliverGuardedToSlot: async (_s: number, text: string) => { messages.push(text); return { outcome: "delivered" }; },
     } as any) as any;
-    await health.deliverPMRestartContinuation("%1");
+    await restartContinuation(h, health);
     assert.deepEqual(messages, ["Read resume. Resume PM."]);
     assert.equal(h.status().pending, false, "the PM-only episode ends with its continuation");
     assert.equal(h.status().dev_only, false);
@@ -303,7 +309,7 @@ test("Rajiv proof: request -> save -> PM Stop on a BUSY pane while a new prompt 
       deliverGuardedToSlot: async (_s: number, text: string) => { assert.equal(text, "Read resume. Resume PM."); return { outcome: "delivered" }; },
     } as any) as any;
     await boot(h, "pm-next", "resume");
-    await health.deliverPMRestartContinuation("%1");
+    await restartContinuation(h, health);
     assert.equal(h.status().pending, false, "the PM-only episode ends with its continuation");
     assert.equal(h.status().dev_only, false, "dev slots are never armed by a PM-only restart");
   } finally { h.close(); }
@@ -418,7 +424,7 @@ test("a zero-effect refusal (PM draft in the composer) ends in a durable termina
     const health = new ProcessHealthChecker(h.db, {
       deliverGuardedToSlot: async () => { throw new Error("continuation must not be sent without a delivered exit + boot"); },
     } as any) as any;
-    await health.deliverPMRestartContinuation("%1");
+    assert.equal(await restartContinuation(h, health, String(terminal.episode)), "episode_changed");
     await health.checkExitPending();
     assert.equal(h.exits(), 0, "zero paste after the refusal");
     assert.equal(h.db.getEvents(0, 10, "exit_pending_triggered").length, 1, "no autonomous resend");
@@ -555,7 +561,7 @@ test("both intents ready: exactly ONE command (exit); clear intent kept; no lost
     const health = new ProcessHealthChecker(h.db, {
       deliverGuardedToSlot: async (_s: number, text: string) => { messages.push(text); return { outcome: "delivered" }; },
     } as any) as any;
-    await health.deliverPMRestartContinuation("%1");
+    await restartContinuation(h, health);
     assert.deepEqual(messages, ["Read resume. Resume PM."]);
     assert.equal(h.status().pending, false, "the PM-only episode ends with its continuation");
     assert.equal(h.status().dev_only, false);

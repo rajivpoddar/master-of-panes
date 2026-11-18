@@ -1,10 +1,8 @@
-// PM restart contract (Rajiv, DM D0AMF0XE6TS thread 1793979986.975849, ts 1793988738.009889 /
-// 1793989226.288339): /exit -> wait for the zsh prompt (pane read, bounded; respawn-pane is the
-// fallback) -> FRESH configured-model launcher (no --continue) -> wait for the Claude input prompt
-// -> ONE continuation through the guarded writer. Crash recovery uses the same path.
+// PM restart = Rajiv's exit flow (C0ALZJHGE49 thread 1794998965.861819, ts 1794999568.152419): "MoP should inject /exit at
+// stop, inject 1 if the exit option comes up, then inject the launch pm command, then inject the continuation prompt
+// without any gates." The Stop hook injects /exit; ProcessHealthChecker.runPMFreshRestart does the other three steps.
+// No pane/boot ownership pin, launch record or replacement binding: a probe failure only delays a bounded wait.
 import assert from "node:assert/strict";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import test from "node:test";
 import { MoPDatabase } from "../src/db.js";
 import { HookProcessor } from "../src/hooks.js";
@@ -17,43 +15,34 @@ import { DEFAULT_CONFIG } from "../src/types.js";
 const PM_PATH = "/Users/rajiv/Downloads/projects/heydonna-app";
 const SHELL_TEXT = "some earlier output\n\x1b[32mrajiv@heydonna\x1b[39m ~ \x1b[31m»\x1b[39m\n$ \n\n";
 const COMPOSER_TEXT = `${"─".repeat(40)}\n❯ \n${"─".repeat(40)}\n  ? for shortcuts`;
+// The "Background work is running" dialog (shape of test/exit-confirmation.test.ts), option 1 highlighted.
+const EXIT_MENU_TEXT = "Background work is running\n❯ 1. Exit and stop tasks\n  2. Move to background and exit\n  3. Stay\nEnter to confirm · Esc to cancel";
 
-type PaneState = "busy" | "idle" | "exiting" | "printing" | "shell" | "booting" | "fresh";
+// menu: Claude is up showing the exit dialog; exiting: Claude is still up, no dialog; shell: back at the zsh prompt;
+// booting: launcher typed, no Claude yet; fresh: the new Claude session is up at its input prompt.
+type PaneState = "menu" | "exiting" | "idle" | "busy" | "shell" | "booting" | "fresh";
 
-function harness(options: { state?: PaneState; exitAfterPolls?: number; bootSessionStart?: boolean; neverBoots?: boolean } = {}) {
+function harness(options: { state?: PaneState; neverBoots?: boolean; failIdentityProbe?: boolean } = {}) {
   const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: ":memory:" });
   const pane = { state: options.state ?? "exiting" as PaneState, polls: 0, typed: [] as string[], shell: [] as string[], sends: [] as string[],
-    pid: "500", child: "501", onPoll: undefined as undefined | ((polls: number) => void),
-    pgrepError: false, failPaste: false, onEnter: undefined as undefined | (() => void), bootPanePid: "" };
+    onPoll: undefined as undefined | ((polls: number) => void) };
   const order: string[] = [];
   const runShell = async (command: string) => {
     pane.shell.push(command);
     let stdout = "";
-    if (command.startsWith("tmux display-message") && command.includes("#{pane_pid}")) stdout = `${pane.pid}|/dev/ttys009\n`;
-    else if (command.startsWith("tmux display-message")) stdout = `%7|${PM_PATH}\n`;
-    else if (command.startsWith("ps -t") && pane.pgrepError) throw Object.assign(new Error("probe failed"), { code: 2 });
-    else if (command.startsWith("ps -t")) {
-      // The pane terminal listing: the pane shell, plus its Claude child when alive.
-      const alive = !["shell", "printing", "booting"].includes(pane.state);
-      stdout = `${pane.pid} 1 -zsh\n` + (alive && pane.child ? `${pane.child} ${pane.pid} claude --model claude-opus-5-5\n` : "");
-    }
-    else if (command.startsWith("git -C")) stdout = `${PM_PATH}\n`;
-    // The listing shows a bare "claude" argv0 (launch-pm.sh exec claude); its OS-reported image (proc_pidpath) is the stable executable.
-    else if (command.startsWith("python3 ")) stdout = `${join(homedir(), ".local/opt/claude-code/claude")}\n`;
-    else if (command.startsWith("tmux respawn-pane")) { pane.state = "shell"; pane.pid = "600"; order.push("respawn"); }
-    else if (command.startsWith("tmux send-keys -l")) {
-      if (pane.failPaste) throw new Error("paste timed out");
-      pane.typed.push(command); order.push("type");
-    }
+    if (command.startsWith("tmux display-message")) {
+      if (options.failIdentityProbe) throw new Error("Command failed: tmux display-message");
+      stdout = `%7|${PM_PATH}\n`;
+    } else if (command.startsWith("tmux respawn-pane")) { pane.state = "shell"; order.push("respawn"); }
+    else if (command === "tmux send-keys -t %7 1") order.push("1");
+    else if (command.startsWith("tmux send-keys -l")) { pane.typed.push(command); order.push("type"); }
     else if (command.startsWith("tmux send-keys") && command.endsWith(" Enter")) {
-      pane.onEnter?.();
-      order.push("enter");
-      if (pane.state === "shell" && pane.typed.length) {
-        pane.state = options.neverBoots ? "booting" : "fresh";
-        if (!options.neverBoots) pane.child = "502"; // the launched Claude is a NEW child of the same shell
-        if (pane.bootPanePid) pane.pid = pane.bootPanePid;
-        if (!options.neverBoots && options.bootSessionStart !== false) {
-          db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "fresh-session", cwd: PM_PATH });
+      if (pane.state === "menu") { order.push("menu-enter"); pane.state = "exiting"; }
+      else {
+        order.push("enter");
+        if (pane.state === "shell" && pane.typed.length) {
+          pane.state = options.neverBoots ? "booting" : "fresh";
+          if (!options.neverBoots) db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "fresh-session", cwd: PM_PATH });
         }
       }
     } else throw new Error(`Unexpected shell command: ${command}`);
@@ -62,10 +51,9 @@ function harness(options: { state?: PaneState; exitAfterPolls?: number; bootSess
   const relay = {
     observeSlotPane: async () => ({
       paneId: "%7",
-      text: pane.state === "shell" ? SHELL_TEXT : pane.state === "printing" ? "Resuming...\n" : COMPOSER_TEXT,
+      text: pane.state === "shell" ? SHELL_TEXT : pane.state === "menu" ? EXIT_MENU_TEXT : COMPOSER_TEXT,
     }),
-    getSlotActivityState: async () => pane.state === "idle" || pane.state === "fresh" ? "idle"
-      : pane.state === "busy" ? "active" : "unknown",
+    getSlotActivityState: async () => pane.state === "idle" || pane.state === "fresh" ? "idle" : pane.state === "busy" ? "active" : "unknown",
     deliverGuardedToSlot: async (slot: number, text: string, guard: any) => {
       assert.equal(slot, 0);
       assert.equal(guard.expectedPaneId, "%7");
@@ -77,17 +65,6 @@ function harness(options: { state?: PaneState; exitAfterPolls?: number; bootSess
       pane.sends.push(text);
       return { outcome: "delivered", paneId: "%7" };
     },
-    exitProcessIdentity: async () => '["%7",502,"Wed Nov 18 08:18:49 2026"]',
-    // The real observer grants cycle credit only from MoP's replacement receipt for this episode's attempt.
-    observeExitAttempts: async () => {
-      const attempt = db.getExitAttempt(0);
-      const receipt = db.getEvents(0, 1, "exit_replacement_bound")[0];
-      if (!attempt || attempt.phase === "verified" || !receipt) return;
-      const bound = JSON.parse(receipt.payload);
-      if (bound.episode !== attempt.episode || bound.submittedAt !== attempt.submittedAt) return;
-      db.saveExitAttempt(0, { ...attempt, phase: "verified", replacementProcess: bound.replacementProcess });
-      db.markSlotExitCycled(0);
-    },
     drainPMQueue: async () => { order.push("drain"); },
     injectToPM: () => true,
   };
@@ -98,38 +75,27 @@ function harness(options: { state?: PaneState; exitAfterPolls?: number; bootSess
   health.PM_FORCE_SHELL_TIMEOUT_MS = 100;
   health.PM_PROMPT_TIMEOUT_MS = 100;
   health.PM_BOOT_EVENT_TIMEOUT_MS = 50;
+  health.pmAgentProcess = async () => "4000:4001";
   health.getPaneCommand = async () => {
     pane.polls++;
     pane.onPoll?.(pane.polls);
-    if (pane.state === "exiting" && pane.polls >= (options.exitAfterPolls ?? 3)) pane.state = "shell";
-    if (pane.state === "printing" && pane.polls >= (options.exitAfterPolls ?? 3)) pane.state = "shell";
-    return pane.state === "shell" || pane.state === "printing" ? "zsh" : pane.state === "booting" ? "zsh" : "claude";
+    // Claude takes a few polls to finish exiting once nothing is blocking it (the menu was answered, or none appeared).
+    if (pane.state === "exiting" && pane.polls >= 3) pane.state = "shell";
+    return pane.state === "shell" || pane.state === "booting" ? "zsh" : "claude";
   };
   return { db, pane, order, health, relay };
 }
 
-// A flag alone is never proof of replacement: cycled[slot] needs a VERIFIED exit attempt of the current episode. The PM's
-// attempt is "delivered" (its /exit was confirmed); the harness observer verifies it once MoP records the replacement.
-function saveExitAttempt(db: MoPDatabase, slot: number, episode: string, phase: "delivered" | "verified" = "delivered") {
-  db.saveExitAttempt(slot, {
-    episode, paneId: "%7", originalClaudePid: 400, originalStart: "Wed Nov 18 00:29:17 2026",
-    originalProcess: '["%7",400,"Wed Nov 18 00:29:17 2026"]', sessionId: "old-session", inputEventId: null, assignmentEpoch: 0,
-    stopEventId: null, ownerPin: null, phase, attemptCount: 1, submittedAt: new Date().toISOString(),
-    blockedReason: null, ...(phase === "verified" ? { replacementProcess: '["%7",502,"Wed Nov 18 08:18:49 2026"]' } : {}),
-  });
-  if (phase === "verified") db.markSlotExitCycled(slot);
-}
-
-function armPmOnlyEpisode(db: MoPDatabase, prompt?: string, delivery = "delivered") {
+function armPmOnlyEpisode(db: MoPDatabase, prompt?: string): string {
   db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "old-session", cwd: PM_PATH });
   db.setExitPending(true, false, true, prompt);
-  const episode = db.getExitStatus().episode;
-  saveExitAttempt(db, 0, episode!);
-  db.logEvent(0, "exit_pending_triggered", "Stop", null, { source: "pm_only_stop", delivery, episode });
+  const episode = db.getExitStatus().episode!;
+  db.logEvent(0, "exit_pending_triggered", "Stop", null, { source: "pm_only_stop", delivery: "delivered", episode });
   return episode;
 }
 
 const launchTyped = (pane: { typed: string[] }) => pane.typed.map((cmd) => cmd.replace(/^tmux send-keys -l -t %7 /, ""));
+const LAUNCH = `'cd '\\''${PM_PATH}'\\'' && bash /Users/rajiv/.claude/scripts/launch-pm.sh --via cliproxy --model claude-opus-5-5'`;
 
 test("launcher contract: fresh start, configured model, default opus, never --continue", () => {
   assert.equal(pmFreshLaunchCommand("opus"), "bash /Users/rajiv/.claude/scripts/launch-pm.sh --via cliproxy --model claude-opus-5-5");
@@ -157,38 +123,75 @@ test("zsh prompt detection reads the pane: jreese prompt yes; Claude composer, o
   assert.equal(isShellPromptVisible(""), false);
 });
 
+// The whole contract, in order: exit menu -> 1 -> Enter (selection confirmed) -> shell -> launch command -> continuation.
 for (const prompt of [undefined, "Read /saved/resume.md and resume."]) {
-  test(`/exit episode: waits for the zsh prompt, launches fresh, injects ${prompt ? "the saved" : "the standard"} continuation exactly once`, async () => {
-    const h = harness({ state: "printing", exitAfterPolls: 4 });
+  test(`exit flow step order with the exit menu: 1, Enter, launch, ${prompt ? "saved" : "standard"} continuation, once`, async () => {
+    const h = harness({ state: "menu" });
     try {
       const episode = armPmOnlyEpisode(h.db, prompt);
       const result = await h.health.restartPMFresh("exit", episode);
       assert.equal(result.success, true, result.reason);
-      // Nothing was typed before the pane showed the shell prompt.
-      assert.ok(h.pane.polls >= 4);
-      assert.deepEqual(launchTyped(h.pane), [`'cd '\\''${PM_PATH}'\\'' && bash /Users/rajiv/.claude/scripts/launch-pm.sh --via cliproxy --model claude-opus-5-5'`]);
+      assert.deepEqual(h.order, ["1", "menu-enter", "type", "enter", "continuation", "drain"]);
+      assert.deepEqual(launchTyped(h.pane), [LAUNCH]);
       assert.equal(h.pane.shell.some((cmd) => cmd.includes("--continue")), false);
       assert.deepEqual(h.pane.sends, [prompt ?? PM_RESTART_CONTINUATION_PROMPT]);
-      assert.deepEqual(h.order, ["type", "enter", "continuation", "drain"]);
       const status = h.db.getExitStatus();
       assert.equal(status.continuation_delivery, "delivered");
       assert.equal(status.pending, false, "the PM-only episode ends with its continuation");
       assert.equal(status.dev_only, false, "dev slots are never armed by a PM-only restart");
-      // A later health tick or duplicate trigger never resends.
-      await h.health.reconcilePMRestartContinuation();
+      assert.equal(h.db.getEvents(0, 1, "pm_restart_failed").length, 0);
+      // A duplicate trigger never resends.
       await h.health.restartPMFresh("exit", episode);
       assert.equal(h.pane.sends.length, 1);
     } finally { h.db.close(); }
   });
 }
 
-test("configured deepseek model is passed to the launcher", async () => {
-  const h = harness({ state: "shell" });
+test("exit flow without an exit menu: nothing is typed until the shell prompt, then launch and continuation", async () => {
+  const h = harness({ state: "exiting" });
   try {
-    h.db.setConfig(PM_MODEL_CONFIG_KEY, "deepseek");
-    const result = await h.health.restartPMFresh("crash");
+    const episode = armPmOnlyEpisode(h.db);
+    const result = await h.health.restartPMFresh("exit", episode);
     assert.equal(result.success, true, result.reason);
-    assert.match(launchTyped(h.pane)[0], /launch-pm\.sh --via cliproxy --model deepseek'$/);
+    assert.ok(h.pane.polls >= 3);
+    assert.deepEqual(h.order, ["type", "enter", "continuation", "drain"], "no 1 or Enter without a menu");
+    assert.deepEqual(h.pane.sends, [PM_RESTART_CONTINUATION_PROMPT]);
+  } finally { h.db.close(); }
+});
+
+// Cause of the 16:21 IST 18 Nov failure: a single-shot pane identity probe aborted the restart before it launched anything.
+test("a failing tmux identity probe never aborts the exit flow", async () => {
+  const h = harness({ state: "menu", failIdentityProbe: true });
+  try {
+    const episode = armPmOnlyEpisode(h.db);
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.equal(result.success, true, result.reason);
+    assert.deepEqual(h.order, ["1", "menu-enter", "type", "enter", "continuation", "drain"]);
+  } finally { h.db.close(); }
+});
+
+test("exit flow times out waiting for the shell: one pm_restart_failed, nothing typed, no force, episode still pending", async () => {
+  const h = harness({ state: "idle" });
+  try {
+    const episode = armPmOnlyEpisode(h.db);
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.equal(result.success, false);
+    assert.equal(result.reason, "exit_blocked_shell_not_observed_no_force");
+    assert.deepEqual(h.order, []);
+    assert.equal(h.db.getEvents(0, 5, "pm_restart_failed").length, 1);
+    assert.equal(h.db.getExitStatus().pending, true);
+    assert.deepEqual(h.pane.sends, []);
+  } finally { h.db.close(); }
+});
+
+test("the launched Claude never appears: bounded wait, one pm_restart_failed, no continuation typed into the shell", async () => {
+  const h = harness({ state: "shell", neverBoots: true });
+  try {
+    const result = await h.health.restartPMFresh("crash");
+    assert.equal(result.success, false);
+    assert.match(result.reason, /claude process not observed/);
+    assert.deepEqual(h.pane.sends, []);
+    assert.equal(h.db.getEvents(0, 5, "pm_restart_failed").length, 1);
   } finally { h.db.close(); }
 });
 
@@ -198,12 +201,28 @@ test("crash recovery (no exit episode) uses the same fresh launch and one standa
     h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "old-session", cwd: PM_PATH });
     const result = await h.health.restartPMFresh("crash");
     assert.equal(result.success, true, result.reason);
+    assert.deepEqual(h.order, ["type", "enter", "continuation", "drain"]);
     assert.deepEqual(h.pane.sends, [PM_RESTART_CONTINUATION_PROMPT]);
     // Same boot, second attempt: the per-boot claim refuses a resend.
-    assert.equal(await h.health.deliverPMFreshContinuation("%7", h.db.getEvents(0, 1, "SessionStart")[0].id, "crash"), "already_claimed");
+    const boot = h.db.getEvents(0, 1, "SessionStart")[0].id;
+    assert.equal(await h.health.deliverPMRestartContinuation("%7", boot, "crash", null), "already_claimed");
     assert.equal(h.pane.sends.length, 1);
-    assert.equal(h.db.getEvents(0, 1, "process_restarted").length, 1);
   } finally { h.db.close(); }
+});
+
+test("configured model and launcher reach the typed command", async () => {
+  for (const [config, pattern] of [
+    [[PM_MODEL_CONFIG_KEY, "deepseek"], /launch-pm\.sh --via cliproxy --model deepseek'$/],
+    [["pm_launcher", "direct"], /launch-pm\.sh --via direct --model claude-opus-5-5'$/],
+  ] as const) {
+    const h = harness({ state: "shell" });
+    try {
+      h.db.setConfig(config[0], config[1]);
+      const result = await h.health.restartPMFresh("crash");
+      assert.equal(result.success, true, result.reason);
+      assert.match(launchTyped(h.pane)[0], pattern);
+    } finally { h.db.close(); }
+  }
 });
 
 test("health tick on a dead PM pane starts the fresh restart, never the --continue launcher", async () => {
@@ -224,7 +243,7 @@ test("health tick on a dead PM pane starts the fresh restart, never the --contin
 });
 
 test("concurrent triggers join one restart: one launcher, one continuation", async () => {
-  const h = harness({ state: "exiting", exitAfterPolls: 3 });
+  const h = harness({ state: "menu" });
   try {
     const episode = armPmOnlyEpisode(h.db);
     const [a, b] = await Promise.all([h.health.restartPMFresh("exit", episode), h.health.restartPMFresh("crash")]);
@@ -234,90 +253,43 @@ test("concurrent triggers join one restart: one launcher, one continuation", asy
   } finally { h.db.close(); }
 });
 
-test("zsh prompt timeout with an idle PM takes the force path: respawn-pane to a shell, then fresh launch + continuation", async () => {
-  const h = harness({ state: "idle" });
+test("04:00 with_devs episode: the restart delivers the continuation and ends the episode when devs are done", async () => {
+  const h = harness({ state: "shell" });
   try {
-    const episode = armPmOnlyEpisode(h.db, undefined, "uncertain");
+    h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "old-session", cwd: PM_PATH });
+    h.db.setExitPending(true, false, true, "Read /saved/resume.md.", true, true);
+    const episode = h.db.getExitStatus().episode!;
+    h.db.logEvent(0, "exit_pending_triggered", "Stop", null, { source: "pm_only_stop", delivery: "delivered", episode });
+    for (let i = 1; i <= 8; i++) h.db.markSlotExitCycled(i);
+    (h.relay as any).hasPendingExitConfirmation = () => false;
     const result = await h.health.restartPMFresh("exit", episode);
     assert.equal(result.success, true, result.reason);
-    const respawn = h.pane.shell.find((cmd) => cmd.startsWith("tmux respawn-pane"));
-    assert.equal(respawn, `tmux respawn-pane -k -t %7 -c '${PM_PATH}'`, "fallback respawns a shell, not a --continue launcher");
-    assert.deepEqual(h.order, ["respawn", "type", "enter", "continuation", "drain"]);
-    assert.equal(h.db.getEvents(0, 1, "pm_restart_force_respawn").length, 1);
-    assert.deepEqual(h.pane.sends, [PM_RESTART_CONTINUATION_PROMPT]);
+    assert.deepEqual(h.pane.sends, ["Read /saved/resume.md."]);
+    assert.equal(h.db.getExitStatus().pending, false, "single episode complete; no second dev phase");
   } finally { h.db.close(); }
 });
 
-test("zsh prompt timeout with a BUSY PM never kills the turn: no force, no launcher, no continuation", async () => {
-  const h = harness({ state: "busy" });
+test("crash/unresponsive never kills a running agent without proof: busy PM keeps its turn, idle PM is respawned", async () => {
+  const busy = harness({ state: "busy" });
   try {
-    const episode = armPmOnlyEpisode(h.db);
-    const result = await h.health.restartPMFresh("exit", episode);
-    assert.equal(result.success, false);
+    const result = await busy.health.restartPMFresh("unresponsive");
     assert.equal(result.reason, "shell_prompt_timeout_pm_busy_no_force");
-    assert.deepEqual(h.order, []);
-    assert.equal(h.pane.shell.some((cmd) => cmd.startsWith("tmux respawn-pane")), false);
-    // The fence is released so the health tick owns the later exit.
-    assert.equal(h.health.isPmInitiatedRespawn(0), false);
-  } finally { h.db.close(); }
-});
-
-test("Claude prompt never appears: bounded wait, no continuation typed into the shell", async () => {
-  const h = harness({ state: "shell", neverBoots: true });
+    assert.equal(busy.pane.shell.some((cmd) => cmd.startsWith("tmux respawn-pane")), false);
+    assert.deepEqual(busy.order, []);
+  } finally { busy.db.close(); }
+  const crashed = harness({ state: "idle" });
   try {
-    const result = await h.health.restartPMFresh("crash");
-    assert.equal(result.success, false);
-    assert.match(result.reason, /claude process not observed/);
-    assert.deepEqual(h.pane.sends, []);
-  } finally { h.db.close(); }
-});
-
-test("issued exit relaunch timeout retains custody and reconciles its late owned boot once", async () => {
-  const h = harness({ state: "shell", neverBoots: true });
+    const result = await crashed.health.restartPMFresh("crash");
+    assert.equal(result.reason, "shell_prompt_timeout_agent_running_no_force");
+    assert.deepEqual(crashed.order, []);
+  } finally { crashed.db.close(); }
+  const idle = harness({ state: "idle" });
   try {
-    h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "old", cwd: PM_PATH });
-    h.db.setExitPending(true, false, true, "saved continuation", true, true);
-    const episode = h.db.getExitStatus().episode;
-    saveExitAttempt(h.db, 0, episode!);
-    h.db.logEvent(0, "exit_pending_triggered", "Stop", null, { episode, delivery: "delivered" });
-    h.db.enqueuePendingPMEvent(1, "handoff", "inbound");
-    const result = await h.health.restartPMFresh("exit", episode);
-    assert.equal(result.success, false);
-    assert.match(result.reason, /claude process not observed/);
-    assert.equal(h.db.getExitStatus().pending, true);
-    assert.equal(h.db.getExitStatus().continuation_delivery, "waiting");
-    assert.equal(h.db.getExitStatus().with_devs, true);
-    assert.equal(h.db.peekPendingPMEvents().length, 1);
-    (h.health as any).lastRestart.clear();
-    assert.equal((await h.health.restartPMFresh("exit", episode)).reason, "uncertain_launch_no_resend");
-    assert.equal(launchTyped(h.pane).length, 1);
-    h.pane.state = "fresh";
-    h.pane.child = "502";
-    h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "late", cwd: PM_PATH });
-    await h.health.reconcilePMRestartContinuation();
-    await h.health.reconcilePMRestartContinuation();
-    assert.deepEqual(h.pane.sends, ["saved continuation"]);
-    assert.equal(h.db.getExitStatus().continuation_delivery, "delivered");
-    assert.equal(h.db.getExitStatus().with_devs, true);
-    assert.equal(h.db.peekPendingPMEvents().length, 1);
-  } finally { h.db.close(); }
-});
-
-test("late successor boot cannot inherit an issued launch's continuation", async () => {
-  const h = harness({ state: "shell", neverBoots: true });
-  try {
-    const episode = armPmOnlyEpisode(h.db, "saved continuation");
-    await h.health.restartPMFresh("exit", episode);
-    h.pane.state = "fresh";
-    h.pane.child = "502";
-    for (const session_id of ["first", "successor"]) {
-      h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id, cwd: PM_PATH });
-    }
-    await h.health.reconcilePMRestartContinuation();
-    assert.deepEqual(h.pane.sends, []);
-    assert.equal(h.db.getExitStatus().pending, true);
-    assert.equal(JSON.parse(h.db.getConfig("pm_restart_launch")!).status, "issued");
-  } finally { h.db.close(); }
+    const result = await idle.health.restartPMFresh("unresponsive");
+    assert.equal(result.success, true, result.reason);
+    assert.deepEqual(idle.order, ["respawn", "type", "enter", "continuation", "drain"]);
+    assert.equal(idle.db.getEvents(0, 1, "pm_restart_force_respawn").length, 1);
+  } finally { idle.db.close(); }
 });
 
 test("PM-only Stop hands its consumed /exit to the fresh-restart handler exactly once", async () => {
@@ -344,262 +316,5 @@ test("a refused /exit never starts a restart", () => {
   try {
     h.health.onPmExitDispatched("ep", "refused_pre_effect");
     assert.equal(h.health.pmRestartInFlight, null);
-  } finally { h.db.close(); }
-});
-
-test("crash restart never force-kills an agent that is running when the prompt wait expires", async () => {
-  const h = harness({ state: "idle" });
-  try {
-    const result = await h.health.restartPMFresh("crash");
-    assert.equal(result.reason, "shell_prompt_timeout_agent_running_no_force");
-    assert.deepEqual(h.order, []);
-  } finally { h.db.close(); }
-});
-
-test("04:00 with_devs episode: the fresh PM restart delivers the continuation and ends the episode when devs are done", async () => {
-  const h = harness({ state: "shell" });
-  try {
-    h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "old-session", cwd: PM_PATH });
-    h.db.setExitPending(true, false, true, "Read /saved/resume.md.", true, true);
-    const episode = h.db.getExitStatus().episode;
-    saveExitAttempt(h.db, 0, episode!);
-    for (let i = 1; i <= 8; i++) saveExitAttempt(h.db, i, episode!, "verified");
-    h.db.logEvent(0, "exit_pending_triggered", "Stop", null, { source: "pm_only_stop", delivery: "delivered", episode });
-    (h.relay as any).hasPendingExitConfirmation = () => false;
-    const result = await h.health.restartPMFresh("exit", episode);
-    assert.equal(result.success, true, result.reason);
-    assert.deepEqual(h.pane.sends, ["Read /saved/resume.md."]);
-    assert.deepEqual(h.order, ["type", "enter", "continuation", "drain"]);
-    assert.equal(h.db.getExitStatus().pending, false, "single episode complete; no second dev phase");
-  } finally { h.db.close(); }
-});
-
-test("pm_launcher=direct: the same fresh restart types launch-pm.sh, then one continuation", async () => {
-  const h = harness({ state: "shell" });
-  try {
-    h.db.setConfig("pm_launcher", "direct");
-    const result = await h.health.restartPMFresh("crash");
-    assert.equal(result.success, true, result.reason);
-    assert.match(launchTyped(h.pane)[0], /&& bash \/Users\/rajiv\/\.claude\/scripts\/launch-pm\.sh --via direct --model claude-opus-5-5'$/);
-    assert.deepEqual(h.pane.sends, [PM_RESTART_CONTINUATION_PROMPT]);
-    assert.equal(JSON.parse(h.db.getEvents(0, 1, "pm_restart_started")[0].payload).launcher, "direct");
-  } finally { h.db.close(); }
-});
-
-// CTO REVISE ts 1794018596.287469: ownership and busy protection for EVERY trigger.
-test("unresponsive trigger never kills a BUSY PM (an unchanged screen is not proof of idle)", async () => {
-  const h = harness({ state: "busy" });
-  try {
-    const result = await h.health.restartPMFresh("unresponsive");
-    assert.equal(result.reason, "shell_prompt_timeout_pm_busy_no_force");
-    assert.equal(h.pane.shell.some((cmd) => cmd.startsWith("tmux respawn-pane")), false);
-    assert.deepEqual(h.order, []);
-  } finally { h.db.close(); }
-});
-
-test("a different PM process than the one pinned at the trigger is never killed", async () => {
-  const h = harness({ state: "idle" });
-  try {
-    const episode = armPmOnlyEpisode(h.db);
-    h.pane.onPoll = (polls) => { if (polls === 2) h.pane.child = "777"; };
-    const result = await h.health.restartPMFresh("exit", episode);
-    assert.equal(result.reason, "no_force:pm_process_changed");
-    assert.equal(h.pane.shell.some((cmd) => cmd.startsWith("tmux respawn-pane")), false);
-  } finally { h.db.close(); }
-});
-
-test("a successor PM boot during the wait stops the restart: no kill, no launcher, no continuation", async () => {
-  const h = harness({ state: "idle" });
-  try {
-    const episode = armPmOnlyEpisode(h.db);
-    h.pane.onPoll = (polls) => {
-      if (polls === 2) h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "successor", cwd: PM_PATH });
-    };
-    const result = await h.health.restartPMFresh("exit", episode);
-    assert.equal(result.reason, "no_force:pm_session_changed");
-    assert.deepEqual(h.order, []);
-    assert.deepEqual(h.pane.sends, []);
-  } finally { h.db.close(); }
-});
-
-test("only the FIRST boot after the launch is this launch; a successor boot gets no continuation", async () => {
-  const h = harness({ state: "shell" });
-  try {
-    const episode = armPmOnlyEpisode(h.db);
-    const origLog = h.db.logEvent.bind(h.db);
-    // The launch boots, then a second (successor) SessionStart lands before delivery.
-    (h.db as any).logEvent = (slot: number, type: string, hook: any, tool: any, payload: any) => {
-      const id = origLog(slot, type, hook, tool, payload);
-      if (type === "SessionStart" && payload.session_id === "fresh-session") {
-        origLog(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "successor", cwd: PM_PATH });
-      }
-      return id;
-    };
-    const result = await h.health.restartPMFresh("exit", episode);
-    assert.equal(result.reason, "successor_boot_after_launch");
-    assert.deepEqual(h.pane.sends, []);
-    assert.equal(h.db.getExitStatus().continuation_delivery, "waiting");
-  } finally { h.db.close(); }
-});
-
-test("an exit restart writes the durable launch record that binds its boot", async () => {
-  const h = harness({ state: "exiting" });
-  try {
-    const episode = armPmOnlyEpisode(h.db);
-    const result = await h.health.restartPMFresh("exit", episode);
-    assert.equal(result.success, true, result.reason);
-    const record = JSON.parse(h.db.getConfig("pm_restart_launch")!);
-    assert.equal(record.episode, episode);
-    assert.equal(record.pane_id, "%7");
-    assert.ok(record.launch_event_id > 0);
-  } finally { h.db.close(); }
-});
-
-// CTO REVISE ts 1794019803.549589: a planned launch is not an issued launch, and
-// an unknown process identity never passes the kill guard.
-test("a failed paste leaves the launch UNKNOWN; it is never resent and its record never takes a continuation", async () => {
-  const h = harness({ state: "shell" });
-  try {
-    const episode = armPmOnlyEpisode(h.db);
-    h.pane.failPaste = true;
-    const first = await h.health.restartPMFresh("exit", episode);
-    assert.match(first.reason, /launcher send failed/);
-    assert.equal(JSON.parse(h.db.getConfig("pm_restart_launch")!).status, "unknown");
-    assert.equal(h.db.getExitStatus().pending, true);
-    assert.equal(h.db.getExitStatus().continuation_delivery, "waiting");
-    h.pane.failPaste = false;
-    (h.health as any).lastRestart.clear();
-    const second = await h.health.restartPMFresh("exit", episode);
-    assert.equal(second.reason, "uncertain_launch_no_resend");
-    assert.deepEqual(h.pane.typed, [], "no second launcher");
-    // A PM started by hand afterwards never receives the old continuation.
-    h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "manual", cwd: PM_PATH });
-    await h.health.reconcilePMRestartContinuation();
-    assert.deepEqual(h.pane.sends, []);
-  } finally { h.db.close(); }
-});
-
-test("a refused Enter after the typed launcher is UNKNOWN (not refused) and blocks a resend", async () => {
-  const h = harness({ state: "shell" });
-  try {
-    const episode = armPmOnlyEpisode(h.db);
-    let typedSeen = false;
-    const origLog = h.db.getEvents.bind(h.db);
-    // A successor PM boot lands between the text and the Enter keystroke.
-    (h.db as any).getEvents = (...args: any[]) => {
-      if (!typedSeen && h.pane.typed.length) {
-        typedSeen = true;
-        h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "successor", cwd: PM_PATH });
-      }
-      return origLog(...args);
-    };
-    const result = await h.health.restartPMFresh("exit", episode);
-    assert.equal(result.reason, "pm_session_changed");
-    assert.equal(h.order.includes("enter"), false);
-    assert.equal(JSON.parse(h.db.getConfig("pm_restart_launch")!).status, "unknown");
-  } finally { h.db.close(); }
-});
-
-test("a MoP crash after a PLANNED launch: a later boot is not bound (first-in-time is not ownership)", async () => {
-  const h = harness({ state: "fresh" });
-  try {
-    const episode = armPmOnlyEpisode(h.db);
-    h.db.setConfig("pm_restart_launch", JSON.stringify({
-      episode, launch_event_id: h.db.getEvents(0, 1)[0].id, pane_id: "%7", command: "x", status: "planned", pane_pid: "500",
-    }));
-    h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "manual", cwd: PM_PATH });
-    // The cycle reads verified, yet the boot is not bound to a MoP launch record (a planned send proves no process): note, no send.
-    saveExitAttempt(h.db, 0, episode!, "verified");
-    await h.health.reconcilePMRestartContinuation();
-    assert.deepEqual(h.pane.sends, []);
-    assert.equal(JSON.parse(h.db.getEvents(0, 1, "pm_restart_continuation_uncertain")[0].payload).reason, "boot_not_bound_to_mop_launch");
-    // An unverified cycle with an unowned boot stays silent: no receipt is ever written for a boot MoP did not launch.
-    assert.equal(h.db.getEvents(0, 5, "exit_replacement_bound").length, 0);
-  } finally { h.db.close(); }
-});
-
-for (const shape of ["probe_error", "both_unknown"] as const) {
-  test(`unknown process identity never passes the kill guard (${shape})`, async () => {
-    const h = harness({ state: "idle" });
-    try {
-      const episode = armPmOnlyEpisode(h.db);
-      if (shape === "both_unknown") h.pane.pgrepError = true; // pin AND current probes fail: two nulls never match
-      else h.pane.onPoll = (polls) => { if (polls === 2) h.pane.pgrepError = true; };
-      const result = await h.health.restartPMFresh("exit", episode);
-      assert.equal(result.reason, "no_force:pm_process_unknown");
-      assert.equal(h.pane.shell.some((cmd) => cmd.startsWith("tmux respawn-pane")), false);
-    } finally { h.db.close(); }
-  });
-}
-
-test("a boot whose Claude is not a child of the launched shell is unowned: no continuation", async () => {
-  const h = harness({ state: "shell" });
-  try {
-    const episode = armPmOnlyEpisode(h.db);
-    h.pane.bootPanePid = "900"; // a different shell/pane process produced the Claude
-    const result = await h.health.restartPMFresh("exit", episode);
-    assert.equal(result.reason, "launch_boot_process_unowned");
-    assert.deepEqual(h.pane.sends, []);
-    assert.equal(JSON.parse(h.db.getConfig("pm_restart_launch")!).status, "issued");
-  } finally { h.db.close(); }
-});
-
-test("the success path records planned -> issued -> booted with the owned process", async () => {
-  const h = harness({ state: "shell" });
-  try {
-    const episode = armPmOnlyEpisode(h.db);
-    const result = await h.health.restartPMFresh("exit", episode);
-    assert.equal(result.success, true, result.reason);
-    const record = JSON.parse(h.db.getConfig("pm_restart_launch")!);
-    assert.equal(record.status, "booted");
-    assert.equal(record.process, "500:502");
-    assert.equal(record.pane_pid, "500");
-    assert.equal(record.boot_event_id, h.db.getEvents(0, 1, "SessionStart")[0].id);
-  } finally { h.db.close(); }
-});
-
-// CTO REVISE ts 1794021484.838249: an unresolved same-episode launch stays consumed
-// across newer (manual) boots; only reconciliation or a superseding request retires it.
-test("unresolved episode launch custody survives a newer manual boot: no second launcher, record kept", async () => {
-  const h = harness({ state: "shell" });
-  try {
-    const episode = armPmOnlyEpisode(h.db);
-    h.pane.failPaste = true;
-    assert.match((await h.health.restartPMFresh("exit", episode)).reason, /launcher send failed/);
-    const unresolved = h.db.getConfig("pm_restart_launch");
-    assert.equal(JSON.parse(unresolved!).status, "unknown");
-    h.pane.failPaste = false;
-    // An operator starts PM M by hand; reconcile refuses it; M then exits.
-    h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "manual-M", cwd: PM_PATH });
-    await h.health.reconcilePMRestartContinuation();
-    assert.deepEqual(h.pane.sends, []);
-    (h.health as any).lastRestart.clear();
-    const again = await h.health.restartPMFresh("exit", episode);
-    assert.equal(again.reason, "uncertain_launch_no_resend");
-    assert.deepEqual(h.pane.typed, [], "the uncertain launcher is never resent");
-    assert.equal(h.db.getConfig("pm_restart_launch"), unresolved, "E's unresolved record is never overwritten");
-    assert.equal(JSON.parse(h.db.getEvents(0, 1, "pm_restart_failed")[0].payload).custody, "episode");
-    // The health tick's crash path for the dead PM is held by the same custody.
-    (h.health as any).lastRestart.clear();
-    assert.equal((await h.health.restartPMFresh("crash")).reason, "uncertain_launch_no_resend");
-    assert.deepEqual(h.pane.sends, []);
-  } finally { h.db.close(); }
-});
-
-test("an explicitly superseding exit request retires the old unresolved custody", async () => {
-  const h = harness({ state: "shell" });
-  try {
-    const old = armPmOnlyEpisode(h.db);
-    h.pane.failPaste = true;
-    await h.health.restartPMFresh("exit", old);
-    h.pane.failPaste = false;
-    h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "manual-M", cwd: PM_PATH });
-    // A NEW pm_only request supersedes E; its own launch proceeds normally.
-    const fresh = armPmOnlyEpisode(h.db, "Read /new/resume.md.");
-    (h.health as any).lastRestart.clear();
-    const result = await h.health.restartPMFresh("exit", fresh);
-    assert.equal(result.success, true, result.reason);
-    assert.deepEqual(h.pane.sends, ["Read /new/resume.md."]);
-    assert.equal(JSON.parse(h.db.getConfig("pm_restart_launch")!).episode, fresh);
   } finally { h.db.close(); }
 });

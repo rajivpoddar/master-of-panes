@@ -29,7 +29,7 @@ import { join } from "node:path";
 import { execShell } from "./asyncCommand.js";
 import type { MoPDatabase } from "./db.js";
 import { recentJsonlActivity } from "./jsonlActivity.js";
-import type { TmuxRelay } from "./relay.js";
+import { parsePMExitMenu, type TmuxRelay } from "./relay.js";
 import { DEV_SLOT_NUMBERS, RUNTIME_SLOT_NUMBERS, SLOT_RUNTIME_IDENTITIES, isDecommissionedSlot } from "./slotConfig.js";
 import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity, type PaneCommandRunner } from "./paneIdentity.js";
 import { pinFrom, pinDrift } from "./interruptBeforeClear.js";
@@ -101,8 +101,6 @@ export function pmConfiguredModel(db: Pick<MoPDatabase, "getConfig">): string {
  * The fresh-start + continuation contract is identical for both.
  */
 export const PM_LAUNCHER_CONFIG_KEY = "pm_launcher";
-/** Durable record of the last MoP PM launch: binds the ONE boot it produced. */
-export const PM_RESTART_LAUNCH_KEY = "pm_restart_launch";
 export type PmLauncher = "cliproxy" | "direct";
 export const PM_DEFAULT_LAUNCHER: PmLauncher = "cliproxy";
 
@@ -455,14 +453,32 @@ export class ProcessHealthChecker {
     return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
   }
 
-  /** Poll the PM pane until an empty shell prompt is visible, bounded. */
+  /**
+   * Wait (bounded) for the PM pane to be back at an empty shell prompt after /exit, answering Claude Code's exit menu on
+   * the way: when the "Background work is running" option menu is up, inject 1, then Enter once option 1 shows as
+   * selected (Rajiv ts 1794999568.152419: "inject 1 if the exit option comes up"). The menu is only read while the pane
+   * runs the agent, so scrollback left over after the exit never counts as a live menu. This is the only sender of that 1
+   * for slot 0 (relay.ts leaves the PM menu to this flow). Probe failures just retry on the next poll.
+   */
   private async waitForPMShellPrompt(timeoutMs: number): Promise<{ paneId: string } | null> {
     const deadline = Date.now() + timeoutMs;
+    let sentOne = false;
+    let sentEnter = false;
     for (;;) {
       const command = await this.getPaneCommand(0);
-      if (command && SHELL_COMMANDS.has(command)) {
-        const observed = await this.relay.observeSlotPane(0);
-        if (observed && isShellPromptVisible(observed.text)) return { paneId: observed.paneId };
+      const observed = command ? await this.relay.observeSlotPane(0) : null;
+      if (observed && command) {
+        if (SHELL_COMMANDS.has(command)) {
+          if (isShellPromptVisible(observed.text)) return { paneId: observed.paneId };
+        } else if (this.isAgentCommand(0, command)) {
+          const menu = parsePMExitMenu(observed.text);
+          const key = !menu ? null : !sentOne ? "1" : menu.selected === 1 && !sentEnter ? "Enter" : null;
+          if (key) {
+            await withSlotSendLock(0, () => this.runShell(`tmux send-keys -t ${observed.paneId} ${key}`, { timeout: 10_000 }))
+              .catch(() => undefined);
+            if (key === "1") sentOne = true; else sentEnter = true;
+          }
+        }
       }
       if (Date.now() >= deadline) return null;
       await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, deadline - Date.now()));
@@ -486,11 +502,9 @@ export class ProcessHealthChecker {
   }
 
   /**
-   * The PM restart contract: wait for the zsh prompt after /exit (pane read,
-   * bounded; respawn-pane to a fresh shell is the fallback), type the
-   * configured-model launcher as a FRESH start, wait for the agent process (bounded, busy or idle),
-   * then deliver ONE continuation through the guarded writer.
-   * Never force-kills a busy PM turn. Used for /exit episodes and PM crashes.
+   * The PM restart contract (see runPMFreshRestart): after /exit, wait for the zsh prompt (answering the exit menu with 1),
+   * type the configured-model launcher as a FRESH start, wait for the agent process, then inject ONE continuation.
+   * Every wait is bounded and none gates PM input. Never force-kills a busy PM turn. Used for /exit episodes and PM crashes.
    */
   restartPMFresh(trigger: "exit" | "crash" | "unresponsive", episode: string | null = null): Promise<{ success: boolean; reason: string }> {
     if (this.pmRestartInFlight) return this.pmRestartInFlight;
@@ -600,202 +614,82 @@ export class ProcessHealthChecker {
     return identity !== null && /^\d+:\d+$/.test(identity);
   }
 
-  /** The durable MoP launch record of the last PM restart (survives a MoP restart). */
-  private pmLaunchRecord(): {
-    episode: string | null; launch_event_id: number; pane_id: string; command: string;
-    status?: "planned" | "refused" | "unknown" | "issued" | "booted"; pane_pid?: string; boot_event_id?: number; process?: string;
-  } | null {
-    try {
-      const record = JSON.parse(this.db.getConfig(PM_RESTART_LAUNCH_KEY) || "null");
-      return record && typeof record.launch_event_id === "number" ? record : null;
-    } catch {
-      return null;
-    }
-  }
-
   /**
-   * The ONE boot a MoP launch produced: the first PM SessionStart after the
-   * launch keystroke, from the PM checkout, with a session id. Any later
-   * SessionStart is a successor and never "this launch" (CTO REVISE ts
-   * 1794018596.287469).
+   * The PM restart is exactly Rajiv's exit flow (C0ALZJHGE49 thread 1794998965.861819, ts 1794999568.152419: "MoP should
+   * inject /exit at stop, inject 1 if the exit option comes up, then inject the launch pm command, then inject the
+   * continuation prompt without any gates"). The Stop hook injects /exit (hooks.ts handleStop); this runs from there:
+   *   1. wait for the shell prompt, answering the exit menu with 1 on the way (waitForPMShellPrompt);
+   *   2. type the launch command (pmLaunchPlan: the configured launcher and model);
+   *   3. wait for the new Claude process and its SessionStart;
+   *   4. inject the continuation prompt (deliverPMRestartContinuation).
+   * Every wait is bounded; a timeout logs pm_restart_failed once and stops. Nothing here holds PM input or tool calls
+   * (rule 50). There is no pane/boot ownership pin, launch record or replacement binding: a transient tmux probe failure
+   * only delays a wait, it never aborts the flow (the 16:21 IST 18 Nov restart aborted at a single-shot identity probe
+   * before it launched anything).
    */
-  private launchBoot(launchEventId: number): { id: number; session: string } | null {
-    const after = this.db.getEvents(0, 50, "SessionStart").filter((event) => event.id > launchEventId)
-      .sort((a, b) => a.id - b.id);
-    const first = after[0];
-    if (!first) return null;
-    try {
-      const payload = JSON.parse(first.payload);
-      if (!["startup", "resume"].includes(String(payload.source)) || payload.cwd !== SLOT_CWDS[0]
-          || typeof payload.session_id !== "string" || !payload.session_id.trim()) return null;
-      return { id: first.id, session: payload.session_id };
-    } catch {
-      return null;
-    }
-  }
-
   private async runPMFreshRestart(trigger: "exit" | "crash" | "unresponsive", episode: string | null):
     Promise<{ success: boolean; launched: boolean; reason: string }> {
     const { model, launcher, command: launchCommand } = pmLaunchPlan(this.db);
     const cwd = SLOT_CWDS[0];
     const fail = (reason: string, launched = false, extra: Record<string, unknown> = {}) => {
-      // A restart failure does not cancel an issued or uncertain /exit or launcher.
-      // The separate refused_pre_effect exit terminal owns proven zero-effect cleanup.
       this.db.logEvent(0, "pm_restart_failed", null, null, { trigger, episode, model, reason, ...extra });
       console.error(`[health][pm-restart] ${trigger}: ${reason}`);
       return { success: false, launched, reason };
     };
     this.db.logEvent(0, "pm_restart_started", null, null, { trigger, episode, model, launcher, launch_command: launchCommand });
 
-    // Ownership pin (CTO REVISE ts 1794018596.287469): the pane, the PM boot,
-    // the agent process and the exit episode observed at the trigger. Every
-    // effect below re-checks it, so a recovered or successor PM is never
-    // killed, typed into, or handed this restart's continuation.
-    const pinned = await verifyPaneIdentity(0, this.runShell);
-    if (!pinned.ok) return fail(`pane identity unavailable: ${pinned.detail}`);
-    const pin = {
-      paneId: pinned.snapshot.paneId,
-      boot: latestSessionStartEventId(this.db, 0),
-      process: await this.pmAgentProcess(pinned.snapshot.paneId),
-      episode: trigger === "exit" ? episode : null,
-    };
-    const ownerRefusal = async (): Promise<string | null> => {
-      const identity = await verifyPaneIdentity(0, this.runShell);
-      if (!identity.ok || identity.snapshot.paneId !== pin.paneId) return "pane_identity_changed";
-      if (latestSessionStartEventId(this.db, 0) !== pin.boot) return "pm_session_changed";
-      if (pin.episode) {
-        const current = this.db.getExitStatus();
-        if (!current.pending || current.episode !== pin.episode) return "exit_episode_changed";
-      }
-      return null;
-    };
-
-    // Never resend an uncertain launcher (CTO REVISE ts 1794019803.549589 and
-    // 1794021484.838249). An unresolved (planned/unknown/issued) launch of a
-    // still-pending exit episode keeps that episode's launch custody CONSUMED,
-    // across ANY newer boot (e.g. an operator's manual PM that then exits): its
-    // record is never overwritten and no launcher is sent again for that
-    // episode. Custody retires only by reconciliation (the record becomes
-    // `booted`) or an explicitly superseding request (a new or disabled
-    // exit-pending episode). An episode-less (crash) launch blocks only until a
-    // PM boot follows it in this pane.
-    const prior = this.pmLaunchRecord();
-    if (prior && ["planned", "unknown", "issued"].includes(String(prior.status))) {
-      const current = this.db.getExitStatus();
-      const episodeCustody = prior.episode !== null && current.pending && current.episode === prior.episode;
-      const paneUnresolved = prior.pane_id === pin.paneId && latestSessionStartEventId(this.db, 0) <= prior.launch_event_id;
-      if (episodeCustody || paneUnresolved) {
-        return fail("uncertain_launch_no_resend", false, {
-          prior_status: prior.status, prior_launch_event_id: prior.launch_event_id, prior_episode: prior.episode,
-          custody: episodeCustody ? "episode" : "pane",
-        });
-      }
-    }
-    // The kill guard: same pane/boot/episode AND the same KNOWN live process.
-    const killRefusal = async (): Promise<string | null> => {
-      const owner = await ownerRefusal();
-      if (owner) return owner;
-      const current = await this.pmAgentProcess(pin.paneId);
-      if (!ProcessHealthChecker.ownedAgent(pin.process) || !ProcessHealthChecker.ownedAgent(current)) return "pm_process_unknown";
-      return current === pin.process ? null : "pm_process_changed";
-    };
-
-    // 1. zsh prompt (pane read). Fallback: respawn-pane to a fresh login shell,
-    //    only for the SAME pinned process and only when it is gone or shows an
-    //    idle prompt, for EVERY trigger; a busy PM turn is never killed.
+    // 1. Shell prompt (the exit menu is answered inside the wait). A graceful /exit never escalates to a kill; only a PM
+    //    that is gone or hung (crash, unresponsive) may be respawned, and a busy PM turn is never killed.
     let shell = await this.waitForPMShellPrompt(trigger === "unresponsive" ? 0 : this.PM_EXIT_SHELL_TIMEOUT_MS);
-    if (shell && shell.paneId !== pin.paneId) return fail("pane_identity_changed");
     if (!shell) {
-      // /exit is graceful only. A blocked dialog or background agent must
-      // never turn a timeout into respawn-pane -k, even at an idle prompt.
       if (trigger === "exit") return fail("exit_blocked_shell_not_observed_no_force");
       const command = await this.getPaneCommand(0);
       if (!command) return fail("shell_prompt_timeout_pane_unknown");
-      const agentAlive = this.isAgentCommand(0, command);
-      if (agentAlive && trigger === "crash") {
-        // A crash restart started from an observed shell; an agent now running
-        // was launched by someone else and is never killed.
-        return fail("shell_prompt_timeout_agent_running_no_force", false, { pane_command: command });
+      const identity = await verifyPaneIdentity(0, this.runShell);
+      if (!identity.ok) return fail(`force respawn refused: ${identity.detail}`);
+      const respawnPane = identity.snapshot.paneId;
+      if (this.isAgentCommand(0, command)) {
+        if (trigger === "crash") return fail("shell_prompt_timeout_agent_running_no_force", false, { pane_command: command });
+        if ((await this.relay.getSlotActivityState(0, respawnPane)) !== "idle") {
+          return fail("shell_prompt_timeout_pm_busy_no_force", false, { pane_command: command });
+        }
       }
-      // A live agent may be killed only if it is the SAME, KNOWN process pinned
-      // at the trigger; an unknown or ambiguous identity refuses. With no agent
-      // left the pane must provably be a bare shell (known, no Claude child).
-      const guard = agentAlive ? killRefusal : async () => {
-        const owner = await ownerRefusal();
-        if (owner) return owner;
-        const current = await this.pmAgentProcess(pin.paneId);
-        return current !== null && current.endsWith(":") ? null : "pm_process_unknown";
-      };
-      const refusal = await guard();
-      if (refusal) return fail(`no_force:${refusal}`, false, { pane_command: command });
-      if (agentAlive && (await this.relay.getSlotActivityState(0, pin.paneId)) !== "idle") {
-        // An unchanged screen/JSONL/event counter is not proof of idle.
-        return fail("shell_prompt_timeout_pm_busy_no_force", false, { pane_command: command });
-      }
-      // Last pre-effect recheck INCLUDING the process: nothing yields between it and the kill.
-      const finalRefusal = await guard();
-      if (finalRefusal) return fail(`no_force:${finalRefusal}`, false, { pane_command: command });
       this.db.logEvent(0, "pm_restart_force_respawn", null, null, {
-        trigger, episode, pane_command: command, process: pin.process, reason: "shell prompt not observed within bound",
+        trigger, episode, pane_command: command, reason: "shell prompt not observed within bound",
       });
       try {
-        await this.runShell(`tmux respawn-pane -k -t ${pin.paneId} -c ${shellEscape(cwd)}`, { timeout: 10_000 });
+        await this.runShell(`tmux respawn-pane -k -t ${respawnPane} -c ${shellEscape(cwd)}`, { timeout: 10_000 });
         this.lastForceRespawn.set(0, Date.now());
       } catch (err) {
         return fail(`force respawn failed: ${String(err).slice(0, 200)}`);
       }
       shell = await this.waitForPMShellPrompt(this.PM_FORCE_SHELL_TIMEOUT_MS);
       if (!shell) return fail("shell_prompt_not_observed_after_force_respawn");
-      if (shell.paneId !== pin.paneId) return fail("pane_identity_changed");
     }
     this.unresponsiveStates.delete(0);
     this.db.logEvent(0, "process_dead", null, null, {
       detected_at: new Date().toISOString(), pane_command: "shell_prompt", trigger, episode,
     });
 
-    // 2. Fresh launcher with the configured model, typed at the verified prompt.
-    //    The durable launch record binds the ONE boot this launch produces.
-    //    The record carries the ACTUAL disposition (CTO REVISE ts
-    //    1794019803.549589): planned -> refused (proven zero effect) | unknown
-    //    (a key may have landed) | issued (both keys sent) -> booted (owned
-    //    process + its SessionStart). Only `booted` can take a continuation.
-    const launchEventId = this.db.getEvents(0, 1)[0]?.id ?? 0;
+    // 2. The launch command, typed at the shell prompt.
+    const paneId = shell.paneId;
+    const bootBefore = latestSessionStartEventId(this.db, 0);
     const typed = `cd ${shellEscape(cwd)} && ${launchCommand}`;
-    const shellProcess = await this.pmAgentProcess(pin.paneId);
-    if (shellProcess === null || !shellProcess.endsWith(":")) return fail("launch_refused:pm_shell_process_unknown");
-    const record = {
-      episode: pin.episode, launch_event_id: launchEventId, pane_id: pin.paneId, command: launchCommand,
-      pane_pid: shellProcess.slice(0, -1), at: new Date().toISOString(), status: "planned",
-    } as Record<string, unknown>;
-    const setRecord = (fields: Record<string, unknown>) => {
-      Object.assign(record, fields);
-      this.db.setConfig(PM_RESTART_LAUNCH_KEY, JSON.stringify(record));
-    };
-    setRecord({});
-    let effect = false;
     const refusal = await withSlotSendLock(0, async () => {
       for (const key of ["text", "Enter"] as const) {
-        const owner = await ownerRefusal();
-        if (owner) return owner;
         const command = await this.getPaneCommand(0);
         if (!command || !SHELL_COMMANDS.has(command)) return "pm_shell_changed";
-        effect = true;
         await this.runShell(key === "text"
-          ? `tmux send-keys -l -t ${pin.paneId} ${shellEscape(typed)}`
-          : `tmux send-keys -t ${pin.paneId} Enter`, { timeout: 10_000 });
+          ? `tmux send-keys -l -t ${paneId} ${shellEscape(typed)}`
+          : `tmux send-keys -t ${paneId} Enter`, { timeout: 10_000 });
       }
       return null;
     }).catch((err) => `launcher send failed: ${String(err).slice(0, 200)}`);
-    if (refusal) {
-      setRecord({ status: effect ? "unknown" : "refused", reason: refusal });
-      return fail(refusal, false, { launch_disposition: record.status });
-    }
-    setRecord({ status: "issued", issued_at: new Date().toISOString() });
+    if (refusal) return fail(refusal);
     this.db.logEvent(0, "pm_restart_launched", null, null, { trigger, episode, model, launcher, launch_command: launchCommand });
 
-    // 3. The agent process (pane read, bounded). No idle requirement: the boot and replacement receipts below bind the
-    //    launch's own first boot, busy or not (CTO REVISE ts 1794973351.556359, item 1).
-    const exitCandidate = this.db.getExitAttempt(0);
+    // 3. The Claude process, then its SessionStart (busy or idle: the guarded writer below decides when the composer can
+    //    take the paste).
     const bootCommand = await this.waitForPMAgentProcess(this.PM_PROMPT_TIMEOUT_MS);
     if (!bootCommand) return fail(`claude process not observed within ${this.PM_PROMPT_TIMEOUT_MS}ms`, true);
     this.db.logEvent(0, "agent_booted", null, null, {
@@ -804,93 +698,18 @@ export class ProcessHealthChecker {
     this.db.logEvent(0, "process_restarted", null, null, {
       command: launchCommand, restarted_at: new Date().toISOString(), trigger, model,
     });
-
-    // This launch's FIRST SessionStart binds the continuation to this boot; a
-    // later (successor) boot never inherits it.
     const bootDeadline = Date.now() + this.PM_BOOT_EVENT_TIMEOUT_MS;
-    let boot = this.launchBoot(launchEventId);
-    while (!boot && Date.now() < bootDeadline) {
+    while (latestSessionStartEventId(this.db, 0) <= bootBefore && Date.now() < bootDeadline) {
       await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, bootDeadline - Date.now()));
-      boot = this.launchBoot(launchEventId);
     }
-    if (!boot) return fail("session_start_not_observed_for_launch", true);
-    if (latestSessionStartEventId(this.db, 0) !== boot.id) return fail("successor_boot_after_launch", true);
-    // First-in-time is not ownership: the boot must be a Claude child of the
-    // SAME shell this launch typed into, and the only boot since the launch.
-    const bootProcess = await this.pmAgentProcess(pin.paneId);
-    if (!ProcessHealthChecker.ownedAgent(bootProcess) || !bootProcess!.startsWith(`${record.pane_pid}:`)) {
-      return fail("launch_boot_process_unowned", true, { boot_process: bootProcess });
-    }
-    setRecord({ status: "booted", boot_event_id: boot.id, process: bootProcess });
-    if (trigger === "exit" && exitCandidate?.episode === episode) {
-      await this.recordPMReplacement(episode, {
-        launchEventId, paneId: pin.paneId, bootEventId: boot.id, bootSession: boot.session, ownedProcess: bootProcess!,
-      });
-    }
-    const processGuard = async () => (await this.pmAgentProcess(pin.paneId)) === bootProcess ? null : "pm_process_changed";
+    const boot = latestSessionStartEventId(this.db, 0);
+    if (boot <= bootBefore) return fail("session_start_not_observed_for_launch", true);
 
-    // 4. ONE continuation. A PM-only exit episode keeps its durable
-    //    waiting -> attempted claim (and its saved continuation); every other
-    //    restart claims this boot once.
-    // Rajiv C0ALZJHGE49 thread 1794970059.617269, ts 1794971912.636829: "continuation delivery is supposed to be
-    // injected right after the process is back up". The replacement is verified by the health observer, which otherwise
-    // only runs on the next tick: reconcile below saw cycled[0]=false, returned silently, and the next attempt came after
-    // the restart cooldown (episode 33fdff94, 2.5 min later). Verify it here, now, through the same observer.
-    if (trigger === "exit") await this.relay.observeExitAttempts?.().catch(() => undefined);
-    const status = this.db.getExitStatus();
-    if (pin.episode && status.pending && status.pm_only && this.db.hasExitAttemptSubmitted(0) && status.episode === pin.episode) {
-      await this.reconcilePMRestartContinuation(boot.id);  // binds the booted record + process inside
-      // A PROVEN pre-effect refusal (a composer that cannot take the paste yet on a fresh or busy boot) wrote nothing and
-      // handed the claim back: retry within the bound the idle wait used to have, not only at the next health tick. An
-      // uncertain outcome is consumed and never retried here (CTO REVISE ts 1794973351.556359, items 1 and 2).
-      const retryDeadline = Date.now() + this.PM_PROMPT_TIMEOUT_MS;
-      while (Date.now() < retryDeadline && this.continuationRefusedPreEffect(status.episode, launchEventId, boot.id)) {
-        await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS * 5, Math.max(0, retryDeadline - Date.now())));
-        await this.reconcilePMRestartContinuation(boot.id);
-      }
-      // Read this episode's continuation receipt: a with_devs episode whose devs
-      // all cycled ends (and resets its flags) as soon as the PM part lands.
-      let delivery: string | null = null;
-      const receipt = this.db.getEvents(0, 1, "pm_restart_continuation")[0];
-      try {
-        const payload = receipt ? JSON.parse(receipt.payload) : null;
-        if (payload && payload.episode === status.episode && receipt!.id > launchEventId) delivery = String(payload.delivery);
-      } catch { delivery = null; }
-      const delivered = delivery === "delivered";
-      if (delivered) void this.relay.drainPMQueue();
-      return { success: delivered, launched: true, reason: `continuation ${delivery ?? "unknown"}` };
-    }
-    const outcome = await this.deliverPMFreshContinuation(pin.paneId, boot.id, trigger, processGuard);
-    if (outcome === "delivered") void this.relay.drainPMQueue();
-    return { success: outcome === "delivered", launched: true, reason: `continuation ${outcome}` };
-  }
-
-  /** Exactly-once continuation for a non-episode PM restart, claimed per boot before the send. */
-  private async deliverPMFreshContinuation(paneId: string, bootId: number, trigger: string,
-    processGuard: () => Promise<string | null>): Promise<string> {
-    const claimKey = "pm_restart_continuation_boot";
-    if (this.db.getConfig(claimKey) === String(bootId)) return "already_claimed";
-    this.db.setConfig(claimKey, String(bootId));
-    const fence = () => latestSessionStartEventId(this.db, 0) !== bootId ? "pm_session_changed" : null;
-    const send = () => this.relay.deliverGuardedToSlot(0, PM_RESTART_CONTINUATION_PROMPT, {
-      expectedPaneId: paneId,
-      recheck: async () => fence() ?? await processGuard() ?? fence(),
-      finalCheck: fence,
-      bracketedPaste: true,
-    });
-    // The launcher no longer waits for an idle prompt (CTO REVISE ts 1794973351.556359, item 1): the guarded writer decides
-    // when the composer can safely take the paste. A PROVEN pre-effect refusal (composer not ready yet, ...) wrote nothing,
-    // so it is retried within the same bound the idle wait had; an uncertain outcome stays consumed and is never resent.
-    const deadline = Date.now() + this.PM_PROMPT_TIMEOUT_MS;
-    let result = await send();
-    while (result.outcome === "refused_pre_effect" && !fence() && Date.now() < deadline) {
-      await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS * 5, Math.max(0, deadline - Date.now())));
-      result = await send();
-    }
-    this.db.logEvent(0, "pm_restart_continuation", null, null, {
-      episode: null, trigger, boot_event_id: bootId, delivery: result.outcome,
-    });
-    return result.outcome;
+    // 4. The continuation prompt.
+    const outcome = await this.deliverPMRestartContinuation(paneId, boot, trigger, episode);
+    if (outcome !== "delivered") return fail(`continuation_${outcome}`, true);
+    void this.relay.drainPMQueue();
+    return { success: true, launched: true, reason: "continuation delivered" };
   }
 
   private isAgentCommand(slotNum: number, command: string | null): boolean {
@@ -1118,7 +937,6 @@ export class ProcessHealthChecker {
       const paneCommand = await this.getPaneCommand(slot);
 
       if (this.isAgentCommand(slot, paneCommand)) {
-        if (slot === 0 && this.db.getExitPending()) await this.reconcilePMRestartContinuation();
         await this.checkClaudeResponsiveness(slot);
         continue;
       }
@@ -1235,12 +1053,6 @@ export class ProcessHealthChecker {
 
     // After dead-process checks, scan for exit_pending on idle slots
     await this.checkExitPending();
-    // The PM continuation is not part of the per-slot loop above: that loop skips the PM during the post-restart
-    // cooldown and runs reconcile BEFORE the observer marks the replacement verified. Retry it here, after the observer,
-    // every tick until it lands (Rajiv ts 1794971912.636829: no Stop, idle or other gate). It also completes an episode
-    // whose continuation is still "waiting" with a verified replacement on the first tick after a release activation.
-    // A restart in flight owns its own delivery; the durable waiting -> attempted claim makes any overlap safe.
-    if (this.db.getExitPending() && !this.pmInitiatedRespawns.has(0)) await this.reconcilePMRestartContinuation();
   }
 
   // ─── Exit Pending: process receipts only, never timer-driven /exit ───
@@ -1277,7 +1089,6 @@ export class ProcessHealthChecker {
    * and next checkAll() cycle will handle it.
    */
   private scheduleContinueInjection(slotNum: number): void {
-    const restartEpisode = slotNum === 0 ? this.db.getExitStatus().episode : null;
     const timer = setTimeout(async () => {
       const cmd = await this.getPaneCommand(slotNum);
       // Native Claude's executable name is its installed version (for example
@@ -1295,11 +1106,8 @@ export class ProcessHealthChecker {
           console.warn(`[health] refusing continue injection for slot ${slotNum}: ${identity.detail}`);
           return;
         }
-        if (slotNum === 0 && this.db.getExitStatus().pm_only) {
-          if (this.db.getExitStatus().episode !== restartEpisode) return;
-          await this.reconcilePMRestartContinuation();
-          return;
-        }
+        // A PM-only exit episode's continuation is injected by the restart flow (runPMFreshRestart), not here.
+        if (slotNum === 0 && this.db.getExitStatus().pm_only) return;
         await execShell(
           `tmux send-keys -t ${identity.snapshot.paneId} 'continue' Enter`,
           { timeout: 10_000 },
@@ -1318,189 +1126,6 @@ export class ProcessHealthChecker {
     if (timer.unref) timer.unref();
   }
 
-  /**
-   * Recover only an unattempted episode whose exit is followed by a PM boot.
-   *
-   * CTO correction (C0ALZJHGE49 thread 1793754459.969419, ts 1793761597.648009):
-   * an `uncertain` /exit receipt stays uncertain forever and a boot/session id
-   * is never delivery proof (the real --continue boot reuses the same UUID).
-   * The continuation settles independently of exit-submit certainty only when
-   * the watchdog itself observed the PM process die and restarted it AFTER the
-   * attempt (process_dead -> process_restarted, both newer than the receipt),
-   * the latest boot follows that death, and the pane is still owned. The send
-   * goes through the guarded continuation writer behind the durable
-   * waiting -> attempted claim; only its delivered receipt arms dev_only and
-   * releases custody. Anything less stays typed uncertain.
-   */
-  private async reconcilePMRestartContinuation(expectedBoot?: number): Promise<void> {
-    let status = this.db.getExitStatus();
-    if (!status.pending) return;
-    // A delivery this episode already has on record whose transition never finished (MoP restarted between the delivered
-    // receipt and finishPMContinuation, so the claim still reads "attempted"): apply that confirmed receipt and finish,
-    // without another send (CTO REVISE ts 1794973351.556359, item 3). An attempted claim with no delivered receipt stays
-    // consumed: an uncertain paste or Enter is never resent.
-    if (status.continuation_delivery === "attempted") {
-      this.settleRecordedContinuation(status);
-      return;
-    }
-    if (!status.pm_only || status.continuation_delivery !== "waiting") return;
-    const exit = this.db.getEvents(0, 1, "exit_pending_triggered")[0];
-    const boot = this.db.getEvents(0, 1, "SessionStart")[0];
-    if (!exit || !boot || boot.id <= exit.id) return;
-    if (expectedBoot !== undefined && boot.id !== expectedBoot) return;
-    // Only the boot MoP itself launched for THIS episode receives its
-    // continuation (CTO REVISE ts 1794018596.287469). A recovered or successor
-    // PM started outside that launch never inherits an older restart's prompt.
-    // CTO REVISE ts 1794019803.549589: a planned/issued record is not a
-    // launch; only a `booted` record (owned Claude process + its SessionStart)
-    // binds the boot, and that same process must still own the pane.
-    let launch = this.pmLaunchRecord();
-    // A successfully issued launcher may become healthy after the bounded wait.
-    // Bind only its first boot in the same pane and shell; planned/unknown sends
-    // cannot establish that ownership and remain in custody without replay.
-    // No idle requirement (CTO REVISE ts 1794973351.556359, item 1): a busy replacement is still this launch's replacement.
-    // The first-and-current SessionStart, the pane, the shell, the process and the episode must all match.
-    if (launch?.status === "issued" && launch.episode === status.episode && launch.launch_event_id >= exit.id) {
-      const first = this.launchBoot(launch.launch_event_id);
-      const identity = await verifyPaneIdentity(0, this.runShell);
-      const process = identity.ok && identity.snapshot.paneId === launch.pane_id
-        ? await this.pmAgentProcess(launch.pane_id) : null;
-      const command = await this.getPaneCommand(0);
-      const processAgain = await this.pmAgentProcess(launch.pane_id);
-      const current = this.db.getExitStatus();
-      const latest = this.pmLaunchRecord();
-      if (first && first.id === boot.id && latestSessionStartEventId(this.db, 0) === boot.id
-          && ProcessHealthChecker.ownedAgent(process) && process!.startsWith(`${launch.pane_pid}:`)
-          && processAgain === process && this.isAgentCommand(0, command)
-          && current.pending && current.episode === status.episode && current.continuation_delivery === "waiting"
-          && latest?.status === "issued" && latest.launch_event_id === launch.launch_event_id
-          && latest.episode === launch.episode && latest.pane_id === launch.pane_id) {
-        launch = { ...latest, status: "booted", boot_event_id: boot.id, process: process! };
-        this.db.setConfig(PM_RESTART_LAUNCH_KEY, JSON.stringify(launch));
-        this.db.logEvent(0, "process_restarted", null, null, { trigger: "exit", episode: status.episode,
-          command: launch.command, reason: "late_owned_boot" });
-      }
-    }
-    const bound = !!launch && launch.status === "booted" && launch.episode === status.episode
-      && launch.launch_event_id >= exit.id && launch.boot_event_id === boot.id
-      && ProcessHealthChecker.ownedAgent(launch.process ?? null);
-    if (!status.cycled[0]) {
-      // The replacement is RECORDED before the cycle verification is requested, so a launch that bound late (or whose
-      // restart flow was interrupted before its receipt) still earns cycle credit (CTO REVISE ts 1794973351.556359, item 1).
-      // A boot that is not MoP's own launch stays silent here, as before.
-      if (!bound || !launch || !status.episode) return;
-      let bootSession = "";
-      try { bootSession = String(JSON.parse(boot.payload).session_id ?? ""); } catch { return; }
-      if (!bootSession.trim()
-          || !(await this.recordPMReplacement(status.episode, {
-            launchEventId: launch.launch_event_id, paneId: launch.pane_id, bootEventId: boot.id, bootSession,
-            ownedProcess: launch.process!,
-          }))) return;
-      await this.relay.observeExitAttempts?.().catch(() => undefined);
-      status = this.db.getExitStatus();
-      if (!status.pending || !status.pm_only || !status.cycled[0] || status.continuation_delivery !== "waiting") return;
-    }
-    if (!bound || !launch) {
-      this.noteUncertainContinuation(status.episode, "boot_not_bound_to_mop_launch", exit.id, boot.id);
-      return;
-    }
-    const ownedProcess = launch.process!;
-    if ((await this.pmAgentProcess(launch.pane_id)) !== ownedProcess) {
-      this.noteUncertainContinuation(status.episode, "boot_process_not_owned", exit.id, boot.id);
-      return;
-    }
-    const processGuard = async () => (await this.pmAgentProcess(launch.pane_id)) === ownedProcess ? null : "pm_process_changed";
-    let payload: Record<string, unknown>;
-    let receipt: Record<string, unknown>;
-    try { payload = JSON.parse(boot.payload); receipt = JSON.parse(exit.payload); }
-    catch { return; }
-    if (receipt.episode !== status.episode
-        || !["startup", "resume"].includes(String(payload.source))
-        || typeof payload.session_id !== "string" || !payload.session_id.trim()) return;
-    let restart: { dead: number; restarted: number } | null = null;
-    if (receipt.delivery !== "delivered") {
-      if (receipt.delivery !== "uncertain") return;
-      const dead = this.db.getEvents(0, 1, "process_dead")[0];
-      const restarted = this.db.getEvents(0, 1, "process_restarted")[0];
-      if (!dead || !restarted || dead.id <= exit.id || restarted.id <= dead.id || boot.id <= dead.id) {
-        this.noteUncertainContinuation(status.episode, "no_watchdog_restart_after_attempt", exit.id, boot.id);
-        return;
-      }
-      restart = { dead: dead.id, restarted: restarted.id };
-    }
-    const identity = await verifyPaneIdentity(0, this.runShell);
-    if (!identity.ok || payload.cwd !== identity.snapshot.currentPath) {
-      if (restart) this.noteUncertainContinuation(status.episode, "pane_ownership_unverified", exit.id, boot.id);
-      return;
-    }
-    if (latestSessionStartEventId(this.db, 0) !== boot.id
-        || this.db.getExitStatus().episode !== status.episode) return;
-    if (identity.snapshot.paneId !== launch.pane_id) return;
-    await this.deliverPMRestartContinuation(identity.snapshot.paneId, boot.id, restart ? {
-      exit_event_id: exit.id, exit_delivery: "uncertain",
-      process_dead_event_id: restart.dead, process_restarted_event_id: restart.restarted, boot_event_id: boot.id,
-    } : undefined, processGuard);
-  }
-
-  /**
-   * Record MoP's own launch as the replacement PM of this exit episode: the `exit_replacement_bound` receipt that
-   * relay.observeExitAttempts requires before it grants cycle credit. Used by the restart flow right after the boot binds
-   * and by reconcile when the launch bound late, so the replacement is on record BEFORE the cycle verification is requested
-   * (CTO REVISE ts 1794973351.556359, item 1). The launch's boot must still be the latest SessionStart and the owned process
-   * must still own the pane. Idempotent: a matching receipt already on record is never duplicated. Returns whether one is
-   * on record afterwards. It needs no idle prompt, Stop or input.
-   */
-  private async recordPMReplacement(episode: string, bound: {
-    launchEventId: number; paneId: string; bootEventId: number; bootSession: string; ownedProcess: string;
-  }): Promise<boolean> {
-    const candidate = this.db.getExitAttempt(0);
-    if (!candidate || candidate.episode !== episode) return false;
-    const recorded = (): boolean => {
-      try {
-        const receipt = JSON.parse(this.db.getEvents(0, 1, "exit_replacement_bound")[0]?.payload ?? "null");
-        return receipt?.episode === episode && receipt.submittedAt === candidate.submittedAt
-          && receipt.launchEventId === bound.launchEventId && receipt.bootEventId === bound.bootEventId;
-      } catch { return false; }
-    };
-    if (recorded()) return true;
-    const replacementProcess = await this.relay.exitProcessIdentity(0, bound.paneId);
-    if (!replacementProcess || (await this.pmAgentProcess(bound.paneId)) !== bound.ownedProcess
-        || latestSessionStartEventId(this.db, 0) !== bound.bootEventId
-        || !this.db.getExitPending() || this.db.getExitStatus().episode !== episode
-        || this.db.getExitAttempt(0)?.submittedAt !== candidate.submittedAt) return false;
-    if (recorded()) return true;
-    this.db.logEvent(0, "exit_replacement_bound", null, null, { episode,
-      submittedAt: candidate.submittedAt, assignmentEpoch: candidate.assignmentEpoch, replacementProcess,
-      launchEventId: bound.launchEventId, bootEventId: bound.bootEventId, bootSession: bound.bootSession,
-      ownedProcess: bound.ownedProcess });
-    return true;
-  }
-
-  /** This episode's newest continuation receipt (after the launch) is a proven pre-effect refusal and the claim is back to "waiting". */
-  private continuationRefusedPreEffect(episode: string | null, afterEventId: number, bootId: number): boolean {
-    const status = this.db.getExitStatus();
-    if (!episode || !status.pending || status.episode !== episode || status.continuation_delivery !== "waiting"
-        || latestSessionStartEventId(this.db, 0) !== bootId) return false;
-    const receipt = this.db.getEvents(0, 1, "pm_restart_continuation")[0];
-    if (!receipt || receipt.id <= afterEventId) return false;
-    try {
-      const payload = JSON.parse(receipt.payload);
-      return payload.episode === episode && payload.delivery === "refused_pre_effect";
-    } catch { return false; }
-  }
-
-  private readonly uncertainContinuationNoted = new Set<string>();
-
-  /** Typed, once per episode+reason: the continuation stays waiting; the exit receipt stays uncertain. */
-  private noteUncertainContinuation(episode: string | null, reason: string, exitId: number, bootId: number): void {
-    const key = `${episode}:${reason}`;
-    if (this.uncertainContinuationNoted.has(key)) return;
-    this.uncertainContinuationNoted.add(key);
-    this.db.logEvent(0, "pm_restart_continuation_uncertain", null, null, {
-      episode, reason, exit_event_id: exitId, boot_event_id: bootId,
-    });
-  }
-
   /** A delivered receipt for THIS episode is already recorded: its continuation is never injected a second time. */
   private continuationDeliveryRecorded(episode: string | null): boolean {
     if (!episode) return false;  // a crash restart's receipt carries episode null; it never settles an episode
@@ -1510,24 +1135,6 @@ export class ProcessHealthChecker {
         return payload.episode === episode && payload.delivery === "delivered";
       } catch { return false; }
     });
-  }
-
-  /**
-   * The episode's confirmed delivery receipt is on record but the claim still reads "attempted" (MoP restarted between the
-   * delivered receipt and finishPMContinuation). Finish the transition from that receipt: no send, no new claim. PM-only
-   * ends; with_devs keeps its arm-time cohort (exit_arm_*), every cycle flag (exit_cycled_*) and with_devs itself, and
-   * every write finishPMContinuation makes is idempotent, so a transition interrupted half-way (pm_only already false)
-   * resumes to the same end state (CTO REVISE ts 1794973351.556359, item 3). Stop, inbound and input are not consulted.
-   */
-  private settleRecordedContinuation(status: ReturnType<MoPDatabase["getExitStatus"]>): boolean {
-    if (!status.pending || status.continuation_delivery !== "attempted"
-        || !this.continuationDeliveryRecorded(status.episode)) return false;
-    this.db.logEvent(0, "pm_restart_continuation_settled", null, null, {
-      episode: status.episode, with_devs: status.with_devs, pm_only: status.pm_only,
-      reason: "delivered receipt already on record; transition finished without another send",
-    });
-    this.finishPMContinuation(status);
-    return true;
   }
 
   /**
@@ -1578,63 +1185,73 @@ export class ProcessHealthChecker {
     this.completePMOnlyEpisode(status.episode, "pm_restart_continuation");
   }
 
-  private async deliverPMRestartContinuation(paneId: string, expectedBoot?: number, claim?: Record<string, unknown>,
-    processGuard?: () => Promise<string | null>): Promise<void> {
+  /**
+   * Step 4 of the PM restart: inject the continuation into the new PM's input, with no idle timer, Stop wait or input
+   * guard (Rajiv C0ALZJHGE49 thread 1794970059.617269, ts 1794971912.636829: "continuation delivery is supposed to be
+   * injected right after the process is back up. it does not have to wait for stop or any other gate"). It is one
+   * serialized paste on the same chain as every PM write, and a busy PM queues it behind its turn
+   * (allowNativeQueuedInput). A PM-only exit episode sends its saved prompt under the durable waiting -> attempted claim
+   * and ends when the delivery is confirmed; every other restart sends the standard handoff continuation once per boot.
+   * A PROVEN pre-effect refusal (composer not ready on a fresh boot) wrote nothing and is retried within the bound; an
+   * uncertain outcome stays consumed and is never resent. Returns the delivery outcome (or why nothing was sent).
+   */
+  private async deliverPMRestartContinuation(paneId: string, bootId: number, trigger: string,
+    episode: string | null): Promise<string> {
     const status = this.db.getExitStatus();
-    if (!status.pending || !status.pm_only || !status.cycled[0]
-        || status.continuation_delivery !== "waiting") return;
-    // The fresh PM has no resumed session: a saved episode continuation wins,
-    // otherwise the standard handoff-pointing continuation (never bare "continue").
-    const prompt = status.continuation_prompt ?? PM_RESTART_CONTINUATION_PROMPT;
-    const boot = latestSessionStartEventId(this.db, 0);
-    if (expectedBoot !== undefined && boot !== expectedBoot) return;
-    // Rajiv C0ALZJHGE49 thread 1794970059.617269, ts 1794971912.636829: "continuation delivery is supposed to be injected
-    // right after the process is back up. it does not have to wait for stop or any other gate." No input guard: a boot that
-    // already accepted real input, or has PM inbound pending, still gets its continuation (the former
-    // replacement_boot_input_accepted / pm_inbound_pending withholds starved episode 33fdff94 for 30+ minutes). It is one
-    // serialized paste on the same chain as every PM write, so it never interleaves with an inbound. A delivery already
-    // recorded for this episode is never repeated: the episode just finishes.
-    if (this.continuationDeliveryRecorded(status.episode)) {
-      this.finishPMContinuation(status);
-      return;
+    const owned = trigger === "exit" && !!episode && status.pending && status.pm_only && status.episode === episode;
+    if (trigger === "exit" && episode && !owned) return "episode_changed";
+    if (owned) {
+      if (this.continuationDeliveryRecorded(episode)) {
+        this.finishPMContinuation(status);
+        return "delivered";
+      }
+      if (status.continuation_delivery !== "waiting") return `episode_${status.continuation_delivery ?? "unarmed"}`;
+      this.db.setConfig("exit_pending_continuation_delivery", "attempted");
+    } else {
+      const claimKey = "pm_restart_continuation_boot";
+      if (this.db.getConfig(claimKey) === String(bootId)) return "already_claimed";
+      this.db.setConfig(claimKey, String(bootId));
     }
-    this.db.setConfig("exit_pending_continuation_delivery", "attempted");
-    // Durable attempt-before-send claim bound to the restart evidence (uncertain-exit path).
-    if (claim) this.db.logEvent(0, "pm_restart_continuation_claim", null, null, { episode: status.episode, ...claim });
-    const fence = () => {
-      const current = this.db.getExitStatus();
-      return !current.pending || !current.pm_only || current.episode !== status.episode || current.continuation_prompt !== status.continuation_prompt
-        ? "exit_pending_changed" : latestSessionStartEventId(this.db, 0) !== boot ? "pm_session_changed" : null;
+    const prompt = owned ? (status.continuation_prompt ?? PM_RESTART_CONTINUATION_PROMPT) : PM_RESTART_CONTINUATION_PROMPT;
+    const sameBoot = () => latestSessionStartEventId(this.db, 0) === bootId;
+    const fence = (): string | null => {
+      if (owned) {
+        const current = this.db.getExitStatus();
+        if (!current.pending || !current.pm_only || current.episode !== episode
+            || current.continuation_prompt !== status.continuation_prompt) return "exit_pending_changed";
+      }
+      return sameBoot() ? null : "pm_session_changed";
     };
-    // Physical ownership of OUR unsubmitted paste, for the relay's draft cleanup inside the same send lock: same boot and
-    // the same owned PM process (the relay checks the pane id). No process proof means no cleanup: the draft is retained
-    // and automated paste is held (CTO REVISE ts 1794950616.405579).
-    const sameBoot = () => latestSessionStartEventId(this.db, 0) === boot;
+    // Physical ownership of OUR unsubmitted paste, for the relay's draft cleanup inside its send lock: same boot and a
+    // Claude process still in the pane.
     const continuationDraft = {
       sameBoot,
-      owns: async () => sameBoot() && !!processGuard && (await processGuard()) === null && sameBoot(),
+      owns: async () => sameBoot() && ProcessHealthChecker.ownedAgent(await this.pmAgentProcess(paneId)),
     };
-    const result = await this.relay.deliverGuardedToSlot(0, prompt, {
-      expectedPaneId: paneId,
-      recheck: async () => fence() ?? (processGuard ? await processGuard() : null) ?? fence(), finalCheck: fence, bracketedPaste: true,
-      // A busy PM queues the prompt behind its turn (native "press up to edit queued messages" banner) instead of
-      // refusing it: "queued submit is fine" (same directive).
-      allowNativeQueuedInput: true,
-      continuationDraft,
+    const send = () => this.relay.deliverGuardedToSlot(0, prompt, {
+      expectedPaneId: paneId, recheck: async () => fence(), finalCheck: fence, bracketedPaste: true,
+      allowNativeQueuedInput: true, continuationDraft,
     });
-    this.db.logEvent(0, "pm_restart_continuation", null, null, {
-      episode: status.episode, boot_event_id: boot, delivery: result.outcome,
-    });
-    if (result.outcome === "refused_pre_effect") {
-      // Proven zero effect (a busy composer, a pane that moved): hand the claim back so the next health tick retries.
-      // An uncertain outcome keeps the consumed attempt and is never resent. Only this episode's own claim is returned.
-      if (!fence() && this.db.getExitStatus().continuation_delivery === "attempted") {
-        this.db.setConfig("exit_pending_continuation_delivery", "waiting");
-      }
-      return;
+    const deadline = Date.now() + this.PM_PROMPT_TIMEOUT_MS;
+    let result = await send();
+    while (result.outcome === "refused_pre_effect" && !fence() && Date.now() < deadline) {
+      await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS * 5, Math.max(0, deadline - Date.now())));
+      result = await send();
     }
-    if (result.outcome !== "delivered" || fence()) return;
-    this.finishPMContinuation(status);
+    this.db.logEvent(0, "pm_restart_continuation", null, null, {
+      episode: owned ? episode : null, trigger, boot_event_id: bootId, delivery: result.outcome,
+    });
+    if (owned) {
+      if (result.outcome === "refused_pre_effect") {
+        // Proven zero effect: hand this episode's own claim back.
+        if (!fence() && this.db.getExitStatus().continuation_delivery === "attempted") {
+          this.db.setConfig("exit_pending_continuation_delivery", "waiting");
+        }
+      } else if (result.outcome === "delivered" && !fence()) {
+        this.finishPMContinuation(status);
+      }
+    }
+    return result.outcome;
   }
 
   // ─── Lifecycle ─────────────────────────────────────────

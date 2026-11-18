@@ -5,6 +5,9 @@
 // Round 3 (CTO REVISE ts 1794951624.218829): the ownership probe before EVERY Ctrl-U is followed by a fresh composer read
 // that must equal the last verified owned text (multiline human-interference case), and an unresolved Enter (lost key or
 // lost acknowledgement) holds automated paste alone: no Ctrl-U, the attempt stays consumed.
+// 18 Nov 2026 (Rajiv C0ALZJHGE49 thread 1794998965.861819, ts 1794999568.152419): the continuation is the restart flow's step 4,
+// deliverPMRestartContinuation(paneId, bootId, trigger, episode). It has no injected guard; a withheld Enter is driven through
+// the real fence (the saved prompt changing after the paste) and ownership through the pmAgentProcess stub.
 // Fixtures only: not executed (Rajiv DM D0AMF0XE6TS thread 1793979986.975849, ts 1793983042.752819: MoP changes need no
 // local testing or proof).
 import assert from "node:assert/strict";
@@ -72,16 +75,10 @@ function pane(opts: { lineCtrlU?: boolean } = {}) {
   };
 }
 
-// A one-shot Enter withhold that leaves draft ownership intact: the first process probe after the paste (the pre-Enter
-// recheck) refuses, every later probe (the draft-ownership proof) passes. It replaces the former trigger, PM inbound
-// between paste and Enter, which no longer withholds a continuation (Rajiv C0ALZJHGE49 thread 1794970059.617269, ts
-// 1794971912.636829: no gate). The inbound is still submitted in the hook so the "queued message goes out alone" checks hold.
-function withholdEnterOnce(p: ReturnType<typeof pane>, then: () => Promise<string | null> = async () => null) {
-  let done = false;
-  return async () => {
-    if (p.pasted().length > 0 && !done) { done = true; return "pm_process_changed"; }
-    return then();
-  };
+// Withholds the continuation's Enter while leaving draft ownership intact: the saved prompt changes after the paste, so the
+// pre-Enter fence refuses (exit_pending_changed) while the same boot and the Claude process still prove the draft is ours.
+function withholdEnterAfterPaste(f: { db: MoPDatabase }) {
+  return () => f.db.setConfig("exit_pending_continuation_prompt", "a different saved prompt");
 }
 
 function fixture(p: ReturnType<typeof pane>, prompt = "resume") {
@@ -100,14 +97,18 @@ function fixture(p: ReturnType<typeof pane>, prompt = "resume") {
   db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "old", source: "startup" });
   const bootId = db.logEvent(0, "SessionStart", "SessionStart", null, { session_id: "replacement", source: "startup" });
   const health = new ProcessHealthChecker(db, relay as never) as any;
-  return { db, relay, bootId, health, close: () => db.close() };
+  // The physical-ownership probe (pane pid:claude pid); `own.probe` runs on every probe, `own.alive` false = unproven.
+  const own = { alive: true, probe: (() => undefined) as () => void };
+  health.pmAgentProcess = async () => { own.probe(); return own.alive ? "4000:4001" : null; };
+  const run = () => health.deliverPMRestartContinuation("%1", bootId, "exit", db.getExitStatus().episode);
+  return { db, relay, bootId, health, own, run, close: () => db.close() };
 }
 
 test("no inbound: the continuation is pasted and submitted once and no draft cleanup runs", async () => {
   const p = pane();
   const f = fixture(p);
   try {
-    await f.health.deliverPMRestartContinuation("%1", f.bootId, undefined, async () => null);
+    await f.run();
     assert.deepEqual(p.submitted(), ["resume"]);
     assert.equal(f.db.getExitStatus().continuation_delivery, "delivered");
     assert.equal(f.db.getEvents(0, 5, "pm_restart_continuation_draft").length, 0);
@@ -119,9 +120,10 @@ test("Enter withheld after the paste (ownership intact): zero continuation Enter
   const p = pane();
   const f = fixture(p);
   let inbound: Promise<unknown> | undefined;
-  p.setOnPaste(() => { inbound = f.relay.submitToPM("hello PM"); });
+  const withhold = withholdEnterAfterPaste(f);
+  p.setOnPaste(() => { withhold(); inbound = f.relay.submitToPM("hello PM"); });
   try {
-    await f.health.deliverPMRestartContinuation("%1", f.bootId, undefined, withholdEnterOnce(p));
+    await f.run();
     await inbound;
     assert.equal(p.pasted()[0], "resume");
     assert.equal(p.submitted().length, 1, "exactly one Enter, and it is the inbound's, never the continuation's");
@@ -142,12 +144,12 @@ test("Enter withheld after the paste (ownership intact): zero continuation Enter
 test("uncertain ownership retains the draft and holds automated paste; the queued message waits, then goes out alone once reconciled", async () => {
   const p = pane();
   const f = fixture(p);
-  let owned = true;
   let inbound: Promise<unknown> | undefined;
-  p.setOnPaste(() => { owned = false; inbound = f.relay.submitToPM("hello PM"); });
+  const withhold = withholdEnterAfterPaste(f);
+  p.setOnPaste(() => { f.own.alive = false; withhold(); inbound = f.relay.submitToPM("hello PM"); });
   try {
     // The owned PM process stops proving after the paste: cleanup cannot prove the draft is ours.
-    await f.health.deliverPMRestartContinuation("%1", f.bootId, undefined, async () => owned ? null : "pm_process_changed");
+    await f.run();
     await inbound;
     assert.equal(p.composer(), "resume", "the draft is retained, never guessed away");
     assert.equal(p.ctrlU(), 0);
@@ -177,7 +179,7 @@ test("human input typed after the paste is preserved: the draft is not exact, so
     inbound = f.relay.submitToPM("hello PM");
   });
   try {
-    await f.health.deliverPMRestartContinuation("%1", f.bootId, undefined, async () => null);
+    await f.run();
     await inbound;
     assert.equal(p.composer(), "resume but also my own words");
     assert.equal(p.ctrlU(), 0, "no clearing key against text we do not exclusively own");
@@ -195,10 +197,11 @@ test("multiline draft, no interference: a fresh composer read follows the owners
   const p = pane({ lineCtrlU: true });
   const f = fixture(p, DRAFT);
   let inbound: Promise<unknown> | undefined;
-  p.setOnPaste(() => { inbound = f.relay.submitToPM("hello PM"); });
-  const guard = withholdEnterOnce(p, async () => { p.trace().push("probe"); return null; });
+  const withhold = withholdEnterAfterPaste(f);
+  p.setOnPaste(() => { withhold(); inbound = f.relay.submitToPM("hello PM"); });
+  f.own.probe = () => { p.trace().push("probe"); };
   try {
-    await f.health.deliverPMRestartContinuation("%1", f.bootId, undefined, guard);
+    await f.run();
     await inbound;
     assert.equal(p.pasted()[0], DRAFT);
     assert.equal(p.ctrlU(), 3, "one key per input line");
@@ -222,16 +225,16 @@ test("multiline remainder, human text typed while the NEXT ownership probe is in
   const p = pane({ lineCtrlU: true });
   const f = fixture(p, DRAFT);
   let inbound: Promise<unknown> | undefined;
-  p.setOnPaste(() => { inbound = f.relay.submitToPM("hello PM"); });
+  const withhold = withholdEnterAfterPaste(f);
+  p.setOnPaste(() => { withhold(); inbound = f.relay.submitToPM("hello PM"); });
   let typed = false;
   // The first key goes out cleanly (leaving a two-line remainder); during the probe that precedes the SECOND key a
   // person types a new line. A recheck only before the first key would not see it and the next Ctrl-U would erase it.
-  const guard = withholdEnterOnce(p, async () => {
+  f.own.probe = () => {
     if (p.ctrlU() === 1 && !typed) { typed = true; p.setComposer(`${p.composer()}\nmy own words`); }
-    return null;
-  });
+  };
   try {
-    await f.health.deliverPMRestartContinuation("%1", f.bootId, undefined, guard);
+    await f.run();
     await inbound;
     assert.ok(typed, "the human typed during the second ownership probe");
     assert.equal(p.ctrlU(), 1, "no clearing key after the composer changed under the probe");
@@ -261,7 +264,7 @@ test("unresolved Enter, the key never reached the pane: hold only, no Ctrl-U, th
   const f = fixture(p);
   p.failNextEnter("lost_key");
   try {
-    await f.health.deliverPMRestartContinuation("%1", f.bootId, undefined, async () => null);
+    await f.run();
     assert.equal(p.composer(), "resume", "the draft is still in the composer");
     assert.equal(p.ctrlU(), 0, "no clearing key when the Enter outcome is unresolved");
     assert.deepEqual(p.submitted(), []);
@@ -293,7 +296,7 @@ test("unresolved Enter, the key landed but its acknowledgement was lost: no Ctrl
   const f = fixture(p);
   p.failNextEnter("lost_ack");
   try {
-    await f.health.deliverPMRestartContinuation("%1", f.bootId, undefined, async () => null);
+    await f.run();
     assert.deepEqual(p.submitted(), ["resume"], "the continuation reached the pane exactly once");
     assert.equal(p.ctrlU(), 0);
     assert.ok(f.db.getConfig(HOLD));
