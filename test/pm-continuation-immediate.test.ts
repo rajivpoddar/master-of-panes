@@ -9,7 +9,7 @@
 // local testing or proof).
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -21,7 +21,7 @@ const cwd = "/Users/rajiv/Downloads/projects/heydonna-app";
 const health = readFileSync(new URL("../src/health.ts", import.meta.url), "utf8");
 
 test("the restart flow verifies the replacement through the observer before it reconciles the continuation", () => {
-  const flow = health.slice(health.indexOf("exit_replacement_bound"), health.indexOf("await this.reconcilePMRestartContinuation(boot.id)"));
+  const flow = health.slice(health.indexOf("await this.recordPMReplacement(episode"), health.indexOf("await this.reconcilePMRestartContinuation(boot.id)"));
   assert.ok(flow.includes('if (trigger === "exit") await this.relay.observeExitAttempts?.()'), "observer runs between the bound receipt and reconcile");
 });
 
@@ -44,7 +44,8 @@ for (const cooldown of [false, true]) {
     const bin = mkdtempSync(join(tmpdir(), "mop-continuation-immediate-"));
     const oldPath = process.env.PATH;
     writeFileSync(join(bin, "tmux"), `#!/bin/sh\ncase "$*" in *pane_pid*) echo '4000|/dev/ttys040';; *) printf '%s\\n' '%40|${cwd}';; esac\n`, { mode: 0o700 });
-    writeFileSync(join(bin, "ps"), "#!/bin/sh\nprintf '4000 1 -zsh\\n4001 4000 claude --model claude-opus-5-5\\n'\n", { mode: 0o700 });
+    // The pane's Claude child is owned only through a trusted executable path (a bare "claude" argv0 needs a libproc probe).
+    writeFileSync(join(bin, "ps"), `#!/bin/sh\nprintf '4000 1 -zsh\\n4001 4000 ${join(homedir(), ".local/opt/claude-code/claude")} --model claude-opus-5-5\\n'\n`, { mode: 0o700 });
     writeFileSync(join(bin, "git"), `#!/bin/sh\nprintf '%s\\n' '${cwd}'\n`, { mode: 0o700 });
     process.env.PATH = `${bin}:${oldPath}`;
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: ":memory:" });

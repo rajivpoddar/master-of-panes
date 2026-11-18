@@ -77,6 +77,17 @@ function harness(options: { state?: PaneState; exitAfterPolls?: number; bootSess
       pane.sends.push(text);
       return { outcome: "delivered", paneId: "%7" };
     },
+    exitProcessIdentity: async () => '["%7",502,"Wed Nov 18 08:18:49 2026"]',
+    // The real observer grants cycle credit only from MoP's replacement receipt for this episode's attempt.
+    observeExitAttempts: async () => {
+      const attempt = db.getExitAttempt(0);
+      const receipt = db.getEvents(0, 1, "exit_replacement_bound")[0];
+      if (!attempt || attempt.phase === "verified" || !receipt) return;
+      const bound = JSON.parse(receipt.payload);
+      if (bound.episode !== attempt.episode || bound.submittedAt !== attempt.submittedAt) return;
+      db.saveExitAttempt(0, { ...attempt, phase: "verified", replacementProcess: bound.replacementProcess });
+      db.markSlotExitCycled(0);
+    },
     drainPMQueue: async () => { order.push("drain"); },
     injectToPM: () => true,
   };
@@ -97,11 +108,23 @@ function harness(options: { state?: PaneState; exitAfterPolls?: number; bootSess
   return { db, pane, order, health, relay };
 }
 
+// A flag alone is never proof of replacement: cycled[slot] needs a VERIFIED exit attempt of the current episode. The PM's
+// attempt is "delivered" (its /exit was confirmed); the harness observer verifies it once MoP records the replacement.
+function saveExitAttempt(db: MoPDatabase, slot: number, episode: string, phase: "delivered" | "verified" = "delivered") {
+  db.saveExitAttempt(slot, {
+    episode, paneId: "%7", originalClaudePid: 400, originalStart: "Wed Nov 18 00:29:17 2026",
+    originalProcess: '["%7",400,"Wed Nov 18 00:29:17 2026"]', sessionId: "old-session", inputEventId: null, assignmentEpoch: 0,
+    stopEventId: null, ownerPin: null, phase, attemptCount: 1, submittedAt: new Date().toISOString(),
+    blockedReason: null, ...(phase === "verified" ? { replacementProcess: '["%7",502,"Wed Nov 18 08:18:49 2026"]' } : {}),
+  });
+  if (phase === "verified") db.markSlotExitCycled(slot);
+}
+
 function armPmOnlyEpisode(db: MoPDatabase, prompt?: string, delivery = "delivered") {
   db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "old-session", cwd: PM_PATH });
   db.setExitPending(true, false, true, prompt);
-  db.markSlotExitCycled(0);
   const episode = db.getExitStatus().episode;
+  saveExitAttempt(db, 0, episode!);
   db.logEvent(0, "exit_pending_triggered", "Stop", null, { source: "pm_only_stop", delivery, episode });
   return episode;
 }
@@ -244,7 +267,7 @@ test("Claude prompt never appears: bounded wait, no continuation typed into the 
   try {
     const result = await h.health.restartPMFresh("crash");
     assert.equal(result.success, false);
-    assert.match(result.reason, /claude prompt not observed/);
+    assert.match(result.reason, /claude process not observed/);
     assert.deepEqual(h.pane.sends, []);
   } finally { h.db.close(); }
 });
@@ -254,13 +277,13 @@ test("issued exit relaunch timeout retains custody and reconciles its late owned
   try {
     h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "old", cwd: PM_PATH });
     h.db.setExitPending(true, false, true, "saved continuation", true, true);
-    h.db.markSlotExitCycled(0);
     const episode = h.db.getExitStatus().episode;
+    saveExitAttempt(h.db, 0, episode!);
     h.db.logEvent(0, "exit_pending_triggered", "Stop", null, { episode, delivery: "delivered" });
     h.db.enqueuePendingPMEvent(1, "handoff", "inbound");
     const result = await h.health.restartPMFresh("exit", episode);
     assert.equal(result.success, false);
-    assert.match(result.reason, /claude prompt not observed/);
+    assert.match(result.reason, /claude process not observed/);
     assert.equal(h.db.getExitStatus().pending, true);
     assert.equal(h.db.getExitStatus().continuation_delivery, "waiting");
     assert.equal(h.db.getExitStatus().with_devs, true);
@@ -339,7 +362,8 @@ test("04:00 with_devs episode: the fresh PM restart delivers the continuation an
     h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "old-session", cwd: PM_PATH });
     h.db.setExitPending(true, false, true, "Read /saved/resume.md.", true, true);
     const episode = h.db.getExitStatus().episode;
-    for (let i = 0; i <= 8; i++) h.db.markSlotExitCycled(i);
+    saveExitAttempt(h.db, 0, episode!);
+    for (let i = 1; i <= 8; i++) saveExitAttempt(h.db, i, episode!, "verified");
     h.db.logEvent(0, "exit_pending_triggered", "Stop", null, { source: "pm_only_stop", delivery: "delivered", episode });
     (h.relay as any).hasPendingExitConfirmation = () => false;
     const result = await h.health.restartPMFresh("exit", episode);
@@ -484,9 +508,13 @@ test("a MoP crash after a PLANNED launch: a later boot is not bound (first-in-ti
       episode, launch_event_id: h.db.getEvents(0, 1)[0].id, pane_id: "%7", command: "x", status: "planned", pane_pid: "500",
     }));
     h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "manual", cwd: PM_PATH });
+    // The cycle reads verified, yet the boot is not bound to a MoP launch record (a planned send proves no process): note, no send.
+    saveExitAttempt(h.db, 0, episode!, "verified");
     await h.health.reconcilePMRestartContinuation();
     assert.deepEqual(h.pane.sends, []);
     assert.equal(JSON.parse(h.db.getEvents(0, 1, "pm_restart_continuation_uncertain")[0].payload).reason, "boot_not_bound_to_mop_launch");
+    // An unverified cycle with an unowned boot stays silent: no receipt is ever written for a boot MoP did not launch.
+    assert.equal(h.db.getEvents(0, 5, "exit_replacement_bound").length, 0);
   } finally { h.db.close(); }
 });
 

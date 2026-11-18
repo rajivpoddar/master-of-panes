@@ -233,9 +233,9 @@ export class ProcessHealthChecker {
   private PM_EXIT_SHELL_TIMEOUT_MS = 120_000;
   /** respawn-pane (force path) -> zsh prompt. */
   private PM_FORCE_SHELL_TIMEOUT_MS = 30_000;
-  /** launcher typed -> idle Claude input prompt. */
+  /** launcher typed -> the agent process runs in the pane (no idle prompt required; also bounds a non-episode continuation's pre-effect retries). */
   private PM_PROMPT_TIMEOUT_MS = 90_000;
-  /** idle prompt -> this launch's SessionStart hook row. */
+  /** agent process -> this launch's SessionStart hook row. */
   private PM_BOOT_EVENT_TIMEOUT_MS = 20_000;
   /** tmux runner for the PM restart effects (tests substitute a fake pane). */
   private runShell: PaneCommandRunner = execShell;
@@ -469,13 +469,17 @@ export class ProcessHealthChecker {
     }
   }
 
-  /** Poll until the PM pane runs the agent AND shows an idle Claude input prompt, bounded. */
-  private async waitForPMClaudePrompt(paneId: string, timeoutMs: number): Promise<string | null> {
+  /**
+   * Poll until the PM pane runs the agent, bounded. NOT until it is idle: a replacement that is busy (booting, working a
+   * resumed turn, handling an inbound) is still the replacement, and its boot and replacement receipts must be written
+   * without waiting for a quiet prompt (CTO REVISE C0ALZJHGE49 thread 1794970059.617269, ts 1794973351.556359, item 1).
+   * The guarded writer decides when the composer can safely take the continuation.
+   */
+  private async waitForPMAgentProcess(timeoutMs: number): Promise<string | null> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const command = await this.getPaneCommand(0);
-      if (this.isAgentCommand(0, command)
-          && (await this.relay.getSlotActivityState(0, paneId)) === "idle") return command;
+      if (this.isAgentCommand(0, command)) return command;
       if (Date.now() >= deadline) return null;
       await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, deadline - Date.now()));
     }
@@ -484,8 +488,8 @@ export class ProcessHealthChecker {
   /**
    * The PM restart contract: wait for the zsh prompt after /exit (pane read,
    * bounded; respawn-pane to a fresh shell is the fallback), type the
-   * configured-model launcher as a FRESH start, wait for the Claude input
-   * prompt (bounded), then deliver ONE continuation through the guarded writer.
+   * configured-model launcher as a FRESH start, wait for the agent process (bounded, busy or idle),
+   * then deliver ONE continuation through the guarded writer.
    * Never force-kills a busy PM turn. Used for /exit episodes and PM crashes.
    */
   restartPMFresh(trigger: "exit" | "crash" | "unresponsive", episode: string | null = null): Promise<{ success: boolean; reason: string }> {
@@ -789,10 +793,11 @@ export class ProcessHealthChecker {
     setRecord({ status: "issued", issued_at: new Date().toISOString() });
     this.db.logEvent(0, "pm_restart_launched", null, null, { trigger, episode, model, launcher, launch_command: launchCommand });
 
-    // 3. Claude input prompt (pane read, bounded).
+    // 3. The agent process (pane read, bounded). No idle requirement: the boot and replacement receipts below bind the
+    //    launch's own first boot, busy or not (CTO REVISE ts 1794973351.556359, item 1).
     const exitCandidate = this.db.getExitAttempt(0);
-    const bootCommand = await this.waitForPMClaudePrompt(pin.paneId, this.PM_PROMPT_TIMEOUT_MS);
-    if (!bootCommand) return fail(`claude prompt not observed within ${this.PM_PROMPT_TIMEOUT_MS}ms`, true);
+    const bootCommand = await this.waitForPMAgentProcess(this.PM_PROMPT_TIMEOUT_MS);
+    if (!bootCommand) return fail(`claude process not observed within ${this.PM_PROMPT_TIMEOUT_MS}ms`, true);
     this.db.logEvent(0, "agent_booted", null, null, {
       command: bootCommand, launch_command: launchCommand, observed_at: new Date().toISOString(),
     });
@@ -818,13 +823,9 @@ export class ProcessHealthChecker {
     }
     setRecord({ status: "booted", boot_event_id: boot.id, process: bootProcess });
     if (trigger === "exit" && exitCandidate?.episode === episode) {
-      const replacementProcess = await this.relay.exitProcessIdentity(0, pin.paneId);
-      if (replacementProcess && await this.pmAgentProcess(pin.paneId) === bootProcess
-          && latestSessionStartEventId(this.db, 0) === boot.id) {
-        this.db.logEvent(0, "exit_replacement_bound", null, null, { episode,
-          submittedAt: exitCandidate.submittedAt, assignmentEpoch: exitCandidate.assignmentEpoch, replacementProcess,
-          launchEventId, bootEventId: boot.id, bootSession: boot.session, ownedProcess: bootProcess });
-      }
+      await this.recordPMReplacement(episode, {
+        launchEventId, paneId: pin.paneId, bootEventId: boot.id, bootSession: boot.session, ownedProcess: bootProcess!,
+      });
     }
     const processGuard = async () => (await this.pmAgentProcess(pin.paneId)) === bootProcess ? null : "pm_process_changed";
 
@@ -839,6 +840,14 @@ export class ProcessHealthChecker {
     const status = this.db.getExitStatus();
     if (pin.episode && status.pending && status.pm_only && this.db.hasExitAttemptSubmitted(0) && status.episode === pin.episode) {
       await this.reconcilePMRestartContinuation(boot.id);  // binds the booted record + process inside
+      // A PROVEN pre-effect refusal (a composer that cannot take the paste yet on a fresh or busy boot) wrote nothing and
+      // handed the claim back: retry within the bound the idle wait used to have, not only at the next health tick. An
+      // uncertain outcome is consumed and never retried here (CTO REVISE ts 1794973351.556359, items 1 and 2).
+      const retryDeadline = Date.now() + this.PM_PROMPT_TIMEOUT_MS;
+      while (Date.now() < retryDeadline && this.continuationRefusedPreEffect(status.episode, launchEventId, boot.id)) {
+        await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS * 5, Math.max(0, retryDeadline - Date.now())));
+        await this.reconcilePMRestartContinuation(boot.id);
+      }
       // Read this episode's continuation receipt: a with_devs episode whose devs
       // all cycled ends (and resets its flags) as soon as the PM part lands.
       let delivery: string | null = null;
@@ -863,12 +872,21 @@ export class ProcessHealthChecker {
     if (this.db.getConfig(claimKey) === String(bootId)) return "already_claimed";
     this.db.setConfig(claimKey, String(bootId));
     const fence = () => latestSessionStartEventId(this.db, 0) !== bootId ? "pm_session_changed" : null;
-    const result = await this.relay.deliverGuardedToSlot(0, PM_RESTART_CONTINUATION_PROMPT, {
+    const send = () => this.relay.deliverGuardedToSlot(0, PM_RESTART_CONTINUATION_PROMPT, {
       expectedPaneId: paneId,
       recheck: async () => fence() ?? await processGuard() ?? fence(),
       finalCheck: fence,
       bracketedPaste: true,
     });
+    // The launcher no longer waits for an idle prompt (CTO REVISE ts 1794973351.556359, item 1): the guarded writer decides
+    // when the composer can safely take the paste. A PROVEN pre-effect refusal (composer not ready yet, ...) wrote nothing,
+    // so it is retried within the same bound the idle wait had; an uncertain outcome stays consumed and is never resent.
+    const deadline = Date.now() + this.PM_PROMPT_TIMEOUT_MS;
+    let result = await send();
+    while (result.outcome === "refused_pre_effect" && !fence() && Date.now() < deadline) {
+      await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS * 5, Math.max(0, deadline - Date.now())));
+      result = await send();
+    }
     this.db.logEvent(0, "pm_restart_continuation", null, null, {
       episode: null, trigger, boot_event_id: bootId, delivery: result.outcome,
     });
@@ -1315,9 +1333,17 @@ export class ProcessHealthChecker {
    * releases custody. Anything less stays typed uncertain.
    */
   private async reconcilePMRestartContinuation(expectedBoot?: number): Promise<void> {
-    const status = this.db.getExitStatus();
-    if (!status.pending || !status.pm_only || !status.cycled[0]
-        || status.continuation_delivery !== "waiting") return;
+    let status = this.db.getExitStatus();
+    if (!status.pending) return;
+    // A delivery this episode already has on record whose transition never finished (MoP restarted between the delivered
+    // receipt and finishPMContinuation, so the claim still reads "attempted"): apply that confirmed receipt and finish,
+    // without another send (CTO REVISE ts 1794973351.556359, item 3). An attempted claim with no delivered receipt stays
+    // consumed: an uncertain paste or Enter is never resent.
+    if (status.continuation_delivery === "attempted") {
+      this.settleRecordedContinuation(status);
+      return;
+    }
+    if (!status.pm_only || status.continuation_delivery !== "waiting") return;
     const exit = this.db.getEvents(0, 1, "exit_pending_triggered")[0];
     const boot = this.db.getEvents(0, 1, "SessionStart")[0];
     if (!exit || !boot || boot.id <= exit.id) return;
@@ -1332,19 +1358,20 @@ export class ProcessHealthChecker {
     // A successfully issued launcher may become healthy after the bounded wait.
     // Bind only its first boot in the same pane and shell; planned/unknown sends
     // cannot establish that ownership and remain in custody without replay.
+    // No idle requirement (CTO REVISE ts 1794973351.556359, item 1): a busy replacement is still this launch's replacement.
+    // The first-and-current SessionStart, the pane, the shell, the process and the episode must all match.
     if (launch?.status === "issued" && launch.episode === status.episode && launch.launch_event_id >= exit.id) {
       const first = this.launchBoot(launch.launch_event_id);
       const identity = await verifyPaneIdentity(0, this.runShell);
       const process = identity.ok && identity.snapshot.paneId === launch.pane_id
         ? await this.pmAgentProcess(launch.pane_id) : null;
       const command = await this.getPaneCommand(0);
-      const idle = await this.relay.getSlotActivityState(0, launch.pane_id);
       const processAgain = await this.pmAgentProcess(launch.pane_id);
       const current = this.db.getExitStatus();
       const latest = this.pmLaunchRecord();
       if (first && first.id === boot.id && latestSessionStartEventId(this.db, 0) === boot.id
           && ProcessHealthChecker.ownedAgent(process) && process!.startsWith(`${launch.pane_pid}:`)
-          && processAgain === process && this.isAgentCommand(0, command) && idle === "idle"
+          && processAgain === process && this.isAgentCommand(0, command)
           && current.pending && current.episode === status.episode && current.continuation_delivery === "waiting"
           && latest?.status === "issued" && latest.launch_event_id === launch.launch_event_id
           && latest.episode === launch.episode && latest.pane_id === launch.pane_id) {
@@ -1354,8 +1381,26 @@ export class ProcessHealthChecker {
           command: launch.command, reason: "late_owned_boot" });
       }
     }
-    if (!launch || launch.status !== "booted" || launch.episode !== status.episode || launch.launch_event_id < exit.id
-        || launch.boot_event_id !== boot.id || !ProcessHealthChecker.ownedAgent(launch.process ?? null)) {
+    const bound = !!launch && launch.status === "booted" && launch.episode === status.episode
+      && launch.launch_event_id >= exit.id && launch.boot_event_id === boot.id
+      && ProcessHealthChecker.ownedAgent(launch.process ?? null);
+    if (!status.cycled[0]) {
+      // The replacement is RECORDED before the cycle verification is requested, so a launch that bound late (or whose
+      // restart flow was interrupted before its receipt) still earns cycle credit (CTO REVISE ts 1794973351.556359, item 1).
+      // A boot that is not MoP's own launch stays silent here, as before.
+      if (!bound || !launch || !status.episode) return;
+      let bootSession = "";
+      try { bootSession = String(JSON.parse(boot.payload).session_id ?? ""); } catch { return; }
+      if (!bootSession.trim()
+          || !(await this.recordPMReplacement(status.episode, {
+            launchEventId: launch.launch_event_id, paneId: launch.pane_id, bootEventId: boot.id, bootSession,
+            ownedProcess: launch.process!,
+          }))) return;
+      await this.relay.observeExitAttempts?.().catch(() => undefined);
+      status = this.db.getExitStatus();
+      if (!status.pending || !status.pm_only || !status.cycled[0] || status.continuation_delivery !== "waiting") return;
+    }
+    if (!bound || !launch) {
       this.noteUncertainContinuation(status.episode, "boot_not_bound_to_mop_launch", exit.id, boot.id);
       return;
     }
@@ -1397,6 +1442,53 @@ export class ProcessHealthChecker {
     } : undefined, processGuard);
   }
 
+  /**
+   * Record MoP's own launch as the replacement PM of this exit episode: the `exit_replacement_bound` receipt that
+   * relay.observeExitAttempts requires before it grants cycle credit. Used by the restart flow right after the boot binds
+   * and by reconcile when the launch bound late, so the replacement is on record BEFORE the cycle verification is requested
+   * (CTO REVISE ts 1794973351.556359, item 1). The launch's boot must still be the latest SessionStart and the owned process
+   * must still own the pane. Idempotent: a matching receipt already on record is never duplicated. Returns whether one is
+   * on record afterwards. It needs no idle prompt, Stop or input.
+   */
+  private async recordPMReplacement(episode: string, bound: {
+    launchEventId: number; paneId: string; bootEventId: number; bootSession: string; ownedProcess: string;
+  }): Promise<boolean> {
+    const candidate = this.db.getExitAttempt(0);
+    if (!candidate || candidate.episode !== episode) return false;
+    const recorded = (): boolean => {
+      try {
+        const receipt = JSON.parse(this.db.getEvents(0, 1, "exit_replacement_bound")[0]?.payload ?? "null");
+        return receipt?.episode === episode && receipt.submittedAt === candidate.submittedAt
+          && receipt.launchEventId === bound.launchEventId && receipt.bootEventId === bound.bootEventId;
+      } catch { return false; }
+    };
+    if (recorded()) return true;
+    const replacementProcess = await this.relay.exitProcessIdentity(0, bound.paneId);
+    if (!replacementProcess || (await this.pmAgentProcess(bound.paneId)) !== bound.ownedProcess
+        || latestSessionStartEventId(this.db, 0) !== bound.bootEventId
+        || !this.db.getExitPending() || this.db.getExitStatus().episode !== episode
+        || this.db.getExitAttempt(0)?.submittedAt !== candidate.submittedAt) return false;
+    if (recorded()) return true;
+    this.db.logEvent(0, "exit_replacement_bound", null, null, { episode,
+      submittedAt: candidate.submittedAt, assignmentEpoch: candidate.assignmentEpoch, replacementProcess,
+      launchEventId: bound.launchEventId, bootEventId: bound.bootEventId, bootSession: bound.bootSession,
+      ownedProcess: bound.ownedProcess });
+    return true;
+  }
+
+  /** This episode's newest continuation receipt (after the launch) is a proven pre-effect refusal and the claim is back to "waiting". */
+  private continuationRefusedPreEffect(episode: string | null, afterEventId: number, bootId: number): boolean {
+    const status = this.db.getExitStatus();
+    if (!episode || !status.pending || status.episode !== episode || status.continuation_delivery !== "waiting"
+        || latestSessionStartEventId(this.db, 0) !== bootId) return false;
+    const receipt = this.db.getEvents(0, 1, "pm_restart_continuation")[0];
+    if (!receipt || receipt.id <= afterEventId) return false;
+    try {
+      const payload = JSON.parse(receipt.payload);
+      return payload.episode === episode && payload.delivery === "refused_pre_effect";
+    } catch { return false; }
+  }
+
   private readonly uncertainContinuationNoted = new Set<string>();
 
   /** Typed, once per episode+reason: the continuation stays waiting; the exit receipt stays uncertain. */
@@ -1411,12 +1503,31 @@ export class ProcessHealthChecker {
 
   /** A delivered receipt for THIS episode is already recorded: its continuation is never injected a second time. */
   private continuationDeliveryRecorded(episode: string | null): boolean {
+    if (!episode) return false;  // a crash restart's receipt carries episode null; it never settles an episode
     return this.db.getEvents(0, 20, "pm_restart_continuation").some((row) => {
       try {
         const payload = JSON.parse(row.payload);
         return payload.episode === episode && payload.delivery === "delivered";
       } catch { return false; }
     });
+  }
+
+  /**
+   * The episode's confirmed delivery receipt is on record but the claim still reads "attempted" (MoP restarted between the
+   * delivered receipt and finishPMContinuation). Finish the transition from that receipt: no send, no new claim. PM-only
+   * ends; with_devs keeps its arm-time cohort (exit_arm_*), every cycle flag (exit_cycled_*) and with_devs itself, and
+   * every write finishPMContinuation makes is idempotent, so a transition interrupted half-way (pm_only already false)
+   * resumes to the same end state (CTO REVISE ts 1794973351.556359, item 3). Stop, inbound and input are not consulted.
+   */
+  private settleRecordedContinuation(status: ReturnType<MoPDatabase["getExitStatus"]>): boolean {
+    if (!status.pending || status.continuation_delivery !== "attempted"
+        || !this.continuationDeliveryRecorded(status.episode)) return false;
+    this.db.logEvent(0, "pm_restart_continuation_settled", null, null, {
+      episode: status.episode, with_devs: status.with_devs, pm_only: status.pm_only,
+      reason: "delivered receipt already on record; transition finished without another send",
+    });
+    this.finishPMContinuation(status);
+    return true;
   }
 
   /**

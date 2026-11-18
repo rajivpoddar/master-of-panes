@@ -1006,7 +1006,8 @@ export class TmuxRelay {
     if (!paneId) return { ok: false, zeroEffect: true, busy: false, reason: "pm_pane_unobservable" };
     const guardedCheck = (): PMClearFenceRefusal | null => this.pmMaintenanceGate?.isHeld()
       ? { reason: "pm_busy", busy: true } : check();
-    const run = (): Promise<PMClearWriteResult> => this.writePMClearFencedNow({ paneId, check: guardedCheck }, text, "pm_prompt");
+    // Same single PM paste/Enter lock as inbound and the other fenced writers (CTO REVISE ts 1794973351.556359, item 2).
+    const run = (): Promise<PMClearWriteResult> => withSlotSendLock(0, () => this.writePMClearFencedNow({ paneId, check: guardedCheck }, text, "pm_prompt"));
     const result = this.directInjectChain.then(run, run);
     this.directInjectChain = result.then(() => undefined, () => undefined);
     return result;
@@ -1069,7 +1070,10 @@ export class TmuxRelay {
   private injectDirectWithSubmitKey(message: string, submitKey: PMSubmitKey, guard?: PasteGuard): Promise<DirectSubmitResult> {
     ++this.pmInboundGeneration;
     ++this.pmInboundPending;
-    const run = (): Promise<DirectSubmitResult> => this.injectDirectNow(message, submitKey, guard);
+    // ONE PM paste/Enter lock (CTO REVISE ts 1794973351.556359, item 2): chain order plus the slot-0 send lock that
+    // deliverGuardedToSlot, the clear writer and the exit confirmation already hold. An inbound paste or Enter can therefore
+    // never land inside another writer's paste-to-Enter interval. It serializes writes only: no Stop, input or idle wait.
+    const run = (): Promise<DirectSubmitResult> => withSlotSendLock(0, () => this.injectDirectNow(message, submitKey, guard));
     const result = this.directInjectChain.then(run, run).finally(() => { --this.pmInboundPending; });
     this.directInjectChain = result.then(() => undefined, () => undefined);
     return result;
@@ -2260,7 +2264,8 @@ export class TmuxRelay {
         ? "pm_inbound_pending" : check?.(stage, snapshot) ?? null,
     });
     if (slotNum !== 0) return run();
-    // Exit uses the SAME chain as inbound PM writes. No input admission gate.
+    // Exit and the continuation use the SAME chain as inbound PM writes, and inbound now holds the same slot-0 send lock
+    // inside it (injectDirectWithSubmitKey). No input admission gate.
     const result = this.directInjectChain.then(run, run);
     this.directInjectChain = result.then(() => undefined, () => undefined);
     return result;
