@@ -16,7 +16,8 @@ Usage: mop <subcommand> [options]
   ops-audit run|status|job|pause | pm-cadence status|run|pause
   reminder add --key K --thread TS --text T --every 30m|1h --until <ISO|+12h>
                [--channel C] [--stop-obligation N] [--first-at <ISO|+5m>] [--replace]
-           list [--status active|stopped|expired|all] | cancel --key K
+           list [--status active|stopped|expired|all | --expired-since 48h] | cancel --key K
+           (--expired-since: reminders that expired with no stop obligation in that window)
            (recurring HeyDonna Alerts bot posts into a Slack thread, owned by MoP)
 
 stdout is JSON. Exit 0 on success, non-zero on refusal/transport failure.
@@ -211,6 +212,12 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--source-ref", default=None)
     r = rsub.add_parser("list", help="list reminders")
     r.add_argument("--status", default="active", choices=["active", "stopped", "expired", "all"])
+    r.add_argument(
+        "--expired-since",
+        default=None,
+        metavar="DURATION",
+        help="instead of --status: reminders that expired with NO stop obligation in the last e.g. 48h (nothing was watching them)",
+    )
     r = rsub.add_parser("cancel", help="stop a reminder")
     r.add_argument("--key", required=True)
 
@@ -309,7 +316,16 @@ def main(argv: list[str] | None = None) -> int:
                 return emit({"error": str(error), "sanctioned_path": SANCTIONED_PATH}, 2)
             code, data = http_json("POST", f"{base}/alert-reminders", body)
         elif args.reminder_action == "list":
-            code, data = http_json("GET", f"{base}/alert-reminders?status={args.status}")
+            if args.expired_since is not None:
+                try:
+                    parse_duration_s(args.expired_since)
+                except ValueError as error:
+                    return emit({"error": str(error), "sanctioned_path": SANCTIONED_PATH}, 2)
+                code, data = http_json(
+                    "GET", f"{base}/alert-reminders?expired_since={quote(args.expired_since.strip(), safe='')}"
+                )
+            else:
+                code, data = http_json("GET", f"{base}/alert-reminders?status={args.status}")
         else:
             code, data = http_json("POST", f"{base}/alert-reminders/{quote(args.key, safe='')}/cancel", {})
         ok = code == 200 and isinstance(data, dict) and data.get("success") is True

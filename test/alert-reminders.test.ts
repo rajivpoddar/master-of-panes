@@ -8,12 +8,16 @@ import { Hono } from "hono";
 
 import {
   advanceByWholeIntervals,
+  ALERT_REMINDER_EXPIRY_WARN_LEAD_MS,
   AlertReminderScheduler,
   AlertReminderStore,
   ensureAlertReminderSchema,
+  expiryWarningMessage,
   normalizeAddRequest,
+  parseExpiredSince,
   readAlertsToken,
   registerAlertReminderRoutes,
+  reminderEndsAt,
   retryBackoffMs,
   SlackAlertsPoster,
   type AlertPoster,
@@ -21,6 +25,7 @@ import {
   type ObligationState,
 } from "../src/alertReminders.js";
 import { MoPDatabase } from "../src/db.js";
+import type { PMSubmitResult } from "../src/relay.js";
 import type { MoPConfig } from "../src/types.js";
 
 const T0 = Date.parse("2026-11-08T10:00:00.000Z");
@@ -68,7 +73,11 @@ class FakePoster implements AlertPoster {
   }
 }
 
-function schedulerFixture(clock: { now: number }, obligationState?: (id: number) => ObligationState) {
+function schedulerFixture(
+  clock: { now: number },
+  obligationState?: (id: number) => ObligationState,
+  submitToPM?: (message: string, eventType: string) => Promise<PMSubmitResult>,
+) {
   const { store, db } = memoryStore();
   const poster = new FakePoster();
   const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
@@ -76,6 +85,7 @@ function schedulerFixture(clock: { now: number }, obligationState?: (id: number)
     store,
     poster,
     obligationState,
+    submitToPM,
     now: () => clock.now,
     logEvent: (type, payload) => events.push({ type, payload }),
   });
@@ -945,7 +955,7 @@ test("a table created by the first release is upgraded in place; existing remind
   ensureAlertReminderSchema(db);
   ensureAlertReminderSchema(db); // idempotent: a second boot is a no-op
   const columns = (db.prepare("PRAGMA table_info(alert_reminders)").all() as Array<{ name: string }>).map((c) => c.name);
-  for (const name of ["claim_gen", "last_outcome", "unknown_count", "last_unknown_at", "last_unknown_reason"]) {
+  for (const name of ["claim_gen", "last_outcome", "unknown_count", "last_unknown_at", "last_unknown_reason", "expiry_warned_until_at"]) {
     assert.ok(columns.includes(name), `${name} added`);
   }
 
@@ -959,6 +969,7 @@ test("a table created by the first release is upgraded in place; existing remind
   assert.equal(kept.claim_gen, 0);
   assert.equal(kept.last_outcome, null);
   assert.equal(kept.unknown_count, 0);
+  assert.equal(kept.expiry_warned_until_at, null, "a migrated reminder has not been warned yet");
   assert.deepEqual(store.list("active").map((r) => r.key).sort(), ["backlog-hygiene", "retries-13049"]);
 
   const clock = { now: T0 + 30 * MIN + 1_000 };
@@ -981,4 +992,256 @@ test("the upgraded schema stays readable by the previous release's statements (r
   const row = db.prepare("SELECT * FROM alert_reminders WHERE key = 'old'").get() as { claim_gen: number; unknown_count: number };
   assert.equal(row.claim_gen, 0);
   assert.equal(row.unknown_count, 0);
+});
+
+// ─── pre-expiry PM warning and the expired-without-obligation surface ──
+
+const DAY = 24 * HOUR;
+const delivered = async (): Promise<PMSubmitResult> => ({ ok: true, submitKey: "Enter", ambiguous: false });
+const flush = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+/** A recorder for the injected PM submit; `impl` decides what each call returns or throws. */
+function pmRecorder(impl: () => Promise<PMSubmitResult> = delivered) {
+  const calls: Array<{ message: string; eventType: string }> = [];
+  const submit = (message: string, eventType: string): Promise<PMSubmitResult> => {
+    calls.push({ message, eventType });
+    return impl();
+  };
+  return { calls, submit };
+}
+
+/** An hourly reminder that lives for 24h from T0, so its warning opens at T0+12h. */
+function dailyReminder(overrides: Record<string, unknown> = {}) {
+  return normalized({ interval_s: 3600, until_at: new Date(T0 + DAY).toISOString(), ...overrides });
+}
+
+test("pure helpers: the warning lead, the final post of a long-interval row, and the IST message", () => {
+  assert.equal(ALERT_REMINDER_EXPIRY_WARN_LEAD_MS, 12 * HOUR);
+  assert.equal(reminderEndsAt({ next_at: T0 + HOUR, until_at: T0 + DAY, interval_s: 3600 }), T0 + DAY, "on the grid: until itself");
+  assert.equal(reminderEndsAt({ next_at: T0 + DAY, until_at: T0 + 3 * DAY + 2 * HOUR, interval_s: 86_400 }), T0 + 3 * DAY, "long interval: the last grid point, not until");
+  assert.equal(reminderEndsAt({ next_at: T0 + 2 * DAY, until_at: T0 + DAY, interval_s: 3600 }), T0 + DAY, "next_at already past until: until");
+  assert.equal(
+    expiryWarningMessage({ key: "training-sindhu-r7-hourly", ends_at: Date.parse("2026-11-25T08:10:00Z") }),
+    "reminder training-sindhu-r7-hourly expires 2026-11-25 13:40 IST; renew with mop reminder add --replace",
+  );
+});
+
+test("parseExpiredSince accepts s/m/h/d and bare seconds, and nothing else", () => {
+  assert.equal(parseExpiredSince("48h"), 48 * HOUR);
+  assert.equal(parseExpiredSince(" 2d "), 2 * DAY);
+  assert.equal(parseExpiredSince("90m"), 90 * MIN);
+  assert.equal(parseExpiredSince("30s"), 30_000);
+  assert.equal(parseExpiredSince("45"), 45_000);
+  for (const bad of ["", "soon", "-1h", "0h", "1.5h", "48 h", "999d"]) {
+    assert.equal(parseExpiredSince(bad), null, `${JSON.stringify(bad)} is refused`);
+  }
+});
+
+test("the warning posts one line to PM once the final post is within 12h, and never again for that until_at", async () => {
+  const clock = { now: T0 };
+  const pm = pmRecorder();
+  const { store, scheduler, events } = schedulerFixture(clock, undefined, pm.submit);
+  store.add(dailyReminder(), T0);
+
+  clock.now = T0 + 12 * HOUR - MIN;
+  assert.deepEqual((await scheduler.tick()).expiry_warned, [], "13 minutes short of the lead: no warning yet");
+  assert.equal(pm.calls.length, 0);
+
+  clock.now = T0 + 12 * HOUR;
+  const result = await scheduler.tick();
+  assert.deepEqual(result.expiry_warned, ["k1"]);
+  assert.equal(pm.calls.length, 1);
+  assert.equal(pm.calls[0].message, "reminder k1 expires 2026-11-09 15:30 IST; renew with mop reminder add --replace");
+  assert.equal(pm.calls[0].eventType, `cadence-reminder-expiry-k1-${T0 + DAY}`);
+  assert.equal(store.get("k1")!.expiry_warned_until_at, T0 + DAY, "the claim records the until_at it warned for");
+  await flush();
+  assert.ok(events.some((e) => e.type === "alert_reminder_expiry_warned" && e.payload.key === "k1" && e.payload.queued === false));
+
+  for (const offset of [30_000, 20 * MIN, 6 * HOUR, 11 * HOUR]) {
+    clock.now = T0 + 12 * HOUR + offset;
+    assert.deepEqual((await scheduler.tick()).expiry_warned, []);
+  }
+  assert.equal(pm.calls.length, 1, "exactly one warning per until_at");
+});
+
+test("no warning for a reminder with a stop obligation, one that ends later than 12h out, or a lifetime of 12h or less", async () => {
+  const clock = { now: T0 };
+  const pm = pmRecorder();
+  const { store, scheduler } = schedulerFixture(clock, () => "open", pm.submit);
+  store.add(dailyReminder({ key: "watched", stop_obligation_id: 5 }), T0, () => null);
+  store.add(normalized({ key: "far", interval_s: 3600, until_at: new Date(T0 + 4 * DAY).toISOString() }), T0);
+  store.add(normalized({ key: "short", interval_s: 3600, until_at: new Date(T0 + 12 * HOUR).toISOString() }), T0);
+  store.add(normalized({ key: "shorter", interval_s: 3600, until_at: new Date(T0 + 6 * HOUR).toISOString() }), T0);
+
+  for (const at of [T0 + HOUR, T0 + 5 * HOUR, T0 + 11 * HOUR, T0 + 12 * HOUR + 30 * MIN, T0 + 20 * HOUR]) {
+    clock.now = at;
+    assert.deepEqual((await scheduler.tick()).expiry_warned, [], `nothing to warn at +${(at - T0) / HOUR}h`);
+  }
+  assert.equal(pm.calls.length, 0);
+  for (const key of ["watched", "far", "short", "shorter"]) assert.equal(store.get(key)!.expiry_warned_until_at, null, key);
+});
+
+test("a long-interval reminder is warned from its final post, not from until_at", async () => {
+  const clock = { now: T0 };
+  const pm = pmRecorder();
+  const { store, scheduler } = schedulerFixture(clock, undefined, pm.submit);
+  // Daily posts; until is 2h past the third grid point, so the last post (and the expiry) is at T0+3d.
+  store.add(normalized({ key: "daily", interval_s: 86_400, until_at: new Date(T0 + 3 * DAY + 2 * HOUR).toISOString() }), T0);
+
+  clock.now = T0 + 3 * DAY - 13 * HOUR;
+  assert.deepEqual((await scheduler.tick()).expiry_warned, []);
+  clock.now = T0 + 3 * DAY - 12 * HOUR;
+  assert.deepEqual((await scheduler.tick()).expiry_warned, ["daily"]);
+  assert.equal(pm.calls[0].message, "reminder daily expires 2026-11-11 15:30 IST; renew with mop reminder add --replace");
+});
+
+test("renewing with a new until_at re-arms the warning for the new bound", async () => {
+  const clock = { now: T0 };
+  const pm = pmRecorder();
+  const { store, scheduler } = schedulerFixture(clock, undefined, pm.submit);
+  store.add(dailyReminder(), T0);
+
+  clock.now = T0 + 12 * HOUR;
+  await scheduler.tick();
+  assert.equal(pm.calls.length, 1);
+
+  clock.now = T0 + 13 * HOUR;
+  const renewed = store.add(
+    normalized({ interval_s: 3600, until_at: new Date(T0 + 37 * HOUR).toISOString(), replace: true }, clock.now),
+    clock.now,
+  );
+  assert.ok(renewed.ok);
+  clock.now = T0 + 24 * HOUR;
+  assert.deepEqual((await scheduler.tick()).expiry_warned, [], "the new final post is more than 12h away");
+  clock.now = T0 + 26 * HOUR;
+  assert.deepEqual((await scheduler.tick()).expiry_warned, ["k1"]);
+  assert.equal(pm.calls.length, 2);
+  assert.equal(pm.calls[1].eventType, `cadence-reminder-expiry-k1-${T0 + 37 * HOUR}`);
+  assert.notEqual(pm.calls[0].eventType, pm.calls[1].eventType);
+});
+
+test("every unconfirmed outcome stays consumed: a throw, a rejection, an ambiguous, withheld or refused receipt is never retried", async () => {
+  const cases: Array<{ name: string; impl: () => Promise<PMSubmitResult>; type: string; outcome?: string; queued?: boolean }> = [
+    { name: "sync throw", impl: () => { throw new Error("pane gone"); }, type: "alert_reminder_expiry_warn_unconfirmed", outcome: "threw" },
+    { name: "rejection", impl: () => Promise.reject(new Error("socket reset")), type: "alert_reminder_expiry_warn_unconfirmed", outcome: "threw" },
+    { name: "ambiguous", impl: async () => ({ ok: true, submitKey: "Enter", ambiguous: true }), type: "alert_reminder_expiry_warn_unconfirmed", outcome: "ambiguous" },
+    { name: "withheld", impl: async () => ({ ok: true, submitKey: "Enter", ambiguous: false, withheld: "guard" }), type: "alert_reminder_expiry_warn_unconfirmed", outcome: "withheld" },
+    { name: "refused", impl: async () => ({ ok: false, submitKey: "Enter", ambiguous: false, refused: "guard" }), type: "alert_reminder_expiry_warn_unconfirmed", outcome: "refused" },
+    { name: "not delivered", impl: async () => ({ ok: false, submitKey: "Enter", ambiguous: false }), type: "alert_reminder_expiry_warn_unconfirmed", outcome: "not_delivered" },
+    { name: "queued", impl: async () => ({ ok: true, submitKey: "Enter", ambiguous: false, queued: true }), type: "alert_reminder_expiry_warned", queued: true },
+  ];
+  for (const c of cases) {
+    const clock = { now: T0 };
+    const pm = pmRecorder(c.impl);
+    const { store, scheduler, events } = schedulerFixture(clock, undefined, pm.submit);
+    store.add(dailyReminder(), T0);
+
+    clock.now = T0 + 12 * HOUR;
+    const first = await scheduler.tick();
+    assert.deepEqual(first.expiry_warned, ["k1"], c.name);
+    await flush();
+    const logged = events.find((e) => e.type.startsWith("alert_reminder_expiry_warn"));
+    assert.equal(logged?.type, c.type, c.name);
+    if (c.outcome) assert.equal(logged?.payload.outcome, c.outcome, c.name);
+    if (c.queued !== undefined) assert.equal(logged?.payload.queued, c.queued, c.name);
+
+    for (const offset of [MIN, HOUR, 8 * HOUR]) {
+      clock.now = T0 + 12 * HOUR + offset;
+      assert.deepEqual((await scheduler.tick()).expiry_warned, [], `${c.name}: not retried`);
+    }
+    assert.equal(pm.calls.length, 1, `${c.name}: one submit in total`);
+    assert.equal(events.some((e) => e.type === "alert_reminder_expiry_warn_error"), false, c.name);
+  }
+});
+
+test("without a PM submit nothing is claimed, so the warning is still available once one is wired", async () => {
+  const clock = { now: T0 };
+  const { store, scheduler } = schedulerFixture(clock);
+  store.add(dailyReminder(), T0);
+  clock.now = T0 + 12 * HOUR;
+  assert.deepEqual((await scheduler.tick()).expiry_warned, []);
+  assert.equal(store.get("k1")!.expiry_warned_until_at, null);
+});
+
+test("a PM submit that never answers does not hold up the post tick, and the warning does not touch claim fencing", async () => {
+  const clock = { now: T0 };
+  const pm = pmRecorder(() => new Promise<PMSubmitResult>(() => undefined));
+  const { store, poster, scheduler } = schedulerFixture(clock, undefined, pm.submit);
+  store.add(dailyReminder(), T0);
+
+  clock.now = T0 + 12 * HOUR;
+  const before = store.get("k1")!;
+  let timer: NodeJS.Timeout | undefined;
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("tick waited on the PM submit")), 2_000);
+  });
+  const result = await Promise.race([scheduler.tick(), guard]);
+  clearTimeout(timer);
+  assert.deepEqual(result.expiry_warned, ["k1"]);
+  assert.deepEqual(result.posted, ["k1"], "the due post still goes out in the same tick");
+  assert.equal(poster.calls.length, 1);
+  const after = store.get("k1")!;
+  assert.equal(after.claim_gen, before.claim_gen + 1, "only the post's own claim advanced the generation");
+  assert.equal(after.expiry_warned_until_at, T0 + DAY);
+});
+
+test("expired_since lists reminders that expired with no stop obligation inside the window, newest first", async () => {
+  const clock = { now: T0 };
+  const { store, scheduler } = schedulerFixture(clock);
+  const app = new Hono();
+  registerAlertReminderRoutes(app, { store, scheduler, now: () => clock.now, obligationState: () => "open" });
+  const lapsing = (key: string, nowMs: number, extra: Record<string, unknown> = {}) =>
+    normalized({ key, interval_s: 600, until_at: new Date(nowMs + 11 * MIN).toISOString(), ...extra }, nowMs);
+
+  store.add(lapsing("lapsed-old", T0), T0);
+  store.expireStale(T0 + HOUR);
+
+  const t1 = T0 + 60 * HOUR;
+  store.add(lapsing("lapsed-recent", t1), t1);
+  store.add(lapsing("lapsed-watched", t1, { stop_obligation_id: 7 }), t1, () => null);
+  store.add(lapsing("cancelled", t1), t1);
+  store.add(normalized({ key: "still-active", until_at: new Date(t1 + 6 * HOUR).toISOString() }, t1), t1);
+  store.stop("cancelled", "cancelled", t1 + MIN);
+  store.expireStale(t1 + HOUR);
+
+  clock.now = t1 + 2 * HOUR;
+  const recent = (await (await app.request("/alert-reminders?expired_since=48h")).json()) as {
+    success: boolean;
+    expired_since_ms: number;
+    reminders: Array<{ key: string; status: string; stop_reason: string }>;
+    scheduler: unknown;
+  };
+  assert.equal(recent.success, true);
+  assert.equal(recent.expired_since_ms, 48 * HOUR);
+  assert.deepEqual(recent.reminders.map((r) => r.key), ["lapsed-recent"], "not the watched, cancelled, active or long-expired rows");
+  assert.equal(recent.reminders[0].status, "expired");
+  assert.equal(recent.reminders[0].stop_reason, "until_passed");
+  assert.ok(recent.scheduler);
+
+  const wide = (await (await app.request("/alert-reminders?expired_since=100h")).json()) as { reminders: Array<{ key: string }> };
+  assert.deepEqual(wide.reminders.map((r) => r.key), ["lapsed-recent", "lapsed-old"], "newest expiry first");
+
+  for (const bad of ["soon", "0h", "999d", "-5h"]) {
+    const refused = await app.request(`/alert-reminders?expired_since=${encodeURIComponent(bad)}`);
+    assert.equal(refused.status, 400, bad);
+    assert.equal(((await refused.json()) as { success: boolean }).success, false, bad);
+  }
+  // The existing status listing is unchanged.
+  const active = (await (await app.request("/alert-reminders")).json()) as { reminders: Array<{ key: string }> };
+  assert.deepEqual(active.reminders.map((r) => r.key), ["still-active"]);
+});
+
+test("a table from before the warning column gains it in place and the old reminder keeps working", () => {
+  const db = new Database(":memory:");
+  db.exec(V1_DDL);
+  db.prepare(
+    `INSERT INTO alert_reminders (key, thread_ts, text, interval_s, next_at, until_at, status, created_by, created_at, updated_at)
+     VALUES ('old', ?, 'check', 3600, ?, ?, 'active', 'cli', ?, ?)`,
+  ).run(THREAD, T0 + HOUR, T0 + DAY, T0, T0);
+  ensureAlertReminderSchema(db);
+  ensureAlertReminderSchema(db);
+  const store = new AlertReminderStore(db);
+  assert.equal(store.get("old")!.expiry_warned_until_at, null);
+  assert.deepEqual(store.claimExpiryWarnings(T0 + 12 * HOUR).map((w) => w.key), ["old"]);
+  assert.deepEqual(store.claimExpiryWarnings(T0 + 12 * HOUR), [], "claimed once, not again");
 });

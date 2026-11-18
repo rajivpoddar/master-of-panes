@@ -10,8 +10,20 @@
  * advances `next_at` by whole intervals so downtime never causes a burst of catch-up posts.
  *
  * Rules honoured here:
- * - Rule 50: this never touches PM input, tools or the UserPromptSubmit hook chain. The
- *   scheduler only talks to Slack and its own table.
+ * - Rule 50: this never gates or holds PM input or tools and never touches the UserPromptSubmit
+ *   hook chain. The post tick only talks to Slack and its own table. The one PM line it can send
+ *   (the pre-expiry warning, below) is a single fire-and-forget `submitToPM` on its own timer: it
+ *   fails open, never blocks the post tick, and a failed or lost submit is simply consumed.
+ * - Expiry warning (Rajiv regret-ledger control point, PR #14051; trigger: training-sindhu-r7-hourly
+ *   lapsed silently at its 7 day bound on 2026-11-17): an active reminder with an `until_at` and no
+ *   stop obligation sends ONE line to PM 12h before it expires (its final post, which is `until_at`
+ *   or the last grid point before it). The claim `expiry_warned_until_at` is written BEFORE the
+ *   submit and holds the `until_at` it warned for, so it fires once per `until_at`; a renew
+ *   (`add --replace` with a new `until_at`) re-arms it. A reminder created with less than 12h of
+ *   life has no "12h before" moment and is not warned. Send semantics, claim fencing and the 7 day
+ *   cap are untouched: the claim writes only that column.
+ * - Expired reminders that never had a stop obligation (nothing was watching them) are listed by
+ *   `GET /alert-reminders?expired_since=48h` and `mop reminder list --expired-since 48h`.
  * - Delivery is classified. Only an AFFIRMATIVE zero-effect failure (a known pre-post Slack
  *   `ok:false` error, a 429, or a connection that never opened) restores the due time and retries
  *   with a bounded backoff. A timeout, lost response, unparseable reply, 5xx or unlisted Slack
@@ -28,6 +40,7 @@
 import { readFileSync } from "node:fs";
 import Database from "better-sqlite3";
 import type { Hono } from "hono";
+import type { PMSubmitResult } from "./relay.js";
 
 export const ALERT_REMINDER_DEFAULT_CHANNEL = "C0ALZJHGE49";
 export const ALERT_REMINDER_MIN_INTERVAL_S = 600;
@@ -76,6 +89,8 @@ export interface AlertReminderRow {
   unknown_count: number;
   last_unknown_at: number | null;
   last_unknown_reason: string | null;
+  /** The `until_at` the one-time pre-expiry PM warning was claimed for; null until warned. */
+  expiry_warned_until_at: number | null;
 }
 
 export interface AlertReminderAddInput {
@@ -107,6 +122,7 @@ const ADDED_COLUMNS: ReadonlyArray<readonly [string, string]> = [
   ["unknown_count", "INTEGER NOT NULL DEFAULT 0"],
   ["last_unknown_at", "INTEGER"],
   ["last_unknown_reason", "TEXT"],
+  ["expiry_warned_until_at", "INTEGER"],
 ];
 
 export function ensureAlertReminderSchema(db: Database.Database): void {
@@ -275,7 +291,52 @@ export function alertReminderView(row: AlertReminderRow): Record<string, unknown
     unknown_count: row.unknown_count,
     last_unknown_at: iso(row.last_unknown_at),
     last_unknown_reason: row.last_unknown_reason,
+    expiry_warned_until_at: iso(row.expiry_warned_until_at),
   };
+}
+
+/** How long before `until_at` the one-time PM warning is sent. */
+export const ALERT_REMINDER_EXPIRY_WARN_LEAD_MS = 12 * 60 * 60 * 1000;
+/** Expired reminders without a stop obligation stay visible this long. */
+export const ALERT_REMINDER_EXPIRED_VISIBLE_MS = 48 * 60 * 60 * 1000;
+const MAX_EXPIRED_SINCE_MS = 365 * 24 * 60 * 60 * 1000;
+
+/** `48h`, `90m`, `2d`, `30s` or a bare number of seconds; null when it is none of those or not positive. */
+export function parseExpiredSince(value: string): number | null {
+  const match = /^(\d+)([smhd]?)$/.exec(value.trim());
+  if (!match) return null;
+  const unit = { "": 1, s: 1, m: 60, h: 3600, d: 86400 }[match[2] as "" | "s" | "m" | "h" | "d"];
+  const ms = Number(match[1]) * unit * 1000;
+  return Number.isSafeInteger(ms) && ms > 0 && ms <= MAX_EXPIRED_SINCE_MS ? ms : null;
+}
+
+/**
+ * When the reminder makes its final post: the last grid point `next_at + k * interval` that is not
+ * after `until_at`. The row expires (`schedule_complete`) at that post, which for a long interval can
+ * be earlier than `until_at`, so the warning is timed from this and not from `until_at`.
+ */
+export function reminderEndsAt(row: Pick<AlertReminderRow, "next_at" | "until_at" | "interval_s">): number {
+  if (row.next_at > row.until_at) return row.until_at;
+  const intervalMs = row.interval_s * 1000;
+  return row.next_at + Math.floor((row.until_at - row.next_at) / intervalMs) * intervalMs;
+}
+
+/** One claimed pre-expiry warning. `until_at` is the bound it was claimed for; `ends_at` the final post. */
+export interface ExpiryWarning {
+  key: string;
+  until_at: number;
+  ends_at: number;
+}
+
+/** The one line PM receives: `reminder <key> expires <time>; renew with mop reminder add --replace`. */
+export function expiryWarningMessage(warning: Pick<ExpiryWarning, "key" | "ends_at">): string {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(new Date(warning.ends_at));
+  const get = (type: string): string => parts.find((part) => part.type === type)?.value ?? "";
+  const when = `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")} IST`;
+  return `reminder ${warning.key} expires ${when}; renew with mop reminder add --replace`;
 }
 
 // ─── Store ───────────────────────────────────────────────
@@ -400,6 +461,62 @@ export class AlertReminderStore {
     return this.db
       .prepare("SELECT * FROM alert_reminders WHERE status = 'active' AND stop_obligation_id IS NOT NULL")
       .all() as AlertReminderRow[];
+  }
+
+  /**
+   * Atomically claim the one-time pre-expiry PM warning for every active reminder that has no
+   * stop obligation and whose final post is within `ALERT_REMINDER_EXPIRY_WARN_LEAD_MS`.
+   *
+   * The claim writes `expiry_warned_until_at = until_at` and nothing else (no `claim_gen` bump, no
+   * `updated_at`), so send semantics and claim fencing are untouched, and it is written BEFORE any
+   * submit: a crash or a lost submit consumes the warning rather than repeating it. A renewed
+   * `until_at` differs from the stored value, which re-arms the warning for the new bound.
+   *
+   * A reminder whose whole lifetime is no longer than the lead has no "12h before" moment after it
+   * was created, so it is not warned: its creator chose that short bound.
+   */
+  claimExpiryWarnings(nowMs: number, limit = 10): ExpiryWarning[] {
+    const run = this.db.transaction((): ExpiryWarning[] => {
+      const candidates = this.db
+        .prepare(`
+          SELECT * FROM alert_reminders
+          WHERE status = 'active' AND stop_obligation_id IS NULL AND until_at > ?
+            AND (expiry_warned_until_at IS NULL OR expiry_warned_until_at != until_at)
+          ORDER BY until_at ASC, key ASC
+        `)
+        .all(nowMs) as AlertReminderRow[];
+      const mark = this.db.prepare(`
+        UPDATE alert_reminders SET expiry_warned_until_at = until_at
+        WHERE key = ? AND status = 'active' AND stop_obligation_id IS NULL AND until_at = ?
+          AND (expiry_warned_until_at IS NULL OR expiry_warned_until_at != until_at)
+      `);
+      const claimed: ExpiryWarning[] = [];
+      for (const row of candidates) {
+        if (claimed.length >= limit) break;
+        const endsAt = reminderEndsAt(row);
+        if (endsAt <= nowMs || endsAt - nowMs > ALERT_REMINDER_EXPIRY_WARN_LEAD_MS) continue;
+        if (endsAt - ALERT_REMINDER_EXPIRY_WARN_LEAD_MS <= row.created_at) continue;
+        if (mark.run(row.key, row.until_at).changes > 0) {
+          claimed.push({ key: row.key, until_at: row.until_at, ends_at: endsAt });
+        }
+      }
+      return claimed;
+    });
+    return run();
+  }
+
+  /**
+   * Reminders that expired without ever having a stop obligation, so nothing was watching them,
+   * and did so within the last `windowMs`. `updated_at` is the expiry time: both expiry writes set it.
+   */
+  listExpiredWithoutObligation(nowMs: number, windowMs: number): AlertReminderRow[] {
+    return this.db
+      .prepare(`
+        SELECT * FROM alert_reminders
+        WHERE status = 'expired' AND stop_obligation_id IS NULL AND updated_at >= ?
+        ORDER BY updated_at DESC, key ASC
+      `)
+      .all(nowMs - windowMs) as AlertReminderRow[];
   }
 
   /**
@@ -684,11 +801,18 @@ export interface AlertReminderTickResult {
   skipped: string[];
   /** Sent, but the row was replaced or re-claimed meanwhile, so the completion was discarded. */
   stale: string[];
+  /** Keys whose one-time pre-expiry PM warning was claimed this tick (the submit is fire-and-forget). */
+  expiry_warned: string[];
 }
 
 export interface AlertReminderSchedulerDeps {
   store: AlertReminderStore;
   poster: AlertPoster;
+  /**
+   * Existing PM delivery path, used ONLY for the one-time pre-expiry warning. Optional: when absent
+   * the warning is skipped and nothing is claimed. Never awaited by the post tick (rule 50).
+   */
+  submitToPM?: (message: string, eventType: string) => Promise<PMSubmitResult>;
   obligationState?: (id: number) => ObligationState;
   logEvent?: (type: string, payload: Record<string, unknown>) => void;
   now?: () => number;
@@ -738,9 +862,66 @@ export class AlertReminderScheduler {
     };
   }
 
+  /**
+   * Claim and send the one-time pre-expiry warnings that are due. The claim is written before the
+   * submit, so a crash, a throw or an ambiguous receipt leaves it consumed and never repeats it. The
+   * submit is NOT awaited: the post tick never waits on PM, never gates PM input and fails open
+   * (rule 50). Every rejection and every log failure is swallowed here.
+   */
+  private warnExpiring(
+    nowMs: number,
+    result: AlertReminderTickResult,
+    log: (type: string, payload: Record<string, unknown>) => void,
+  ): void {
+    const submit = this.deps.submitToPM;
+    if (!submit) return;
+    for (const warning of this.deps.store.claimExpiryWarnings(nowMs)) {
+      result.expiry_warned.push(warning.key);
+      const base = {
+        key: warning.key,
+        until_at: new Date(warning.until_at).toISOString(),
+        expires_at: new Date(warning.ends_at).toISOString(),
+      };
+      const eventType = `cadence-reminder-expiry-${warning.key.replace(/[^A-Za-z0-9._-]/g, "-")}-${warning.until_at}`;
+      let pending: Promise<PMSubmitResult>;
+      try {
+        pending = submit(expiryWarningMessage(warning), eventType);
+      } catch (error) {
+        pending = Promise.reject(error);
+      }
+      void pending
+        .then(
+          (receipt) => {
+            if (receipt?.ok === true && receipt.ambiguous === false && !receipt.withheld && !receipt.refused) {
+              log("alert_reminder_expiry_warned", { ...base, queued: receipt.queued === true });
+              return;
+            }
+            const outcome = receipt?.withheld
+              ? "withheld"
+              : receipt?.ambiguous
+                ? "ambiguous"
+                : receipt?.refused
+                  ? "refused"
+                  : "not_delivered";
+            log("alert_reminder_expiry_warn_unconfirmed", { ...base, outcome });
+          },
+          (error) => {
+            // The submit may have been accepted before its acknowledgement was lost: stay consumed.
+            log("alert_reminder_expiry_warn_unconfirmed", {
+              ...base,
+              outcome: "threw",
+              error: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
+            });
+          },
+        )
+        .catch(() => undefined);
+    }
+  }
+
   async tick(): Promise<AlertReminderTickResult> {
     const result: AlertReminderTickResult = {
       expired: [], stopped: [], claimed: 0, posted: [], failed: [], unknown: [], skipped: [], stale: [],
+      expiry_warned: [],
     };
     if (this.ticking) return result;
     this.ticking = true;
@@ -762,6 +943,13 @@ export class AlertReminderScheduler {
         }
       }
       for (const key of result.expired) log("alert_reminder_expired", { key });
+
+      // Pre-expiry PM warning. Its own try/catch: a failure here must never skip the post step below.
+      try {
+        this.warnExpiring(startMs, result, log);
+      } catch (error) {
+        log("alert_reminder_expiry_warn_error", { error: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200) });
+      }
 
       const claims = store.claimDue(startMs, this.maxPostsPerTick);
       result.claimed = claims.length;
@@ -879,6 +1067,20 @@ export function registerAlertReminderRoutes(app: Hono, deps: AlertReminderRouteD
   });
 
   app.get("/alert-reminders", (c) => {
+    // Expired reminders that never had a stop obligation, within the window (default view 48h).
+    const expiredSince = c.req.query("expired_since");
+    if (expiredSince !== undefined) {
+      const windowMs = parseExpiredSince(expiredSince);
+      if (windowMs === null) {
+        return c.json({ success: false, error: "expired_since must be a duration like 48h, 2d, 90m (at most 365d)" }, 400);
+      }
+      return c.json({
+        success: true,
+        expired_since_ms: windowMs,
+        reminders: deps.store.listExpiredWithoutObligation(now(), windowMs).map(alertReminderView),
+        scheduler: deps.scheduler.getStatus(),
+      });
+    }
     const requested = c.req.query("status") ?? "active";
     if (requested !== "active" && requested !== "stopped" && requested !== "expired" && requested !== "all") {
       return c.json({ success: false, error: "status must be active, stopped, expired or all" }, 400);

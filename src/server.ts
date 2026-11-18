@@ -327,11 +327,14 @@ p0EscalationWatcher.start();
 
 // ─── Recurring Alerts Reminders ─────────────────────────────
 // Durable `alert_reminders` rows posted into Slack threads as the HeyDonna Alerts
-// bot. Never touches PM input, tools or hooks (rule 50). See src/alertReminders.ts.
+// bot. Never gates or holds PM input or tools and never touches the hooks (rule 50). The one
+// PM line it sends is a fire-and-forget pre-expiry warning through the existing PM delivery
+// path (submitToPM), once per until_at, that fails open. See src/alertReminders.ts.
 const alertReminderStore = db.alertReminderStore();
 const alertReminderScheduler = new AlertReminderScheduler({
   store: alertReminderStore,
   poster: new SlackAlertsPoster(),
+  submitToPM: (message, eventType) => relay.submitToPM(message, eventType),
   obligationState: (id) => lookupObligationState(id),
   logEvent: (type, payload) => {
     try {

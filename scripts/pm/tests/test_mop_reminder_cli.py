@@ -152,6 +152,17 @@ class ReminderRoutingTest(unittest.TestCase):
         self.assertEqual(_Handler.seen[0][:2], ("GET", "/alert-reminders?status=all"))
         self.assertEqual(_Handler.seen[1][:2], ("POST", "/alert-reminders/smoke-1108/cancel"))
 
+    def test_list_expired_since_uses_the_expired_route_and_ignores_status(self):
+        code, _ = self.run_cli("reminder", "list", "--expired-since", "48h")
+        self.assertEqual(code, 0)
+        self.assertEqual(_Handler.seen[0][:2], ("GET", "/alert-reminders?expired_since=48h"))
+
+    def test_list_expired_since_rejects_a_bad_duration_without_calling_mop(self):
+        code, out = self.run_cli("reminder", "list", "--expired-since", "soon")
+        self.assertEqual(code, 2)
+        self.assertIn("invalid duration", out)
+        self.assertEqual(_Handler.seen, [])
+
     def test_bad_interval_exits_2_without_calling_mop(self):
         code, out = self.run_cli(
             "reminder", "add", "--key", "k", "--thread", "1.2", "--every", "5m", "--until", "+1h", "--text", "t",
@@ -165,6 +176,9 @@ class ReminderRoutingTest(unittest.TestCase):
         self.assertEqual(proc.returncode, 0)
         for sub in ("add", "list", "cancel"):
             self.assertIn(sub, proc.stdout)
+        listing = subprocess.run([sys.executable, str(CLI), "reminder", "list", "--help"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(listing.returncode, 0)
+        self.assertIn("--expired-since", listing.stdout)
 
 
 if __name__ == "__main__":
