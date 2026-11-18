@@ -28,6 +28,13 @@ MUSE = 'muse-spark-1.3-contributor'
 DEEPSEEK = 'deepseek-v4.1-flash'
 GLM = 'glm-5.3'
 FREE_IDS = (HY4, MUSE)
+# Router aliases that resolve to the same two upstreams (cliproxyapi.conf openai-compatibility `opencode-go`).
+HY4_ALIAS = 'hy4-flash'
+MUSE_ALIAS = 'opencode-go-muse-spark-1.3-contributor'
+# Decorated names CLIProxyAPI 8.0.50 routes to the restricted base model (suffix stripped, provider resolved from the base) plus a Claude
+# Code context suffix: each used to pass the literal compare and reach the router.
+DECORATED_FREE = (f'{HY4}(high)', f'{HY4}(8192)', f'{HY4}(none)', f'{MUSE}(xhigh)', f'{MUSE}[1m]', f'{MUSE}[2m]', 'HY4-Flash-Free(High)',
+                  f'{HY4_ALIAS}(low)', f'{MUSE_ALIAS}(high)', f' {HY4}(high)', f'{HY4}()')
 # The exact declaration 9ea1b9b treated as "verified", and the QA mode it paired with it.
 VERIFIED_FLAGS = ('--data-scope', 'no-customer-content,no-prod-write', '--qa-mode', 'replay-only')
 BENIGN = 'Fix the sidebar spacing.\n'
@@ -38,7 +45,9 @@ def _slice(start, end):
     return SRC[first:SRC.index(end, first)]
 
 
-# Tier lists, the guard helpers, the emergency gate and proxy_agent_pick_tier; the primary guard; the argv loop.
+# Router-identity helper + restricted-id list (before the tier lists); tier lists, the guard helpers, the emergency gate and
+# proxy_agent_pick_tier; the primary guard; the argv loop.
+HELPERS = _slice('proxy_agent_router_identity() {', '# Ordered tiers;')
 PICKER = _slice('# OpenCode Go pool: hy4-flash-free', '# Ordinary burn gate for capped roles')
 GUARD = _slice('proxy_agent_primary_pool_guard() {', '# Primary burn check (CTO REVISE')
 ARGV_LOOP = _slice('while [[ $# -gt 0 ]]; do\n  case "$1" in\n    --cwd)', 'case "$RUNG" in')
@@ -106,15 +115,17 @@ def _primary(tmp_path, agent_type, model, **kwargs):
     return result.stdout.strip().splitlines()[-1], result.stderr
 
 
-def test_only_the_two_approved_ids_are_free_trial_ids():
-    assert re.search(r'proxy_agent_is_free_trial_id\(\) \{\n\s+case "\$1" in hy4-flash-free\|muse-spark-1\.3-contributor\) return 0;;', SRC)
+def test_only_the_two_restricted_models_and_their_router_aliases_are_free_trial_ids():
+    assert 'PROXY_AGENT_FREE_TRIAL_IDS="hy4-flash-free hy4-flash muse-spark-1.3-contributor opencode-go-muse-spark-1.3-contributor"' in SRC
+    for other in (DEEPSEEK, GLM):
+        assert other not in re.search(r'PROXY_AGENT_FREE_TRIAL_IDS="([^"]*)"', SRC).group(1).split()
 
 
 # ---- no allow path: nothing a caller, brief, role, QA mode or record says can lift the block ------------------------
 
 def test_the_guard_takes_no_input_but_the_model_id_and_no_allow_machinery_remains():
     body = _slice('proxy_agent_free_guard_refuses() {', '# Ordered tiers;')
-    assert body.strip().splitlines()[1].strip() == 'proxy_agent_is_free_trial_id "$1"'
+    assert body.strip().splitlines()[1].strip() == 'proxy_agent_is_free_trial_id "$(proxy_agent_router_identity "$1")"'
     for gone in ('DATA_SCOPE_ARG', 'QA_MODE_ARG', 'PA_FREE_SCOPE', 'free_scope_classify', 'free_scope_decide', 'free_scope_restore',
                  'free_scope_record', 'free-scope', 'qa_replay_only_verified', 'PA_QA_REPLAY_PINNED', 'PROXY_AGENT_QA_REPLAY_ONLY',
                  'QA_REPLAY_ONLY', 'brief_names_sensitive_scope', 'proxy_agent_sensitive_type', 'proxy_agent_sensitive_launch'):
@@ -213,16 +224,20 @@ def test_a_raw_free_primary_is_refused_by_the_guard_not_the_emergency_gate(tmp_p
 
 def _continuation_line():
     runner = _slice("  case \"$TYPE\" in\n    pm-lock-release|prod-*|manual-lease-release", "  printf 'printf \"Continue the task")
-    line = re.search(r"^  printf 'case %q in hy4-flash-free\|muse-spark-1\.3-contributor\) PROXY_AGENT_NO_CONTINUE=1;; esac\\n' \"\$MODEL_ID\"$",
-                     runner, re.M)
+    line = re.search(r"^  printf 'case %q in %s\) PROXY_AGENT_NO_CONTINUE=1;; esac\\n' \"\$\(proxy_agent_router_identity \"\$MODEL_ID\"\)\" "
+                     r"\"\$\{PROXY_AGENT_FREE_TRIAL_IDS// /\|\}\"$", runner, re.M)
     assert line, runner
     return line.group(0).strip()
 
 
-@pytest.mark.parametrize('model_id,expected', ((HY4, '1'), (MUSE, '1'), (DEEPSEEK, '0'), ('claude-haiku-5-5', '0'), ('gpt-6.1-terra', '0')))
+@pytest.mark.parametrize('model_id,expected', (
+    (HY4, '1'), (MUSE, '1'), (HY4_ALIAS, '1'), (MUSE_ALIAS, '1'), *((d, '1') for d in DECORATED_FREE),
+    (DEEPSEEK, '0'), (f'{DEEPSEEK}(high)', '0'), ('claude-haiku-5-5', '0'), ('claude-opus-5-5[1m]', '0'), ('gpt-6.1-terra', '0')))
 def test_the_generated_runner_never_continues_a_free_id_run(tmp_path, model_id, expected):
-    # Run the launcher's real generator line, then the generated line, and read the flag the continuation loop tests.
-    script = f'MODEL_ID={shlex.quote(model_id)}\n{_continuation_line()} > gen.sh\nPROXY_AGENT_NO_CONTINUE=0\nsource ./gen.sh\necho "$PROXY_AGENT_NO_CONTINUE"\n'
+    # Run the launcher's real generator line (with its real identity helper and list), then the generated line, and read the flag the
+    # continuation loop tests. The generated case is keyed on the router-equivalent identity, so a decorated id cannot continue either.
+    script = (f'{HELPERS}\nMODEL_ID={shlex.quote(model_id)}\n{_continuation_line()} > gen.sh\nPROXY_AGENT_NO_CONTINUE=0\n'
+              'source ./gen.sh\necho "$PROXY_AGENT_NO_CONTINUE"\n')
     result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, cwd=tmp_path,
                             env={'PATH': os.environ.get('PATH', '/usr/bin:/bin')})
     assert result.returncode == 0, result.stderr
@@ -248,3 +263,51 @@ def test_the_guard_runs_before_the_emergency_gate_and_before_last_is_set():
 
 def test_the_skill_documents_the_unconditional_rule_and_no_declaration_flow():
     assert 'UNCONDITIONAL' in SKILL and 'DEFAULT-DENY' not in SKILL and 'Declare it per launch' not in SKILL
+
+
+# ---- router-equivalent identity (CTO REVISE ts 1794989163.540309) -------------------------------------------------------
+# CLIProxyAPI 8.0.50 strips a supported reasoning suffix and resolves the provider from the base model, so a decorated name routes to the
+# restricted upstream. The deny runs on that identity at raw selection and in the generated continuation; permitted models keep their
+# original argument.
+
+def _primary_raw(tmp_path, model, resume='', sidecar=None):
+    body = (f'TYPE=hd-builder\nMODEL={shlex.quote(model)}\nproxy_agent_primary_pool_guard && rc=0 || rc=$?\n'
+            'printf "rc=%s model=[%s]\\n" "$rc" "$MODEL"\n')
+    result = _run(tmp_path, body, resume=resume, sidecar=sidecar)
+    assert result.returncode == 0, result.stderr
+    rc, model_after = re.match(r'rc=(\d+) model=\[(.*)\]$', result.stdout.strip().splitlines()[-1]).groups()
+    return rc, model_after, result.stderr
+
+
+IDENTITY_CASES = ((HY4, HY4), (f'{HY4}(high)', HY4), ('HY4-Flash-Free(High)', HY4), (f' {HY4}(8192) ', HY4), (f'{MUSE}[1m]', MUSE),
+                  (f'{MUSE}(xhigh)[1m]', MUSE), ('claude-opus-5-5[1m]', 'claude-opus-5-5'), (f'{DEEPSEEK}(high)', DEEPSEEK), (GLM, GLM),
+                  (f'x({HY4})', 'x'), ('', ''))
+
+
+@pytest.mark.parametrize('raw,expected', IDENTITY_CASES)
+def test_router_identity_lowercases_and_cuts_at_the_first_suffix_bracket(raw, expected):
+    result = subprocess.run(['bash', '-c', f'{HELPERS}\nproxy_agent_router_identity {shlex.quote(raw)}\n'], capture_output=True, text=True,
+                            env={'PATH': os.environ.get('PATH', '/usr/bin:/bin')})
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == expected
+
+
+@pytest.mark.parametrize('resume', ('', 'run1'))
+@pytest.mark.parametrize('model_id', (*DECORATED_FREE, HY4_ALIAS, MUSE_ALIAS, f'{HY4} (high)'))
+def test_a_decorated_or_aliased_restricted_primary_is_refused_at_raw_selection_and_resume(tmp_path, model_id, resume):
+    rc, _, stderr = _primary_raw(tmp_path, model_id, resume=resume, sidecar=_verified_sidecar(BENIGN) if resume else None)
+    assert rc == '75' and 'REFUSED free-model guard primary' in stderr and 'emergency_gate' not in stderr
+
+
+@pytest.mark.parametrize('model_id', (f'{DEEPSEEK}(high)', f'{GLM}(low)', 'claude-opus-5-5[1m]', 'claude-sonnet-5-5(high)',
+                                      'gpt-6.1-terra(high)', 'grok-4.7', 'x(hy4-flash-free)'))
+def test_a_permitted_decorated_model_is_not_denied_and_keeps_its_original_argument(tmp_path, model_id):
+    rc, model_after, stderr = _primary_raw(tmp_path, model_id)
+    assert rc == '0' and 'free-model guard' not in stderr
+    assert model_after == model_id  # the guard never rewrites MODEL; the launcher still passes the original string to --model
+
+
+def test_the_free_guard_precedes_the_exact_opencode_id_early_return_and_launch_keeps_the_original_argument():
+    assert GUARD.index('proxy_agent_free_guard_refuses "$_guard_id"') < GUARD.index('proxy_agent_is_opencode_id "$_guard_id" || return 0')
+    assert GUARD.count('proxy_agent_free_guard_refuses') == 1  # one deny site on the resolved primary, now ahead of the early return
+    assert SRC.count('read -r MODEL_ID WINDOW MAX_OUT < <(resolve_model "$MODEL")') == 1  # --model "$MODEL_ID" is never normalized

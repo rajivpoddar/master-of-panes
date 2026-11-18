@@ -1353,8 +1353,32 @@ proxy_agent_is_emergency_muse() {
 # Free-model guard (Rajiv DM D0AMF0XE6TS ts 1794984605.382609, "yes", to: block free/trial OpenCode models (hy4-flash-free,
 # muse-spark-1.3-contributor) for agents that read customer content or write prod). Trigger 2026-11-18: customer-data and prod-write
 # launches landed on unvetted free models. Only these two ids; deepseek-v4.1-flash and glm-5.3 are not part of that decision.
+# ROUTER-EQUIVALENT IDENTITY (CTO REVISE of 3003f414, C0ALZJHGE49 thread 1794985651.254889, ts 1794989163.540309): the literal-id checks above were
+# bypassable by a decorated name. CLIProxyAPI 8.0.50 strips a supported reasoning suffix `model(value)` and resolves the provider from the BASE
+# model, so `hy4-flash-free(high)` passed a literal compare yet routed to the restricted upstream; resolve_model passes any unrecognized string
+# through unchanged, so the launch carried it verbatim. The deny therefore runs on the identity the router derives: lowercase, cut at the first
+# `(` (router thinking suffix) or `[` (Claude Code context suffix such as [1m]), trim whitespace. Deliberately a SUPERSET of the router's own
+# parse (cuts at the FIRST bracket, case-folds, trims unicode space): this is a deny-side check, so over-matching only refuses more, and no
+# permitted id contains `(` or `[`, so a permitted model's identity is its own name and its original argument still flows to --model unchanged.
+# Plain ids (the common path, every tier-list entry) skip the interpreter.
+proxy_agent_router_identity() {
+  case "$1" in
+    ''|*[!a-z0-9._-]*) ;;
+    *) printf '%s' "$1"; return 0;;
+  esac
+  python3 -I -c 'import re, sys; print(re.split(r"[(\[]", sys.argv[1].lower(), 1)[0].strip(), end="")' "$1" 2>/dev/null && return 0
+  # No interpreter: ASCII-only sed fallback (same cut), never an empty pass-through of the raw string.
+  printf '%s' "$1" | tr '\n\r\t' '   ' | tr '[:upper:]' '[:lower:]' | sed -E 's/[([].*$//; s/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+# The two restricted upstreams and the router aliases that resolve to them (cliproxyapi.conf openai-compatibility `opencode-go`: alias
+# `hy4-flash` -> hy4-flash-free, alias `opencode-go-muse-spark-1.3-contributor` -> muse-spark-1.3-contributor). An alias is the same restricted
+# model under another name, so it is the same unconditional denial. Single source: the guard, the tier pick and the generated continuation
+# all read this list.
+PROXY_AGENT_FREE_TRIAL_IDS="hy4-flash-free hy4-flash muse-spark-1.3-contributor opencode-go-muse-spark-1.3-contributor"
 proxy_agent_is_free_trial_id() {
-  case "$1" in hy4-flash-free|muse-spark-1.3-contributor) return 0;; *) return 1;; esac
+  local _id
+  for _id in $PROXY_AGENT_FREE_TRIAL_IDS; do [[ "$1" == "$_id" ]] && return 0; done
+  return 1
 }
 # UNCONDITIONAL (CTO REVISE of 970d140 / 9ea1b9b, C0ALZJHGE49 thread 1794985651.254889, ts 1794987952.900739: grant eligibility only from an
 # existing restricted execution profile whose authority covers the actual inputs, tools and deployment through resume and continuation;
@@ -1366,7 +1390,7 @@ proxy_agent_is_free_trial_id() {
 # model, before the emergency gate and before `last` is set), the resolved primary (raw --model, and --resume which requires an explicit
 # model), and the auto-continuation block of the generated run.sh.
 proxy_agent_free_guard_refuses() {
-  proxy_agent_is_free_trial_id "$1"
+  proxy_agent_is_free_trial_id "$(proxy_agent_router_identity "$1")"
 }
 # Ordered tiers; escalation after a stall is LIGHT -> MID -> TOP. This is the single source of the tier lists: the picker and the
 # emergency eligibility check (proxy_agent_emergency_open) both read it. Prints the model ids, no-Codex flag applied.
@@ -1611,6 +1635,13 @@ proxy_agent_pool_blocked() {
 proxy_agent_primary_pool_guard() {
   local _guard_id _guard_window _guard_max
   read -r _guard_id _guard_window _guard_max < <(resolve_model "$MODEL")
+  # Free-model guard FIRST, on the router-equivalent identity of the resolved primary (the exact string that becomes --model): a decorated
+  # `hy4-flash-free(high)` / `muse-spark-1.3-contributor[1m]` is not an exact OpenCode id, so the early return below used to let it through.
+  # A raw `--model <restricted>` (or its alias) and a --resume of one have no tier to fall back within.
+  if proxy_agent_free_guard_refuses "$_guard_id"; then
+    printf 'proxy-agent: REFUSED free-model guard primary %s identity=%s type=%s (free/trial ids are unconditionally ineligible; name a vetted model)\n' "$_guard_id" "$(proxy_agent_router_identity "$_guard_id")" "${TYPE:-}" >&2
+    return 75
+  fi
   case "$_guard_id" in
     gpt-*)
       if [[ -e "$HOME/.claude/state/proxy-no-codex" ]]; then
@@ -1624,12 +1655,6 @@ proxy_agent_primary_pool_guard() {
       return 0;;
   esac
   proxy_agent_is_opencode_id "$_guard_id" || return 0
-  # Free-model guard on the resolved primary (unconditional): a raw `--model hy4-flash-free|muse-spark-1.3-contributor`, or a --resume of
-  # either, has no tier to fall back within.
-  if proxy_agent_free_guard_refuses "$_guard_id"; then
-    printf 'proxy-agent: REFUSED free-model guard primary %s type=%s (free/trial ids are unconditionally ineligible; name a vetted model)\n' "$_guard_id" "${TYPE:-}" >&2
-    return 75
-  fi
   if proxy_agent_pool_blocked "$_guard_id"; then
     printf 'proxy-agent: REFUSED primary %s (opencode pool_cap)\n' "$_guard_id" >&2
     return 75
@@ -2070,8 +2095,10 @@ CLAUDE_BIN="$(command -v claude)"
       printf 'PROXY_AGENT_NO_CONTINUE=1\n';;
   esac
   # Continuations reuse this launch's resolved model and settings (no re-selection). A free/trial-id run NEVER continues: the launch guard
-  # already refuses both ids, and this is the same unconditional denial at the continuation boundary (CTO REVISE 1794987952.900739).
-  printf 'case %q in hy4-flash-free|muse-spark-1.3-contributor) PROXY_AGENT_NO_CONTINUE=1;; esac\n' "$MODEL_ID"
+  # already refuses the restricted ids, and this is the same unconditional denial at the continuation boundary (CTO REVISE 1794987952.900739).
+  # The case subject is the router-equivalent identity of the launched model (CTO REVISE ts 1794989163.540309), not the literal argument, so a
+  # decorated name cannot slip past here either; the original MODEL_ID itself still flows to --model unchanged.
+  printf 'case %q in %s) PROXY_AGENT_NO_CONTINUE=1;; esac\n' "$(proxy_agent_router_identity "$MODEL_ID")" "${PROXY_AGENT_FREE_TRIAL_IDS// /|}"
   printf 'printf "Continue the task in your brief from exactly where you stopped. Do not end your turn until it is DONE, or BLOCKED with the exact external blocker (or HANDOFF). Do not send interim progress peer messages to PM; send ONE message only for a blocker that needs a PM decision, plus the final Stop.\\n" > %q\n' "$JOB_DIR/continue.md"
   # Also continue after an error_max_turns stop (rc!=0): 4 sol runs died that way on 2026-11-13 with work mid-flight (PM).
   printf 'pa_maxturns() { tail -c 6000 %q 2>/dev/null | grep -q "\\"subtype\\":\\"error_max_turns\\""; }\n' "$JSONL"
