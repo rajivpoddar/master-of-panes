@@ -2040,7 +2040,7 @@ allow_write = [
 json.dump({"hooks": {"PreToolUse": keep},
            "permissions": {"deny": deny},
            "sandbox": {
-               "enabled": True,
+               "enabled": False,  # PM emergency off 2026-11-18 19:00 IST: live sandbox broke gh TLS (x509 OSStatus -26276) and git worktree in /tmp
                "failIfUnavailable": True,
                "autoAllowBashIfSandboxed": True,
                "allowUnsandboxedCommands": False,
