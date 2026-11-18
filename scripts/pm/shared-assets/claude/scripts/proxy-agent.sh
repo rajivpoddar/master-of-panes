@@ -2043,50 +2043,57 @@ if os.environ.get("HELPER_READONLY") == "1":
              "Bash(gh pr ready*)", "Bash(gh pr close*)", "Bash(gh pr edit*)",
              "Bash(*pm-admit-ci.sh*)", "Bash(git push*)"]
 # Bash sandbox for proxy agents only (this --settings file). Not the PM pane.
-# Rajiv DM D0AMF0XE6TS thread 1795004502.133389, ts 1795006580.326659.
+# Rajiv DM D0AMF0XE6TS thread 1795004502.133389, ts 1795006580.326659; layer 2 approved
+# ("ok", ts 1795011133.027879): agents must not delete directories with Python shutil.
 # bypassPermissions (--dangerously-skip-permissions) leaves the sandbox off unless
-# allowUnsandboxedCommands is false. Network stays unrestricted (allowedDomains omitted).
-# Do not allowWrite $HOME or ~/.heydonna itself: that would permit deleting siblings.
+# allowUnsandboxedCommands is false. No repo root, no $HOME and no .git entry is writable;
+# only the paths below are. Network is limited to the package and GitHub hosts below.
+# enableWeakerNetworkIsolation lets Go/Security-framework clients (gh) reach trustd for
+# TLS verification (the 2026-11-18 x509 OSStatus -26276 failure). GH_TOKEN is exported by
+# the runner outside the sandbox (see run.sh generation), never logged.
+# Only these commands run outside the sandbox: the two remote-box scripts, ssh, and
+# git worktree, plain or as rewritten by RTK (worktree add/remove must write the main repo's .git). gh and
+# interpreters (python, node, bash, npm) are never excluded.
 allow_write = [
     "/tmp",
     "/private/tmp",
-    "/var/folders",
-    "/private/var/folders",
-    "/Users/rajiv/Downloads/projects/heydonna-app-proxy",
-    "/Users/rajiv/Downloads/projects/heydonna-app",
-    "/Users/rajiv/.heydonna/qa",
-    "/Users/rajiv/.heydonna/qa-*",
-    "/Users/rajiv/.heydonna/qa-*/**",
-    "/Users/rajiv/.heydonna/qa-modal-leases",
-    "/Users/rajiv/.heydonna/qa-convex-leases",
-    "/Users/rajiv/.heydonna/qa-deployment-leases",
-    "/Users/rajiv/.heydonna/qa-config-snapshots",
-    "/Users/rajiv/.heydonna/qa-evidence",
-    "/Users/rajiv/.heydonna/qa-inputs",
-    "/Users/rajiv/.heydonna/qa-logs",
-    "/Users/rajiv/.heydonna/qa-private",
-    "/Users/rajiv/.heydonna/private-qa",
-    "/Users/rajiv/.heydonna/evidence",
-    "/Users/rajiv/.heydonna/rtb-custody",
-    "/Users/rajiv/.heydonna/proxy-setup-dirt",
-    "/Users/rajiv/.heydonna/remote-*",
-    "/Users/rajiv/.heydonna/remote-*/**",
-    "/Users/rajiv/.claude/state",
-    "/Users/rajiv/.claude/projects",
-    "/Users/rajiv/.claude/logs",
-    "/Users/rajiv/.cache",
     "/Users/rajiv/.npm",
     "/Users/rajiv/.bun",
-    "/Users/rajiv/Library/Caches",
-    "/Users/rajiv/.config/hcloud",
+    "/Users/rajiv/.cache",
+    "/Users/rajiv/.claude/state",
+    "/Users/rajiv/.claude/projects",
+    "/tmp/proxy-agent",
+    "/tmp/agent-progress",
+]
+excluded_commands = [
+    "~/.claude/scripts/remote-test-box.sh *",
+    "/Users/rajiv/.claude/scripts/remote-test-box.sh *",
+    "~/.claude/scripts/remote-browser-box.sh *",
+    "/Users/rajiv/.claude/scripts/remote-browser-box.sh *",
+    "ssh *",
+    "git worktree *",
+    # The user-level RTK hook rewrites git to "rtk git ..." outside a linked worktree (standalone checkouts such as
+    # heydonna-app-proxy), so the exclusion must also match the rewritten form of the same command.
+    "rtk git worktree *",
+]
+allowed_domains = [
+    "registry.npmjs.org",
+    "registry.yarnpkg.com",
+    "objects.githubusercontent.com",
+    "github.com",
+    "api.github.com",
+    "codeload.github.com",
 ]
 json.dump({"hooks": {"PreToolUse": keep},
            "permissions": {"deny": deny},
            "sandbox": {
-               "enabled": False,  # PM emergency off 2026-11-18 19:00 IST: live sandbox broke gh TLS (x509 OSStatus -26276) and git worktree in /tmp
+               "enabled": True,
                "failIfUnavailable": True,
                "autoAllowBashIfSandboxed": True,
                "allowUnsandboxedCommands": False,
+               "enableWeakerNetworkIsolation": True,
+               "excludedCommands": excluded_commands,
+               "network": {"allowedDomains": allowed_domains},
                "filesystem": {
                    "allowWrite": allow_write,
                    "denyWrite": [],
@@ -2178,6 +2185,10 @@ CLAUDE_BIN="$(command -v claude)"
   printf 'exit "$rc"; }\n'
   printf "trap complete EXIT\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\ntrap 'exit 129' HUP\n"
   printf 'cd %q || exit 2\n' "$CWD"
+  # GH_TOKEN is resolved by the runner, outside the sandbox, at run time (keyring access is blocked inside it).
+  # The token is never written to this file or logged; an explicit GH_TOKEN already in the environment wins.
+  printf 'if [[ -z "${GH_TOKEN:-}" ]]; then GH_TOKEN="$(gh auth token 2>/dev/null || true)"; fi\n'
+  printf 'if [[ -n "${GH_TOKEN:-}" ]]; then export GH_TOKEN; else unset GH_TOKEN; fi\n'
   # Bounded auto-continue (PM 2026-11-12 01:25 IST; side-agent flag + PM diagnosis: proxies
   # ended runs with stop_reason=end_turn/subtype=success and an "Incomplete:" report). After a
   # successful run whose final result lacks a DONE:/BLOCKED:/HANDOFF: marker, resume the SAME
