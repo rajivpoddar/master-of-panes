@@ -22,17 +22,28 @@ const EXIT_MENU_TEXT = "Background work is running\n❯ 1. Exit and stop tasks\n
 // booting: launcher typed, no Claude yet; fresh: the new Claude session is up at its input prompt.
 type PaneState = "menu" | "exiting" | "idle" | "busy" | "shell" | "booting" | "fresh";
 
-function harness(options: { state?: PaneState; neverBoots?: boolean; failIdentityProbe?: boolean } = {}) {
+// failIdentityProbe: how many `tmux display-message` probes fail first (Infinity = always). noSessionStart: the new Claude
+// boots but its SessionStart hook never arrives (a late or missing hook).
+function harness(options: { state?: PaneState; neverBoots?: boolean; failIdentityProbe?: number; noSessionStart?: boolean } = {}) {
   const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: ":memory:" });
   const pane = { state: options.state ?? "exiting" as PaneState, polls: 0, typed: [] as string[], shell: [] as string[], sends: [] as string[],
-    onPoll: undefined as undefined | ((polls: number) => void) };
+    onPoll: undefined as undefined | ((polls: number) => void),
+    // The VISIBLE screen (capture-pane) when it differs from the scrollback the other fakes show, and text a user appends
+    // to the typed launcher after it was typed.
+    visible: undefined as undefined | string, appended: "", probeFailures: options.failIdentityProbe ?? 0 };
   const order: string[] = [];
+  const typedRaw = () => (pane.typed.at(-1) ?? "").replace(/^tmux send-keys -l -t %7 /, "").slice(1, -1).replace(/'\\''/g, "'");
   const runShell = async (command: string) => {
     pane.shell.push(command);
     let stdout = "";
     if (command.startsWith("tmux display-message")) {
-      if (options.failIdentityProbe) throw new Error("Command failed: tmux display-message");
+      if (pane.probeFailures > 0) { pane.probeFailures--; throw new Error("Command failed: tmux display-message"); }
       stdout = `%7|${PM_PATH}\n`;
+    } else if (command.startsWith("git -C ") && command.endsWith("rev-parse --show-toplevel")) stdout = `${PM_PATH}\n`;
+    else if (command.startsWith("tmux list-panes")) stdout = `%7|${PM_PATH}\n`;
+    else if (command === "tmux capture-pane -t %7 -p -J") {
+      stdout = pane.visible ?? (pane.state === "shell" ? (pane.typed.length ? `earlier output\n$ ${typedRaw()}${pane.appended}\n` : SHELL_TEXT)
+        : pane.state === "menu" ? EXIT_MENU_TEXT : COMPOSER_TEXT);
     } else if (command.startsWith("tmux respawn-pane")) { pane.state = "shell"; order.push("respawn"); }
     else if (command === "tmux send-keys -t %7 1") order.push("1");
     else if (command.startsWith("tmux send-keys -l")) { pane.typed.push(command); order.push("type"); }
@@ -42,7 +53,7 @@ function harness(options: { state?: PaneState; neverBoots?: boolean; failIdentit
         order.push("enter");
         if (pane.state === "shell" && pane.typed.length) {
           pane.state = options.neverBoots ? "booting" : "fresh";
-          if (!options.neverBoots) db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "fresh-session", cwd: PM_PATH });
+          if (!options.neverBoots && !options.noSessionStart) db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "fresh-session", cwd: PM_PATH });
         }
       }
     } else throw new Error(`Unexpected shell command: ${command}`);
@@ -74,7 +85,6 @@ function harness(options: { state?: PaneState; neverBoots?: boolean; failIdentit
   health.PM_EXIT_SHELL_TIMEOUT_MS = 200;
   health.PM_FORCE_SHELL_TIMEOUT_MS = 100;
   health.PM_PROMPT_TIMEOUT_MS = 100;
-  health.PM_BOOT_EVENT_TIMEOUT_MS = 50;
   health.pmAgentProcess = async () => "4000:4001";
   health.getPaneCommand = async () => {
     pane.polls++;
@@ -160,13 +170,92 @@ test("exit flow without an exit menu: nothing is typed until the shell prompt, t
 });
 
 // Cause of the 16:21 IST 18 Nov failure: a single-shot pane identity probe aborted the restart before it launched anything.
-test("a failing tmux identity probe never aborts the exit flow", async () => {
-  const h = harness({ state: "menu", failIdentityProbe: true });
+// A transient probe failure only delays the next key; a probe that never answers sends nothing blind (finding 2).
+test("a transient tmux identity probe failure never aborts the exit flow", async () => {
+  const h = harness({ state: "menu", failIdentityProbe: 2 });
   try {
     const episode = armPmOnlyEpisode(h.db);
     const result = await h.health.restartPMFresh("exit", episode);
     assert.equal(result.success, true, result.reason);
     assert.deepEqual(h.order, ["1", "menu-enter", "type", "enter", "continuation", "drain"]);
+  } finally { h.db.close(); }
+});
+
+test("a pane that cannot be identified gets no menu key and no launcher: bounded wait, nothing sent", async () => {
+  const h = harness({ state: "menu", failIdentityProbe: Infinity });
+  try {
+    const episode = armPmOnlyEpisode(h.db);
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.equal(result.success, false);
+    assert.deepEqual(h.order, []);
+    assert.deepEqual(h.pane.sends, []);
+  } finally { h.db.close(); }
+});
+
+// CTO REVISE ts 1795004139.496649, finding 2: the menu is read from the visible screen inside the send lock.
+test("a menu that is only in scrollback is never answered: no key is sent when the visible screen has no menu", async () => {
+  const h = harness({ state: "menu" });
+  try {
+    h.pane.visible = COMPOSER_TEXT;
+    const episode = armPmOnlyEpisode(h.db);
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.equal(result.success, false);
+    assert.deepEqual(h.order, [], "no 1, no Enter");
+    assert.equal(h.db.getConfig("exit_pending_restart_steps") ?? "", "");
+  } finally { h.db.close(); }
+});
+
+test("a menu key is recorded durably once: the same episode never answers the menu twice", async () => {
+  // neverBoots keeps the episode open: a completed episode resets its step list with the rest of the exit state.
+  const h = harness({ state: "menu", neverBoots: true });
+  try {
+    const episode = armPmOnlyEpisode(h.db);
+    await h.health.restartPMFresh("exit", episode);
+    assert.equal(h.db.getConfig("exit_pending_restart_steps"), "menu_1,menu_Enter,launch,launched");
+    // A restarted MoP process (empty in-memory state) sees the menu again: the recorded keys are not repeated.
+    h.pane.state = "menu";
+    const before = h.order.length;
+    await h.health.answerPMExitMenu("%7", episode, new Set());
+    assert.equal(h.order.length, before);
+    // A new episode starts clean.
+    h.db.setExitPending(true, false, true);
+    assert.equal(h.db.getConfig("exit_pending_restart_steps") ?? "", "");
+  } finally { h.db.close(); }
+});
+
+test("launcher: a half-typed draft at the prompt is never joined to the launcher", async () => {
+  const h = harness({ state: "shell" });
+  try {
+    h.pane.visible = "$ half typed draft\n";
+    const result = await h.health.restartPMFresh("crash");
+    assert.equal(result.success, false);
+    assert.match(result.reason, /pm_launch_prompt_not_empty/);
+    assert.deepEqual(h.order, [], "nothing typed, nothing submitted");
+  } finally { h.db.close(); }
+});
+
+test("launcher: a draft appended after the launcher was typed is never submitted", async () => {
+  const h = harness({ state: "shell" });
+  try {
+    h.pane.appended = " && rm draft";
+    const result = await h.health.restartPMFresh("crash");
+    assert.equal(result.success, false);
+    assert.match(result.reason, /pm_launch_text_not_owned/);
+    assert.deepEqual(h.order, ["type"], "typed once, Enter withheld");
+    assert.deepEqual(h.pane.sends, []);
+  } finally { h.db.close(); }
+});
+
+test("launcher steps are recorded durably before they happen: a restarted MoP never retypes or resubmits", async () => {
+  const h = harness({ state: "shell", neverBoots: true });
+  try {
+    const episode = armPmOnlyEpisode(h.db);
+    await h.health.restartPMFresh("exit", episode);
+    assert.equal(h.db.getConfig("exit_pending_restart_steps"), "launch,launched");
+    h.pane.state = "shell";
+    const before = h.order.length;
+    assert.equal(await h.health.sendPMLaunch("%7", "cd /x && y", episode), "launch_already_attempted");
+    assert.equal(h.order.length, before, "no second type, no second Enter");
   } finally { h.db.close(); }
 });
 
@@ -203,10 +292,135 @@ test("crash recovery (no exit episode) uses the same fresh launch and one standa
     assert.equal(result.success, true, result.reason);
     assert.deepEqual(h.order, ["type", "enter", "continuation", "drain"]);
     assert.deepEqual(h.pane.sends, [PM_RESTART_CONTINUATION_PROMPT]);
-    // Same boot, second attempt: the per-boot claim refuses a resend.
+    // Same boot and same live process, second attempt: the per-boot claim refuses a resend.
     const boot = h.db.getEvents(0, 1, "SessionStart")[0].id;
-    assert.equal(await h.health.deliverPMRestartContinuation("%7", boot, "crash", null), "already_claimed");
+    assert.equal(await h.health.deliverPMRestartContinuation("%7", boot, "crash", null, "4000:4001"), "already_claimed");
     assert.equal(h.pane.sends.length, 1);
+  } finally { h.db.close(); }
+});
+
+// CTO REVISE ts 1795004139.496649, finding 1: the destination is the live replacement Claude process in the launched pane
+// plus the guarded composer. SessionStart is evidence only; it neither gates nor satisfies the delivery.
+test("a late or missing SessionStart never delays or drops the continuation", async () => {
+  const h = harness({ state: "shell", noSessionStart: true });
+  try {
+    const episode = armPmOnlyEpisode(h.db, "saved prompt");
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.equal(result.success, true, result.reason);
+    assert.deepEqual(h.order, ["type", "enter", "continuation", "drain"]);
+    assert.deepEqual(h.pane.sends, ["saved prompt"]);
+    assert.equal(h.db.getExitStatus().pending, false);
+  } finally { h.db.close(); }
+});
+
+test("a different live Claude process in the pane is never the destination: nothing is pasted, the claim stays consumed", async () => {
+  const h = harness({ state: "shell" });
+  try {
+    const episode = armPmOnlyEpisode(h.db, "saved prompt");
+    let probes = 0;
+    h.health.pmAgentProcess = async () => (++probes === 1 ? "4000:4001" : "4000:4999");
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.equal(result.success, false);
+    assert.match(result.reason, /continuation_refused_pre_effect/);
+    assert.deepEqual(h.pane.sends, []);
+    assert.equal(h.db.getExitStatus().continuation_delivery, "attempted", "no automatic resend into another process");
+  } finally { h.db.close(); }
+});
+
+test("a process probe that cannot name the Claude yet waits within the bound, then delivers once", async () => {
+  const h = harness({ state: "shell" });
+  try {
+    const episode = armPmOnlyEpisode(h.db, "saved prompt");
+    let probes = 0;
+    h.health.pmAgentProcess = async () => (++probes === 1 || probes > 3 ? "4000:4001" : null);
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.equal(result.success, true, result.reason);
+    assert.deepEqual(h.pane.sends, ["saved prompt"]);
+    assert.equal(h.db.getExitStatus().pending, false);
+  } finally { h.db.close(); }
+});
+
+// Finding 3: the first health tick after a MoP restart settles or resumes the PM-only episode (slot 0 only).
+const confirmReceipt = (db: MoPDatabase, episode: string) =>
+  db.logEvent(0, "pm_restart_continuation", null, null, { episode, trigger: "exit", boot_event_id: 1, delivery: "delivered" });
+
+test("resume tick: a confirmed continuation receipt settles the episode through the PM-only completion, nothing is resent", async () => {
+  const h = harness({ state: "fresh" });
+  try {
+    const episode = armPmOnlyEpisode(h.db, "saved prompt");
+    h.db.setConfig("exit_pending_continuation_delivery", "attempted");
+    confirmReceipt(h.db, episode);
+    await h.health.resumePMExitEpisode(h.db.getExitStatus());
+    assert.equal(h.db.getExitStatus().pending, false);
+    assert.equal(h.db.getEvents(0, 5, "exit_pending_complete").length, 1);
+    assert.deepEqual(h.pane.sends, []);
+    assert.deepEqual(h.order, []);
+  } finally { h.db.close(); }
+});
+
+test("resume tick: a receipt for another episode never settles this one", async () => {
+  const h = harness({ state: "fresh" });
+  try {
+    const episode = armPmOnlyEpisode(h.db, "saved prompt");
+    h.db.setConfig("exit_pending_continuation_delivery", "attempted");
+    confirmReceipt(h.db, `${episode}-other`);
+    await h.health.resumePMExitEpisode(h.db.getExitStatus());
+    assert.equal(h.db.getExitStatus().pending, true);
+    assert.deepEqual(h.pane.sends, []);
+  } finally { h.db.close(); }
+});
+
+test("resume tick: an attempted send with no confirmed receipt stays consumed", async () => {
+  const h = harness({ state: "fresh" });
+  try {
+    const episode = armPmOnlyEpisode(h.db, "saved prompt");
+    h.db.setConfig("exit_pending_restart_steps", "launch,launched");
+    h.db.setConfig("exit_pending_continuation_delivery", "attempted");
+    await h.health.resumePMExitEpisode(h.db.getExitStatus());
+    const status = h.db.getExitStatus();
+    assert.equal(status.pending, true);
+    assert.equal(status.continuation_delivery, "attempted");
+    assert.equal(status.episode, episode);
+    assert.deepEqual(h.pane.sends, []);
+  } finally { h.db.close(); }
+});
+
+test("resume tick: a recorded launch whose continuation was never attempted resumes the unsent step on the live Claude", async () => {
+  const h = harness({ state: "fresh" });
+  try {
+    armPmOnlyEpisode(h.db, "saved prompt");
+    h.db.setConfig("exit_pending_restart_steps", "launch,launched");
+    await h.health.resumePMExitEpisode(h.db.getExitStatus());
+    assert.deepEqual(h.pane.sends, ["saved prompt"]);
+    assert.equal(h.db.getExitStatus().pending, false);
+    // A further tick finds a settled episode: nothing more is sent.
+    await h.health.resumePMExitEpisode(h.db.getExitStatus());
+    assert.equal(h.pane.sends.length, 1);
+  } finally { h.db.close(); }
+});
+
+test("resume tick: no recorded launch, or no live Claude in the pane, resumes nothing", async () => {
+  for (const [steps, process] of [["launch", "4000:4001"], ["launch,launched", "4000:"], ["launch,launched", null]] as const) {
+    const h = harness({ state: "fresh" });
+    try {
+      armPmOnlyEpisode(h.db, "saved prompt");
+      h.db.setConfig("exit_pending_restart_steps", steps);
+      h.health.pmAgentProcess = async () => process;
+      await h.health.resumePMExitEpisode(h.db.getExitStatus());
+      assert.deepEqual(h.pane.sends, [], `${steps} / ${process}`);
+      assert.equal(h.db.getExitStatus().continuation_delivery, "waiting");
+    } finally { h.db.close(); }
+  }
+});
+
+test("resume tick: skipped while this process runs the restart flow itself", async () => {
+  const h = harness({ state: "fresh" });
+  try {
+    armPmOnlyEpisode(h.db, "saved prompt");
+    h.db.setConfig("exit_pending_restart_steps", "launch,launched");
+    h.health.pmRestartInFlight = Promise.resolve();
+    await h.health.resumePMExitEpisode(h.db.getExitStatus());
+    assert.deepEqual(h.pane.sends, []);
   } finally { h.db.close(); }
 });
 

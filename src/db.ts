@@ -2835,6 +2835,8 @@ export class MoPDatabase {
     this.setConfig("exit_pending_continuation_prompt", enabled ? continuationPrompt ?? "" : "");
     this.setConfig("exit_pending_continuation_delivery", enabled && pmOnly ? "waiting" : "");
     this.setConfig("exit_pending_stop_only", "false");
+    // Durable record of the PM restart steps whose effect was attempted (menu keys, launcher); per episode, see health.ts.
+    this.setConfig("exit_pending_restart_steps", "");
     this.setConfig("exit_pending_dev_only", enabled && devOnly ? "true" : "false");
     this.setConfig("exit_pending", enabled ? "true" : "false");
     for (const i of devSlots(this.config.slotCount)) this.setConfig(`exit_arm_${i}`, "");

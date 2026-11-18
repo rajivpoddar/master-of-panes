@@ -140,6 +140,12 @@ export function isShellPromptVisible(text: string | null | undefined): boolean {
   return /^(?:\S.*\s)?[$%#»]$/.test(last);
 }
 
+/** Bottom non-empty line of a captured screen, whitespace collapsed ("" when blank). */
+function bottomLine(text: string): string {
+  const lines = text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").split(/\r?\n/).filter((line) => line.trim() !== "");
+  return (lines.at(-1) ?? "").replace(/\s+/g, " ").trim();
+}
+
 // Dev slots: always --continue (crash recovery preserves session/work).
 // PM: fresh launch with the configured model, then one continuation prompt.
 // Respawn skill: --continue is optional arg (fresh start for atma updates).
@@ -233,12 +239,11 @@ export class ProcessHealthChecker {
   private PM_FORCE_SHELL_TIMEOUT_MS = 30_000;
   /** launcher typed -> the agent process runs in the pane (no idle prompt required; also bounds a non-episode continuation's pre-effect retries). */
   private PM_PROMPT_TIMEOUT_MS = 90_000;
-  /** agent process -> this launch's SessionStart hook row. */
-  private PM_BOOT_EVENT_TIMEOUT_MS = 20_000;
   /** tmux runner for the PM restart effects (tests substitute a fake pane). */
   private runShell: PaneCommandRunner = execShell;
   /** Single owner of a PM restart; concurrent triggers join it. */
   private pmRestartInFlight: Promise<{ success: boolean; reason: string }> | null = null;
+  private pmResumeInFlight = false;
 
   constructor(
     private db: MoPDatabase,
@@ -460,29 +465,67 @@ export class ProcessHealthChecker {
    * runs the agent, so scrollback left over after the exit never counts as a live menu. This is the only sender of that 1
    * for slot 0 (relay.ts leaves the PM menu to this flow). Probe failures just retry on the next poll.
    */
-  private async waitForPMShellPrompt(timeoutMs: number): Promise<{ paneId: string } | null> {
+  private async waitForPMShellPrompt(timeoutMs: number, episode: string | null = null): Promise<{ paneId: string } | null> {
     const deadline = Date.now() + timeoutMs;
-    let sentOne = false;
-    let sentEnter = false;
+    const sent = new Set<string>();
     for (;;) {
       const command = await this.getPaneCommand(0);
       const observed = command ? await this.relay.observeSlotPane(0) : null;
       if (observed && command) {
         if (SHELL_COMMANDS.has(command)) {
           if (isShellPromptVisible(observed.text)) return { paneId: observed.paneId };
-        } else if (this.isAgentCommand(0, command)) {
-          const menu = parsePMExitMenu(observed.text);
-          const key = !menu ? null : !sentOne ? "1" : menu.selected === 1 && !sentEnter ? "Enter" : null;
-          if (key) {
-            await withSlotSendLock(0, () => this.runShell(`tmux send-keys -t ${observed.paneId} ${key}`, { timeout: 10_000 }))
-              .catch(() => undefined);
-            if (key === "1") sentOne = true; else sentEnter = true;
-          }
+        } else if (this.isAgentCommand(0, command) && parsePMExitMenu(observed.text)) {
+          await this.answerPMExitMenu(observed.paneId, episode, sent);
         }
       }
       if (Date.now() >= deadline) return null;
       await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, deadline - Date.now()));
     }
+  }
+
+  /** Durable per-episode record (db.setExitPending resets it) of a restart step whose effect was attempted. */
+  private restartStepDone(episode: string | null, step: string): boolean {
+    return !!episode && (this.db.getConfig("exit_pending_restart_steps") ?? "").split(",").includes(step);
+  }
+
+  /** Written BEFORE the step's effect: an uncertain or failed effect stays consumed, across a MoP restart too. */
+  private markRestartStep(episode: string | null, step: string): void {
+    if (!episode) return;
+    const steps = (this.db.getConfig("exit_pending_restart_steps") ?? "").split(",").filter(Boolean);
+    this.db.setConfig("exit_pending_restart_steps", [...steps, step].join(","));
+  }
+
+  /** True for a crash/unresponsive restart (no episode) or while the same exit episode is still pending. */
+  private sameEpisode(episode: string | null): boolean {
+    if (!episode) return true;
+    const status = this.db.getExitStatus();
+    return status.pending && status.episode === episode;
+  }
+
+  /** The VISIBLE screen of a pane (no scrollback, wrapped lines joined); null when it cannot be read. */
+  private async visiblePane(paneId: string): Promise<string | null> {
+    try { return (await this.runShell(`tmux capture-pane -t ${paneId} -p -J`, { timeout: 10_000 })).stdout; } catch { return null; }
+  }
+
+  /**
+   * ONE exit-menu key, inside the slot send lock. Right before the key it rechecks the same pane, the menu on the visible
+   * screen (older scrollback never counts) and the same episode, then records the key durably first (CTO REVISE
+   * ts 1795004139.496649, finding 2). An unreadable pane just waits for the next poll within the caller's bound.
+   */
+  private async answerPMExitMenu(paneId: string, episode: string | null, sent: Set<string>): Promise<void> {
+    await withSlotSendLock(0, async () => {
+      const done = (key: string) => sent.has(key) || this.restartStepDone(episode, `menu_${key}`);
+      const key = !done("1") ? "1" : !done("Enter") ? "Enter" : null;
+      if (!key) return;
+      const identity = await verifyPaneIdentity(0, this.runShell);
+      if (!identity.ok || identity.snapshot.paneId !== paneId) return;
+      const screen = await this.visiblePane(paneId);
+      const menu = screen === null ? null : parsePMExitMenu(screen);
+      if (!menu || (key === "Enter" && menu.selected !== 1) || !this.sameEpisode(episode)) return;
+      sent.add(key);
+      this.markRestartStep(episode, `menu_${key}`);
+      await this.runShell(`tmux send-keys -t ${paneId} ${key}`, { timeout: 10_000 });
+    }).catch(() => undefined);
   }
 
   /**
@@ -620,7 +663,7 @@ export class ProcessHealthChecker {
    * continuation prompt without any gates"). The Stop hook injects /exit (hooks.ts handleStop); this runs from there:
    *   1. wait for the shell prompt, answering the exit menu with 1 on the way (waitForPMShellPrompt);
    *   2. type the launch command (pmLaunchPlan: the configured launcher and model);
-   *   3. wait for the new Claude process and its SessionStart;
+   *   3. wait for the replacement Claude process in the launched pane (SessionStart is evidence only);
    *   4. inject the continuation prompt (deliverPMRestartContinuation).
    * Every wait is bounded; a timeout logs pm_restart_failed once and stops. Nothing here holds PM input or tool calls
    * (rule 50). There is no pane/boot ownership pin, launch record or replacement binding: a transient tmux probe failure
@@ -640,7 +683,7 @@ export class ProcessHealthChecker {
 
     // 1. Shell prompt (the exit menu is answered inside the wait). A graceful /exit never escalates to a kill; only a PM
     //    that is gone or hung (crash, unresponsive) may be respawned, and a busy PM turn is never killed.
-    let shell = await this.waitForPMShellPrompt(trigger === "unresponsive" ? 0 : this.PM_EXIT_SHELL_TIMEOUT_MS);
+    let shell = await this.waitForPMShellPrompt(trigger === "unresponsive" ? 0 : this.PM_EXIT_SHELL_TIMEOUT_MS, episode);
     if (!shell) {
       if (trigger === "exit") return fail("exit_blocked_shell_not_observed_no_force");
       const command = await this.getPaneCommand(0);
@@ -663,7 +706,7 @@ export class ProcessHealthChecker {
       } catch (err) {
         return fail(`force respawn failed: ${String(err).slice(0, 200)}`);
       }
-      shell = await this.waitForPMShellPrompt(this.PM_FORCE_SHELL_TIMEOUT_MS);
+      shell = await this.waitForPMShellPrompt(this.PM_FORCE_SHELL_TIMEOUT_MS, episode);
       if (!shell) return fail("shell_prompt_not_observed_after_force_respawn");
     }
     this.unresponsiveStates.delete(0);
@@ -673,23 +716,13 @@ export class ProcessHealthChecker {
 
     // 2. The launch command, typed at the shell prompt.
     const paneId = shell.paneId;
-    const bootBefore = latestSessionStartEventId(this.db, 0);
-    const typed = `cd ${shellEscape(cwd)} && ${launchCommand}`;
-    const refusal = await withSlotSendLock(0, async () => {
-      for (const key of ["text", "Enter"] as const) {
-        const command = await this.getPaneCommand(0);
-        if (!command || !SHELL_COMMANDS.has(command)) return "pm_shell_changed";
-        await this.runShell(key === "text"
-          ? `tmux send-keys -l -t ${paneId} ${shellEscape(typed)}`
-          : `tmux send-keys -t ${paneId} Enter`, { timeout: 10_000 });
-      }
-      return null;
-    }).catch((err) => `launcher send failed: ${String(err).slice(0, 200)}`);
+    const refusal = await this.sendPMLaunch(paneId, `cd ${shellEscape(cwd)} && ${launchCommand}`, episode);
     if (refusal) return fail(refusal);
     this.db.logEvent(0, "pm_restart_launched", null, null, { trigger, episode, model, launcher, launch_command: launchCommand });
 
-    // 3. The Claude process, then its SessionStart (busy or idle: the guarded writer below decides when the composer can
-    //    take the paste).
+    // 3. The replacement Claude process in the launched pane. The destination is that live process plus the guarded
+    //    composer below, not a SessionStart row (CTO REVISE finding 1): the SessionStart id is evidence only, and a late
+    //    or missing hook delays nothing. Busy or idle, the guarded writer decides when the composer can take the paste.
     const bootCommand = await this.waitForPMAgentProcess(this.PM_PROMPT_TIMEOUT_MS);
     if (!bootCommand) return fail(`claude process not observed within ${this.PM_PROMPT_TIMEOUT_MS}ms`, true);
     this.db.logEvent(0, "agent_booted", null, null, {
@@ -698,18 +731,54 @@ export class ProcessHealthChecker {
     this.db.logEvent(0, "process_restarted", null, null, {
       command: launchCommand, restarted_at: new Date().toISOString(), trigger, model,
     });
-    const bootDeadline = Date.now() + this.PM_BOOT_EVENT_TIMEOUT_MS;
-    while (latestSessionStartEventId(this.db, 0) <= bootBefore && Date.now() < bootDeadline) {
-      await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, bootDeadline - Date.now()));
-    }
-    const boot = latestSessionStartEventId(this.db, 0);
-    if (boot <= bootBefore) return fail("session_start_not_observed_for_launch", true);
 
     // 4. The continuation prompt.
-    const outcome = await this.deliverPMRestartContinuation(paneId, boot, trigger, episode);
+    const identity = await this.pmAgentProcess(paneId);
+    const outcome = await this.deliverPMRestartContinuation(paneId, latestSessionStartEventId(this.db, 0), trigger, episode,
+      ProcessHealthChecker.ownedAgent(identity) ? identity : null);
     if (outcome !== "delivered") return fail(`continuation_${outcome}`, true);
     void this.relay.drainPMQueue();
     return { success: true, launched: true, reason: "continuation delivered" };
+  }
+
+  /**
+   * Types the launcher, then submits it; each key runs inside the slot send lock (CTO REVISE finding 2). Right before
+   * typing it rechecks the same episode, pane and shell command and that the VISIBLE screen ends at an empty prompt; right
+   * before Enter, that the visible line is exactly that prompt plus the owned launch text, so a draft typed in between is
+   * never submitted. Each step is recorded durably BEFORE its effect: an uncertain or failed send stays consumed, also
+   * across a MoP restart. A screen that cannot be read yet waits within the existing bound. Returns a refusal or null.
+   */
+  private async sendPMLaunch(paneId: string, typed: string, episode: string | null): Promise<string | null> {
+    const deadline = Date.now() + this.PM_PROMPT_TIMEOUT_MS;
+    let promptLine = "";
+    for (const step of ["launch", "launched"] as const) {
+      for (;;) {
+        const outcome = await withSlotSendLock(0, async () => {
+          if (this.restartStepDone(episode, step)) return "launch_already_attempted";
+          if (!this.sameEpisode(episode)) return "exit_pending_changed";
+          const command = await this.getPaneCommand(0);
+          if (!command || !SHELL_COMMANDS.has(command)) return "pm_shell_changed";
+          const identity = await verifyPaneIdentity(0, this.runShell);
+          if (identity.ok && identity.snapshot.paneId !== paneId) return "pm_pane_changed";
+          const screen = identity.ok ? await this.visiblePane(paneId) : null;
+          if (screen === null) return "wait";
+          if (step === "launch") {
+            if (!isShellPromptVisible(screen)) return "wait";
+            promptLine = bottomLine(screen);
+          } else if (bottomLine(screen) !== `${promptLine} ${typed}`.replace(/\s+/g, " ").trim()) return "wait";
+          this.markRestartStep(episode, step);
+          await this.runShell(step === "launch"
+            ? `tmux send-keys -l -t ${paneId} ${shellEscape(typed)}`
+            : `tmux send-keys -t ${paneId} Enter`, { timeout: 10_000 });
+          return null;
+        }).catch((err) => `launcher send failed: ${String(err).slice(0, 200)}`);
+        if (outcome === null) break;
+        if (outcome !== "wait") return outcome;
+        if (Date.now() >= deadline) return `pm_launch_${step === "launch" ? "prompt_not_empty" : "text_not_owned"}`;
+        await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, deadline - Date.now()));
+      }
+    }
+    return null;
   }
 
   private isAgentCommand(slotNum: number, command: string | null): boolean {
@@ -1065,6 +1134,10 @@ export class ProcessHealthChecker {
       this.completePMOnlyEpisode(status.episode, "health_observer");
       return;
     }
+    // A MoP restart mid-restart-flow: pick the PM-only episode up where it stopped (never blocks the tick or PM input).
+    if (status.pending && status.pm_only) void this.resumePMExitEpisode(status).catch((err) => {
+      console.error("[health] PM exit episode resume failed:", err);
+    });
     if (!status.pending || status.pm_only) return;
     const settled = Object.entries(status.cycled).every(([slot, verified]) =>
       (status.dev_only && Number(slot) === 0) || verified || this.db.isExitSlotRetained(Number(slot)));
@@ -1073,6 +1146,32 @@ export class ProcessHealthChecker {
       this.db.logEvent(0, "exit_pending_complete", null, null, {
         source: "health_observer", reason: "Every targeted slot has a verified process replacement or explicit cohort retention",
       });
+    }
+  }
+
+  /**
+   * Next tick after a MoP restart (CTO REVISE ts 1795004139.496649, finding 3), only while no restart flow of this process
+   * is running. An episode left at `attempted` whose continuation has an exact confirmed receipt settles through the same
+   * atomic PM-only completion. A launch recorded durably (`launched`) whose continuation was never attempted (`waiting`)
+   * and whose pane now runs exactly one live Claude resumes the unsent step. An `attempted` send with no receipt stays
+   * consumed, and a launch with no live agent is left alone. Only slot 0 is read or written; dev slots are untouched.
+   */
+  private async resumePMExitEpisode(status: ReturnType<MoPDatabase["getExitStatus"]>): Promise<void> {
+    if (this.pmRestartInFlight || this.pmResumeInFlight) return;
+    if (status.continuation_delivery === "attempted") {
+      if (this.continuationDeliveryRecorded(status.episode)) this.finishPMContinuation(status);
+      return;
+    }
+    if (status.continuation_delivery !== "waiting" || !this.restartStepDone(status.episode, "launched")) return;
+    this.pmResumeInFlight = true;
+    try {
+      const identity = await verifyPaneIdentity(0, this.runShell);
+      if (!identity.ok) return;
+      const process = await this.pmAgentProcess(identity.snapshot.paneId);
+      if (!ProcessHealthChecker.ownedAgent(process)) return;
+      await this.deliverPMRestartContinuation(identity.snapshot.paneId, latestSessionStartEventId(this.db, 0), "exit", status.episode, process);
+    } finally {
+      this.pmResumeInFlight = false;
     }
   }
 
@@ -1196,7 +1295,7 @@ export class ProcessHealthChecker {
    * uncertain outcome stays consumed and is never resent. Returns the delivery outcome (or why nothing was sent).
    */
   private async deliverPMRestartContinuation(paneId: string, bootId: number, trigger: string,
-    episode: string | null): Promise<string> {
+    episode: string | null, processIdentity: string | null = null): Promise<string> {
     const status = this.db.getExitStatus();
     const owned = trigger === "exit" && !!episode && status.pending && status.pm_only && status.episode === episode;
     if (trigger === "exit" && episode && !owned) return "episode_changed";
@@ -1208,29 +1307,37 @@ export class ProcessHealthChecker {
       if (status.continuation_delivery !== "waiting") return `episode_${status.continuation_delivery ?? "unarmed"}`;
       this.db.setConfig("exit_pending_continuation_delivery", "attempted");
     } else {
+      // One claim per boot: the SessionStart id may not exist yet (a late hook), so the launched process joins the token.
       const claimKey = "pm_restart_continuation_boot";
-      if (this.db.getConfig(claimKey) === String(bootId)) return "already_claimed";
-      this.db.setConfig(claimKey, String(bootId));
+      const token = processIdentity ? `${bootId}|${processIdentity}` : String(bootId);
+      if (this.db.getConfig(claimKey) === token) return "already_claimed";
+      this.db.setConfig(claimKey, token);
     }
     const prompt = owned ? (status.continuation_prompt ?? PM_RESTART_CONTINUATION_PROMPT) : PM_RESTART_CONTINUATION_PROMPT;
-    const sameBoot = () => latestSessionStartEventId(this.db, 0) === bootId;
+    // Destination = the live replacement Claude process in the launched pane plus the guarded composer, never a newer
+    // SessionStart row (CTO REVISE finding 1; SessionStart stays evidence in the receipt). `replaced` turns true only when a
+    // DIFFERENT live process owns the pane (permanent); a probe that cannot name the process is a proven pre-effect refusal
+    // that waits within the bound. The native queue behind ordinary inbound is unchanged (allowNativeQueuedInput).
+    let replaced = false;
+    const live = async (): Promise<boolean> => {
+      const id = await this.pmAgentProcess(paneId);
+      const agent = ProcessHealthChecker.ownedAgent(id);
+      if (agent && processIdentity && id !== processIdentity) replaced = true;
+      return agent && !replaced;
+    };
     const fence = (): string | null => {
       if (owned) {
         const current = this.db.getExitStatus();
         if (!current.pending || !current.pm_only || current.episode !== episode
             || current.continuation_prompt !== status.continuation_prompt) return "exit_pending_changed";
       }
-      return sameBoot() ? null : "pm_session_changed";
+      return replaced ? "pm_process_changed" : null;
     };
-    // Physical ownership of OUR unsubmitted paste, for the relay's draft cleanup inside its send lock: same boot and a
-    // Claude process still in the pane.
-    const continuationDraft = {
-      sameBoot,
-      owns: async () => sameBoot() && ProcessHealthChecker.ownedAgent(await this.pmAgentProcess(paneId)),
-    };
+    // Physical ownership of OUR unsubmitted paste, for the relay's draft cleanup inside its send lock.
+    const continuationDraft = { sameBoot: () => !replaced, owns: live };
     const send = () => this.relay.deliverGuardedToSlot(0, prompt, {
-      expectedPaneId: paneId, recheck: async () => fence(), finalCheck: fence, bracketedPaste: true,
-      allowNativeQueuedInput: true, continuationDraft,
+      expectedPaneId: paneId, bracketedPaste: true, allowNativeQueuedInput: true, continuationDraft, finalCheck: fence,
+      recheck: async () => { const refused = fence(); return refused ?? ((await live()) ? fence() : "pm_process_unavailable"); },
     });
     const deadline = Date.now() + this.PM_PROMPT_TIMEOUT_MS;
     let result = await send();

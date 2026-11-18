@@ -92,10 +92,26 @@ test("an unresolved continuation Enter holds automated paste only: no clearing k
   // Only an unconfirmed delivery holds: the flag is set exactly where the send is confirmed.
   assert.ok(relay.includes("deliveryConfirmed = true;"));
 });
-test("continuation draft ownership is physical (same boot + owned process), never the input fence", () => {
-  const owner = health.slice(health.indexOf("const sameBoot ="), health.indexOf("const send = () => this.relay.deliverGuardedToSlot(0, prompt"));
+test("continuation destination and draft ownership is the live replacement process in the launched pane, never a SessionStart row or the input fence (CTO REVISE ts 1795004139.496649, finding 1)", () => {
+  const owner = health.slice(health.indexOf("let replaced = false;"), health.indexOf("const send = () => this.relay.deliverGuardedToSlot(0, prompt"));
   assert.ok(owner.includes("continuationDraft"));
-  assert.ok(owner.includes("latestSessionStartEventId(this.db, 0) === bootId"));
-  assert.ok(owner.includes("ProcessHealthChecker.ownedAgent(await this.pmAgentProcess(paneId))"));
+  assert.ok(owner.includes("await this.pmAgentProcess(paneId)") && owner.includes("ProcessHealthChecker.ownedAgent(id)"));
+  assert.ok(!owner.includes("latestSessionStartEventId"), "SessionStart stays evidence in the receipt only");
   assert.ok(!owner.includes("inputFence") && !owner.includes("continuationInputRefusal"), "inbound/real input cancels the Enter, not ownership");
+  assert.ok(!health.includes("session_start_not_observed"), "no wait for a SessionStart row before the continuation");
+});
+test("PM restart effects are rechecked inside the send lock and recorded durably before they happen (CTO REVISE ts 1795004139.496649, finding 2)", () => {
+  const menu = health.slice(health.indexOf("private async answerPMExitMenu"), health.indexOf("* Poll until the PM pane runs the agent"));
+  assert.ok(menu.includes("withSlotSendLock(0") && menu.includes("this.visiblePane(paneId)") && menu.includes("this.sameEpisode(episode)"));
+  assert.ok(menu.indexOf("this.markRestartStep(") < menu.indexOf("send-keys"), "the key is recorded before it is sent");
+  assert.ok(!menu.includes("observeSlotPane"), "the in-lock menu read is the visible screen, not scrollback");
+  const launch = health.slice(health.indexOf("private async sendPMLaunch"), health.indexOf("private isAgentCommand"));
+  assert.ok(launch.includes("withSlotSendLock(0") && launch.includes("isShellPromptVisible(screen)") && launch.includes("bottomLine(screen)"));
+  assert.ok(launch.indexOf("this.markRestartStep(") < launch.indexOf("send-keys"), "the launcher step is recorded before it is sent");
+});
+test("the next tick after a MoP restart settles a confirmed receipt and resumes only a positively identified unsent launch (CTO REVISE ts 1795004139.496649, finding 3)", () => {
+  const resume = health.slice(health.indexOf("private async resumePMExitEpisode"), health.indexOf("// ─── Post-Restart Continue Injection"));
+  assert.ok(resume.includes("this.continuationDeliveryRecorded(status.episode)") && resume.includes("this.finishPMContinuation(status)"));
+  assert.ok(resume.includes('this.restartStepDone(status.episode, "launched")') && resume.includes("ProcessHealthChecker.ownedAgent(process)"));
+  assert.ok(!resume.includes("setConfig") && !/getSlotActivityState|setSlotState|clearSlot|assignSlot/.test(resume), "no new gate or state on PM input, no dev slot");
 });
