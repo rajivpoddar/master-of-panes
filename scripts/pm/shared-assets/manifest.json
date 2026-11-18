@@ -1061,7 +1061,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-cleanup",
-      "sha256": "76be44d8e58ee7377200c68eeb8cb6c40358d0ad453e5759d9579c3795c1bab2",
+      "sha256": "3b0e13e071d5acaa6789bea372ec73326cd6cc061a132505b27bbb792e9640b7",
       "source_path": "claude/skills/cleanup-pr/SKILL.md"
     },
     {
@@ -1115,7 +1115,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-app-review-prompts",
-      "sha256": "7ac455476b7f75de1d22129295e21b5e6ccdb7ba972e710c5e23f6f0686b5696",
+      "sha256": "10f18e2d18df2bcf0d8e5984305e1a8fc9bfca556000f0156f72287f2db34a79",
       "source_path": "claude/skills/codex-app-qa-review/templates/prompt.txt"
     },
     {

@@ -600,7 +600,7 @@ For each touched production surface, perform read-only checks after deployment: 
 
 ### Step 6.6: Notify the bug originator ASAP (MANDATORY — Rajiv directive 2026-04-30 11:01; resequenced 2026-06-17)
 
-Run this step immediately after Step 6.5 succeeds, before artifact cleanup, process sweeps, Codex retrospective, or any other deep housekeeping. Customers who reported a bug should hear that it shipped as soon as the production deploy and required prod migrations are done.
+Run this step immediately after Step 6.5 succeeds, before artifact cleanup, process sweeps, or any other deep housekeeping. Customers who reported a bug should hear that it shipped as soon as the production deploy and required prod migrations are done.
 
 Initialize an explicit status:
 
@@ -913,9 +913,8 @@ If 0 new memos → skip silently.
 
 ### Step 9.54: PR delivery retro (MANDATORY)
 
-Run the deterministic delivery retro before Codex meta-analysis and before
-`closed-clean`. This is separate from Step 9.55: Step 9.55 improves Codex/review
-gates; Step 9.54 explains why the PR took time to move and records operational
+Run the deterministic delivery retro before `closed-clean`. It is the only
+per-PR retro (Step 9.55 is retired): it explains why the PR took time to move and records operational
 root causes such as CI churn, wall-budget/cancel loops, capture/cache waits,
 dependency waits, plan/code review round counts, review/rework loops, scope
 size, and cleanup label hygiene.
@@ -1030,292 +1029,16 @@ convert the follow-up into either an existing control-plane issue, a newly filed
 bounded issue, or a noted non-actionable one-off in the cleanup tracker. Do not
 leave repeated PR-stall causes only in `/tmp`.
 
-### Step 9.55: Codex review meta-analysis — BOT + slot-side companion (MANDATORY — Rajiv directive 2026-05-16 17:50 IST + PM enhancement 2026-05-16 18:40 IST)
+### Step 9.55: RETIRED: no per-PR Codex review meta-analysis (Rajiv 2026-11-18)
 
-For every merged PR, retrospectively analyze BOTH (a) GitHub Codex bot inline comments AND (b) slot-side `codex-review-companion.mjs` invocations from MoP PostToolUse events + `/tmp/codex-review-companion/*.md` verdict markers, to identify gaps in the pre-Codex review gates (arch/plan/code/qa review skills) and propose (never land) at most one candidate check per PR (Step 9.55.e).
+Source: Rajiv, C0C7U35LBKR thread 1794928109.634879, ts 1794985004.xxx (quoted by the CTO): "yes, prune plan and qa review. move the retros to the morning brief thread instead. do it only for the top 5 pr's by ci/e2e rounds." Context ts 1794981361.359359: "we have to make our process more outcome oriented. we are wasting too much tokens and compute on things which have no return."
 
-Step 9.54 already records plan/code/qa/arch round counts into
-`/tmp/pr-retro-$PR_NUMBER.{md,json}`. Step 9.55 still reads the same slot-side
-sources because its job is deeper gate analysis: classify the finding classes
-and propose at most one candidate check. It never edits a review skill.
+Do NOT run a retro, Codex meta-analysis, candidate-check proposal or `--state codex-retro` Slack summary per merged PR. Go from Step 9.54 straight to Step 9.6. Nothing in cleanup-pr reads or writes `/tmp/pm-codex-meta-analysis-PR-*`, `/tmp/pm-codex-comments-PR-*` or `/tmp/pm-codex-companion-*` any more.
 
-Rajiv directive 2026-05-16 17:50 IST DM thread `1778933826.170419`: *"Analyze all the comments by codex bot and update our review agents so that this is caught earlier. Use a bg agent. Update cleanup pr skill and add this step."*
-
-PM enhancement 2026-05-16 18:40 IST (Rajiv DM "Your call" on PR #4585 NEEDS_DATA retrospective): Step 9.55 also reads MoP slot events because slot-side companion CLI runs (e.g., PR #4585's 7 iteration rounds pre-PR) are INVISIBLE to PM-side GitHub-only fetch. Closes the visibility gap for "slot iterates via companion before opening PR" class of PRs.
-
-**Skip conditions:**
-- PR with **0** bot comments AND **0** companion runs → silent skip
-- PR with only **nit-class** comments (no P0/P1/P2 from either source) → log to retrospective file, no skill updates
-- Pure revert / chore-only / docs-only PR → silent skip
-
-**NOT skip-eligible:** companion-only PRs (0 bot comments + N>0 companion runs) — these MUST run full analysis. PR #4585 is the canonical trigger: 7 companion rounds, 0 bot comments, v1 retrospective came back NEEDS_DATA because Step 9.55 only fetched bot side.
-
-**Procedure (Sonnet bg agent — runs in parallel with Step 9.6):**
-
-This analysis runs inside the `cleanup-pr-runner` Sonnet cleanup agent. Do not
-launch a separate Opus/general-purpose subagent for this retrospective path
-unless Rajiv explicitly approves an exception.
-
-```bash
-PR_NUMBER=<arg>
-PR_CREATED=$(gh pr view $PR_NUMBER --json createdAt --jq '.createdAt')
-PR_HEAD_REF=$(gh pr view $PR_NUMBER --json headRefName --jq '.headRefName')
-```
-
-#### Step 9.55.a — BOT-side fetch (GitHub inline comments)
-
-```bash
-COMMENTS_RAW=/tmp/pm-codex-comments-PR-$PR_NUMBER.raw.json
-COMMENTS_JSON=/tmp/pm-codex-comments-PR-$PR_NUMBER.json
-
-gh api /repos/heydonna-app/heydonna-app/pulls/$PR_NUMBER/comments > "$COMMENTS_RAW"
-python3 - "$COMMENTS_RAW" "$COMMENTS_JSON" <<'PY'
-import json, re, sys
-from pathlib import Path
-
-src = Path(sys.argv[1])
-dst = Path(sys.argv[2])
-raw = src.read_text(errors="replace")
-# GitHub comment bodies can carry copied terminal/control bytes. Normalize once,
-# then write JSONL with escaped strings for downstream processing.
-raw = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", raw)
-try:
-    comments = json.loads(raw)
-except Exception:
-    comments = []
-
-with dst.open("w") as out:
-    for comment in comments if isinstance(comments, list) else []:
-        login = ((comment.get("user") or {}).get("login") or "")
-        if not re.search("codex", login, re.I):
-            continue
-        rec = {
-            "id": comment.get("id"),
-            "path": comment.get("path"),
-            "line": comment.get("line"),
-            "commit_id": (comment.get("commit_id") or "")[:8],
-            "created_at": comment.get("created_at"),
-            "body": comment.get("body") or "",
-        }
-        out.write(json.dumps(rec, ensure_ascii=True) + "\n")
-PY
-
-BOT_COUNT=$(python3 - "$COMMENTS_JSON" <<'PY'
-import sys
-from pathlib import Path
-print(sum(1 for line in Path(sys.argv[1]).read_text(errors="replace").splitlines() if line.strip()))
-PY
-)
-echo "Bot-side: $BOT_COUNT Codex inline comments"
-```
-
-#### Step 9.55.b — SLOT-side companion read (MoP events + marker files)
-
-Slots invoke `codex-review-companion.mjs` during Phase 2 (plan-review) and Phase 4 (code-review) BEFORE opening the PR. These runs emit MoP `PostToolUse` events and write verdict markers to `/tmp/codex-review-companion/*.md`. PM-side bot fetch sees neither.
-
-```bash
-# 1. Identify slot(s) that worked on this PR via labels.
-SLOT_LABELS=$(gh pr view $PR_NUMBER --json labels --jq '.labels[].name | select(test("^slot:[1-8]$"))')
-# Fallback: if labels were stripped at cleanup, resolve the issue ONLY from the
-# authoritative closing-issue set. No title inference, no prose inference.
-if [ -z "$SLOT_LABELS" ]; then
-  # Resolve the issue ONLY from the authoritative closing-issue set. Never from
-  # the PR title. (CTO ruling 2026-09-19 21:00 IST.)
-  ISSUE=$(gh pr view $PR_NUMBER --json closingIssuesReferences \
-    --jq '.closingIssuesReferences[0].number // empty')
-  if [ -z "$ISSUE" ]; then
-    echo "Step 9.55.b: no authoritative closing issue and no slot:N label — skipping companion read (no title inference)." >&2
-  else
-    SLOT_LABELS=$(gh issue view "$ISSUE" --json timelineItems --jq '.timelineItems[] | .label.name? // empty | select(test("^slot:[1-8]$"))' 2>/dev/null | sort -u)
-  fi
-fi
-
-# 2. For each slot, query MoP PostToolUse events covering the PR window.
-COMPANION_RUNS_JSON=/tmp/pm-codex-companion-runs-PR-$PR_NUMBER.json
-echo "[]" > "$COMPANION_RUNS_JSON"
-
-for SLOT_LABEL in $SLOT_LABELS; do
-  N="${SLOT_LABEL#slot:}"
-  MOP_EVENTS_JSON=/tmp/pm-codex-companion-events-PR-$PR_NUMBER-slot-$N.json
-  curl -s "http://127.0.0.1:3100/events?slot=$N&limit=500&type=PostToolUse" > "$MOP_EVENTS_JSON" || printf '{"events":[]}' > "$MOP_EVENTS_JSON"
-  python3 - "$MOP_EVENTS_JSON" "$PR_NUMBER" "$N" "$PR_CREATED" <<'PY' >> "$COMPANION_RUNS_JSON.raw"
-import json, re, sys
-from pathlib import Path
-
-path, pr, slot, created = sys.argv[1:5]
-raw = Path(path).read_text(errors="replace")
-raw = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", raw)
-try:
-    data = json.loads(raw)
-except Exception:
-    data = {"events": []}
-
-for event in data.get("events") or []:
-    if not isinstance(event, dict):
-        continue
-    if (event.get("timestamp") or "") < created:
-        continue
-    payload = event.get("payload") or {}
-    if isinstance(payload, str):
-        payload_raw = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", payload)
-        try:
-            payload = json.loads(payload_raw)
-        except Exception:
-            payload = {}
-    if not isinstance(payload, dict):
-        payload = {}
-    tool_input = payload.get("tool_input") or {}
-    skill_name = ""
-    if isinstance(tool_input, dict):
-        skill_name = str(tool_input.get("skill") or "")
-    else:
-        tool_input = {"value": tool_input}
-    tool = str(event.get("tool_name") or payload.get("tool_name") or "")
-    tool_input_raw = json.dumps(tool_input, ensure_ascii=True, default=str).lower()
-    matches_tool = (
-        (tool == "Bash" and "codex-review-companion" in tool_input_raw)
-        or (tool == "Skill" and re.search(r"codex.*review|zen.*review", skill_name))
-        or (tool in {"Agent", "Task"} and re.search(r"codex|plan review|code review|qa review|verdict", tool_input_raw))
-    )
-    if not matches_tool or pr not in tool_input_raw:
-        continue
-    rec = {
-        "timestamp": event.get("timestamp"),
-        "slot": slot,
-        "mop_event_id": event.get("id"),
-        "tool": tool,
-        "tool_input": tool_input,
-    }
-    print(json.dumps(rec, ensure_ascii=True, default=str))
-PY
-done
-
-# 3. Read companion verdict marker files written since PR_CREATED.
-MARKER_DIR=/tmp/codex-review-companion
-if [ -d "$MARKER_DIR" ]; then
-  find "$MARKER_DIR" -name "*.md" -newermt "$PR_CREATED" -print0 2>/dev/null | while IFS= read -r -d '' MARKER; do
-    # Filter to markers matching this PR's branch or PR number.
-    if grep -qE "(PR #?$PR_NUMBER|branch.*$PR_HEAD_REF|$PR_HEAD_REF)" "$MARKER" 2>/dev/null; then
-      VERDICT=$(grep -oE 'VERDICT:\s*(APPROVE|REVISE|REJECT|REQUEST_CHANGES|NEEDS_REVISION|NEEDS_DEEPER_INVESTIGATION)' "$MARKER" | head -1 | sed 's/VERDICT:\s*//')
-      ROUND=$(grep -oE '(Round|R)[0-9]+' "$MARKER" | head -1)
-      REVIEW_TYPE=$(grep -oE 'review-type[: =]+(plan|code|qa|arch)' "$MARKER" | head -1 | grep -oE '(plan|code|qa|arch)$')
-      jq -n --arg marker "$MARKER" --arg verdict "${VERDICT:-UNKNOWN}" --arg round "${ROUND:-R?}" --arg rtype "${REVIEW_TYPE:-unknown}" --arg mtime "$(stat -f %m "$MARKER" 2>/dev/null || stat -c %Y "$MARKER")" \
-        '{source: "marker", path: $marker, verdict: $verdict, round: $round, review_type: $rtype, mtime: ($mtime | tonumber)}'
-    fi
-  done > "$COMPANION_RUNS_JSON.markers"
-fi
-
-# 4. Compute companion-run summary: round count, verdict trajectory, review-type breakdown.
-COMPANION_COUNT=$(wc -l < "$COMPANION_RUNS_JSON.raw" 2>/dev/null | tr -d ' ')
-COMPANION_COUNT="${COMPANION_COUNT:-0}"
-MARKER_COUNT=$(wc -l < "$COMPANION_RUNS_JSON.markers" 2>/dev/null | tr -d ' ')
-MARKER_COUNT="${MARKER_COUNT:-0}"
-
-echo "Slot-side: $COMPANION_COUNT companion JSONL invocations + $MARKER_COUNT verdict markers"
-```
-
-#### Step 9.55.c — COMBINE + classify (bot + companion findings)
-
-Merge bot-side (9.55.a) + slot-side (9.55.b) into a single analysis stream.
-
-**Combined skip gate:**
-```bash
-if [ "$BOT_COUNT" -eq 0 ] && [ "$COMPANION_COUNT" -eq 0 ] && [ "$MARKER_COUNT" -eq 0 ]; then
-  echo "Step 9.55 skipped: 0 bot comments AND 0 companion runs"
-  exit 0
-fi
-```
-
-**Classify each finding (from either source) by severity (P0/P1/P2/nit) and recurring class:**
-
-- `sibling-call-site` — helper changes one site but parallel sites untouched
-- `error-path-cleanup` — success path cleans, error path orphans
-- `wizard-state-flag-reset` — programmatic clear leaves derived flag stale
-- `pre-flight-invariant` — gate checks N-1 dimensions of N required
-- `whitespace/trim-parity` — frontend trims, API doesn't (or vice versa)
-- `attribution-thread` — userId/createdBy/pipelineRunId dropped through call chain
-- `stale-pending-state` — UI shows in-flight after backend transitioned
-- `failed-status-rendering` — error-state UX gap
-- `iterative-companion-cycle` — slot iterates ≥3 rounds via companion on SAME class of finding (visible only via slot-side data; PR #4585 trigger pattern)
-- `other` — file under retrospective for future class extraction
-
-**Identify which pre-Codex gate SHOULD have caught each finding.** Cross-reference against:
-
-- `~/.claude/skills/codex-app-arch-review/SKILL.md` (Criteria list)
-- `~/.claude/skills/codex-app-plan-review/SKILL.md` (CHECK list)
-- `~/.claude/skills/codex-app-code-review/SKILL.md` (CHECK list)
-- `~/.claude/skills/codex-app-qa-review/SKILL.md` (CHECK list)
-
-If no existing check would have caught it, the class is a candidate for the single 9.55.e proposal. Do NOT add it to any skill `SKILL.md` or template.
-
-For `iterative-companion-cycle` findings: surface as a process gap rather than a content gap — the recurring class is "slot kept iterating via companion instead of escalating to PM after R3" → cross-reference `Rule 4: Codex Review Fatigue → Cap at 3 Rounds` in `buddhi-dev.md` and verify the slot's behavior matches the rule.
-
-**Validate retrospectively:** for a proposed candidate, name 1-2 of the PR's findings (bot or companion) it would have flagged pre-Codex, in the proposal itself.
-
-#### Step 9.55.e — Propose at most ONE candidate check; never edit a review skill (Rajiv 2026-11-18)
-
-Source: Rajiv, C0C7U35LBKR thread 1794928109.634879, ts 1794982335.881169 ("do both"). This retires the 2026-05-19 auto-append directive (thread `1779166624.518699`): auto-appended CHECKs grew `~/.claude/skills/codex-app-code-review/SKILL.md` to ~2.8 MB / 916 CHECKs and #13414's review failed with `input_size_limit`. Context ts 1794981361.359359: *"we have to make our process more outcome oriented. we are wasting too much tokens and compute on things which have no return."*
-
-1. **Never** edit, append to or renumber a review skill, template or reviewer agent from cleanup-pr (`~/.claude/skills/codex-app-{arch,plan,code,qa}-review/SKILL.md`, their `templates/*`, `~/.claude/agents/*-reviewer.md`).
-2. The retro MAY propose **at most one** candidate check, written only in `/tmp/pm-codex-meta-analysis-PR-$PR_NUMBER.md` under `## Candidate check (proposal only)`: target skill; the one-line check; the live product rule (`~/.claude/rules/*.md`, `.claude/rules/*.md`) or general correctness class it enforces; the finding that motivated it; why the existing one-line checks missed it. Grep the target first; if an existing line already covers the class, write `none (covered by: <line>)`. The default is `none`.
-3. Adding any CHECK to a review skill requires Rajiv's explicit OK, quoted with its Slack ts on the added line. Without that OK the proposal stays in the retro file.
-4. Each non-generalizable or already-covered finding gets one line under `## Skipped (rationale)`:
-```
-- Finding: <id-or-path>; Class: <class-from-9.55.c>; Reason: <one-line — e.g. "single call-site fixture-only" / "covered by <line>">
-```
-
-#### Step 9.55.d — SAVE retrospective + Slack summary
-
-```bash
-# Save combined retrospective with both data sources
-cat > /tmp/pm-codex-meta-analysis-PR-$PR_NUMBER.md <<EOF
-# PR #$PR_NUMBER Codex Meta-Analysis ($(date -Iseconds))
-
-## Data sources
-- Bot-side (GitHub inline): $BOT_COUNT comments — /tmp/pm-codex-comments-PR-$PR_NUMBER.json
-- Slot-side (JSONL companion runs): $COMPANION_COUNT invocations — /tmp/pm-codex-companion-runs-PR-$PR_NUMBER.json.raw
-- Slot-side (verdict markers): $MARKER_COUNT markers — /tmp/pm-codex-companion-runs-PR-$PR_NUMBER.json.markers
-
-## Findings classification
-<populated by bg agent per 9.55.c classification>
-
-## Candidate check (proposal only — needs Rajiv's OK with ts before any review-skill edit)
-<at most one candidate from 9.55.e, or: none>
-Candidate proposed: ${CANDIDATE_PROPOSED:-no} (not landed)
-
-## Skipped (rationale)
-<populated by 9.55.e — one line per non-generalizable finding + per deduped finding:
-- Finding: <id-or-path>; Class: <class>; Reason: <one-line>
->
-
-## Retrospective validation
-<2-3 findings replayed against new gate text>
-EOF
-
-# Slack summary — post as a reply in the PR's PM transition thread, not as a
-# fresh top-level channel message.
-CODEX_RETRO_SLACK="/tmp/cleanup-pr-$PR_NUMBER-codex-retro-slack.md"
-cat > "$CODEX_RETRO_SLACK" <<EOF
-:mag: *Codex retrospective PR #$PR_NUMBER* — $BOT_COUNT bot comments + $COMPANION_COUNT companion runs ($MARKER_COUNT markers) analyzed; candidate check proposed: ${CANDIDATE_PROPOSED:-no} (not landed; adding one needs Rajiv's OK). Output: /tmp/pm-codex-meta-analysis-PR-$PR_NUMBER.md.
-EOF
-~/.claude/scripts/pm-transition-alert.sh \
-  --event cleanup-tracker \
-  --pr "$PR_NUMBER" \
-  --issue "$ISSUE" \
-  --state codex-retro \
-  --message-file "$CODEX_RETRO_SLACK"
-```
-
-**Why this step:**
-- Continuous improvement of pre-Codex review gates — every merged PR teaches us what slipped past
-- Compounds with the Buddhi-update classifier sweep (Step 9.5 mirrors feedback memos to `21-lessons.md`)
-- Closes the loop between Codex finding-classes and the review skills that should preempt them
-- Closes the slot-side visibility gap: pre-PR companion iteration cycles are now captured (PR #4585 NEEDS_DATA class)
-
-**Companion memos:**
-- Foundation analysis: `/tmp/pm-codex-meta-analysis-2026-05-16.md` (cross-PR prompt additions landed 17:10 IST)
-- First-step trigger: PR #4582 (5-cycle iterative pattern, 17:47 IST merge)
-- Slot-side gap trigger: PR #4585 (7 companion rounds invisible to bot-only fetch — drove the 9.55.b addition 18:40 IST)
+- Step 9.54 (the deterministic delivery retro) stays: it feeds the `closed-clean` retro gate and the cause column of the morning brief's Merged PRs block.
+- Retros move to the morning brief: it runs the retro only for the top 5 PRs by CI+E2E rounds (`~/.claude/scripts/pm/merged-pr-rounds.py`) and posts them as ONE threaded reply under the brief (not top-level, not in PR threads), in the brief format: cause class, rounds by stage, one lesson.
+- cleanup-pr never edits, appends to or renumbers a review skill, template or reviewer agent (`~/.claude/skills/codex-app-{arch,plan,code,qa}-review/*`, `~/.claude/agents/*-reviewer.md`). Adding a check there needs Rajiv's explicit OK, quoted with its Slack ts.
+- The retired procedure (9.55.a bot-side fetch, 9.55.b slot-side companion read, 9.55.c classification, 9.55.e propose-at-most-one, 9.55.d save plus Slack summary) is preserved verbatim in MoP git at commit `b4229671852163aec55b37a367c17a6e27e82e62`, file `scripts/pm/shared-assets/claude/skills/cleanup-pr/SKILL.md`, lines 1033-1319.
 
 ### Step 9.6: Verify shipping communication status is recorded
 
