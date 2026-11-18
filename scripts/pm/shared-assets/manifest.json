@@ -532,6 +532,15 @@
       "source_path": "claude/scripts/issue_claimability.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/lane-worktree.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "bc8c74f8f65a12cdb26fc5f64ba578be1a916a1869639b339f7482207877931a",
+      "source_path": "claude/scripts/lane-worktree.sh"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/launch-dev-slot-claude.sh",
       "dependencies": [],
       "dependency_status": "closed",
@@ -870,7 +879,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "2a4fed2eeb0f7a7112c6c54bb620d1682b9f59f632bd5c58186370fbe44bdf3f",
+      "sha256": "23f5976e714d520b2c3364b86e1d2699b94052396c191af31a009484d5934e4a",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -1968,7 +1977,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 215,
+    "selected_count": 216,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -2077,6 +2086,7 @@
       "~/.claude/skills/explore-issue/SKILL.md",
       "~/.claude/scripts/spark-run-monitor.sh",
       "~/.claude/scripts/proxy-agent.sh",
+      "~/.claude/scripts/lane-worktree.sh",
       "~/.claude/scripts/proxy-agent-notify.py"
     ]
   },

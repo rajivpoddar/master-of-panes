@@ -4,8 +4,12 @@ Rajiv DM D0AMF0XE6TS thread 1795004502.133389, ts 1795006580.326659; layer 2 app
 ("ok", ts 1795011133.027879) because agents deleted directories with Python shutil.
 Proxy Bash runs inside Claude Code's sandbox: writes only to /tmp, the package caches
 and the two ~/.claude state dirs; no repo root, no $HOME and no .git entry is writable.
-The network is limited to the package and GitHub hosts. Only the remote-box scripts,
-ssh and git worktree run outside the sandbox. The PM pane does not load this file.
+The network is limited to the package and GitHub hosts. Only the remote-box scripts and
+the lane-worktree.sh helper run outside the sandbox (raw ssh and "git worktree *" were removed
+after the CTO REVISE on f203baec, C0ALZJHGE49 thread 1795015806.949919, ts 1795015902.846089).
+The fence is default-ON again (PM live edit 21:17 IST, Rajiv "sandbox now", DM D0AMF0XE6TS ts
+1795016785.315309; opt-out PROXY_AGENT_SANDBOX=0) and never applies to ops/state lanes.
+The PM pane does not load this file.
 """
 import re
 from pathlib import Path
@@ -20,9 +24,11 @@ def _list(name):
     return re.findall(r'"([^"]+)"', body)
 
 
-def test_sandbox_is_on_and_cannot_be_bypassed():
-    assert '"enabled": True' in SRC
-    assert '"failIfUnavailable": True' in SRC
+def test_sandbox_is_default_on_and_cannot_be_bypassed():
+    assert '_fence_on = (os.environ.get("PROXY_AGENT_SANDBOX", "1") != "0") and not _ops_lane' in SRC
+    assert 'PROXY_AGENT_SANDBOX="${PROXY_AGENT_SANDBOX:-1}"' in SRC
+    assert '"enabled": _fence_on' in SRC
+    assert '"failIfUnavailable": _fence_on' in SRC
     assert '"autoAllowBashIfSandboxed": True' in SRC
     assert '"allowUnsandboxedCommands": False' in SRC
     assert '"enableWeakerNetworkIsolation": True' in SRC
@@ -58,19 +64,18 @@ def test_network_is_limited_to_package_and_github_hosts():
     ]
 
 
-def test_only_remote_box_ssh_and_worktree_run_outside_the_sandbox():
+def test_only_remote_box_scripts_and_lane_worktree_helper_run_outside_the_sandbox():
     assert _list("excluded_commands") == [
         "~/.claude/scripts/remote-test-box.sh *",
         "/Users/rajiv/.claude/scripts/remote-test-box.sh *",
         "~/.claude/scripts/remote-browser-box.sh *",
         "/Users/rajiv/.claude/scripts/remote-browser-box.sh *",
-        "ssh *",
-        "git worktree *",
-        "rtk git worktree *",
+        "~/.claude/scripts/lane-worktree.sh *",
+        "/Users/rajiv/.claude/scripts/lane-worktree.sh *",
     ]
     for command in _list("excluded_commands"):
         first = command.split()[0]
-        assert first not in ("gh", "python", "python3", "node", "npm", "npx", "bash", "sh", "bun")
+        assert first not in ("gh", "python", "python3", "node", "npm", "npx", "bash", "sh", "bun", "ssh", "git", "rtk")
 
 
 def test_runner_resolves_gh_token_at_run_time_and_never_writes_it():

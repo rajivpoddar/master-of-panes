@@ -2051,9 +2051,12 @@ if os.environ.get("HELPER_READONLY") == "1":
 # enableWeakerNetworkIsolation lets Go/Security-framework clients (gh) reach trustd for
 # TLS verification (the 2026-11-18 x509 OSStatus -26276 failure). GH_TOKEN is exported by
 # the runner outside the sandbox (see run.sh generation), never logged.
-# Only these commands run outside the sandbox: the two remote-box scripts, ssh, and
-# git worktree, plain or as rewritten by RTK (worktree add/remove must write the main repo's .git). gh and
-# interpreters (python, node, bash, npm) are never excluded.
+# Only these commands run outside the sandbox: the two remote-box scripts and lane-worktree.sh (worktree add/remove must
+# write the main repo's .git, so it goes through that helper, which only touches /private/tmp/<lane>-* worktrees, runs
+# git with hooks suppressed and never removes an unregistered path). Raw "ssh *" and "git worktree *" (plain or RTK
+# rewritten) are NOT excluded any more (CTO REVISE on f203baec, C0ALZJHGE49 thread 1795015806.949919, ts 1795015902.846089):
+# lanes reach remote boxes only through remote-test-box.sh / remote-browser-box.sh. gh and interpreters (python, node,
+# bash, npm) are never excluded.
 allow_write = [
     "/tmp",
     "/private/tmp",
@@ -2070,11 +2073,10 @@ excluded_commands = [
     "/Users/rajiv/.claude/scripts/remote-test-box.sh *",
     "~/.claude/scripts/remote-browser-box.sh *",
     "/Users/rajiv/.claude/scripts/remote-browser-box.sh *",
-    "ssh *",
-    "git worktree *",
-    # The user-level RTK hook rewrites git to "rtk git ..." outside a linked worktree (standalone checkouts such as
-    # heydonna-app-proxy), so the exclusion must also match the rewritten form of the same command.
-    "rtk git worktree *",
+    # Trusted worktree helper (lane-worktree.sh add|remove <path>): lane-prefixed /private/tmp targets only. Run it as a
+    # standalone command; compound commands ("cd x && ...") do not match an exclusion and stay sandboxed.
+    "~/.claude/scripts/lane-worktree.sh *",
+    "/Users/rajiv/.claude/scripts/lane-worktree.sh *",
 ]
 allowed_domains = [
     "registry.npmjs.org",
@@ -2093,8 +2095,9 @@ _ops_lane = (os.environ.get("PROXY_AGENT_TYPE_FOR_SANDBOX", "") in ("mop-main-re
 # state (pm-ops.db, state files) and restart launchd. Claude Code's sandbox protects .claude paths even when they are
 # allow-listed (21:06 IST heartbeat: 16 ops failed with EPERM / "unable to open database file"), so these lanes run
 # unsandboxed. Cleanup/deletion briefs never go to these types (launch-agent rule, Rajiv ts 1795011960.567969).
-# 2026-11-18 21:08 IST PM: fence is OPT-IN (PROXY_AGENT_SANDBOX=1) until a lane-owned worktree helper is proven through
-# this launcher (CTO REVISE on f203baec). Compound commands ("cd x && git worktree add ...") don't match the exclusion
+# 2026-11-18 21:08 IST PM: fence was made OPT-IN until the lane-worktree.sh helper is proven through this launcher
+# (CTO REVISE on f203baec); the 21:17 live edit below made it default-ON again (Rajiv "sandbox now") and the helper
+# rework leaves that default untouched. Compound commands ("cd x && git worktree add ...") don't match the exclusion
 # patterns, so the always-on fence broke ordinary lanes (mm14039b) and the 21:06 heartbeat. Cleanup/deletion lanes MUST
 # launch with PROXY_AGENT_SANDBOX=1 (launch-agent rule).
 _fence_on = (os.environ.get("PROXY_AGENT_SANDBOX", "1") != "0") and not _ops_lane  # default-ON again per Rajiv "sandbox now" (D0AMF0XE6TS ts 1795016785.315309)
@@ -2213,7 +2216,7 @@ CLAUDE_BIN="$(command -v claude)"
   printf 'PA_START=$(date +%%s); export PA_START PROXY_AGENT_NOTICE_MODEL=%q\n' "$MODEL_ID"
   printf 'python3 -I - %q %q %q %q %q > %q <<'"'"'PY'"'"'\n' "$PROMPT_FILE" "$NAME" "$MODEL" "$MODEL_ID" "$PM_ROLE" "$LOG"
   printf '%s\n' 'import datetime, pathlib, re, sys' 'brief, name, alias, model, pm = sys.argv[1:]' 'text = pathlib.Path(brief).read_text(errors="replace")' 'refs = []' 'for key in ("ISSUE", "PR"):' '    m = re.search(r"^\s*" + key + r"\s*:\s*#?(\d{3,6})\b", text, re.I | re.M)' '    refs.append(key + ":" + (m.group(1) if m else "UNKNOWN"))' 'print("[{}] LAUNCH name={} {} model_alias={} model_id={} MODE:{}".format(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), name, " ".join(refs), alias, model, "pm" if pm == "1" else "dev"))' 'PY'
-  printf '{ cat %q; printf "\\n\\n---\\nNOTE: Project skills may not be discoverable through Skill in proxy sessions. If a skill is unavailable, read its SKILL.md directly from %s and follow its instructions; do not repeatedly self-call an unknown skill.\\nPROXY RUN CONTRACT: end your turn ONLY when the task is finished or truly blocked, with a final line starting DONE:, BLOCKED: (exact external blocker) or HANDOFF:. Ending without a marker auto-resumes this session.\\nDo not send interim progress peer messages to PM; send ONE message only for a blocker that needs a PM decision, plus the final Stop.\\nSANDBOX (OS write fence ON, Rajiv 18 Nov): you can write only to /tmp, \$TMPDIR and caches. git worktree add is blocked, so create checkouts with: git clone --shared <existing checkout> /tmp/<lane>-<x>, then git fetch origin. Call ~/.claude/scripts/remote-test-box.sh and remote-browser-box.sh as the FIRST word of a command (no cd x && prefix) or ssh is refused. If a needed write is refused, report BLOCKED with the path; never work around the fence.\\n"; } > %q\n' "$PROMPT_FILE" "$SKILL_NOTE_DIRS" "$JOB_DIR/prompt0.md"
+  printf '{ cat %q; printf "\\n\\n---\\nNOTE: Project skills may not be discoverable through Skill in proxy sessions. If a skill is unavailable, read its SKILL.md directly from %s and follow its instructions; do not repeatedly self-call an unknown skill.\\nPROXY RUN CONTRACT: end your turn ONLY when the task is finished or truly blocked, with a final line starting DONE:, BLOCKED: (exact external blocker) or HANDOFF:. Ending without a marker auto-resumes this session.\\nDo not send interim progress peer messages to PM; send ONE message only for a blocker that needs a PM decision, plus the final Stop.\\nSANDBOX (OS write fence ON, Rajiv 18 Nov): you can write only to /tmp, \$TMPDIR and caches. git worktree add is blocked, so create checkouts with: git clone --shared <existing checkout> /tmp/<lane>-<x>, then git fetch origin. Call ~/.claude/scripts/remote-test-box.sh and remote-browser-box.sh as the FIRST word of a command (no cd x && prefix) or ssh is refused. If a needed write is refused, report BLOCKED with the path; never work around the fence. A worktree of your launch repo is also available as a standalone command: ~/.claude/scripts/lane-worktree.sh add /private/tmp/<lane>-<x> [<branch>|<sha>] (remove with its remove subcommand); it only accepts paths named after your own lane.\\n"; } > %q\n' "$PROMPT_FILE" "$SKILL_NOTE_DIRS" "$JOB_DIR/prompt0.md"
   printf '%q ' "$CLAUDE_BIN" "${ARGS[@]}"
   printf '< %q 2>> %q | python3 -I -u %q %q %q\n' "$JOB_DIR/prompt0.md" "$LOG" "$HOME/.claude/scripts/proxy-agent-stream.py" "$OUT" "$JSONL"
   printf 'statuses=("${PIPESTATUS[@]}"); rc=${statuses[0]}; if [[ "$rc" == 0 ]]; then rc=${statuses[1]}; fi\n'
