@@ -7,6 +7,10 @@ Muse Spark is the final entry of every tier and is emergency-only.
 CTO REVISE of 677302b (C0ALZJHGE49 thread 1794931098.013929, ts 1794932145.795929): Muse is emergency-only across EVERY eligible
 route (not merely last within one rung), raw/explicit pool ids are guarded by the cap and the emergency gate, and nested
 Haiku/Sonnet/Opus aliases never use the (uncounted) OpenCode pool. Static traces only; nothing here is run on the host.
+
+Free-model guard (CTO REVISE of 970d140, C0ALZJHGE49 thread 1794985651.254889, ts 1794987952.900739): hy4-flash-free and Muse are now
+unconditionally ineligible for any launch, so this file exercises the retained cap and emergency-gate mechanics with the guard
+turned off in the harness (FREE_GUARD_OFF); the real denial is tested in test_proxy_agent_free_model_guard.py.
 """
 import os
 import re
@@ -55,8 +59,6 @@ def _bash(body, tmp_path, env=None):
 
 PICK_STUBS = r'''
 TYPE=hd-builder
-PA_FREE_SCOPE=verified  # the free-model scope gate has its own tests (test_proxy_agent_free_model_guard.py)
-PA_FREE_SCOPE_WHY=stub
 PROXY_AGENT_CLAUDE_CAP=5
 STUB_BLOCKED="${STUB_BLOCKED:-}"
 STUB_COOLED="${STUB_COOLED:-}"
@@ -74,6 +76,12 @@ proxy_agent_sub_usable() {
 '''
 
 
+# The free-model guard is UNCONDITIONAL (test_proxy_agent_free_model_guard.py owns that behaviour): hy4-flash-free and Muse are never picked
+# or launched. These tests cover the retained pool-cap and Muse emergency-gate MECHANICS (caps and the gate are unchanged), so the harness
+# turns the guard off after the real definitions are loaded. Nothing outside this file's bash snippets is affected.
+FREE_GUARD_OFF = 'proxy_agent_free_guard_refuses() { return 1; }\n'
+
+
 def _eligible():
     """Every non-emergency route in every tier list: what the emergency gate must see exhausted."""
     return sorted({m for models in _tier_models().values() for m in models if m != MUSE})
@@ -81,7 +89,7 @@ def _eligible():
 
 def _pick(tmp_path, tier, cooled='', fail='', blocked='', enforced=True, nested=False, env=None):
     override = '' if enforced else 'proxy_agent_burn_enforced() { return 1; }\n'
-    body = (PICK_STUBS + override + PICKER
+    body = (PICK_STUBS + override + PICKER + FREE_GUARD_OFF
             + f'proxy_agent_pick_tier {tier}{" nested" if nested else ""} && rc=0 || rc=$?\n'
             + 'printf "rc=%s model=%s reason=%s\\n" "$rc" "${PICK_MODEL-}" "${PICK_REASON-}"\n')
     result = _bash(body, tmp_path, {'STUB_COOLED': cooled, 'STUB_FAIL': fail, 'STUB_BLOCKED': blocked, **(env or {})})
@@ -341,7 +349,7 @@ def test_select_resolves_nested_aliases_with_nested_and_the_primary_without():
 # ---- raw primaries: cap and emergency gate on the final resolved primary ----------------------------------------------
 
 def _guard(tmp_path, model, cooled='', fail='', blocked='', env=None):
-    body = (PICK_STUBS + 'resolve_model() { echo "$1 200000 32000"; }\n' + PICKER + GUARD
+    body = (PICK_STUBS + 'resolve_model() { echo "$1 200000 32000"; }\n' + PICKER + FREE_GUARD_OFF + GUARD
             + f'MODEL={model}\nproxy_agent_primary_pool_guard && rc=0 || rc=$?\nprintf "rc=%s\\n" "$rc"\n')
     result = _bash(body, tmp_path, {'STUB_COOLED': cooled, 'STUB_FAIL': fail, 'STUB_BLOCKED': blocked, **(env or {})})
     assert result.returncode == 0, result.stderr
@@ -417,7 +425,7 @@ def test_cap_zero_keeps_actual_scoped_exemptions(tmp_path):
 def test_an_exemption_is_not_muse_permission(tmp_path):
     # A cap-exempt launch (pool_blocked never true) still needs every eligible route known exhausted for Muse.
     body = (PICK_STUBS + 'proxy_agent_pool_blocked() { return 1; }\nresolve_model() { echo "$1 200000 32000"; }\n'
-            + PICKER + GUARD + f'MODEL={MUSE}\nproxy_agent_primary_pool_guard && echo allowed || echo refused\n')
+            + PICKER + FREE_GUARD_OFF + GUARD + f'MODEL={MUSE}\nproxy_agent_primary_pool_guard && echo allowed || echo refused\n')
     result = _bash(body, tmp_path, {'STUB_COOLED': '', 'STUB_FAIL': '', 'STUB_BLOCKED': ''})
     assert result.stdout.strip() == 'refused', result.stderr
 

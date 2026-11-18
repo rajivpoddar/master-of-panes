@@ -111,12 +111,6 @@ if [ ${#extra_secrets[@]} -gt 0 ]; then
   unset _es
   extra_args_remote="$extra_args_remote --convex-helper /root/qa/convex-lane.py --convex-root /root/qa/convex-root"
 fi
-# Launcher-pinned replay-only mode (proxy-agent.sh --qa-mode replay-only exports PROXY_AGENT_QA_REPLAY_ONLY=1, CTO REVISE C0ALZJHGE49
-# ts 1794986198.378749): the parsed --on-miss option is what opts into live capture, so it is refused here, before any credential,
-# lease, box or Convex deployment exists. Strict replay stays the default.
-if [ "${PROXY_AGENT_QA_REPLAY_ONLY:-}" = 1 ] && [ -n "$llm_onmiss" ]; then
-  echo 'QA_REPLAY_ONLY_REFUSED: --on-miss (capture-on-miss) is not available; this run is pinned to strict replay by its launcher' >&2; exit 2
-fi
 if [ -n "$llm_onmiss" ]; then
   # CTO bounds: synthetic data only (throwaway dev Convex seeded from the synthetic preview seed), GREEN-only (RED-on-revert stays strict).
   [ "$disposable_convex" = 1 ] || { echo '--on-miss requires --disposable-convex (synthetic seed in a throwaway dev Convex only)' >&2; exit 2; }

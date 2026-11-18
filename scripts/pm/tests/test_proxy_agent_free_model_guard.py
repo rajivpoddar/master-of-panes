@@ -1,15 +1,16 @@
-"""Contract tests for the free-model scope gate in proxy-agent.sh (added to the repo; not run on the host).
+"""Contract tests for the UNCONDITIONAL free-model guard in proxy-agent.sh (added to the repo; not run on the host).
 
 Rajiv DM D0AMF0XE6TS ts 1794984605.382609 ("yes"): block free/trial OpenCode models (hy4-flash-free, muse-spark-1.3-contributor)
 for agents that read customer content or write prod.
 
-CTO REVISE of b4229671 (C0ALZJHGE49 thread 1794985651.254889, ts 1794986198.378749): the decision is bound to a VERIFIED safe
-scope, default deny. A missing or ambiguous scope is ineligible, brief text can only veto, a remote-qa-runner needs a verified
-replay-only mode (the spec lane's parsed --on-miss decides, not brief text), and the verdict survives `--resume` and automatic
-continuation. Only the two ids are blocked; caps, the emergency gate and paid routing are untouched.
+CTO REVISE of 970d140 / 9ea1b9b (C0ALZJHGE49 thread 1794985651.254889, ts 1794987952.900739): a caller-declared --data-scope plus
+role/brief checks, a QA replay mode and a recorded resume verdict do not bind what the launched tools can read or write. No restricted
+execution profile exists, so both ids are ineligible for EVERY launch, --resume and auto-continuation. There is no allow path. Only
+the two ids are blocked; caps, the Muse emergency gate (test_proxy_agent_opencode_pool.py) and every other model are unchanged.
 
 Every input here is synthetic (no customer data). Static traces plus bash snippets over sliced functions; nothing is run on the host.
 """
+import hashlib
 import os
 import re
 import shlex
@@ -21,13 +22,15 @@ import pytest
 ASSETS = Path(__file__).parents[1] / 'shared-assets/claude/scripts'
 SRC = (ASSETS / 'proxy-agent.sh').read_text()
 QA_SPEC = (ASSETS / 'remote-qa-spec.sh').read_text()
+SKILL = (Path(__file__).parents[1] / 'shared-assets/claude/skills/proxy-agent/SKILL.md').read_text()
 HY4 = 'hy4-flash-free'
 MUSE = 'muse-spark-1.3-contributor'
 DEEPSEEK = 'deepseek-v4.1-flash'
-SCOPE = 'no-customer-content,no-prod-write'
+GLM = 'glm-5.3'
+FREE_IDS = (HY4, MUSE)
+# The exact declaration 9ea1b9b treated as "verified", and the QA mode it paired with it.
+VERIFIED_FLAGS = ('--data-scope', 'no-customer-content,no-prod-write', '--qa-mode', 'replay-only')
 BENIGN = 'Fix the sidebar spacing.\n'
-NO_BRIEF = None
-MISSING_BRIEF = object()
 
 
 def _slice(start, end):
@@ -35,9 +38,10 @@ def _slice(start, end):
     return SRC[first:SRC.index(end, first)]
 
 
-# Tier lists, the scope gate (classify/decide/restore/record), the guard helpers and proxy_agent_pick_tier.
+# Tier lists, the guard helpers, the emergency gate and proxy_agent_pick_tier; the primary guard; the argv loop.
 PICKER = _slice('# OpenCode Go pool: hy4-flash-free', '# Ordinary burn gate for capped roles')
 GUARD = _slice('proxy_agent_primary_pool_guard() {', '# Primary burn check (CTO REVISE')
+ARGV_LOOP = _slice('while [[ $# -gt 0 ]]; do\n  case "$1" in\n    --cwd)', 'case "$RUNG" in')
 
 STUBS = r'''
 PROXY_AGENT_CLAUDE_CAP=5
@@ -50,6 +54,10 @@ proxy_agent_pool_blocked() { return 1; }
 proxy_agent_sub_usable() { case " $STUB_COOLED " in *" $1 "*) return 1;; esac; return 0; }
 resolve_model() { echo "$1 200000 32000"; }
 '''
+ARGV_PRELUDE = '''
+usage() { echo USAGE; exit 2; }
+FREE_SCOPE_FLAG_IGNORED=0; CWD=""; CWD_EXPLICIT=0; MODEL=auto; MODEL_EXPLICIT=0; RUNG=""; OUT=""; MAX_TURNS=200; PM_ROLE=0
+'''
 
 
 def _all_routes():
@@ -57,40 +65,33 @@ def _all_routes():
     return sorted({m for _, models in tiers for m in models.split()})
 
 
-def _run(tmp_path, body, brief=NO_BRIEF, scope='', qa_mode='', resume='', run_name='', spec_script=None, cooled=''):
-    """Run `body` after the sliced gate. `brief`: None = no ROLE_BRIEF, MISSING_BRIEF = a path that does not exist, str = file text."""
-    brief_path = ''
-    if brief is MISSING_BRIEF:
-        brief_path = str(tmp_path / 'absent-brief.md')
-    elif brief is not None:
-        brief_file = tmp_path / 'brief.md'
-        brief_file.write_text(brief)
-        brief_path = str(brief_file)
+def _run(tmp_path, body, args=(), brief=BENIGN, resume='', cooled='', sidecar=None):
+    """Run `body` after the sliced guard. `args` go through the launcher's real argv loop first.
+
+    `sidecar`: text written as the 9ea1b9b per-run verdict record (<state>/<run>/free-scope) for `resume`.
+    """
     state = tmp_path / 'state'
-    if run_name:
-        (state / run_name).mkdir(parents=True, exist_ok=True)
-    if spec_script is not None:
-        spec = tmp_path / '.claude/scripts/remote-qa-spec.sh'
-        spec.parent.mkdir(parents=True, exist_ok=True)
-        spec.write_text(spec_script)
-    header = (f'set -euo pipefail\nROLE_BRIEF={shlex.quote(brief_path)}\nDATA_SCOPE_ARG={shlex.quote(scope)}\n'
-              f'QA_MODE_ARG={shlex.quote(qa_mode)}\nRESUME_NAME={shlex.quote(resume)}\nPROXY_AGENT_RUN_NAME={shlex.quote(run_name)}\n')
+    brief_file = tmp_path / 'brief.md'
+    brief_file.write_text(brief)
+    if sidecar is not None:
+        (state / 'run1').mkdir(parents=True, exist_ok=True)
+        (state / 'run1/free-scope').write_text(sidecar)
+    header = (f'set -euo pipefail\nROLE_BRIEF={shlex.quote(str(brief_file))}\nRESUME_NAME={shlex.quote(resume)}\n'
+              f'PROXY_AGENT_RUN_NAME=run1\n')
     env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': str(tmp_path), 'PROXY_AGENT_RUN_STATE_DIR': str(state),
            'STUB_COOLED': cooled}
-    return subprocess.run(['bash', '-c', header + STUBS + PICKER + GUARD + body], capture_output=True, text=True, env=env)
+    script = header + ARGV_PRELUDE + STUBS + ARGV_LOOP + PICKER + GUARD + body
+    return subprocess.run(['bash', '-c', script, 'bash', *args], capture_output=True, text=True, env=env)
 
 
-def _verdict(tmp_path, agent_type, **kwargs):
-    """Run proxy_agent_free_scope_classify (fresh launch, or --resume when `resume` is set) and return its verdict fields."""
-    body = (f'TYPE={agent_type}\nproxy_agent_free_scope_classify\n'
-            'printf "scope=%s why=%s pin=%s\\n" "$PA_FREE_SCOPE" "$PA_FREE_SCOPE_WHY" "${PROXY_AGENT_QA_REPLAY_ONLY-unset}"\n')
-    result = _run(tmp_path, body, **kwargs)
-    assert result.returncode == 0, result.stderr
-    return dict(part.split('=', 1) for part in result.stdout.strip().splitlines()[-1].split(' '))
+def _verified_sidecar(brief_text, agent_type='hd-builder'):
+    """The record 9ea1b9b wrote for a verified launch, digest-bound to the brief so its restore would have accepted it."""
+    digest = hashlib.sha256(brief_text.encode()).hexdigest()
+    return f'v1\ntype={agent_type}\nbrief_sha256={digest}\nscope=verified\nwhy=scope_declared_and_checked\nqa_replay_only=1\n'
 
 
 def _pick(tmp_path, agent_type, tier, cooled='claude-haiku-5-5', **kwargs):
-    body = (f'TYPE={agent_type}\nproxy_agent_free_scope_classify\nproxy_agent_pick_tier {tier} && rc=0 || rc=$?\n'
+    body = (f'TYPE={agent_type}\nproxy_agent_pick_tier {tier} && rc=0 || rc=$?\n'
             'printf "rc=%s model=%s\\n" "$rc" "${PICK_MODEL-}"\n')
     result = _run(tmp_path, body, cooled=cooled, **kwargs)
     assert result.returncode == 0, result.stderr
@@ -99,8 +100,7 @@ def _pick(tmp_path, agent_type, tier, cooled='claude-haiku-5-5', **kwargs):
 
 
 def _primary(tmp_path, agent_type, model, **kwargs):
-    body = (f'TYPE={agent_type}\nproxy_agent_free_scope_classify\nMODEL={model}\n'
-            'proxy_agent_primary_pool_guard && rc=0 || rc=$?\nprintf "rc=%s\\n" "$rc"\n')
+    body = f'TYPE={agent_type}\nMODEL={model}\nproxy_agent_primary_pool_guard && rc=0 || rc=$?\nprintf "rc=%s\\n" "$rc"\n'
     result = _run(tmp_path, body, **kwargs)
     assert result.returncode == 0, result.stderr
     return result.stdout.strip().splitlines()[-1], result.stderr
@@ -110,226 +110,141 @@ def test_only_the_two_approved_ids_are_free_trial_ids():
     assert re.search(r'proxy_agent_is_free_trial_id\(\) \{\n\s+case "\$1" in hy4-flash-free\|muse-spark-1\.3-contributor\) return 0;;', SRC)
 
 
-# ---- default deny: scope must be declared and verified ------------------------------------------------------------
+# ---- no allow path: nothing a caller, brief, role, QA mode or record says can lift the block ------------------------
 
-def test_a_declared_scope_with_a_benign_brief_is_the_only_way_to_a_verified_verdict(tmp_path):
-    assert _verdict(tmp_path, 'hd-builder', brief=BENIGN, scope=SCOPE)['scope'] == 'verified'
-    rc, model, stderr = _pick(tmp_path, 'hd-builder', 'LIGHT', brief=BENIGN, scope=SCOPE)
-    assert (rc, model) == ('0', HY4) and 'REFUSED free-model guard' not in stderr
+def test_the_guard_takes_no_input_but_the_model_id_and_no_allow_machinery_remains():
+    body = _slice('proxy_agent_free_guard_refuses() {', '# Ordered tiers;')
+    assert body.strip().splitlines()[1].strip() == 'proxy_agent_is_free_trial_id "$1"'
+    for gone in ('DATA_SCOPE_ARG', 'QA_MODE_ARG', 'PA_FREE_SCOPE', 'free_scope_classify', 'free_scope_decide', 'free_scope_restore',
+                 'free_scope_record', 'free-scope', 'qa_replay_only_verified', 'PA_QA_REPLAY_PINNED', 'PROXY_AGENT_QA_REPLAY_ONLY',
+                 'QA_REPLAY_ONLY', 'brief_names_sensitive_scope', 'proxy_agent_sensitive_type', 'proxy_agent_sensitive_launch'):
+        assert gone not in SRC, gone
+    assert 'QA_REPLAY_ONLY' not in QA_SPEC and '--on-miss' in QA_SPEC  # the 9ea1b9b spec-lane pin is removed; capture-on-miss is untouched
 
 
-def test_missing_scope_denies_even_a_benign_launch_of_any_role(tmp_path):
-    for agent_type in ('hd-builder', 'hd-planner', 'some-new-unclassified-role'):
-        fields = _verdict(tmp_path, agent_type, brief=BENIGN, scope='')
-        assert fields['scope'] == 'denied' and fields['why'] == 'scope_missing', agent_type
-    rc, model, stderr = _pick(tmp_path, 'some-new-unclassified-role', 'LIGHT', brief=BENIGN)
+@pytest.mark.parametrize('agent_type', ('hd-builder', 'hd-planner', 'remote-qa-runner', 'some-new-unclassified-role', 'pm-triage-agent'))
+@pytest.mark.parametrize('flags', ((), VERIFIED_FLAGS))
+def test_a_verified_declaration_no_longer_grants_either_id(tmp_path, agent_type, flags):
+    # The full 9ea1b9b "verified" declaration (--data-scope + --qa-mode) with a benign readable brief, for a non-sensitive role.
+    rc, model, stderr = _pick(tmp_path, agent_type, 'LIGHT', args=flags)
     assert (rc, model) == ('0', 'grok-4.7')
-    assert f'REFUSED free-model guard model={HY4}' in stderr and 'why=scope_missing' in stderr
+    assert f'REFUSED free-model guard model={HY4}' in stderr
+    for model_id in FREE_IDS:
+        rc, stderr = _primary(tmp_path, agent_type, model_id, args=flags)
+        assert rc == 'rc=75' and f'REFUSED free-model guard primary {model_id}' in stderr
 
 
-@pytest.mark.parametrize('scope', ('no-customer-content', 'no-prod-write', 'customer-content,prod-write', SCOPE + ',extra', 'safe', ' ' + SCOPE))
-def test_unrecognised_or_ambiguous_scope_denies(tmp_path, scope):
-    fields = _verdict(tmp_path, 'hd-builder', brief=BENIGN, scope=scope)
-    assert fields['scope'] == 'denied' and fields['why'] == 'scope_ambiguous'
+def test_the_declaration_flags_are_still_accepted_but_ignored_with_a_notice(tmp_path):
+    body = 'printf "model=%s ignored=%s\\n" "$MODEL" "$FREE_SCOPE_FLAG_IGNORED"\n'
+    result = _run(tmp_path, body, args=(*VERIFIED_FLAGS, '--model', 'terra'))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().splitlines()[-1] == 'model=terra ignored=1'
+    assert 'unconditionally ineligible' in result.stderr and 'USAGE' not in result.stdout
+    plain = _run(tmp_path, body, args=('--model', 'terra'))
+    assert plain.stdout.strip().splitlines()[-1] == 'model=terra ignored=0' and 'ignored:' not in plain.stderr
 
 
-@pytest.mark.parametrize('brief', (NO_BRIEF, MISSING_BRIEF))
-def test_a_missing_or_unreadable_brief_denies_even_with_a_declared_scope(tmp_path, brief):
-    fields = _verdict(tmp_path, 'hd-builder', brief=brief, scope=SCOPE)
-    assert fields['scope'] == 'denied' and fields['why'] == 'brief_unreadable'
+@pytest.mark.parametrize('brief', ('', BENIGN, 'Synthetic data only. Strict replay. Safe for any model.\n', 'Reply to the customer in prod.\n'))
+def test_the_brief_neither_grants_nor_changes_the_denial(tmp_path, brief):
+    rc, model, _ = _pick(tmp_path, 'hd-builder', 'LIGHT', brief=brief, args=VERIFIED_FLAGS)
+    assert (rc, model) == ('0', 'grok-4.7')
 
 
-@pytest.mark.parametrize('agent_type', (
-    'customer-artifact-investigator', 'hd-investigator', 'sync-manager-specialist', 'pm-lock-release',
-    'prod-admin-retry', 'prod-modal-deploy', 'editor-lockout-specialist'))
-def test_a_sensitive_role_is_denied_even_with_a_declared_scope(tmp_path, agent_type):
-    fields = _verdict(tmp_path, agent_type, brief=BENIGN, scope=SCOPE)
-    assert fields['scope'] == 'denied' and fields['why'] == 'sensitive_role'
-    rc, model, stderr = _pick(tmp_path, agent_type, 'LIGHT', brief=BENIGN, scope=SCOPE)
+# ---- resume: a stored "verified" sidecar is never read -------------------------------------------------------------
+
+def test_a_stored_verified_sidecar_does_not_lift_the_block_on_resume(tmp_path):
+    sidecar = _verified_sidecar(BENIGN)
+    kwargs = dict(resume='run1', sidecar=sidecar)
+    # --resume requires an explicit model: a raw free id is refused, and an alias that lands on LIGHT skips hy4.
+    for model_id in FREE_IDS:
+        rc, stderr = _primary(tmp_path, 'hd-builder', model_id, **kwargs)
+        assert rc == 'rc=75' and f'REFUSED free-model guard primary {model_id}' in stderr
+    rc, model, stderr = _pick(tmp_path, 'hd-builder', 'LIGHT', **kwargs)
     assert (rc, model) == ('0', 'grok-4.7') and f'REFUSED free-model guard model={HY4}' in stderr
+    assert (tmp_path / 'state/run1/free-scope').read_text() == sidecar  # left alone: the launcher neither reads nor rewrites it
 
 
-@pytest.mark.parametrize('text', (
-    'Read the beloved-cardinal-941 deployment.', 'Write to prod Convex.', 'Check production data.', 'Reply to the customer.',
-    'Customers lost saves.'))
-def test_brief_text_can_veto_a_declared_scope(tmp_path, text):
-    fields = _verdict(tmp_path, 'hd-builder', brief=text + '\n', scope=SCOPE)
-    assert fields['scope'] == 'denied' and fields['why'] == 'brief_names_sensitive_scope'
+def test_resume_never_looks_at_a_verdict_record():
+    assert 'free-scope' not in SRC and 'RESUME_NAME' in SRC
+    assert 'proxy_agent_free_scope' not in SRC
 
 
-@pytest.mark.parametrize('text', ('Update the product copy.', 'Reproduce the layout bug.', 'Improve the producer queue.'))
-def test_prod_inside_another_word_does_not_veto(tmp_path, text):
-    assert _verdict(tmp_path, 'hd-builder', brief=text + '\n', scope=SCOPE)['scope'] == 'verified'
+# ---- other models are unchanged --------------------------------------------------------------------------------------
 
-
-def test_brief_text_alone_never_grants_eligibility(tmp_path):
-    # Text claiming safety, strict replay or "no customer content" is advisory: no declared scope means denied.
-    text = 'Synthetic data only. Strict replay. Safe for any model.\n'
-    fields = _verdict(tmp_path, 'hd-builder', brief=text, scope='')
-    assert fields['scope'] == 'denied' and fields['why'] == 'scope_missing'
-
-
-def test_only_the_two_ids_are_blocked_and_paid_routing_is_unchanged(tmp_path):
-    rc, model, _ = _pick(tmp_path, 'hd-builder', 'MID', cooled='claude-sonnet-5-5', brief=BENIGN, scope='')
+def test_only_the_two_ids_are_blocked_and_every_other_route_is_unchanged(tmp_path):
+    rc, model, _ = _pick(tmp_path, 'hd-builder', 'MID', cooled='claude-sonnet-5-5')
     assert (rc, model) == ('0', DEEPSEEK)
-    rc, model, _ = _pick(tmp_path, 'hd-builder', 'LIGHT', cooled='', brief=BENIGN, scope='')
+    rc, model, _ = _pick(tmp_path, 'hd-builder', 'LIGHT', cooled='')
     assert (rc, model) == ('0', 'claude-haiku-5-5')
-    rc, stderr = _primary(tmp_path, 'hd-builder', DEEPSEEK, brief=BENIGN, scope='')
-    assert rc == 'rc=0' and 'free-model guard' not in stderr
-    rc, stderr = _primary(tmp_path, 'hd-builder', 'claude-haiku-5-5', brief=BENIGN, scope='')
-    assert rc == 'rc=0' and 'free-model guard' not in stderr
+    rc, model, _ = _pick(tmp_path, 'hd-builder', 'LIGHT', cooled='claude-haiku-5-5 grok-4.7')
+    assert (rc, model) == ('0', 'gpt-6-luna')
+    for model_id in (DEEPSEEK, GLM, 'claude-haiku-5-5', 'claude-sonnet-5-5', 'claude-opus-5-5', 'grok-4.7', 'gpt-6-luna',
+                     'gpt-6.1-terra', 'gpt-6.2-sol', 'gpt-6-astra', 'claude-fable-5-2'):
+        rc, stderr = _primary(tmp_path, 'hd-builder', model_id, args=VERIFIED_FLAGS)
+        assert rc == 'rc=0' and 'free-model guard' not in stderr, model_id
 
 
-def test_muse_follows_the_scope_verdict_and_the_emergency_gate_is_unchanged(tmp_path):
+def test_the_other_opencode_ids_keep_their_pool_cap_check(tmp_path):
+    body = ('TYPE=hd-builder\nproxy_agent_pool_blocked() { [[ "$1" == deepseek-v4.1-flash ]]; }\nMODEL=deepseek-v4.1-flash\n'
+            'proxy_agent_primary_pool_guard && rc=0 || rc=$?\nprintf "rc=%s\\n" "$rc"\n')
+    result = _run(tmp_path, body)
+    assert result.stdout.strip().splitlines()[-1] == 'rc=75' and 'REFUSED primary deepseek-v4.1-flash (opencode pool_cap)' in result.stderr
+
+
+# ---- Muse: refused before the emergency gate, so it is never picked even when that gate would open --------------------
+
+def test_muse_is_never_picked_even_with_every_other_route_exhausted(tmp_path):
     cooled = ' '.join(r for r in _all_routes() if r != MUSE)
-    rc, model, stderr = _pick(tmp_path, 'hd-builder', 'PLAN', cooled=cooled, brief=BENIGN, scope='')
-    assert (rc, model) == ('75', '') and f'REFUSED free-model guard model={MUSE}' in stderr
-    rc, model, _ = _pick(tmp_path, 'hd-builder', 'PLAN', cooled=cooled, brief=BENIGN, scope=SCOPE)
-    assert (rc, model) == ('0', MUSE)
+    for tier in ('LIGHT', 'PLAN', 'BUILD1', 'REVIEW'):
+        rc, model, stderr = _pick(tmp_path, 'hd-builder', tier, cooled=cooled, args=VERIFIED_FLAGS)
+        assert (rc, model) == ('75', ''), tier
+        assert f'REFUSED free-model guard model={MUSE}' in stderr and 'emergency_gate skip' not in stderr
 
 
-@pytest.mark.parametrize('model', (HY4, MUSE))
-def test_a_raw_free_primary_needs_a_verified_scope(tmp_path, model):
-    rc, stderr = _primary(tmp_path, 'hd-builder', model, brief=BENIGN, scope='')
-    assert rc == 'rc=75' and f'REFUSED free-model guard primary {model}' in stderr and 'why=scope_missing' in stderr
-    rc, stderr = _primary(tmp_path, 'customer-artifact-investigator', model, brief=BENIGN, scope=SCOPE)
-    assert rc == 'rc=75' and 'why=sensitive_role' in stderr
-    # A verified scope only lifts this gate; the pool cap and Muse emergency gate (test_proxy_agent_opencode_pool.py) still apply.
-    rc, _ = _primary(tmp_path, 'hd-builder', HY4, brief=BENIGN, scope=SCOPE)
-    assert rc == 'rc=0'
+def test_a_raw_free_primary_is_refused_by_the_guard_not_the_emergency_gate(tmp_path):
+    cooled = ' '.join(r for r in _all_routes() if r != MUSE)  # the emergency gate WOULD open for Muse here
+    rc, stderr = _primary(tmp_path, 'hd-builder', MUSE, cooled=cooled, args=VERIFIED_FLAGS)
+    assert rc == 'rc=75' and f'REFUSED free-model guard primary {MUSE}' in stderr and 'emergency_gate' not in stderr
+    rc, stderr = _primary(tmp_path, 'hd-builder', HY4, args=VERIFIED_FLAGS)
+    assert rc == 'rc=75' and f'REFUSED free-model guard primary {HY4}' in stderr
 
 
-def test_a_free_id_is_refused_when_no_verdict_was_ever_computed(tmp_path):
-    body = 'TYPE=hd-builder\nunset PA_FREE_SCOPE\nproxy_agent_free_guard_refuses hy4-flash-free && echo refused || echo allowed\n'
-    result = _run(tmp_path, body, brief=BENIGN, scope=SCOPE)
-    assert result.stdout.strip().splitlines()[-1] == 'refused', result.stderr
+# ---- automatic continuation ------------------------------------------------------------------------------------------
 
-
-# ---- QA: replay eligibility follows the verified route, not brief text ---------------------------------------------
-
-REPLAY_SPEC = 'echo "QA_REPLAY_ONLY_REFUSED"\n'
-
-
-def test_strict_replay_wording_in_a_brief_is_not_evidence_for_a_qa_runner(tmp_path):
-    brief = 'Run the QA scenario with --strict-replay. Strict replay only.\n'
-    fields = _verdict(tmp_path, 'remote-qa-runner', brief=brief, scope=SCOPE, spec_script=REPLAY_SPEC)
-    assert fields['scope'] == 'denied' and fields['why'] == 'qa_replay_only_unverified' and fields['pin'] == 'unset'
-    rc, model, stderr = _pick(tmp_path, 'remote-qa-runner', 'LIGHT', brief=brief, scope=SCOPE, spec_script=REPLAY_SPEC)
-    assert (rc, model) == ('0', 'grok-4.7') and f'REFUSED free-model guard model={HY4}' in stderr
-
-
-def test_replay_only_needs_the_route_to_carry_the_enforcement(tmp_path):
-    for spec in (None, 'echo "an older spec lane that still accepts --on-miss"\n'):
-        fields = _verdict(tmp_path, 'remote-qa-runner', brief=BENIGN, scope=SCOPE, qa_mode='replay-only', spec_script=spec)
-        assert fields['scope'] == 'denied' and fields['why'] == 'qa_replay_only_unverified' and fields['pin'] == 'unset'
-
-
-def test_a_declared_replay_only_mode_on_a_capable_route_with_a_safe_scope_is_eligible_and_pinned(tmp_path):
-    fields = _verdict(tmp_path, 'remote-qa-runner', brief=BENIGN, scope=SCOPE, qa_mode='replay-only', spec_script=REPLAY_SPEC)
-    assert fields['scope'] == 'verified' and fields['pin'] == '1'
-    rc, model, _ = _pick(tmp_path, 'remote-qa-runner', 'LIGHT', brief=BENIGN, scope=SCOPE, qa_mode='replay-only', spec_script=REPLAY_SPEC)
-    assert (rc, model) == ('0', HY4)
-
-
-def test_replay_only_without_a_safe_scope_is_still_denied(tmp_path):
-    fields = _verdict(tmp_path, 'remote-qa-runner', brief=BENIGN, scope='', qa_mode='replay-only', spec_script=REPLAY_SPEC)
-    assert fields['scope'] == 'denied' and fields['why'] == 'scope_missing'
-
-
-def test_the_replay_pin_is_an_exported_launcher_mode_and_the_capture_lane_is_denied():
-    assert 'export PROXY_AGENT_QA_REPLAY_ONLY=1' in SRC
-    assert 'QA_REPLAY_ONLY="${PA_QA_REPLAY_PINNED:-0}" python3 -' in SRC
-    assert '"Bash(*remote-browser-box.sh capture*)", "Bash(*remote-qa-capture.sh*)", "Bash(*--on-miss*)"' in SRC
-
-
-def _qa_guard():
-    start = QA_SPEC.index('if [ "${PROXY_AGENT_QA_REPLAY_ONLY:-}" = 1 ]')
-    return QA_SPEC[start:QA_SPEC.index('if [ -n "$llm_onmiss" ]; then\n  # CTO bounds', start)]
-
-
-@pytest.mark.parametrize('pin,onmiss,expected_rc', (('1', '--on-miss', 2), ('1', '', 0), ('', '--on-miss', 0)))
-def test_the_spec_lane_refuses_a_parsed_on_miss_only_under_the_launcher_pin(tmp_path, pin, onmiss, expected_rc):
-    script = f'llm_onmiss={shlex.quote(onmiss)}\n{_qa_guard()}\necho reached\n'
-    env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'PROXY_AGENT_QA_REPLAY_ONLY': pin}
-    result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, env=env)
-    assert result.returncode == expected_rc
-    assert ('QA_REPLAY_ONLY_REFUSED' in result.stderr) == (expected_rc == 2)
-    assert ('reached' in result.stdout) == (expected_rc == 0)
-
-
-def test_the_spec_lane_refusal_precedes_credentials_leases_and_dry_run():
-    refusal = QA_SPEC.index('QA_REPLAY_ONLY_REFUSED')
-    assert refusal < QA_SPEC.index('if [ -n "$llm_onmiss" ]; then\n  # CTO bounds')
-    assert refusal < QA_SPEC.index('if [ "$dry_run" = yes ]; then echo "DRY_RUN')
-    assert refusal < QA_SPEC.index('check-credentials')
-
-
-# ---- resume: the recorded verdict is restored, never recomputed ----------------------------------------------------
-
-def test_the_verdict_recorded_at_launch_is_restored_on_resume_without_any_declaration(tmp_path):
-    first = _verdict(tmp_path, 'hd-builder', brief=BENIGN, scope=SCOPE, run_name='run1')
-    assert first['scope'] == 'verified'
-    assert (tmp_path / 'state/run1/free-scope').is_file()
-    # --resume carries no --data-scope; the restored role/brief only confirm the record belongs to them.
-    again = _verdict(tmp_path, 'hd-builder', brief=BENIGN, scope='', resume='run1', run_name='run1')
-    assert again['scope'] == 'verified' and again['why'].startswith('resume:')
-    rc, model, _ = _pick(tmp_path, 'hd-builder', 'LIGHT', brief=BENIGN, scope='', resume='run1', run_name='run1')
-    assert (rc, model) == ('0', HY4)
-
-
-def test_a_denied_launch_stays_denied_on_resume_whatever_the_restored_inputs_say(tmp_path):
-    assert _verdict(tmp_path, 'hd-builder', brief=BENIGN, scope='', run_name='run2')['scope'] == 'denied'
-    # The old heuristic would re-run on a benign restored brief and pass; the record wins, and a resume-time --data-scope is ignored.
-    again = _verdict(tmp_path, 'hd-builder', brief=BENIGN, scope=SCOPE, resume='run2', run_name='run2')
-    assert again['scope'] == 'denied' and again['why'] == 'resume:scope_missing'
-    rc, stderr = _primary(tmp_path, 'hd-builder', HY4, brief=BENIGN, scope=SCOPE, resume='run2', run_name='run2')
-    assert rc == 'rc=75' and 'REFUSED free-model guard primary' in stderr
-
-
-def test_resume_without_a_record_is_denied(tmp_path):
-    fields = _verdict(tmp_path, 'hd-builder', brief=BENIGN, scope=SCOPE, resume='never-launched', run_name='never-launched')
-    assert fields['scope'] == 'denied' and fields['why'] == 'resume_scope_unrecorded'
-
-
-def test_resume_with_a_changed_brief_or_role_is_denied(tmp_path):
-    assert _verdict(tmp_path, 'hd-builder', brief=BENIGN, scope=SCOPE, run_name='run3')['scope'] == 'verified'
-    changed = _verdict(tmp_path, 'hd-builder', brief=BENIGN + 'One more line.\n', scope='', resume='run3', run_name='run3')
-    assert changed['scope'] == 'denied' and changed['why'] == 'resume_scope_mismatch'
-    other = _verdict(tmp_path, 'hd-planner', brief=BENIGN, scope='', resume='run3', run_name='run3')
-    assert other['scope'] == 'denied' and other['why'] == 'resume_scope_mismatch'
-
-
-def test_the_qa_replay_pin_is_restored_on_resume(tmp_path):
-    first = _verdict(tmp_path, 'remote-qa-runner', brief=BENIGN, scope=SCOPE, qa_mode='replay-only', spec_script=REPLAY_SPEC, run_name='run4')
-    assert first['scope'] == 'verified' and first['pin'] == '1'
-    again = _verdict(tmp_path, 'remote-qa-runner', brief=BENIGN, scope='', qa_mode='', resume='run4', run_name='run4')
-    assert again['scope'] == 'verified' and again['pin'] == '1'
-
-
-def test_classification_runs_once_after_role_resolution_and_resume_never_decides_again():
-    assert 'proxy_agent_resolve_type\nproxy_agent_free_scope_classify\nproxy_agent_select || exit 75' in SRC
-    classify = _slice('proxy_agent_free_scope_classify() {', '# 0 (refuse) when model id $1 is a free/trial id')
-    resumed = classify[:classify.index('else')]
-    assert 'proxy_agent_free_scope_restore' in resumed and 'proxy_agent_free_scope_decide' not in resumed
-    assert classify.index('proxy_agent_free_scope_decide') < classify.index('proxy_agent_free_scope_record')
-    assert SRC.count('proxy_agent_free_scope_decide\n') == 1 and 'proxy_agent_sensitive_launch' not in SRC
-
-
-# ---- automatic continuation ----------------------------------------------------------------------------------------
-
-def test_auto_continuation_reuses_the_launch_model_and_stops_a_free_run_without_a_verified_verdict():
+def _continuation_line():
     runner = _slice("  case \"$TYPE\" in\n    pm-lock-release|prod-*|manual-lease-release", "  printf 'printf \"Continue the task")
-    guard = "printf 'case %q in hy4-flash-free|muse-spark-1.3-contributor) [[ %q == verified ]] || PROXY_AGENT_NO_CONTINUE=1;; esac\\n' \"$MODEL_ID\" \"${PA_FREE_SCOPE:-denied}\""
-    assert guard in runner
+    line = re.search(r"^  printf 'case %q in hy4-flash-free\|muse-spark-1\.3-contributor\) PROXY_AGENT_NO_CONTINUE=1;; esac\\n' \"\$MODEL_ID\"$",
+                     runner, re.M)
+    assert line, runner
+    return line.group(0).strip()
+
+
+@pytest.mark.parametrize('model_id,expected', ((HY4, '1'), (MUSE, '1'), (DEEPSEEK, '0'), ('claude-haiku-5-5', '0'), ('gpt-6.1-terra', '0')))
+def test_the_generated_runner_never_continues_a_free_id_run(tmp_path, model_id, expected):
+    # Run the launcher's real generator line, then the generated line, and read the flag the continuation loop tests.
+    script = f'MODEL_ID={shlex.quote(model_id)}\n{_continuation_line()} > gen.sh\nPROXY_AGENT_NO_CONTINUE=0\nsource ./gen.sh\necho "$PROXY_AGENT_NO_CONTINUE"\n'
+    result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, cwd=tmp_path,
+                            env={'PATH': os.environ.get('PATH', '/usr/bin:/bin')})
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == expected
+
+
+def test_continuation_reuses_the_launch_model_and_the_denial_precedes_the_loop():
     # The first run and the continuation both expand the same ARGS (one --model), so no continuation re-selects a model.
     assert SRC.count('--model "$MODEL_ID" --max-turns') == 1
     assert SRC.count('printf \'%q \' "$CLAUDE_BIN" "${ARGS[@]}"') == 2
-    loop = SRC.index("printf 'while [[ ( \"$rc\" == 0")
-    assert SRC.index(guard) < loop
+    assert SRC.index(_continuation_line()) < SRC.index("printf 'while [[ ( \"$rc\" == 0")
 
 
-# ---- ordering inside the picker ------------------------------------------------------------------------------------
+# ---- ordering --------------------------------------------------------------------------------------------------------
 
-def test_guard_runs_before_the_emergency_gate_and_before_last_is_set():
+def test_the_guard_runs_before_the_emergency_gate_and_before_last_is_set():
     pick = _slice('proxy_agent_pick_tier() {', '# Ordinary burn gate for capped roles')
     assert pick.index('proxy_agent_free_guard_refuses "$id"') < pick.index('proxy_agent_is_emergency_muse "$id"') < pick.index('last="$id"')
+    select = _slice('proxy_agent_select() {', '# Model table: alias')
+    assert select.index('proxy_agent_primary_pool_guard || return 75') < select.index('proxy_agent_pick_tier LIGHT nested')
+    assert 'proxy_agent_resolve_type\nproxy_agent_select || exit 75' in SRC  # no classification step sits between them any more
+
+
+def test_the_skill_documents_the_unconditional_rule_and_no_declaration_flow():
+    assert 'UNCONDITIONAL' in SKILL and 'DEFAULT-DENY' not in SKILL and 'Declare it per launch' not in SKILL
