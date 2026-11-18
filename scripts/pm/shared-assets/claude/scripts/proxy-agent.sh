@@ -1573,6 +1573,15 @@ proxy_agent_pick_tier() {
     printf 'proxy-agent: REFUSED no usable tier model (%s)\n' "$skipped" >&2
     return 75
   fi
+  # Cap enforcement on the fallback path (MoP proxy cap repair 2026-11-19): the best-effort fallback of a non-enforced role is never a way
+  # past a pool cap. `last` is recorded before the pool check above, so it can be a pool-capped id (or empty when every id was refused);
+  # exporting it would launch (or, for the nested aliases, hand the child) a model the picker had just skipped as pool_cap. Same fail-closed
+  # 75 as the enforced branch. Exempt roles and a valid P0 override still pass proxy_agent_pool_blocked; an unreadable Claude/Grok/Codex count stays fail-open.
+  if [[ -z "$last" ]] || proxy_agent_pool_blocked "$last"; then
+    PICK_MODEL=""
+    printf 'proxy-agent: REFUSED fallback_last %s (%s)\n' "${last:-none}" "$([[ -z "$last" ]] && echo no_candidate || echo pool_cap)" >&2
+    return 75
+  fi
   PICK_MODEL="$last"; PICK_REASON="fallback_last"
 }
 
@@ -1706,6 +1715,26 @@ proxy_agent_primary_pool_guard() {
       fi
       if proxy_agent_pool_blocked "$_guard_id"; then
         printf 'proxy-agent: REFUSED primary %s (codex pool_cap)\n' "$_guard_id" >&2
+        return 75
+      fi
+      return 0;;
+  esac
+  # Cap enforcement on every primary path (MoP proxy cap repair 2026-11-19). A raw `--model claude-*` / `--model grok` (and a --resume of
+  # one) skips proxy_agent_pick_tier, and only the Codex and OpenCode pools were re-checked here, so an explicit Claude or Grok primary
+  # launched past CLAUDE_PROXY_CAP / GROK_PROXY_CAP (even 0) while the same role on `--model auto` was skipped as pool_cap. Same
+  # pool_blocked decision as the picker (role exemptions and a valid P0 override still apply), on the router-equivalent identity so a
+  # decorated or upper-case id is the same admission. A tier-picked primary was already admitted by that decision, so this only
+  # re-confirms it.
+  case "$(proxy_agent_router_identity "$_guard_id")" in
+    claude-*)
+      if proxy_agent_pool_blocked "$_guard_id"; then
+        printf 'proxy-agent: REFUSED primary %s (claude pool_cap)\n' "$_guard_id" >&2
+        return 75
+      fi
+      return 0;;
+    grok-4.7|grok)
+      if proxy_agent_pool_blocked "$_guard_id"; then
+        printf 'proxy-agent: REFUSED primary %s (grok pool_cap)\n' "$_guard_id" >&2
         return 75
       fi
       return 0;;
@@ -1966,10 +1995,13 @@ case "$MODEL" in
   hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor) ;;  # OpenCode Go via CLIProxyAPI; conservative 200000/32000 window until a source is added
   deepseek|deepseek-flash-4.1)
     # Emergencies only: explicit --model plus a P0 cap override (Rajiv D0AMF0XE6TS ts 1794806595.680589).
-    case "${PROXY_AGENT_CAP_OVERRIDE:-}" in
-      P0:*) echo "proxy-agent: DeepSeek emergency route for ${PROXY_AGENT_CAP_OVERRIDE}" >&2;;
-      *) echo "PROXY_AGENT_FAILED reason=deepseek_requires_p0_override (set PROXY_AGENT_CAP_OVERRIDE=P0:<issue>)" >&2; exit 2;;
-    esac;;
+    # Valid override only (MoP proxy cap repair 2026-11-19): the glob `P0:*` accepted `P0:`, `P0:abc` and `P0:1 anything`, while every other
+    # override gate (proxy_agent_cap_exempt, the total-cap gate, proxy-burn-shadow.py) requires `P0:<digits>`. Same shape here, no wildcard.
+    if [[ "${PROXY_AGENT_CAP_OVERRIDE:-}" =~ ^P0:[0-9]+$ ]]; then
+      echo "proxy-agent: DeepSeek emergency route for ${PROXY_AGENT_CAP_OVERRIDE}" >&2
+    else
+      echo "PROXY_AGENT_FAILED reason=deepseek_requires_p0_override (set PROXY_AGENT_CAP_OVERRIDE=P0:<issue>)" >&2; exit 2
+    fi;;
   *) echo "proxy-agent: model '$MODEL' not in alias table; using 200000-token window (warning)" >&2;;
 esac
 # Auto-compact window is capped by Claude Code at 1,000,000 tokens.
