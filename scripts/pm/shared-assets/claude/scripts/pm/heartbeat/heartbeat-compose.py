@@ -47,7 +47,7 @@ COLLECTOR_TIMEOUTS = {
     "axiom": 45, "active-users": 45, "error-map": 90, "support": 120,
     "pr-open-snapshot": 210, "priority-inversion": 90,
     "pending-github": 90, "remote-boxes": 30,
-    "usage": 30, "email": 30, "proxies": 5, "ci-selection": 60,
+    "usage": 30, "email": 30, "proxies": 5, "ci-selection": 60, "reminders": 5,
 }
 # Independent hourly checks share one deadline, not the sum of their limits.
 COMPOSE_COLLECTOR_BUDGET = 210
@@ -332,6 +332,7 @@ def active_users_block(active: dict | None, window_label: str) -> tuple[list[str
 
 IDLE_SLOT_MIN = 20  # slots must not stay idle > 20 min (20-buddhi-pm.md rule 23)
 MOP_SLOTS_URL = "http://127.0.0.1:3100/slots"
+MOP_REMINDERS_URL = "http://127.0.0.1:3100/alert-reminders?expired_since=48h"  # MoP 3f4be39: expired, no stop obligation
 LANE_SPLIT_MIN = 240  # lanes over 4h get a split check (20-buddhi-pm.md 17 "Thin slices")
 
 
@@ -3457,6 +3458,48 @@ def opencode_line(now: datetime, caps: Path = PROXY_CAPS_FILE, root: Path = PROX
     return f"*OpenCode Go:* {cap_text} | {live_text} | {registered_text} | {muse_text}"
 
 
+EXPIRED_REMINDERS_LABEL = "*Expired reminders (48h):*"
+MAX_EXPIRED_REMINDERS = 6
+
+
+def render_expired_reminders(doc) -> str:
+    """One line for MoP's expired-without-stop-obligation reminders (CTO ask C0ALZJHGE49 thread 1794990919.983979).
+
+    Pure. Each row is the key, the time the scheduler MARKED it expired (`updated_at`, IST; a delayed tick makes this
+    later than the scheduled cutoff) and "no stop obligation". An empty successful list is "none". Anything that is
+    not a well-formed success document is "listing unavailable": a failed read is never rendered as "none", and a row
+    that already carries a stop obligation breaks the endpoint contract and is never labelled "no stop obligation".
+    """
+    rows = doc.get("reminders") if isinstance(doc, dict) and doc.get("success") is True else None
+    if not isinstance(rows, list) or any(
+            not isinstance(r, dict) or not isinstance(r.get("key"), str) or not r["key"]
+            or r.get("stop_obligation_id") is not None for r in rows):
+        return f"{EXPIRED_REMINDERS_LABEL} listing unavailable"
+    if not rows:
+        return f"{EXPIRED_REMINDERS_LABEL} none"
+    shown = []
+    for row in rows[:MAX_EXPIRED_REMINDERS]:
+        key = re.sub(r"[^\w.:#/+-]", "-", row["key"])[:60]  # no '@' mentions, backticks or mrkdwn from a key
+        try:
+            at = _ist(datetime.fromisoformat(str(row.get("updated_at")).replace("Z", "+00:00")).timestamp())
+        except (TypeError, ValueError):
+            at = "at an unknown time"
+        shown.append(f"{key} expired {at}, no stop obligation")
+    more = len(rows) - len(shown)
+    return f"{EXPIRED_REMINDERS_LABEL} " + "; ".join(shown) + (f"; +{more} more" if more else "")
+
+
+def expired_reminders_line(url: str = MOP_REMINDERS_URL, timeout: int = COLLECTOR_TIMEOUTS["reminders"]) -> str:
+    """Read-only GET of MoP's expired-reminder list. Never raises; any failure is "listing unavailable"."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:  # GET only
+            doc = json.loads(resp.read())
+    except Exception:
+        doc = None
+    return render_expired_reminders(doc)
+
+
 def compose(
     mode: str,
     now: datetime,
@@ -3492,6 +3535,7 @@ def compose(
     memory: str | None = None,  # PM Claude RSS line; 1h only
     opencode: str | None = None,  # opencode_line(): OpenCode Go counts, rendered under the Burn block; 1h only
     ci_selection: str | None = None,  # ci_selection_line(): "*CI selection:*" under Remote boxes; 1h only
+    expired_reminders: str | None = None,  # expired_reminders_line(): "*Expired reminders (48h):*" under CI selection; 1h only
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -3526,6 +3570,7 @@ def compose(
     if mode == "1h":
         body += ["", remote_boxes or "*Remote boxes:* unavailable (collector not run)"]
         body += ["", ci_selection or "*CI selection:* unavailable (collector not run)"]
+        body += ["", expired_reminders or f"{EXPIRED_REMINDERS_LABEL} listing unavailable (no result)"]
     if tracked:
         # Rajiv 2026-10-27 DM D0AMF0XE6TS thread 1793097714.304129: tracked features right after Slots.
         body += ["", *tracked]
@@ -3581,7 +3626,8 @@ def compose(
     memory_extra = len(memory_lines)
     opencode_extra = len(opencode_lines)
     ci_extra = 1 if mode == "1h" else 0  # the CI selection line must never be folded away
-    report = cap_lines(compact_report(lines, 23 if mode == "3h" else 20 + burn_extra + pace_extra + memory_extra + opencode_extra + ci_extra,
+    reminders_extra = 1 if mode == "1h" else 0  # nor the expired-reminders line
+    report = cap_lines(compact_report(lines, 23 if mode == "3h" else 20 + burn_extra + pace_extra + memory_extra + opencode_extra + ci_extra + reminders_extra,
                                       cadence=mode),
                        MAX_LINE_CHARS - LINE_NOTE_RESERVE)
     if mode == "3h":
@@ -3916,10 +3962,11 @@ def parallel_collect(jobs, wall_cap=COMPOSE_COLLECTOR_BUDGET, cache_dir=HOURLY_C
     for name in jobs:
         value, error = results.get(name, (None, "timed out"))
         path = cache_dir / (name + ".json")
-        if name in {'mac-box', 'proxies', 'ci-selection'}:
+        if name in {'mac-box', 'proxies', 'ci-selection', 'reminders'}:
             # Proxy observations must never fall back to legacy MoP/log caches.
             # Individual mac-box sources own their own caches. A CI selection line is rendered live or as
             # "unavailable (<reason>)": a last-good line would let a stale selection stand behind a live claim.
+            # The expired-reminders line is the same: a cached "none" must never stand in for a failed read.
             results[name] = value
             continue
         if collector_success(value):
@@ -4050,6 +4097,7 @@ def collect_hourly(args, py, hours, now, failures):
         "pending-github": lambda: pending_github(timeout=COLLECTOR_TIMEOUTS["pending-github"]),
         "proxies": lambda: read_proxies(now),
         "ci-selection": lambda: ci_selection_line(timeout=COLLECTOR_TIMEOUTS["ci-selection"]),
+        "reminders": lambda: expired_reminders_line(timeout=COLLECTOR_TIMEOUTS["reminders"]),
     }
     # Hourly producer for usage/quota (appends usage-snapshots.jsonl before the 1h burn read). Registered ONLY for the
     # claimed normal producer (pm-hourly-post.sh passes --sample-usage-claim after its atomic bucket mkdir). Bare CLI
@@ -4232,6 +4280,7 @@ def main() -> int:
         proxies=hourly.get("proxies") if args.mode == "1h" else None,
         burn=burn, pace=pace, memory=memory_line, opencode=opencode,
         ci_selection=hourly.get("ci-selection") if args.mode == "1h" else None,
+        expired_reminders=hourly.get("reminders") if args.mode == "1h" else None,
     )
     labels = {"axiom": "*Axiom errors", "active": "*Active users", "prs": "open non-draft PRs",
               "slots": "*Slots", "priority": "*Slots",
