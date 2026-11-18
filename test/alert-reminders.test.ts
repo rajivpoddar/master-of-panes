@@ -159,6 +159,38 @@ test("add is idempotent on key: same args no-op, different args refused, --repla
   assert.equal(store.get("k1")?.text, "different");
 });
 
+test("extend moves only until_at on an active row and never revives, shortens, or rewrites a lapsed row", () => {
+  const { store } = memoryStore();
+  const created = store.add(normalized(), T0);
+  assert.ok(created.ok);
+  const before = store.get("k1");
+  assert.ok(before);
+  const later = T0 + 5 * 24 * HOUR;
+  const extended = store.extendUntil("k1", later, T0 + HOUR);
+  assert.ok(extended);
+  assert.equal(extended.outcome, "extended");
+  assert.equal(extended.row.until_at, later);
+  assert.equal(extended.row.next_at, before.next_at);
+  assert.equal(extended.row.claim_gen, before.claim_gen);
+  assert.equal(extended.row.interval_s, before.interval_s);
+  assert.equal(extended.row.post_count, before.post_count);
+  assert.equal(extended.row.stop_obligation_id, before.stop_obligation_id);
+  assert.equal(extended.row.text, before.text);
+  assert.equal(store.extendUntil("k1", later, T0 + HOUR)?.outcome, "already_far_enough");
+  assert.equal(store.extendUntil("k1", later - HOUR, T0 + HOUR)?.outcome, "already_far_enough");
+  assert.equal(store.get("k1")?.until_at, later);
+  const lapsedAt = later + MIN;
+  const lapsed = store.extendUntil("k1", later + 48 * HOUR, lapsedAt);
+  assert.equal(lapsed?.outcome, "lapsed");
+  assert.equal(store.get("k1")?.status, "active");
+  assert.equal(store.get("k1")?.until_at, later);
+  assert.equal(store.stop("k1", "cancelled", lapsedAt)?.row.status, "stopped");
+  assert.equal(store.extendUntil("k1", later + 3 * HOUR, lapsedAt)?.outcome, "not_active");
+  assert.equal(store.get("k1")?.status, "stopped");
+  assert.equal(store.get("k1")?.until_at, later);
+  assert.equal(store.extendUntil("missing", later, T0), null);
+});
+
 test("a relative --until is not part of the idempotency comparison, an absolute one is", () => {
   const { store } = memoryStore();
   assert.ok(store.add(normalized({ until_relative: true }), T0).ok);

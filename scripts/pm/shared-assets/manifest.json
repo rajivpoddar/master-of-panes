@@ -672,7 +672,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-mop-cli",
-      "sha256": "cbb252ebf7ae35486cc30ce6d9f5c2573da4527236762f1af70a96dc67eb295e",
+      "sha256": "3a2f911a87e2b9cae6f850844a0aac6c8aeac6a27a358abee9416427a0e399f3",
       "source_path": "claude/scripts/mop.py"
     },
     {
@@ -962,7 +962,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-spark-monitor",
-      "sha256": "f74ddd532d1461943354e87278d2010bfa473b61690a25608bc2a6c44e0cefac",
+      "sha256": "e275dfc7e2893e91a965e0a665efde8278fdf415804c94b04679a645792e8312",
       "source_path": "claude/scripts/spark-run-monitor.sh"
     },
     {

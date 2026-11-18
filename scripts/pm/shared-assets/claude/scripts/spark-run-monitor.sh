@@ -3,11 +3,15 @@
 # Usage: spark-run-monitor.sh --run-name N --log /remote/log --memory-config LAUNCHER_EXPORT.json
 #        [--thread-ts TS] [--interval 900] [--max-hours H] [--container OWNED_CONTAINER]
 #        [--proc-pattern PGREP_PATTERN] [--floor-mib ASSERT_FLOOR] [--channel C0ALZJHGE49] [--host dgx-spark]
-# [--reminder-key KEY] keeps the run's bounded recurring Alerts reminder renewed while the run is unfinished.
+# [--reminder-key KEY] keeps the run's existing bounded Alerts reminder alive by EXTENDING its cutoff only (never replaced).
+# [--down-obligation-id N] binds an already-open training_run_down row to this monitor (else exactly one open row for the run is adopted).
 # --validate-config-only binds the installed CPU policy without Slack, memory clearance or enforcement.
 # No --thread-ts: posts a new top-level parent, prints its ts. Never mentions CTO. Never prints secrets.
 # Step stats post as before. A DOWN run (container/process gone, no training-complete marker) or an unreachable Spark
-# alerts as the HeyDonna Alerts bot every 30 min, and a down run holds a pm-ops training_run_down obligation until recovery.
+# alerts as the HeyDonna Alerts bot every 30 min via the thread given with --thread-ts. The monitor binds ONE pm-ops
+# training_run_down obligation id per outage, never re-opens a closed row, and resolves that exact id only after fresh,
+# identity-bound trainer progress (or a verified terminal state) AND announces only after the ledger confirms.
+# Posts are DELIVERED, REFUSED (confirmed zero-effect Slack refusal) or UNCERTAIN (never retried, never re-sent as another identity).
 exec python3 - "$@" <<'PY'
 import argparse, re, subprocess, sys, time, os, tempfile, shlex, json, math, datetime
 
@@ -64,14 +68,25 @@ def load_memory_config(path, run_name, floor_mib):
         raise ValueError("REFUSE[monitor]: configuration or CLI differs from resolved guard policy")
     return cfg
 
+HOST_UNREACHABLE = "memory telemetry SSH failed"
+
 def memory_status(cfg, host, mode="sample"):
     cmd = shlex.join(["python3", "-I", "-c", MEMORY_PROGRAM, json.dumps(cfg), mode])
     result = subprocess.run(["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", host, cmd],
                             capture_output=True, text=True, errors="replace", timeout=60)
     if result.returncode != 0:
-        return {"verdict": {"state": "UNKNOWN", "reason": "memory telemetry SSH failed"},
+        return {"verdict": {"state": "UNKNOWN", "reason": HOST_UNREACHABLE},
                 "floor_mib": cfg["floor_mib"], "cuda_free_mib": None, "os_avail_mib": None}
     return json.loads(result.stdout)
+
+def bind_status(cfg, host):
+    """Policy binding check. An unreachable host (ssh failure or timeout) is reported as HOST_UNREACHABLE so the caller can
+    keep the coverage gap visible and retry; a mismatch or malformed answer still raises/refuses and is never bypassed."""
+    try:
+        return memory_status(cfg, host, "config")
+    except (subprocess.TimeoutExpired, OSError):
+        return {"verdict": {"state": "UNKNOWN", "reason": HOST_UNREACHABLE},
+                "floor_mib": cfg["floor_mib"], "cuda_free_mib": None, "os_avail_mib": None}
 
 class SSHFailure(Exception):
     def __init__(self, rc):
@@ -121,15 +136,18 @@ ap.add_argument("--channel", default="C0ALZJHGE49")
 ap.add_argument("--host", default="dgx-spark")
 ap.add_argument("--container", help="exact owned training container name/id; enforcement stops ONLY this one (never by pattern)")
 ap.add_argument("--total-steps", type=int, help="authoritative optimizer-step total for this run; required for persisted progress")
-ap.add_argument("--reminder-key", help="MoP alert-reminder key to keep renewed (same args, 7-day bound) while this monitor runs (a cancelled reminder is never revived)")
+ap.add_argument("--reminder-key", help="MoP alert-reminder key whose cutoff this monitor EXTENDS (7-day bound, schedule/counters/stop policy untouched; a stopped, expired or cancelled reminder is never revived)")
+ap.add_argument("--down-obligation-id", type=int, help="open pm-ops training_run_down obligation id to bind (else exactly one open row for this run is adopted at start)")
 a = ap.parse_args()
 memory_config = load_memory_config(a.memory_config, a.run_name, a.floor_mib)
-binding = memory_status(memory_config, a.host, "config")
+binding = bind_status(memory_config, a.host)
 if a.validate_config_only:
     print(json.dumps(binding, sort_keys=True))
     sys.exit(0 if binding["verdict"]["state"] == "CONFIG_ONLY" else 1)
-if binding["verdict"]["state"] != "CONFIG_ONLY":
+if binding["verdict"]["state"] != "CONFIG_ONLY" and binding["verdict"].get("reason") != HOST_UNREACHABLE:
     sys.exit("REFUSE[monitor]: installed policy binding unavailable or mismatched")
+# An unreachable host at startup is handled below, once post() exists: it stays a visible coverage gap and is retried;
+# nothing is sampled, enforced or reported as covered until the hash-pinned policy binding is CONFIG_ONLY.
 SEND = os.path.expanduser("~/.claude/skills/slack-message/scripts/slack-send.sh")
 SECRET = re.compile(r"(xox[a-z]-[\w-]+|sk-[\w-]{8,}|hf_\w{8,}|ghp_\w{8,}|Bearer\s+\S+|(?i:(?:token|secret|password|api[_-]?key)\s*[=:]\s*\S+))")
 def redact(s): return SECRET.sub("[redacted]", s)
@@ -137,35 +155,55 @@ def redact(s): return SECRET.sub("[redacted]", s)
 ALERT_DIR = os.environ.get("SPARK_MONITOR_ALERT_DIR") or os.path.expanduser("~/.claude/state/spark-monitor/alerts")
 POST_RETRY_DELAY_S = 10
 
-# Delivered = slack-send.sh rc 0 AND its "OK ts=" line (printed only after Slack returned ok:true with a ts).
-# One retry; a second failure appends a local alert row so a terminal/dead alert is never silent (2026-11-07).
+# One attempt. DELIVERED = slack-send.sh rc 0 AND its "OK ts=" line. A confirmed auth or membership
+# refusal (zero-effect) is REFUSED. A timeout, lost response or anything else is UNCERTAIN and is consumed:
+# never retried, never re-sent as the default identity (CTO REVISE 2026-11-18). Alerts posts use only the
+# Alerts bot in the channel the caller named (C0ALZJHGE49 / the run thread). C09TYQC1DEF is not a route.
+AUTH_REFUSAL_ERRORS = {
+    "not_in_channel", "channel_not_found", "invalid_auth", "account_inactive", "token_revoked",
+    "not_authed", "missing_scope", "is_archived", "thread_parent_not_in_channel", "ekm_access_denied",
+    "org_login_required", "no_permission", "restricted_action",
+}
+
+def classify_post(rc, stdout, stderr, timed_out):
+    if timed_out or rc is None:
+        return "UNCERTAIN", None
+    blob = (stdout or "") + "\n" + (stderr or "")
+    match = re.search(r"^OK ts=(\d+\.\d+)\b", stdout or "", re.M)
+    if rc == 0 and match:
+        return "DELIVERED", match.group(1)
+    if "SLACK_SEND_REFUSED" in blob:
+        return "REFUSED", None
+    err = re.search(r"\berror=([A-Za-z0-9_]+)", blob)
+    if err and err.group(1) in AUTH_REFUSAL_ERRORS:
+        return "REFUSED", None
+    return "UNCERTAIN", None
+
 def post(text, thread=None, alert=False):
     text = redact(text)
     cmd = ["bash", SEND, "-c", a.channel] + (["-t", thread] if thread else []) + ["-f"]
-    # alert=True posts as the HeyDonna Alerts bot (SLACK_SEND_AS=alerts) so PM processes it. A third attempt under
-    # the default identity keeps a down alert from being lost if the Alerts bot cannot post in this channel.
-    envs = [dict(os.environ, SLACK_SEND_AS="alerts")] * 2 + [None] if alert else [None, None]
-    why = ""
-    for attempt, env in enumerate(envs, 1):
-        try:
-            r = subprocess.run(cmd, input=text, capture_output=True, text=True, errors="replace", timeout=120, env=env)
-            m = re.search(r"^OK ts=(\d+\.\d+)\b", r.stdout or "", re.M)
-            if r.returncode == 0 and m: return m.group(1)
-            why = "rc=%d %s" % (r.returncode, redact(((r.stdout or "") + (r.stderr or "")).strip())[:200])
-        except (subprocess.TimeoutExpired, OSError) as e:
-            why = type(e).__name__
-        print("post attempt %d failed: %s" % (attempt, why), file=sys.stderr, flush=True)
-        if attempt < len(envs): time.sleep(POST_RETRY_DELAY_S)
+    env = dict(os.environ, SLACK_SEND_AS="alerts") if alert else None
+    why, outcome, ts = "", "UNCERTAIN", None
     try:
-        os.makedirs(ALERT_DIR, exist_ok=True)
-        path = os.path.join(ALERT_DIR, re.sub(r"[^\w.-]", "_", a.run_name) + ".alerts.jsonl")
-        with open(path, "a") as f:
-            f.write(json.dumps({"utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "run": a.run_name,
-                                "channel": a.channel, "thread": thread, "reason": why, "text": text}) + "\n")
-        print("UNDELIVERED: Slack post failed twice; alert appended to " + path, file=sys.stderr, flush=True)
+        r = subprocess.run(cmd, input=text, capture_output=True, text=True, errors="replace", timeout=120, env=env)
+        outcome, ts = classify_post(r.returncode, r.stdout, r.stderr, False)
+        why = "rc=%d %s" % (r.returncode, redact(((r.stdout or "") + (r.stderr or "")).strip())[:200])
+    except subprocess.TimeoutExpired:
+        outcome, why = "UNCERTAIN", "TimeoutExpired"
     except OSError as e:
-        print("UNDELIVERED: Slack post failed twice and the alert file failed: " + type(e).__name__, file=sys.stderr, flush=True)
-    return None
+        outcome, why = "UNCERTAIN", type(e).__name__
+    if outcome != "DELIVERED":
+        print("post %s: %s" % (outcome, why), file=sys.stderr, flush=True)
+        try:
+            os.makedirs(ALERT_DIR, exist_ok=True)
+            path = os.path.join(ALERT_DIR, re.sub(r"[^\w.-]", "_", a.run_name) + ".alerts.jsonl")
+            with open(path, "a") as f:
+                f.write(json.dumps({"utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "run": a.run_name,
+                                    "channel": a.channel, "thread": thread, "outcome": outcome, "reason": why, "text": text}) + "\n")
+            print("%s: Slack post consumed; alert appended to %s" % (outcome, path), file=sys.stderr, flush=True)
+        except OSError as e:
+            print("%s: Slack post consumed and the alert file failed: %s" % (outcome, type(e).__name__), file=sys.stderr, flush=True)
+    return ts if outcome == "DELIVERED" else None
 
 # Down handling and reminder renewal (Rajiv 2026-11-18, D0AMF0XE6TS thread 1794988313.192109). Incident: the sindhu-r7
 # hourly reminder reached its mandatory 7-day until_at at 2026-11-17 16:05Z and completed (expired/schedule_complete);
@@ -182,66 +220,158 @@ LIVE = not os.environ.get("MONITOR_TEST") and not os.environ.get("MONITOR_DRY_RU
 def iso_epoch(s):
     return datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
 
-def reminder_renewal(row, now):
-    """argv tail for `mop.py reminder add` renewing this run's own reminder with its stored args, or None.
-    Only a natural expiry (or an active row with under 3 days left) is renewed: a stopped row (cancelled or
-    obligation-resolved) is never revived, and nothing here creates a reminder or changes interval/thread/text."""
-    if not row or row.get("status") == "stopped": return None
-    active = row.get("status") == "active"
-    if active and iso_epoch(row["until_at"]) - now >= REMINDER_RENEW_BELOW_S: return None
+def reminder_extend_argv(row, now):
+    """argv tail for `mop.py reminder extend`, or None.
+    Extends ONLY an active row whose cutoff is still in the future and inside 3 days. A stopped, expired,
+    cancelled or lapsed row is never revived, and the schedule (interval, next_at, text, stop policy) is not rewritten."""
+    if not row or row.get("status") != "active": return None
+    remaining = iso_epoch(row["until_at"]) - now
+    if remaining <= 0 or remaining >= REMINDER_RENEW_BELOW_S: return None
     until = datetime.datetime.fromtimestamp(now + REMINDER_HORIZON_S, datetime.timezone.utc).isoformat()
-    argv = ["--key", row["key"], "--thread", row["thread_ts"], "--text=" + row["text"], "--every", "%ds" % row["interval_s"],
-            "--until", until, "--channel", row["channel"], "--created-by", "spark-run-monitor"]
-    if row.get("stop_obligation_id"): argv += ["--stop-obligation", str(row["stop_obligation_id"])]
-    if active:
-        argv.append("--replace")
-        if iso_epoch(row["next_at"]) > now: argv += ["--first-at", row["next_at"]]  # keep the hourly grid
-    else:
-        argv += ["--first-at", "+1m"]
-    return argv
+    return ["--key", row["key"], "--until", until]
 
 def renew_reminder(key):
     if not key: return
     try:
         r = subprocess.run(["python3", MOP_CLI, "reminder", "list", "--status", "all"], capture_output=True, text=True, errors="replace", timeout=30)
         row = next((x for x in json.loads(r.stdout).get("reminders", []) if x.get("key") == key), None)
-        argv = reminder_renewal(row, time.time())
+        argv = reminder_extend_argv(row, time.time())
         if not argv: return
-        r = subprocess.run(["python3", MOP_CLI, "reminder", "add", *argv], capture_output=True, text=True, errors="replace", timeout=30)
+        # extend is a conditional UPDATE of until_at. A cancel that lands first makes it refuse; it cannot undo one.
+        r = subprocess.run(["python3", MOP_CLI, "reminder", "extend", *argv], capture_output=True, text=True, errors="replace", timeout=30)
         try: outcome = json.loads(r.stdout).get("outcome")
         except ValueError: outcome = None
-        print("reminder %s renewal rc=%d outcome=%s" % (key, r.returncode, outcome), file=sys.stderr, flush=True)
+        print("reminder %s extend rc=%d outcome=%s" % (key, r.returncode, outcome), file=sys.stderr, flush=True)
     except Exception as e:
-        print("reminder %s renewal failed: %s" % (key, type(e).__name__), file=sys.stderr, flush=True)
+        print("reminder %s extend failed: %s" % (key, type(e).__name__), file=sys.stderr, flush=True)
 
 def pm_ops(*args):
     return subprocess.run(["python3", PM_OPS, *args], capture_output=True, text=True, errors="replace", timeout=60)
 
-def down_obligation_open(run):
-    """True/False from the canonical pm-ops ledger, None when it cannot be read (never treated as closed)."""
+def open_down_rows(run):
+    """Open training_run_down rows for this run, or None when the ledger cannot be read (never 'closed')."""
     try:
         r = pm_ops("obligation-list", "--kind", DOWN_KIND, "--format", "json")
-        return any(x.get("target_id") == run for x in json.loads(r.stdout).get("rows", []))
+        if r.returncode != 0: return None
+        return [x for x in json.loads(r.stdout).get("rows", []) if x.get("target_id") == run]
     except Exception:
         return None
+
+def fresh_trainer_progress(previous, step, identity):
+    """True only when the optimizer step increased on the SAME log inode and container identity.
+    Docker 'running', an unbound container ('NA') and a stale step are not progress."""
+    if previous is None or step is None or not identity: return False
+    pstep, plog, pcont = previous
+    if identity.get("log_id") != plog or identity.get("container") != pcont: return False
+    return step > pstep
+
+def may_upsert_down(state, is_open):
+    """Do not open a new row over a closed one, and do not guess among several. An unreadable ledger blocks writes."""
+    if state.get("named_closed") or state.get("ambiguous") or state.get("hold"): return False
+    if state.get("id") is None: return True
+    return is_open is True
+
+def may_resolve_down(state, is_open, terminal, fresh, stopped_this_iteration):
+    if stopped_this_iteration or state.get("named_closed") or state.get("ambiguous") or state.get("hold"): return False
+    if not state.get("id") or is_open is not True: return False
+    return bool(terminal or fresh)
+
+def may_announce_resolution(ledger_rc, still_open):
+    """Announce only after the exact-id resolve succeeded AND the ledger no longer lists that id."""
+    return ledger_rc == 0 and still_open is False
 
 def down_obligation_upsert(run, reason, since):
     try:
         r = pm_ops("obligation-upsert", "--kind", DOWN_KIND, "--target-type", "run", "--target-id", run,
                    "--severity", "high", "--owner", "pm", "--horizon", "hourly", "--title", "Training run down: " + run,
-                   "--action", "Inspect the run's HOLD/FAILED state and resume or release it per training-run-processing; resolves when the monitor sees the run healthy",
-                   "--evidence-json", json.dumps({"run": run, "reason": reason[:200],
+                   "--action", "Inspect the run's HOLD/FAILED state and resume or release it per training-run-processing; resolves when the monitor sees fresh identity-bound progress or a training-complete marker",
+                   "--evidence-json", json.dumps({"run": run, "reason": reason[:200], "obligation_id": bound.get("id"),
                                                   "down_since_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(since))}),
                    "--print-id")
-        return r.returncode == 0
+        if r.returncode != 0: return None
+        tail = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+        return int(tail[-1]) if tail and tail[-1].isdigit() else None
     except Exception:
-        return False
+        return None
 
-def down_obligation_resolve(run, reason):
+def obligation_is_open(oid, run):
+    rows = open_down_rows(run)
+    if rows is None: return None
+    return any(int(x.get("id")) == int(oid) for x in rows)
+
+def adopt_down_obligation():
+    rows = open_down_rows(a.run_name)
+    if rows is None:
+        bound["hold"] = True
+        if a.down_obligation_id: bound["id"] = a.down_obligation_id
+        print("obligation list unreadable; no training_run_down write until it can be read", file=sys.stderr, flush=True)
+        return
+    bound["hold"] = False
+    if a.down_obligation_id:
+        bound["id"] = a.down_obligation_id
+        bound["named_closed"] = not any(int(x.get("id")) == a.down_obligation_id for x in rows)
+        if bound["named_closed"]:
+            print("bound obligation %s is not open; will not open a replacement" % a.down_obligation_id, file=sys.stderr, flush=True)
+        return
+    if len(rows) == 1:
+        bound["id"] = int(rows[0]["id"])
+    elif len(rows) > 1:
+        bound["ambiguous"] = True
+        print("REFUSE[monitor]: %d open %s rows for %s; not guessing an id" % (len(rows), DOWN_KIND, a.run_name), file=sys.stderr, flush=True)
+
+def resolve_bound(reason):
+    """Resolve the bound id only. Returns (rc, still_open). Never key-resolves, so a sibling row cannot be swept."""
+    oid = bound.get("id")
+    if not oid: return 1, None
     try:
-        pm_ops("obligation-resolve", "--kind", DOWN_KIND, "--target-type", "run", "--target-id", run, "--reason", reason)
+        r = pm_ops("obligation-resolve", "--kind", DOWN_KIND, "--id", str(int(oid)), "--reason", reason)
     except Exception as e:
         print("obligation resolve failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
+        return 1, None
+    still = obligation_is_open(oid, a.run_name)
+    if r.returncode != 0:
+        print("obligation resolve rc=%d id=%s" % (r.returncode, oid), file=sys.stderr, flush=True)
+    return r.returncode, still
+
+def successor_argv():
+    flags, i, incoming = [], 0, [x for x in sys.argv[1:] if x != "-"]
+    while i < len(incoming):
+        tok = incoming[i]
+        if tok == "--down-obligation-id":
+            i += 2
+            continue
+        if tok.startswith("--down-obligation-id="):
+            i += 1
+            continue
+        flags.append(tok)
+        i += 1
+    if bound.get("id"): flags += ["--down-obligation-id", str(int(bound["id"]))]
+    return ["bash", os.path.expanduser("~/.claude/scripts/spark-run-monitor.sh")] + flags
+
+def handoff_to_owner():
+    """Before the default 48h exit, hand the same watch to its existing owner, including while the run is down."""
+    if os.environ.get("MONITOR_TEST") or os.environ.get("MONITOR_DRY_RUN"):
+        print("HANDOFF skipped", file=sys.stderr, flush=True)
+        return False
+    cmd = successor_argv()
+    owner = None
+    try:
+        found = subprocess.run(["tmux", "display-message", "-p", "#{session_name}"], capture_output=True, text=True, timeout=5)
+        if found.returncode == 0 and found.stdout.strip(): owner = found.stdout.strip()
+    except Exception:
+        owner = None
+    try:
+        if owner:
+            subprocess.Popen(["tmux", "new-window", "-d", "-t", owner, "-n", ("mon-" + a.run_name)[:32], "--", *cmd], start_new_session=True)
+        else:
+            subprocess.Popen(cmd, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        print("handoff failed: %s" % type(e).__name__, file=sys.stderr, flush=True)
+        post("monitor could not hand off before the %gh exit; %s obligation stays open" % (a.max_hours, DOWN_KIND), thread, alert=True)
+        return False
+    state = "DOWN" if down_since is not None else "active"
+    post("monitor handed off to its existing owner before the %gh exit; successor keeps the watch (run %s)" % (a.max_hours, state), thread, alert=down_since is not None)
+    return True
 
 def down_banner(run, since, now, recorded):
     mins = int(max(0, now - since) // 60)
@@ -345,8 +475,27 @@ if not thread:
 print("thread_ts=" + thread, flush=True)
 min_avail = min_cuda = None; unreachable_posted = False; obs = []; step_history = []; last_mtime = None; stale = 0; last = None
 down_since = None; down_recorded = False; last_down_alert = 0.0; last_unreach_alert = 0.0
+policy_bound = binding["verdict"]["state"] == "CONFIG_ONLY"
+bound = {"id": None, "named_closed": False, "ambiguous": False, "hold": False}
+progress_baseline = None
+if LIVE: adopt_down_obligation()
 while True:
     if LIVE: renew_reminder(a.reminder_key)
+    if not policy_bound:
+        retry = bind_status(memory_config, a.host)
+        if retry["verdict"].get("reason") == HOST_UNREACHABLE:
+            now_gap = time.time()
+            if now_gap - last_unreach_alert >= DOWN_REALERT_S:
+                post("monitor: Spark host unreachable; coverage gap remains visible; installed policy binding was not bypassed", thread, alert=True)
+                last_unreach_alert = now_gap
+            if time.time() + a.interval > deadline:
+                handoff_to_owner()
+                break
+            time.sleep(min(a.interval, DOWN_REALERT_S))
+            continue
+        if retry["verdict"]["state"] != "CONFIG_ONLY":
+            sys.exit("REFUSE[monitor]: installed policy binding unavailable or mismatched")
+        policy_bound = True
     try:
         sec = gather(); unreachable_posted = False
         d = parse(sec.get("TAIL", []), a.total_steps)
@@ -410,8 +559,9 @@ while True:
         elif proc_gone: lines.append("process no longer running")
         # Enforcement (CTO review 2026-10-04): stop ONLY the training container on concrete harm.
         harm = None
+        stopped_this_iteration = False
         tail_txt = " ".join(sec.get("TAIL", []))
-        if memory["verdict"]["state"] != "OK": harm = "memory guard: " + memory["verdict"]["reason"]
+        if memory["verdict"]["state"] != "OK" and memory["verdict"].get("reason") != HOST_UNREACHABLE: harm = "memory guard: " + memory["verdict"]["reason"]
         elif re.search(r"['\"](?:loss|grad_norm)['\"]\s*:\s*(?:nan|inf|-inf)", tail_txt, re.I): harm = "non-finite loss/grad_norm in log"
         else:
             try:
@@ -427,6 +577,7 @@ while True:
                 else:
                     cmd = "docker stop " + shlex.quote(a.container)
                     rr = subprocess.run(["ssh", "-o", "ConnectTimeout=10", "-o", "BatchMode=yes", a.host, cmd], capture_output=True, text=True, errors="replace", timeout=120)
+                    stopped_this_iteration = True
                     lines.append(":octagonal_sign: ENFORCE: stopped owned container %s (%s); rc=%d" % (a.container, harm, rr.returncode))
         handed_off = False
         # Copy-timeout only (Rajiv ts 1794287346.192189). Memory and OOM still fall through to the ended post.
@@ -484,34 +635,54 @@ while True:
         if handed_off:
             break
         if d["terminal"]:
-            # Training finished: post the unchanged "run ended" stats and close any down obligation. Renewal simply
-            # stops with this monitor, so the bounded reminder lapses on its own; PM cancels it earlier if it wants.
+            # Verified terminal state only. Resolve the bound id, and announce only after the ledger confirms.
             post("\n".join(lines), thread)
-            if LIVE and down_obligation_open(a.run_name): down_obligation_resolve(a.run_name, "training complete")
+            if LIVE and may_resolve_down(bound, obligation_is_open(bound.get("id"), a.run_name) if bound.get("id") else False, True, False, stopped_this_iteration):
+                rc, still = resolve_bound("training complete")
+                if may_announce_resolution(rc, still):
+                    post(":white_check_mark: *[%s]* training complete; %s %s resolved" % (a.run_name, DOWN_KIND, bound.get("id")), thread)
+                    bound["id"] = None
             break
         if not ended:
             post("\n".join(lines), thread)  # step stats: unchanged
-            if LIVE and cstate in ("running", "NA") and down_obligation_open(a.run_name):
-                down_obligation_resolve(a.run_name, "monitor observed the run healthy")
-                post(":white_check_mark: *[%s]* recovered; %s obligation resolved" % (a.run_name, DOWN_KIND), thread)
-                down_since = None; down_recorded = False; last_down_alert = 0.0
+            fresh = fresh_trainer_progress(progress_baseline, d.get("step"), identity)
+            is_open = obligation_is_open(bound.get("id"), a.run_name) if (LIVE and bound.get("id")) else False
+            if LIVE and may_resolve_down(bound, is_open, False, fresh, stopped_this_iteration):
+                rc, still = resolve_bound("fresh identity-bound trainer progress")
+                if may_announce_resolution(rc, still):
+                    post(":white_check_mark: *[%s]* recovered; %s %s resolved" % (a.run_name, DOWN_KIND, bound.get("id")), thread)
+                    bound["id"] = None
+                    down_since = None; down_recorded = False; last_down_alert = 0.0
+            if identity and d.get("step") is not None and not stopped_this_iteration:
+                progress_baseline = (d["step"], identity["log_id"], identity["container"])
             # No container to stop: the harm cannot be acted on, so stop monitoring as before. With a container the
             # stop was issued above and the next sample sees it gone, which is the down path below.
             if harm and not os.environ.get("MONITOR_DRY_RUN") and not a.container: break
         else:
-            # Container/process gone with no training-complete marker: DOWN. Alert as Alerts every 30 min and hold a
-            # pm-ops obligation until a monitor sees the run healthy (or PM resolves it). Never exit just because it is down.
+            # Container/process gone with no training-complete marker: DOWN. Check the bound obligation's closure
+            # BEFORE any alert or upsert. A closed row is not re-opened. Alert as Alerts every 30 min.
             now_t = time.time()
             if down_since is None: down_since = now_t
             due = now_t - last_down_alert >= DOWN_REALERT_S
             reason = "no training-complete marker; " + ("container exited (%s)" % cstate[:60] if container_gone else "process no longer running")
-            if LIVE and (due or not down_recorded): down_recorded = down_obligation_upsert(a.run_name, reason, down_since) or down_recorded
-            if due:
-                post("\n".join(lines + [down_banner(a.run_name, down_since, now_t, down_recorded)]), thread, alert=True)
-                last_down_alert = now_t
-            elif LIVE and down_recorded and down_obligation_open(a.run_name) is False:
-                post("%s obligation for %s was closed; monitor stopping (run still down)" % (DOWN_KIND, a.run_name), thread)
+            is_open = obligation_is_open(bound.get("id"), a.run_name) if bound.get("id") else None
+            if LIVE and bound.get("id") and is_open is False:
+                bound["named_closed"] = True
+                post("%s %s for %s was closed; monitor stopping without opening another (run still down)" % (DOWN_KIND, bound["id"], a.run_name), thread)
                 break
+            if LIVE and (due or not down_recorded) and may_upsert_down(bound, True if bound.get("id") is None else is_open):
+                new_id = down_obligation_upsert(a.run_name, reason, down_since)
+                if bound.get("id") is None and new_id:
+                    bound["id"] = new_id
+                    down_recorded = True
+                elif new_id and new_id == bound.get("id"):
+                    down_recorded = True
+                elif new_id and new_id != bound.get("id"):
+                    print("REFUSE[monitor]: upsert returned %s, bound id is %s; not adopting a new row" % (new_id, bound.get("id")), file=sys.stderr, flush=True)
+            if due:
+                recorded = bool(bound.get("id")) and not bound.get("named_closed") and down_recorded
+                post("\n".join(lines + [down_banner(a.run_name, down_since, now_t, recorded)]), thread, alert=True)
+                last_down_alert = now_t
     except Exception as e:
         reach = isinstance(e, (SSHFailure, subprocess.TimeoutExpired))
         if not unreachable_posted or (reach and time.time() - last_unreach_alert >= DOWN_REALERT_S):
@@ -519,10 +690,7 @@ while True:
             unreachable_posted = reach
             if reach: last_unreach_alert = time.time()
     if time.time() + a.interval > deadline:
-        if down_since is not None:
-            post("monitor stopping at max-hours; run is DOWN, %s obligation stays open (step %s/%s)" % (DOWN_KIND, (last or {}).get("step", "n/a"), (last or {}).get("total", "n/a")), thread, alert=True)
-        else:
-            post("monitor stopping at max-hours; run still active (step %s/%s)" % ((last or {}).get("step", "n/a"), (last or {}).get("total", "n/a")), thread)
+        handoff_to_owner()
         break
     time.sleep(min(a.interval, max(30, last_down_alert + DOWN_REALERT_S - time.time())) if down_since is not None else a.interval)
 PY

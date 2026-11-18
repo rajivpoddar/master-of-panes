@@ -17,6 +17,9 @@ Usage: mop <subcommand> [options]
   reminder add --key K --thread TS --text T --every 30m|1h --until <ISO|+12h>
                [--channel C] [--stop-obligation N] [--first-at <ISO|+5m>] [--replace]
            list [--status active|stopped|expired|all | --expired-since 48h] | cancel --key K
+           extend --key K --until <ISO|+Nh>   (move ONLY the cutoff of an ACTIVE reminder later, at most 7 days
+                                               out; schedule, counters, stop policy untouched; refuses a stopped,
+                                               expired or lapsed reminder instead of reviving it)
            (--expired-since: reminders that expired with no stop obligation in that window)
            (recurring HeyDonna Alerts bot posts into a Slack thread, owned by MoP)
 
@@ -218,6 +221,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DURATION",
         help="instead of --status: reminders that expired with NO stop obligation in the last e.g. 48h (nothing was watching them)",
     )
+    r = rsub.add_parser(
+        "extend",
+        help="move the cutoff of an ACTIVE reminder later without touching its schedule (never revives a stopped/expired one)",
+    )
+    r.add_argument("--key", required=True)
+    r.add_argument("--until", required=True, help="new stop time, ISO or +12h; at most 7 days out")
     r = rsub.add_parser("cancel", help="stop a reminder")
     r.add_argument("--key", required=True)
 
@@ -326,6 +335,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 code, data = http_json("GET", f"{base}/alert-reminders?status={args.status}")
+        elif args.reminder_action == "extend":
+            try:
+                until_at, _ = parse_when(args.until)
+            except ValueError as error:
+                return emit({"error": str(error), "sanctioned_path": SANCTIONED_PATH}, 2)
+            code, data = http_json(
+                "POST", f"{base}/alert-reminders/{quote(args.key, safe='')}/extend", {"until_at": until_at}
+            )
         else:
             code, data = http_json("POST", f"{base}/alert-reminders/{quote(args.key, safe='')}/cancel", {})
         ok = code == 200 and isinstance(data, dict) and data.get("success") is True

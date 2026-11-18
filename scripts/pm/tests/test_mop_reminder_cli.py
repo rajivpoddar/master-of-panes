@@ -146,6 +146,15 @@ class ReminderRoutingTest(unittest.TestCase):
         self.assertEqual(body["interval_s"], 600)
         self.assertTrue(body["until_relative"])
 
+    def test_extend_posts_only_the_new_cutoff(self):
+        code, _ = self.run_cli(
+            "reminder", "extend", "--key", "training-sindhu-r7-hourly", "--until", "2026-11-25T08:10:09Z",
+        )
+        self.assertEqual(code, 0)
+        method, path, body = _Handler.seen[0]
+        self.assertEqual((method, path), ("POST", "/alert-reminders/training-sindhu-r7-hourly/extend"))
+        self.assertEqual(set(body), {"until_at"})
+
     def test_list_and_cancel_routes(self):
         self.assertEqual(self.run_cli("reminder", "list", "--status", "all")[0], 0)
         self.assertEqual(self.run_cli("reminder", "cancel", "--key", "smoke-1108")[0], 0)
@@ -174,7 +183,7 @@ class ReminderRoutingTest(unittest.TestCase):
     def test_help_lists_reminder(self):
         proc = subprocess.run([sys.executable, str(CLI), "reminder", "--help"], capture_output=True, text=True, timeout=30)
         self.assertEqual(proc.returncode, 0)
-        for sub in ("add", "list", "cancel"):
+        for sub in ("add", "list", "extend", "cancel"):
             self.assertIn(sub, proc.stdout)
         listing = subprocess.run([sys.executable, str(CLI), "reminder", "list", "--help"], capture_output=True, text=True, timeout=30)
         self.assertEqual(listing.returncode, 0)

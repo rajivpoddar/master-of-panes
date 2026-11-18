@@ -250,6 +250,21 @@ export function normalizeAddRequest(
   };
 }
 
+/**
+ * Body of `POST /alert-reminders/:key/extend`: only the new cutoff. Same bounds as `add` (future, at
+ * most 7 days out), so an extend can never be used to get around the hard horizon.
+ */
+export function normalizeExtendRequest(
+  body: Record<string, unknown>,
+  nowMs: number,
+): { ok: true; until_at: number } | { ok: false; error: string } {
+  const untilAt = parseIsoMs(body.until_at);
+  if (untilAt === null) return { ok: false, error: "until_at is required (ISO timestamp)" };
+  if (untilAt <= nowMs) return { ok: false, error: "until_at must be in the future" };
+  if (untilAt > nowMs + ALERT_REMINDER_MAX_HORIZON_S * 1000) return { ok: false, error: "until_at must be within 7 days" };
+  return { ok: true, until_at: untilAt };
+}
+
 /** Names of the arguments that differ between an existing active row and a new add request. */
 export function differingArgs(row: AlertReminderRow, input: AlertReminderAddInput): string[] {
   const differs: string[] = [];
@@ -528,6 +543,34 @@ export class AlertReminderStore {
       .run(reason, nowMs, key);
     const row = this.get(key);
     return row ? { row, changed: result.changes > 0 } : null;
+  }
+
+  /**
+   * Move the cutoff of an ACTIVE reminder later and change nothing else (CTO REVISE 2026-11-18: renew
+   * the existing reminder without replacing its schedule). One conditional UPDATE on the current row:
+   * no `claim_gen` bump (a claim in flight stays valid), and `next_at`, counters, phase,
+   * `stop_obligation_id`, claim history and every other column are untouched. It never revives a
+   * stopped or expired row (that stays `add`'s explicit decision), never shortens `until_at`, and a
+   * concurrent extend or cancel simply makes the WHERE clause not match, so it cannot undo either.
+   * A new `until_at` differs from `expiry_warned_until_at`, which re-arms the single pre-expiry warning.
+   * Rows whose cutoff already passed (`lapsed`) are left for the expiry sweep.
+   */
+  extendUntil(
+    key: string,
+    newUntilAt: number,
+    nowMs: number,
+  ): { row: AlertReminderRow; outcome: "extended" | "already_far_enough" | "lapsed" | "not_active" } | null {
+    const result = this.db
+      .prepare(
+        "UPDATE alert_reminders SET until_at = ?, updated_at = ? WHERE key = ? AND status = 'active' AND until_at >= ? AND until_at < ?",
+      )
+      .run(newUntilAt, nowMs, key, nowMs, newUntilAt);
+    const row = this.get(key);
+    if (!row) return null;
+    // Re-read wins over the change count: a cancel that committed after this UPDATE is not reported as extended.
+    if (row.status !== "active") return { row, outcome: "not_active" };
+    if (result.changes > 0) return { row, outcome: "extended" };
+    return { row, outcome: row.until_at < nowMs ? "lapsed" : "already_far_enough" };
   }
 
   /**
@@ -1191,6 +1234,28 @@ export function registerAlertReminderRoutes(app: Hono, deps: AlertReminderRouteD
     const row = deps.store.get(c.req.param("key"));
     if (!row) return c.json({ success: false, error: "reminder not found" }, 404);
     return c.json({ success: true, reminder: alertReminderView(row) });
+  });
+
+  app.post("/alert-reminders/:key/extend", async (c) => {
+    let body: Record<string, unknown>;
+    try {
+      body = (await c.req.json()) as Record<string, unknown>;
+    } catch {
+      return c.json({ success: false, error: "Body must be JSON" }, 400);
+    }
+    const nowMs = now();
+    const normalized = normalizeExtendRequest(body && typeof body === "object" ? body : {}, nowMs);
+    if (!normalized.ok) return c.json({ success: false, error: normalized.error }, 400);
+    const result = deps.store.extendUntil(c.req.param("key"), normalized.until_at, nowMs);
+    if (!result) return c.json({ success: false, error: "reminder not found" }, 404);
+    // A stopped, expired or lapsed row was NOT renewed: say so with a conflict, never a success.
+    if (result.outcome === "not_active" || result.outcome === "lapsed") {
+      return c.json(
+        { success: false, error: `reminder_${result.outcome}`, outcome: result.outcome, reminder: alertReminderView(result.row) },
+        409,
+      );
+    }
+    return c.json({ success: true, outcome: result.outcome, reminder: alertReminderView(result.row) });
   });
 
   app.post("/alert-reminders/:key/cancel", (c) => {
