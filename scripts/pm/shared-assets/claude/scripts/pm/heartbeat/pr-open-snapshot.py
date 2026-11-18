@@ -68,23 +68,73 @@ def _memoize(fn):
     return wrapped
 
 
-def _deadline_guard(fn):
-    """Refuse a new 12b network read once the run's verdict window has closed.
+_VERDICT_TLS = threading.local()
 
-    The gate's own `api` timeout is 60s, so a read that starts just before the
-    window closes still ends inside the 210s collector budget. A refused read
-    raises, which _latest_12b_verdict already treats as indeterminate (never PASS).
+
+def _verdict_timeouts() -> int:
+    """Count of verdict-pass reads this thread had refused or timed out (never decreases)."""
+    return getattr(_VERDICT_TLS, "timeouts", 0)
+
+
+def _note_verdict_timeout() -> None:
+    _VERDICT_TLS.timeouts = _verdict_timeouts() + 1
+
+
+def _verdict_budget(cap: float) -> float:
+    """Seconds one verdict-pass read may use: `cap`, trimmed to the single verdict window.
+
+    One window (VERDICT_UNTIL_SECONDS after the run start) covers EVERY read of the
+    verdict pass: the 12b gate's gh api calls, its local git calls (rev-parse,
+    merge-base, merge-tree, diff ...) and the reviewer-login read. A read that cannot
+    start with 2s left is refused. The refusal is a TimeoutError (an OSError), which
+    resolve_commit and _latest_12b_verdict already treat as an unresolved lookup
+    (never PASS); it is also counted so classify_pr reports the PR as unknown.
     """
+    budget = _budget_left(cap, VERDICT_UNTIL_SECONDS)
+    if budget < 2:
+        _note_verdict_timeout()
+        raise TimeoutError("collector budget exhausted")
+    return budget
+
+
+def _deadline_guard(fn):
+    """Refuse a new 12b network read once the run's verdict window has closed."""
     def wrapped(*args, **kwargs):
-        if _budget_left(60, VERDICT_UNTIL_SECONDS) < 2:
-            raise TimeoutError("collector budget exhausted")
+        _verdict_budget(60)
         return fn(*args, **kwargs)
 
     return wrapped
 
 
+class _BoundedSubprocess:
+    """The 12b gate's `subprocess`, with every call held inside the verdict window.
+
+    pm-admit-12b.py runs gh api and local git (60s timeout each, strictly in
+    sequence inside main_merges_only), so a late compare plus a following
+    `git merge-tree` could outlive the 210s collector budget even though only the
+    gh reads were deadline-guarded. Each call here gets no more than the window has
+    left, and none starts once it has closed. The gate file itself is untouched.
+    """
+
+    def __init__(self, real):
+        self._real = real
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def check_output(self, *args, **kwargs):
+        kwargs["timeout"] = _verdict_budget(kwargs.get("timeout") or 60)
+        try:
+            return self._real.check_output(*args, **kwargs)
+        except self._real.TimeoutExpired:
+            _note_verdict_timeout()
+            raise
+
+
 def _install_read_memo() -> None:
     """Collapse repeated 12b carry-forward reads (gh compare, commits/main, git)."""
+    if not isinstance(getattr(_REVIEW_GATE, "subprocess", None), _BoundedSubprocess):
+        _REVIEW_GATE.subprocess = _BoundedSubprocess(_REVIEW_GATE.subprocess)
     for name in ("api", "resolve_commit", "main_merges_only"):
         current = getattr(_REVIEW_GATE, name)
         if getattr(current, "_snapshot_memo", False):
@@ -113,9 +163,13 @@ DETAIL_FIELDS = "headRefOid,statusCheckRollup,files,body,comments"
 LIST_TIMEOUT_SECONDS, LIST_ATTEMPTS, LIST_UNTIL_SECONDS = 20, 3, 45
 DETAIL_TIMEOUT_SECONDS, DETAIL_ATTEMPTS, DETAIL_UNTIL_SECONDS, DETAIL_WORKERS = 25, 2, 90, 6
 THREADS_TIMEOUT_SECONDS, THREADS_UNTIL_SECONDS = 30, 60
-# 12b carry-forward reads (gh compare latency varies 1-19s per call): no new read
-# starts after this offset; one started just before it ends within the 60s gate
-# timeout, leaving the rest of the 210s for claims and classification.
+# The whole 12b verdict pass (gh compare latency varies 1-19s per call, plus the
+# gate's sequential local git reads and the reviewer login read) shares ONE window
+# that closes this many seconds after the run start: no read starts after it, and
+# every read is clamped so it ends inside it (_verdict_budget). A PR whose verdict a
+# timed-out or refused read left unresolved is reported "unknown: 12b verdict timed
+# out" (classify_pr), never classified from a missing verdict; rows that do not need
+# a verdict still emit. The rest of the 210s is for claims and classification.
 VERDICT_UNTIL_SECONDS = 130
 _RUN_STARTED: float | None = None
 
@@ -469,9 +523,12 @@ def _authorized_12b_reviewer() -> str:
     """Resolve the currently configured gh account; never guess a reviewer login."""
     try:
         result = subprocess.run(["gh", "api", "user", "--jq", ".login"],
-                                capture_output=True, text=True, timeout=15)
+                                capture_output=True, text=True, timeout=_verdict_budget(15))
         login = result.stdout.strip()
         return login if result.returncode == 0 and login else ""
+    except subprocess.TimeoutExpired:
+        _note_verdict_timeout()
+        return ""
     except (OSError, subprocess.SubprocessError):
         return ""
 
@@ -900,6 +957,23 @@ def codex_threads(threads: list[dict] | None) -> dict | None:
     return {"live": live, "outdated": outdated}
 
 
+def _unknown_row(pr: dict, head: str, admitted: bool, owner: str, state: str, nxt: str) -> dict:
+    """A row for a PR whose evidence is missing: unknown state, no actions."""
+    return {
+        "number": pr.get("number"),
+        "head": head[:7],
+        "head_full": head,
+        "title": (pr.get("title") or "")[:60],
+        "isDraft": bool(pr.get("isDraft")),
+        "draft": bool(pr.get("isDraft")),
+        "admitted": admitted,
+        "state": state,
+        "owner": owner,
+        "next": nxt,
+        "actions": [],
+    }
+
+
 def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int, str] | None = None,
                 claims: dict[int, dict] | None = None) -> dict:
     """Pure: one PR -> state/owner/next from live head checks, labels, body and comments.
@@ -924,22 +998,13 @@ def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int
     # only names the owner before admission.
     owner = "PM" if admitted or not slots else f"S{slots[0]}"
     stale_admission = any(x.startswith("ci-head:") for x in labels) and not admitted
+    base_owner = owner
+    verdict_timeouts = _verdict_timeouts()
     if pr.get("detailsUnavailable") and not pr.get("isDraft"):
         # The per-PR read failed, so CI, files, body and 12b comments are unknown.
         # Never classify (or raise an action) from empty data; a rerun resolves it.
-        return {
-            "number": pr.get("number"),
-            "head": head[:7],
-            "head_full": head,
-            "title": (pr.get("title") or "")[:60],
-            "isDraft": False,
-            "draft": False,
-            "admitted": admitted,
-            "state": "unknown: PR details unavailable",
-            "owner": owner,
-            "next": "rerun snapshot (per-PR read failed)",
-            "actions": [],
-        }
+        return _unknown_row(pr, head, admitted, owner, "unknown: PR details unavailable",
+                            "rerun snapshot (per-PR read failed)")
     # The Codex wait comes from live review threads, never the pm-blocked:codex label.
     codex = codex_threads(pr.get("reviewThreads"))
     has_codex_label = CODEX_LABEL in labels
@@ -1060,6 +1125,12 @@ def classify_pr(pr: dict, mop_owned_prs: set[int] | None = None, holds: dict[int
         owner = _claim_owner_label(claim)
         if state.startswith("red:"):
             nxt = "await existing owner terminal"
+    if _verdict_timeouts() > verdict_timeouts:
+        # A 12b verdict read this row needed was refused or timed out (the verdict
+        # window closed), so BLOCK/PASS is unresolved. Report unknown with no action
+        # rather than a guessed "PM 12b review" / merge ask; the next run resolves it.
+        return _unknown_row(pr, head, admitted, base_owner, "unknown: 12b verdict timed out",
+                            "rerun snapshot (12b verdict read timed out)")
     if advisory_red:
         state += " (advisory red: " + ",".join(advisory_red[:3]) + ")"
     if codex and codex["outdated"]:
@@ -1170,6 +1241,23 @@ def _prewarm_12b_verdicts(prs: list[dict]) -> None:
         list(pool.map(one, prs))
 
 
+def _admission_holds(prs: list[dict]) -> dict[int, str]:
+    """PR number -> admission hold, read per PR through the bounded verdict reads.
+
+    A hold computed while a verdict read timed out is dropped, not trusted: classify_pr
+    then needs that verdict itself and reports the PR unknown if the read still fails.
+    """
+    holds: dict[int, str] = {}
+    for pr in prs:
+        number = pr.get("number")
+        if isinstance(number, int):
+            timeouts = _verdict_timeouts()
+            hold = admission_hold(pr, {k: _existing_obligation(k, number) for k in ("pr_admission", "pr_merge_ask")})
+            if hold and _verdict_timeouts() == timeouts:
+                holds[number] = hold
+    return holds
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Live open-PR snapshot")
     parser.add_argument("--text", action="store_true")
@@ -1189,13 +1277,7 @@ def main() -> int:
     raw_prs = fetch_open_prs()
     _prewarm_12b_verdicts(raw_prs)
     claims = fetch_live_claims(raw_prs)
-    holds = {}
-    for pr in raw_prs:
-        number = pr.get("number")
-        if isinstance(number, int):
-            hold = admission_hold(pr, {k: _existing_obligation(k, number) for k in ("pr_admission", "pr_merge_ask")})
-            if hold:
-                holds[number] = hold
+    holds = _admission_holds(raw_prs)
     rows = sorted(
         (classify_pr(pr, mop_owned_prs, holds, claims) for pr in raw_prs),
         key=lambda r: -int(r["number"]),
