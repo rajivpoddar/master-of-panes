@@ -1999,8 +1999,57 @@ if os.environ.get("HELPER_READONLY") == "1":
     deny += ["Bash(gh run rerun*)", "Bash(gh run cancel*)", "Bash(gh workflow run*)",
              "Bash(gh pr ready*)", "Bash(gh pr close*)", "Bash(gh pr edit*)",
              "Bash(*pm-admit-ci.sh*)", "Bash(git push*)"]
+# Bash sandbox for proxy agents only (this --settings file). Not the PM pane.
+# Rajiv DM D0AMF0XE6TS thread 1795004502.133389, ts 1795006580.326659.
+# bypassPermissions (--dangerously-skip-permissions) leaves the sandbox off unless
+# allowUnsandboxedCommands is false. Network stays unrestricted (allowedDomains omitted).
+# Do not allowWrite $HOME or ~/.heydonna itself: that would permit deleting siblings.
+allow_write = [
+    "/tmp",
+    "/private/tmp",
+    "/var/folders",
+    "/private/var/folders",
+    "/Users/rajiv/Downloads/projects/heydonna-app-proxy",
+    "/Users/rajiv/Downloads/projects/heydonna-app",
+    "/Users/rajiv/.heydonna/qa",
+    "/Users/rajiv/.heydonna/qa-*",
+    "/Users/rajiv/.heydonna/qa-*/**",
+    "/Users/rajiv/.heydonna/qa-modal-leases",
+    "/Users/rajiv/.heydonna/qa-convex-leases",
+    "/Users/rajiv/.heydonna/qa-deployment-leases",
+    "/Users/rajiv/.heydonna/qa-config-snapshots",
+    "/Users/rajiv/.heydonna/qa-evidence",
+    "/Users/rajiv/.heydonna/qa-inputs",
+    "/Users/rajiv/.heydonna/qa-logs",
+    "/Users/rajiv/.heydonna/qa-private",
+    "/Users/rajiv/.heydonna/private-qa",
+    "/Users/rajiv/.heydonna/evidence",
+    "/Users/rajiv/.heydonna/rtb-custody",
+    "/Users/rajiv/.heydonna/proxy-setup-dirt",
+    "/Users/rajiv/.heydonna/remote-*",
+    "/Users/rajiv/.heydonna/remote-*/**",
+    "/Users/rajiv/.claude/state",
+    "/Users/rajiv/.claude/projects",
+    "/Users/rajiv/.claude/logs",
+    "/Users/rajiv/.cache",
+    "/Users/rajiv/.npm",
+    "/Users/rajiv/.bun",
+    "/Users/rajiv/Library/Caches",
+    "/Users/rajiv/.config/hcloud",
+]
 json.dump({"hooks": {"PreToolUse": keep},
-           "permissions": {"deny": deny}}, open(out, "w"))
+           "permissions": {"deny": deny},
+           "sandbox": {
+               "enabled": True,
+               "failIfUnavailable": True,
+               "autoAllowBashIfSandboxed": True,
+               "allowUnsandboxedCommands": False,
+               "filesystem": {
+                   "allowWrite": allow_write,
+                   "denyWrite": [],
+                   "denyRead": [],
+               },
+           }}, open(out, "w"))
 PY
 # Hard total cap on live long-running proxies (S143; Rajiv D0AMF0XE6TS thread 1794659684.547559, ts 1794661097.599409: "dial things down and keep all accounts within limits"). Reviewers are exempt so 12b is never blocked; override with PROXY_AGENT_TOTAL_CAP.
 PROXY_AGENT_TOTAL_CAP="${PROXY_AGENT_TOTAL_CAP:-8}"
