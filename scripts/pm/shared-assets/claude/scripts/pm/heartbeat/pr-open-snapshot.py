@@ -21,6 +21,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -35,6 +36,39 @@ _REVIEW_GATE_PATH = Path(__file__).resolve().parents[2] / "ci" / "pm-admit-12b.p
 _REVIEW_GATE_SPEC = importlib.util.spec_from_file_location("pm_admit_12b_shared", _REVIEW_GATE_PATH)
 _REVIEW_GATE = importlib.util.module_from_spec(_REVIEW_GATE_SPEC)
 _REVIEW_GATE_SPEC.loader.exec_module(_REVIEW_GATE)
+
+
+def _memoize(fn):
+    """Batch identical successful reads for this process. Failures are not cached."""
+    cache = {}
+    lock = threading.Lock()
+
+    def wrapped(*args, **kwargs):
+        try:
+            key = (args, tuple(sorted(kwargs.items())))
+        except TypeError:
+            return fn(*args, **kwargs)
+        with lock:
+            if key in cache:
+                return cache[key]
+        value = fn(*args, **kwargs)
+        with lock:
+            return cache.setdefault(key, value)
+
+    wrapped._snapshot_memo = True
+    return wrapped
+
+
+def _install_read_memo() -> None:
+    """Collapse repeated 12b carry-forward reads (gh compare, commits/main, git)."""
+    for name in ("api", "resolve_commit", "main_merges_only"):
+        current = getattr(_REVIEW_GATE, name)
+        if getattr(current, "_snapshot_memo", False):
+            continue
+        setattr(_REVIEW_GATE, name, _memoize(current))
+
+
+_install_read_memo()
 
 REPO = "Scribie/heydonna-app"
 # Shared with every other hook/heartbeat caller. A fresh file skips both the
@@ -333,17 +367,56 @@ def _authorized_12b_reviewer() -> str:
         return ""
 
 
+_reviewer_login_impl = _authorized_12b_reviewer
+_REVIEWER_LOGIN: dict[str, str] = {}
+
+
+def _authorized_12b_reviewer() -> str:
+    """One successful login read per run. An empty/failed read is not cached."""
+    cached = _REVIEWER_LOGIN.get("login")
+    if cached:
+        return cached
+    login = _reviewer_login_impl()
+    if login:
+        _REVIEWER_LOGIN["login"] = login
+    return login
+
+_VERDICT_CACHE: dict = {}
+_VERDICT_LOCK = threading.Lock()
+
+
+def _verdict_cache_key(pr: dict, head: str, authorized_login: str):
+    number = pr.get("number")
+    if not isinstance(number, int):
+        return None
+    try:
+        blob = json.dumps(pr.get("comments") or [], sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return None
+    return (number, head, authorized_login, blob)
+
+
 def _latest_12b_verdict(pr: dict, head: str, authorized_login: str | None = None) -> str | None:
     """Use the admission helper's canonical marker and reviewed-head rules."""
     if authorized_login is None:
         authorized_login = pr.get("_authorized_12b_reviewer") or _authorized_12b_reviewer()
+    key = _verdict_cache_key(pr, head, authorized_login or "")
+    if key is not None:
+        with _VERDICT_LOCK:
+            if key in _VERDICT_CACHE:
+                return _VERDICT_CACHE[key]
     try:
-        return _REVIEW_GATE.reviewed_12b_verdict(
+        result = _REVIEW_GATE.reviewed_12b_verdict(
             pr.get("comments") or [], head, authorized_login, REPO, pr.get("number")
         )
     except Exception:
         # Missing authority or unavailable carry-forward evidence never grants 12b.
+        # Do not cache: a later call in this run must be able to retry.
         return None
+    if key is not None:
+        with _VERDICT_LOCK:
+            return _VERDICT_CACHE.setdefault(key, result)
+    return result
 
 
 def _has_12b_block(pr: dict, head: str) -> bool:
@@ -961,6 +1034,22 @@ def fetch_review_threads() -> dict[int, list[dict]] | None:
         return None
 
 
+def _prewarm_12b_verdicts(prs: list[dict]) -> None:
+    """Overlap independent per-PR carry-forward reads. Same verdicts as a serial pass."""
+    if not prs:
+        return
+    login = _authorized_12b_reviewer()
+
+    def one(pr: dict) -> None:
+        if not isinstance(pr, dict):
+            return
+        head = pr.get("headRefOid") or ""
+        _latest_12b_verdict(pr, head if isinstance(head, str) else "", login)
+
+    with ThreadPoolExecutor(max_workers=min(4, len(prs))) as pool:
+        list(pool.map(one, prs))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Live open-PR snapshot")
     parser.add_argument("--text", action="store_true")
@@ -976,6 +1065,7 @@ def main() -> int:
         return 0
     mop_owned_prs = fetch_mop_owned_prs()
     raw_prs = fetch_open_prs()
+    _prewarm_12b_verdicts(raw_prs)
     claims = fetch_live_claims(raw_prs)
     holds = {}
     for pr in raw_prs:
