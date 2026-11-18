@@ -2018,7 +2018,7 @@ SAFETY_SETTINGS="$(mktemp "${TMPDIR:-/tmp}/proxy-agent-safety.XXXXXX")"
 # helper ran an unauthorized "gh run rerun" for #13844 (Rajiv D0AMF0XE6TS 1794787507.634289; PM trace 12:10 IST).
 _HELPER_READONLY=0
 if [[ "${PROXY_AGENT_NAME:-}" == *heartbeat* || "${PROXY_AGENT_NAME:-}" == *hourly* ]] || head -1 "$PROMPT_FILE" 2>/dev/null | grep -qiE '^MODE:[[:space:]]*(heartbeat|hourly)'; then _HELPER_READONLY=1; fi
-HELPER_READONLY="$_HELPER_READONLY" PROXY_AGENT_TYPE_FOR_SANDBOX="$TYPE" PROXY_AGENT_SANDBOX="${PROXY_AGENT_SANDBOX:-0}" python3 - "/Users/rajiv/Downloads/projects/heydonna-app/.claude/settings.json" "$SAFETY_SETTINGS" <<'PY'
+HELPER_READONLY="$_HELPER_READONLY" PROXY_AGENT_TYPE_FOR_SANDBOX="$TYPE" PROXY_AGENT_SANDBOX="${PROXY_AGENT_SANDBOX:-1}" python3 - "/Users/rajiv/Downloads/projects/heydonna-app/.claude/settings.json" "$SAFETY_SETTINGS" <<'PY'
 import json, sys
 src, out = sys.argv[1], sys.argv[2]
 want = ("block-cto-mention-without-ladder", "block-invalid-backlog-issue-create",
@@ -2097,7 +2097,7 @@ _ops_lane = (os.environ.get("PROXY_AGENT_TYPE_FOR_SANDBOX", "") in ("mop-main-re
 # this launcher (CTO REVISE on f203baec). Compound commands ("cd x && git worktree add ...") don't match the exclusion
 # patterns, so the always-on fence broke ordinary lanes (mm14039b) and the 21:06 heartbeat. Cleanup/deletion lanes MUST
 # launch with PROXY_AGENT_SANDBOX=1 (launch-agent rule).
-_fence_on = os.environ.get("PROXY_AGENT_SANDBOX") == "1" and not _ops_lane
+_fence_on = (os.environ.get("PROXY_AGENT_SANDBOX", "1") != "0") and not _ops_lane  # default-ON again per Rajiv "sandbox now" (D0AMF0XE6TS ts 1795016785.315309)
 json.dump({"hooks": {"PreToolUse": keep},
            "permissions": {"deny": deny},
            "sandbox": {
@@ -2213,7 +2213,7 @@ CLAUDE_BIN="$(command -v claude)"
   printf 'PA_START=$(date +%%s); export PA_START PROXY_AGENT_NOTICE_MODEL=%q\n' "$MODEL_ID"
   printf 'python3 -I - %q %q %q %q %q > %q <<'"'"'PY'"'"'\n' "$PROMPT_FILE" "$NAME" "$MODEL" "$MODEL_ID" "$PM_ROLE" "$LOG"
   printf '%s\n' 'import datetime, pathlib, re, sys' 'brief, name, alias, model, pm = sys.argv[1:]' 'text = pathlib.Path(brief).read_text(errors="replace")' 'refs = []' 'for key in ("ISSUE", "PR"):' '    m = re.search(r"^\s*" + key + r"\s*:\s*#?(\d{3,6})\b", text, re.I | re.M)' '    refs.append(key + ":" + (m.group(1) if m else "UNKNOWN"))' 'print("[{}] LAUNCH name={} {} model_alias={} model_id={} MODE:{}".format(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), name, " ".join(refs), alias, model, "pm" if pm == "1" else "dev"))' 'PY'
-  printf '{ cat %q; printf "\\n\\n---\\nNOTE: Project skills may not be discoverable through Skill in proxy sessions. If a skill is unavailable, read its SKILL.md directly from %s and follow its instructions; do not repeatedly self-call an unknown skill.\\nPROXY RUN CONTRACT: end your turn ONLY when the task is finished or truly blocked, with a final line starting DONE:, BLOCKED: (exact external blocker) or HANDOFF:. Ending without a marker auto-resumes this session.\\nDo not send interim progress peer messages to PM; send ONE message only for a blocker that needs a PM decision, plus the final Stop.\\n"; } > %q\n' "$PROMPT_FILE" "$SKILL_NOTE_DIRS" "$JOB_DIR/prompt0.md"
+  printf '{ cat %q; printf "\\n\\n---\\nNOTE: Project skills may not be discoverable through Skill in proxy sessions. If a skill is unavailable, read its SKILL.md directly from %s and follow its instructions; do not repeatedly self-call an unknown skill.\\nPROXY RUN CONTRACT: end your turn ONLY when the task is finished or truly blocked, with a final line starting DONE:, BLOCKED: (exact external blocker) or HANDOFF:. Ending without a marker auto-resumes this session.\\nDo not send interim progress peer messages to PM; send ONE message only for a blocker that needs a PM decision, plus the final Stop.\\nSANDBOX (OS write fence ON, Rajiv 18 Nov): you can write only to /tmp, \$TMPDIR and caches. git worktree add is blocked, so create checkouts with: git clone --shared <existing checkout> /tmp/<lane>-<x>, then git fetch origin. Call ~/.claude/scripts/remote-test-box.sh and remote-browser-box.sh as the FIRST word of a command (no cd x && prefix) or ssh is refused. If a needed write is refused, report BLOCKED with the path; never work around the fence.\\n"; } > %q\n' "$PROMPT_FILE" "$SKILL_NOTE_DIRS" "$JOB_DIR/prompt0.md"
   printf '%q ' "$CLAUDE_BIN" "${ARGS[@]}"
   printf '< %q 2>> %q | python3 -I -u %q %q %q\n' "$JOB_DIR/prompt0.md" "$LOG" "$HOME/.claude/scripts/proxy-agent-stream.py" "$OUT" "$JSONL"
   printf 'statuses=("${PIPESTATUS[@]}"); rc=${statuses[0]}; if [[ "$rc" == 0 ]]; then rc=${statuses[1]}; fi\n'
