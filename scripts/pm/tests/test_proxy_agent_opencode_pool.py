@@ -497,12 +497,38 @@ def test_auto_continuation_rechecks_opencode_cap_before_the_fresh_spawn():
     between = SRC[gate:spawn]
     assert 'proxy_agent_pool_blocked "$MODEL_ID"' in between
     assert 'PROXY_AGENT_CONTINUE_REFUSED' in between
+    assert 'proxy_agent_resolve_opencode_cap' in between
+    assert 'capacity-stop' in between
+    assert 'exit 75' in between
+    assert 'break;' not in between
     assert 'declare -f proxy_agent_router_identity' in SRC
     assert 'declare -f proxy_agent_is_opencode_id' in SRC
     assert 'declare -f proxy_agent_pool_live' in SRC
     assert 'declare -f proxy_agent_pool_blocked' in SRC
+    assert 'declare -f proxy_agent_resolve_opencode_cap' in SRC
     # The free-model continuation denial still precedes the loop.
     assert SRC.index('PROXY_AGENT_NO_CONTINUE=1;; esac') < SRC.index("printf 'while [[ ( \"$rc\" == 0")
+    # Last-valid file assignment is gone; the shared resolver returns on the first valid value.
+    assert '&& OPENCODE_PROXY_CAP="$_v"' not in SRC
+    resolver = _slice('proxy_agent_resolve_opencode_cap() {', '# Daily dial')
+    assert resolver.index('return 0') < resolver.index("printf '2'")
+
+
+def test_opencode_cap_resolution_is_env_then_first_file_then_two(tmp_path):
+    # PM decision ts 1795012176.225749. Not executed on the host by the suite; the generated-runner
+    # proof is a separate no-provider run.
+    fn = _slice('proxy_agent_resolve_opencode_cap() {', '# Daily dial')
+    body = fn + 'printf "%s\\n" "$(proxy_agent_resolve_opencode_cap "${OPENCODE_PROXY_CAP:-}")"\n'
+    caps = tmp_path / '.claude' / 'state' / 'proxy-caps.env'
+    caps.parent.mkdir(parents=True)
+    caps.write_text('OPENCODE_PROXY_CAP=nope\nOPENCODE_PROXY_CAP=1\nOPENCODE_PROXY_CAP=9\n')
+    env_wins = _bash(body, tmp_path, {'OPENCODE_PROXY_CAP': '4'})
+    assert env_wins.returncode == 0 and env_wins.stdout.strip() == '4', env_wins.stderr
+    first = _bash(body, tmp_path, {})
+    assert first.returncode == 0 and first.stdout.strip() == '1', first.stderr
+    caps.write_text('GROK_PROXY_CAP=3\nOPENCODE_PROXY_CAP=abc\n')
+    default = _bash(body, tmp_path, {})
+    assert default.returncode == 0 and default.stdout.strip() == '2', default.stderr
 
 
 def test_opencode_cap_zero_is_not_lifted_by_exemption(tmp_path):

@@ -1317,6 +1317,28 @@ PY
   case "$status" in 200) return 0;; 402|429) return 1;; *) return 2;; esac
 }
 
+# OpenCode cap: explicit numeric env, else the first valid file value, else 2.
+# A later file line never replaces an earlier valid one. The same function is declared
+# into the generated continuation runner (PM decision ts 1795012176.225749).
+_OPENCODE_CAP_EXPLICIT=""
+[[ "${OPENCODE_PROXY_CAP:-}" =~ ^[0-9]+$ ]] && _OPENCODE_CAP_EXPLICIT="$OPENCODE_PROXY_CAP"
+proxy_agent_resolve_opencode_cap() {
+  local explicit="${1-}" k v
+  if [[ "$explicit" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$explicit"
+    return 0
+  fi
+  if [[ -r "$HOME/.claude/state/proxy-caps.env" ]]; then
+    while IFS== read -r k v; do
+      if [[ "$k" == OPENCODE_PROXY_CAP && "$v" =~ ^[0-9]+$ ]]; then
+        printf '%s' "$v"
+        return 0
+      fi
+    done < "$HOME/.claude/state/proxy-caps.env"
+  fi
+  printf '2'
+}
+
 # Daily dial (morning brief, proxy-burn-dial.py --apply) writes the caps here; explicit env still wins.
 _PROXY_TOTAL_CAP_ENV="${PROXY_AGENT_TOTAL_CAP:-}"
 if [[ -r "$HOME/.claude/state/proxy-caps.env" ]]; then
@@ -1327,6 +1349,9 @@ if [[ -r "$HOME/.claude/state/proxy-caps.env" ]]; then
     esac
   done < "$HOME/.claude/state/proxy-caps.env"
 fi
+# Recompute after the shared loader so a non-numeric env cannot block the file, and so the
+# default is 2 when neither the env nor the file has a valid cap. Explicit numeric env still wins.
+OPENCODE_PROXY_CAP="$(proxy_agent_resolve_opencode_cap "$_OPENCODE_CAP_EXPLICIT")"
 PROXY_BURN_GATE="${PROXY_BURN_GATE:-enforce}"
 if [[ "$PROXY_BURN_GATE" != enforce && "$PROXY_BURN_GATE" != shadow ]]; then
   printf 'proxy-burn: invalid mode=%s; using enforce\n' "$PROXY_BURN_GATE" >&2
@@ -2181,12 +2206,16 @@ CLAUDE_BIN="$(command -v claude)"
   printf 'case %q in %s) PROXY_AGENT_NO_CONTINUE=1;; esac\n' "$(proxy_agent_router_identity "$MODEL_ID")" "${PROXY_AGENT_FREE_TRIAL_IDS// /|}|auto"
   # Auto-continuation starts a fresh claude process after the previous one exits, so it is a new admission.
   # Re-check OPENCODE_PROXY_CAP at that spawn with the same identity, counter and pool_blocked decision (CTO REVISE ts 1795010788.320629).
+  # The runner uses proxy_agent_resolve_opencode_cap: an explicit numeric launcher env is carried in and wins;
+  # with no override the current file is read the same way (first valid value, else 2), not the last file value
+  # (PM decision ts 1795012176.225749). A refused continuation exits 75 (capacity-stop), not the prior turn's rc.
   # Role exemption is unchanged: this check runs only for an OpenCode identity, and pool_blocked still skips the exemption for that pool only.
   printf 'MODEL_ID=%q\n' "$MODEL_ID"
   declare -f proxy_agent_router_identity
   declare -f proxy_agent_is_opencode_id
   declare -f proxy_agent_pool_live
   declare -f proxy_agent_pool_blocked
+  declare -f proxy_agent_resolve_opencode_cap
   printf 'printf "Continue the task in your brief from exactly where you stopped. Do not end your turn until it is DONE, or BLOCKED with the exact external blocker (or HANDOFF). Do not send interim progress peer messages to PM; send ONE message only for a blocker that needs a PM decision, plus the final Stop.\\n" > %q\n' "$JOB_DIR/continue.md"
   # Also continue after an error_max_turns stop (rc!=0): 4 sol runs died that way on 2026-11-13 with work mid-flight (PM).
   printf 'pa_maxturns() { tail -c 6000 %q 2>/dev/null | grep -q "\\"subtype\\":\\"error_max_turns\\""; }\n' "$JSONL"
@@ -2197,8 +2226,13 @@ CLAUDE_BIN="$(command -v claude)"
   printf '  pa_reason=other; if pa_maxturns; then pa_reason=max_turns; elif [[ "$rc" != 0 ]]; then pa_reason=stream_error; fi\n'
   printf '  pa_n=$((pa_n+1)); printf "[%%s] PROXY_AGENT_CONTINUE n=%%s reason=%%s sid=%%s\\n" "$(date -u +%%FT%%TZ)" "$pa_n" "$pa_reason" "$pa_sid" >> %q\n' "$LOG"
   printf '  if proxy_agent_is_opencode_id "$MODEL_ID"; then\n'
-  printf '    if [[ -r "$HOME/.claude/state/proxy-caps.env" ]]; then while IFS== read -r _k _v; do [[ "$_k" == OPENCODE_PROXY_CAP && "$_v" =~ ^[0-9]+$ ]] && OPENCODE_PROXY_CAP="$_v"; done < "$HOME/.claude/state/proxy-caps.env"; fi\n'
-  printf '    if proxy_agent_pool_blocked "$MODEL_ID"; then printf "[%%s] PROXY_AGENT_CONTINUE_REFUSED model=%%s reason=opencode_pool_cap\\n" "$(date -u +%%FT%%TZ)" "$MODEL_ID" >> %q; break; fi\n' "$LOG"
+  if [[ -n "$_OPENCODE_CAP_EXPLICIT" ]]; then
+    printf '    OPENCODE_PROXY_CAP=%q\n' "$_OPENCODE_CAP_EXPLICIT"
+  else
+    printf '    unset OPENCODE_PROXY_CAP\n'
+  fi
+  printf '    OPENCODE_PROXY_CAP="$(proxy_agent_resolve_opencode_cap "${OPENCODE_PROXY_CAP:-}")"\n'
+  printf '    if proxy_agent_pool_blocked "$MODEL_ID"; then printf "[%%s] PROXY_AGENT_CONTINUE_REFUSED model=%%s cap=%%s reason=opencode_pool_cap capacity-stop\\n" "$(date -u +%%FT%%TZ)" "$MODEL_ID" "$OPENCODE_PROXY_CAP" >> %q; printf "PROXY_AGENT_CAPACITY_STOP rc=75 model=%%s cap=%%s reason=opencode_pool_cap\\n" "$MODEL_ID" "$OPENCODE_PROXY_CAP" >&2; rc=75; exit 75; fi\n' "$LOG"
   printf '  fi\n'
   printf '  %q ' "$CLAUDE_BIN" "${ARGS[@]}"
   printf ' --resume "$pa_sid" < %q 2>> %q | python3 -I -u %q %q %q\n' "$JOB_DIR/continue.md" "$LOG" "$HOME/.claude/scripts/proxy-agent-stream.py" "$OUT.c" "$JSONL.c"
