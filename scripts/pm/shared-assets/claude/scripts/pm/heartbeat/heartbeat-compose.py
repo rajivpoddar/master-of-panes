@@ -47,7 +47,7 @@ COLLECTOR_TIMEOUTS = {
     "axiom": 45, "active-users": 45, "error-map": 90, "support": 120,
     "pr-open-snapshot": 210, "priority-inversion": 90,
     "pending-github": 90, "remote-boxes": 30,
-    "usage": 30, "email": 30, "proxies": 5,
+    "usage": 30, "email": 30, "proxies": 5, "ci-selection": 60,
 }
 # Independent hourly checks share one deadline, not the sum of their limits.
 COMPOSE_COLLECTOR_BUDGET = 210
@@ -1302,6 +1302,269 @@ def remote_boxes_line(timeout: int = 20) -> str:
     except (OSError, ValueError) as exc:
         reason = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
     return f"*Remote boxes:* unavailable ({reason})"
+
+
+# ---------------------------------------------------------------------------
+# CI selection (regret-ledger control point, docs/pm/regret-ledger.md 2026-11-18, PR #14018): any PM
+# "live" / "saving" claim must cite this line. Source: the newest COMPLETED pull_request runs of
+# .github/workflows/ci.yml, ignoring conclusion "skipped" duplicates. Every unit-tests (N) shard log
+# carries "##[notice]unit selection mode=<m> reason=<r>" near its start and the vitest
+# "Test Files N passed (M)" summary near its end, so only a bounded head and tail byte window of each
+# ~12 MB log is read (gh api -i with a Range header; shard 1 prints the vitest inventory before the
+# notice, so a head window without it falls back to the same notice as a check-run annotation).
+# Read-only GETs under one wall-clock deadline. Fail-open: any read error renders
+# "unavailable (<reason>)", never an empty or "none" line, and the result is never served from a
+# last-good cache (see parallel_collect).
+# ---------------------------------------------------------------------------
+CI_SELECTION_REPO = "Scribie/heydonna-app"
+CI_SELECTION_RUNS = 3
+CI_SELECTION_SCAN = 40  # completed pull_request runs listed to find CI_SELECTION_RUNS non-skipped ones
+CI_SELECTION_MAX_CHARS = 299  # the whole line stays under 300 chars
+CI_LOG_WINDOW = 256 * 1024
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_UNIT_SELECTION = re.compile(r"##\[notice\]unit selection mode=(\S+) reason=(\S+)")
+_UNIT_SELECTION_ANNOTATION = re.compile(r"^unit selection mode=(\S+) reason=(\S+)$")
+_VITEST_FILES = re.compile(r"Test Files\s+([^()\n]*?)\s*\((\d+)\)")
+_UNIT_SHARD_JOB = re.compile(r"^unit-tests \((\d+)\)$")
+_CONTENT_RANGE = re.compile(r"(?im)^content-range:\s*bytes\s+\d+-\d+/(\d+)\s*$")
+
+
+class CiSelectionError(Exception):
+    """A CI selection read failed; str(exc) is the reason shown after "unavailable"."""
+
+
+def parse_unit_selection(text: str) -> tuple[str, str] | None:
+    """First "##[notice]unit selection mode=<m> reason=<r>" line of a job log window, else None."""
+    match = _UNIT_SELECTION.search(_ANSI.sub("", text))
+    return (match.group(1), match.group(2)) if match else None
+
+
+def parse_vitest_files(text: str) -> tuple[int, int] | None:
+    """(passed, total) from the vitest "Test Files ... (M)" summary of a job log window.
+
+    Shard 1 also runs the isolated NYSD suite after the main run, so several summaries can share a
+    window; the main run is the one with the most files.
+    """
+    best = None
+    for body, total in _VITEST_FILES.findall(_ANSI.sub("", text)):
+        passed = re.search(r"(\d+)\s+passed", body)
+        row = (int(passed.group(1)) if passed else 0, int(total))
+        if best is None or row[1] > best[1]:
+            best = row
+    return best
+
+
+def split_http(raw: str) -> tuple[int, str, str]:
+    """Split "gh api -i" output into (status, header block, body)."""
+    head, sep, body = raw.replace("\r\n", "\n").partition("\n\n")
+    first = head.split("\n", 1)[0].split()
+    if not sep or len(first) < 2 or not first[1].isdigit():
+        raise CiSelectionError("malformed log response")
+    return int(first[1]), head, body
+
+
+def ci_log_windows(job_id: int, gh, window: int = CI_LOG_WINDOW) -> tuple[str, str]:
+    """(head, tail) byte windows of one job log. The first ranged read reports the total size."""
+    def read(span: str) -> tuple[int, str, str]:
+        return split_http(gh(["api", "-i", "-H", f"Range: bytes={span}",
+                              f"repos/{CI_SELECTION_REPO}/actions/jobs/{job_id}/logs"]))
+    status, headers, head = read(f"0-{window - 1}")
+    if status == 200:  # Range ignored: the body is the whole log
+        return head, head
+    total = _CONTENT_RANGE.search(headers)
+    if status != 206 or not total:
+        raise CiSelectionError(f"log http {status}")
+    size = int(total.group(1))
+    if size <= window:
+        return head, head
+    return head, read(f"{max(window, size - window)}-{size - 1}")[2]
+
+
+def ci_annotation_selection(job_id: int, gh) -> tuple[str, str] | None:
+    """The same notice as a check-run annotation (the job id is the check-run id)."""
+    for note in json.loads(gh(["api", f"repos/{CI_SELECTION_REPO}/check-runs/{job_id}/annotations?per_page=100"])):
+        match = _UNIT_SELECTION_ANNOTATION.match(str(note.get("message", "")).strip())
+        if match:
+            return match.group(1), match.group(2)
+    return None
+
+
+def ci_unit_shard(job_id: int, gh) -> dict:
+    head, tail = ci_log_windows(job_id, gh)
+    selection = parse_unit_selection(head)
+    if selection is None:
+        try:
+            selection = ci_annotation_selection(job_id, gh)
+        except (CiSelectionError, ValueError, TypeError, AttributeError):
+            selection = None  # the shard is then reported as "notice missing", not as unreadable
+    files = parse_vitest_files(tail)
+    return {"mode": selection[0] if selection else None, "reason": selection[1] if selection else None,
+            "passed": files[0] if files else None, "total": files[1] if files else None}
+
+
+def _ci_clean(text: str) -> str:
+    """Branch names and log text are not trusted: nothing Slack could render as a mention or link."""
+    return re.sub(r"[^A-Za-z0-9._/#=+-]", "?", str(text))
+
+
+def _ci_short(branch: str, width: int) -> str:
+    branch = _ci_clean(branch)
+    if width <= 0:
+        return ""
+    return branch if len(branch) <= width else branch[:max(1, width - 1)] + "…"
+
+
+def _ci_groups(shards: list[dict]) -> dict[str, int]:
+    """Shard counts by selection notice. Cancelled and unreadable shards are counted elsewhere."""
+    groups: dict[str, int] = {}
+    for s in shards:
+        if s.get("cancelled") or s.get("error"):
+            continue
+        key = f"mode={_ci_clean(s['mode'])} reason={_ci_clean(s['reason'])}" if s.get("mode") else "notice missing"
+        groups[key] = groups.get(key, 0) + 1
+    return groups
+
+
+def _ci_group_text(groups: dict[str, int]) -> str:
+    return ", ".join(f"{key} ×{n}" for key, n in sorted(groups.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
+def _ci_run_body(shards: list[dict], baseline: int | None, notes: bool = True) -> str:
+    """Files part of one run: "files P/T", or "narrowed: X of Y files" when any shard selected."""
+    if not shards:
+        return "no unit shards ran"
+    cancelled = sum(1 for s in shards if s.get("cancelled"))
+    unreadable = sum(1 for s in shards if s.get("error"))
+    ran = len(shards) - cancelled
+    read = [s for s in shards if s.get("total") is not None]
+    total = sum(s["total"] for s in read)
+    if not ran:
+        return f"all {cancelled} shards cancelled"
+    if not read:
+        files = "files n/a"
+    elif any(s.get("mode") == "selected" for s in shards):
+        files = f"narrowed: {total} of {baseline} files" if baseline else f"narrowed: {total} files (full n/a)"
+    else:
+        files = f"files {sum(s['passed'] for s in read)}/{total}"
+    if notes:
+        if read and len(read) < ran:
+            files += f" ({len(read)}/{ran} read)"
+        if cancelled:
+            files += f", {cancelled} cancelled"
+        if unreadable:
+            files += f", {unreadable} unreadable"
+    return files
+
+
+def render_ci_selection(runs: list[dict]) -> str:
+    """One "*CI selection:*" line, under 300 chars. Pure: runs come from ci_selection_line().
+
+    A run is {"id", "branch", "shards": [...]} or {"id", "branch", "error": reason}. When the line is
+    too long, branch names shrink to 12 chars, then the cancelled/read/unreadable notes go, then the
+    branch names; the file counts
+    and the selection notice groups ("mode=full reason=merge_parent_mismatch ×5") are never dropped.
+    """
+    prefix = "*CI selection:* "
+    live = [r for r in runs if not r.get("error")]
+    if not live:
+        reason = runs[0]["error"] if runs else "no completed non-skipped pull_request runs"
+        return f"{prefix}unavailable ({reason})"
+    # A "full" file total is only ever an observed one: the newest fully read run that did not narrow.
+    baseline = next((sum(s["total"] for s in r["shards"]) for r in live
+                     if r["shards"] and all(s.get("total") is not None and s.get("mode") != "selected"
+                                            for s in r["shards"])), None)
+    line = prefix
+    for width, notes in ((24, True), (18, True), (12, True), (24, False), (18, False), (12, False), (0, False)):
+        segments = []
+        for r in runs:
+            head = " ".join(part for part in (str(r["id"]), _ci_short(r["branch"], width)) if part)
+            if r.get("error"):
+                segments.append(f"{head}: unavailable ({r['error']})")
+                continue
+            parts = [_ci_run_body(r["shards"], baseline, notes), _ci_group_text(_ci_groups(r["shards"]))]
+            segments.append(f"{head}: " + "; ".join(p for p in parts if p))
+        line = prefix + " | ".join(segments)
+        if len(line) <= CI_SELECTION_MAX_CHARS:
+            return line
+    return line[:CI_SELECTION_MAX_CHARS - 1] + "…"
+
+
+def ci_selection_line(run=subprocess.run, timeout: int = COLLECTOR_TIMEOUTS["ci-selection"]) -> str:
+    """Collect and render the CI selection line. Never raises; every failure is "unavailable (<reason>)"."""
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+    deadline = monotonic() + timeout
+
+    def gh(args: list[str]) -> str:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise CiSelectionError(f"timeout {timeout}s")
+        try:
+            proc = run(["gh", *args], capture_output=True, text=True, errors="replace", timeout=min(25, remaining))
+        except subprocess.TimeoutExpired:
+            raise CiSelectionError(f"timeout {timeout}s") from None
+        except OSError as exc:
+            raise CiSelectionError(type(exc).__name__) from None
+        if proc.returncode:
+            raise CiSelectionError(f"gh rc={proc.returncode}")
+        return proc.stdout
+
+    def jobs_of(run_id: int) -> list[tuple[int, int, str]]:
+        doc = json.loads(gh(["api", f"repos/{CI_SELECTION_REPO}/actions/runs/{run_id}/jobs?per_page=100"]))
+        shards = []
+        for job in doc["jobs"]:
+            match = _UNIT_SHARD_JOB.match(str(job.get("name")))
+            if match and job.get("status") == "completed" and job.get("conclusion") != "skipped":
+                shards.append((int(match.group(1)), int(job["id"]), str(job.get("conclusion"))))
+        return sorted(shards)
+
+    def wait(future):
+        try:
+            return future.result(timeout=max(0.1, deadline - monotonic() + 2))
+        except CiSelectionError:
+            raise
+        except FutureTimeout:
+            raise CiSelectionError(f"timeout {timeout}s") from None
+        except (ValueError, KeyError, TypeError):
+            raise CiSelectionError("invalid GitHub response") from None
+
+    pool = ThreadPoolExecutor(max_workers=16)
+    try:
+        listing = json.loads(gh(["run", "list", "--repo", CI_SELECTION_REPO, "--workflow", "ci.yml",
+                                 "--event", "pull_request", "--status", "completed",
+                                 "--limit", str(CI_SELECTION_SCAN), "--json", "databaseId,headBranch,conclusion"]))
+        picked = [r for r in listing if r.get("conclusion") != "skipped"][:CI_SELECTION_RUNS]
+        if not picked:
+            raise CiSelectionError(f"no completed non-skipped pull_request runs in the last {CI_SELECTION_SCAN}")
+        runs = [{"id": int(r["databaseId"]), "branch": str(r.get("headBranch") or "?")} for r in picked]
+        job_futures = [pool.submit(jobs_of, r["id"]) for r in runs]
+        pending = []
+        for r, future in zip(runs, job_futures):
+            try:
+                jobs = wait(future)
+            except CiSelectionError as exc:
+                r["error"] = str(exc)
+                continue
+            # A cancelled shard (matrix fail-fast) has no complete log; it is counted, not read.
+            r["shards"] = [{"cancelled": True} if conclusion == "cancelled" else None for _, _, conclusion in jobs]
+            pending.append((r, [(i, pool.submit(ci_unit_shard, job_id, gh))
+                                for i, (_, job_id, conclusion) in enumerate(jobs) if conclusion != "cancelled"]))
+        for r, futures in pending:
+            for i, future in futures:
+                try:
+                    r["shards"][i] = wait(future)
+                except CiSelectionError as exc:
+                    r["shards"][i] = {"error": str(exc)}
+            if futures and all("error" in s for s in r["shards"] if not s.get("cancelled")):
+                r["error"] = next(s["error"] for s in r["shards"] if "error" in s)
+        return render_ci_selection(runs)
+    except CiSelectionError as exc:
+        return render_ci_selection([{"id": 0, "branch": "", "error": str(exc)}])
+    except (ValueError, KeyError, TypeError):
+        return "*CI selection:* unavailable (invalid GitHub response)"
+    except Exception as exc:  # fail-open backstop: the hourly must still post
+        return f"*CI selection:* unavailable ({type(exc).__name__})"
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def parse_mac_list(text: str) -> str:
@@ -2966,6 +3229,7 @@ def compose(
     pace: str | None = None,  # pace_table() block, rendered directly under the *Hourly line
     memory: str | None = None,  # PM Claude RSS line; 1h only
     opencode: str | None = None,  # opencode_line(): OpenCode Go counts, rendered under the Burn block; 1h only
+    ci_selection: str | None = None,  # ci_selection_line(): "*CI selection:*" under Remote boxes; 1h only
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -2999,6 +3263,7 @@ def compose(
         body += ["", *pr_lines]
     if mode == "1h":
         body += ["", remote_boxes or "*Remote boxes:* unavailable (collector not run)"]
+        body += ["", ci_selection or "*CI selection:* unavailable (collector not run)"]
     if tracked:
         # Rajiv 2026-10-27 DM D0AMF0XE6TS thread 1793097714.304129: tracked features right after Slots.
         body += ["", *tracked]
@@ -3053,7 +3318,8 @@ def compose(
     pace_extra = len(pace_lines)
     memory_extra = len(memory_lines)
     opencode_extra = len(opencode_lines)
-    report = cap_lines(compact_report(lines, 23 if mode == "3h" else 20 + burn_extra + pace_extra + memory_extra + opencode_extra,
+    ci_extra = 1 if mode == "1h" else 0  # the CI selection line must never be folded away
+    report = cap_lines(compact_report(lines, 23 if mode == "3h" else 20 + burn_extra + pace_extra + memory_extra + opencode_extra + ci_extra,
                                       cadence=mode),
                        MAX_LINE_CHARS - LINE_NOTE_RESERVE)
     if mode == "3h":
@@ -3388,9 +3654,10 @@ def parallel_collect(jobs, wall_cap=COMPOSE_COLLECTOR_BUDGET, cache_dir=HOURLY_C
     for name in jobs:
         value, error = results.get(name, (None, "timed out"))
         path = cache_dir / (name + ".json")
-        if name in {'mac-box', 'proxies'}:
+        if name in {'mac-box', 'proxies', 'ci-selection'}:
             # Proxy observations must never fall back to legacy MoP/log caches.
-            # Individual mac-box sources own their own caches.
+            # Individual mac-box sources own their own caches. A CI selection line is rendered live or as
+            # "unavailable (<reason>)": a last-good line would let a stale selection stand behind a live claim.
             results[name] = value
             continue
         if collector_success(value):
@@ -3520,6 +3787,7 @@ def collect_hourly(args, py, hours, now, failures):
         "mac-box": mac_box_stats,
         "pending-github": lambda: pending_github(timeout=COLLECTOR_TIMEOUTS["pending-github"]),
         "proxies": lambda: read_proxies(now),
+        "ci-selection": lambda: ci_selection_line(timeout=COLLECTOR_TIMEOUTS["ci-selection"]),
     }
     # Hourly producer for usage/quota (appends usage-snapshots.jsonl before the 1h burn read). Registered ONLY for the
     # claimed normal producer (pm-hourly-post.sh passes --sample-usage-claim after its atomic bucket mkdir). Bare CLI
@@ -3700,6 +3968,7 @@ def main() -> int:
         pending_actions=(pending_obligations(PM_OPS_DB, now), hourly.get("pending-github") or {"error": "UNAVAILABLE (no recent successful probe)"}) if args.mode == "1h" else None,
         proxies=hourly.get("proxies") if args.mode == "1h" else None,
         burn=burn, pace=pace, memory=memory_line, opencode=opencode,
+        ci_selection=hourly.get("ci-selection") if args.mode == "1h" else None,
     )
     labels = {"axiom": "*Axiom errors", "active": "*Active users", "prs": "open non-draft PRs",
               "slots": "*Slots", "priority": "*Slots",
