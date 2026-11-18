@@ -1418,11 +1418,11 @@ proxy_agent_tier_models() {
     PLAN) models="grok-4.7 claude-opus-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
     # Grok before Codex in every rung: Codex must last to Thu (Rajiv ts 1794660714.234059 "only grok, claude, codex").
     # Dev ladder (Rajiv C0ALZJHGE49 thread 1794665799.784789, ts 1794665970.826379): haiku/luna → sonnet/terra → opus/sol. No Grok on dev rungs.
-    BUILD1) models="claude-haiku-5-5 gpt-6-luna muse-spark-1.3-contributor";;
+    BUILD1) models="claude-haiku-5-5 deepseek-v4.1-flash gpt-6-luna muse-spark-1.3-contributor";;  # DeepSeek after Claude (Rajiv C0ALZJHGE49 ts 1794998807.846819 "ok for 2")
     BUILD2) models="claude-sonnet-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
     # S149 (Rajiv ts 1794941131.743129 "6.1 terra should stay. 6.2 sol should replace 6.1 sol"): gpt-6.2-sol follows terra on the top conveyor rungs only; never MID/TOP/PLAN (ts 1794720589.429929).
     BUILD3) models="claude-opus-5-5 gpt-6.1-terra gpt-6.2-sol muse-spark-1.3-contributor";;
-    PROOF1) models="claude-sonnet-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
+    PROOF1) models="claude-sonnet-5-5 deepseek-v4.1-flash gpt-6.1-terra muse-spark-1.3-contributor";;  # DeepSeek after Claude (Rajiv ts 1794998807.846819 "ok for 2")
     PROOF2) models="claude-opus-5-5 gpt-6.1-terra gpt-6.2-sol muse-spark-1.3-contributor";;
     # 12b reviews: carbon -> fable -> astra (Rajiv D0AMF0XE6TS thread 1794624936.567599, ts 1794640502.657479 "the 12b reviewer ladder can be carbon/fable/astra").
     # Supersedes the earlier fable-first list (thread 1794573312.657559, ts 1794623641.572859). Reviews never skip claude-* at the cap (see below).
