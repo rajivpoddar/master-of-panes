@@ -18,6 +18,7 @@ import { closeSync, fstatSync, openSync, readSync, readFileSync } from "node:fs"
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { EXPIRY_EVENT_PREFIX, revalidateExpiryWarning } from "./alertReminders.js";
 import type { MoPDatabase } from "./db.js";
 import {
   HOURLY_REPORT_ESCALATE_AFTER_MS,
@@ -303,8 +304,8 @@ export class PMCadenceScheduler {
     this.db = db;
     this.relay = relay;
     this.hourlyReport = hourlyReport;
-    // Revalidate the hourly reminder at the queued-writer effect boundary.
-    relay.setPMQueuedEffectCheck?.((row) => this.revalidateQueuedReminder(row.event_type));
+    // Revalidate the hourly reminder and alert-reminder expiry warnings at the queued-writer effect boundary.
+    relay.setPMQueuedEffectCheck?.((row) => this.revalidateQueuedReminder(row.event_type, new Date(), row.payload ?? null));
   }
 
   start(): void {
@@ -708,8 +709,20 @@ export class PMCadenceScheduler {
    * Effect-boundary check for a queued/retried hourly reminder row. Unrelated
    * rows always deliver. A reminder for a past bucket or a debt that is no
    * longer open is dropped; an unreadable ledger retains the row unchanged.
+   *
+   * An alert-reminder pre-expiry warning is only delivered while that exact reminder key is still
+   * active with the exact claimed cutoff, inside its warning window and before its final post; a
+   * renewed, stopped, missing or already-expired reminder drops the row (the expiry listing reports
+   * a lapse). An unreadable reminder store retains it. Nothing here re-arms or retries a warning.
    */
-  revalidateQueuedReminder(eventType: string, now: Date = new Date()): PMQueuedEffectVerdict {
+  revalidateQueuedReminder(eventType: string, now: Date = new Date(), payload: string | null = null): PMQueuedEffectVerdict {
+    if (eventType.startsWith(EXPIRY_EVENT_PREFIX)) {
+      try {
+        return revalidateExpiryWarning(this.db.alertReminderStore(), eventType, payload, now.getTime());
+      } catch {
+        return "retain";
+      }
+    }
     const match = REINJECT_EVENT_RE.exec(eventType);
     if (match) {
       const bucket = match[1]!;

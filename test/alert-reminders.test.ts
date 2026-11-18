@@ -12,19 +12,23 @@ import {
   AlertReminderScheduler,
   AlertReminderStore,
   ensureAlertReminderSchema,
+  expiryEventType,
   expiryWarningMessage,
   normalizeAddRequest,
   parseExpiredSince,
+  parseExpiryEventType,
   readAlertsToken,
   registerAlertReminderRoutes,
   reminderEndsAt,
   retryBackoffMs,
+  revalidateExpiryWarning,
   SlackAlertsPoster,
   type AlertPoster,
   type AlertPostResult,
   type ObligationState,
 } from "../src/alertReminders.js";
 import { MoPDatabase } from "../src/db.js";
+import { PMCadenceScheduler } from "../src/pmCadence.js";
 import type { PMSubmitResult } from "../src/relay.js";
 import type { MoPConfig } from "../src/types.js";
 
@@ -1055,7 +1059,8 @@ test("the warning posts one line to PM once the final post is within 12h, and ne
   assert.equal(pm.calls[0].eventType, `cadence-reminder-expiry-k1-${T0 + DAY}`);
   assert.equal(store.get("k1")!.expiry_warned_until_at, T0 + DAY, "the claim records the until_at it warned for");
   await flush();
-  assert.ok(events.some((e) => e.type === "alert_reminder_expiry_warned" && e.payload.key === "k1" && e.payload.queued === false));
+  assert.ok(events.some((e) => e.type === "alert_reminder_expiry_warned" && e.payload.key === "k1"));
+  assert.equal(events.some((e) => e.type === "alert_reminder_expiry_warn_queued"), false, "a delivered receipt is not logged as queued");
 
   for (const offset of [30_000, 20 * MIN, 6 * HOUR, 11 * HOUR]) {
     clock.now = T0 + 12 * HOUR + offset;
@@ -1120,15 +1125,184 @@ test("renewing with a new until_at re-arms the warning for the new bound", async
   assert.notEqual(pm.calls[0].eventType, pm.calls[1].eventType);
 });
 
+test("the warning's queue id carries the full key and cutoff losslessly, so distinct reminders never share a PM queue row", async () => {
+  const until = T0 + DAY;
+  const keys = ["a:b", "a-b", "a.b", "a~3Ab", "A:B", "k1", "k1-2", "training-sindhu-r7-hourly", "é", "a b", "日本", "~", "~~"];
+  const ids = keys.map((key) => expiryEventType({ key, until_at: until }));
+  assert.equal(new Set(ids).size, keys.length, "every key maps to its own id");
+  for (const [i, key] of keys.entries()) {
+    assert.ok(ids[i].startsWith("cadence-reminder-expiry-"), "stays a durable cadence event");
+    assert.match(ids[i], /^[A-Za-z0-9._~-]+$/, "the id is plain ASCII");
+    assert.deepEqual(parseExpiryEventType(ids[i]), { key, until_at: until }, `round-trips ${JSON.stringify(key)}`);
+  }
+  assert.equal(expiryEventType({ key: "a:b", until_at: until }), `cadence-reminder-expiry-a~3Ab-${until}`);
+  assert.equal(expiryEventType({ key: "a-b", until_at: until }), `cadence-reminder-expiry-a-b-${until}`);
+  assert.notEqual(expiryEventType({ key: "k1", until_at: until }), expiryEventType({ key: "k1", until_at: until + 1 }), "the cutoff is part of the id");
+
+  for (const bad of [
+    "cadence-hourly-heartbeat-2026-11-13:02",
+    "cadence-reminder-expiry-",
+    "cadence-reminder-expiry-k1",
+    "cadence-reminder-expiry-k1-",
+    "cadence-reminder-expiry--5",
+    "cadence-reminder-expiry-k1-0",
+    "cadence-reminder-expiry-k1-05",
+    "cadence-reminder-expiry-k1-1e3",
+    "cadence-reminder-expiry-k1-99999999999999999",
+    "cadence-reminder-expiry-a:b-5",
+    "cadence-reminder-expiry-a~3ab-5",
+    "cadence-reminder-expiry-~ZZ-5",
+    "cadence-reminder-expiry-~FF-5",
+    "cadence-reminder-expiry-a~41-5",
+  ]) {
+    assert.equal(parseExpiryEventType(bad), null, `${bad} is not a canonical expiry id`);
+  }
+
+  // Two reminders with the same cutoff warned in one tick get two PM submits under two ids (the old
+  // hyphen-mapped id was identical for these, and the queue's (slot, event_type) key replaced the first).
+  const clock = { now: T0 };
+  const pm = pmRecorder();
+  const { store, scheduler } = schedulerFixture(clock, undefined, pm.submit);
+  store.add(dailyReminder({ key: "dup:key" }), T0);
+  store.add(dailyReminder({ key: "dup-key" }), T0);
+  clock.now = T0 + 12 * HOUR;
+  assert.deepEqual((await scheduler.tick()).expiry_warned.sort(), ["dup-key", "dup:key"]);
+  assert.equal(pm.calls.length, 2);
+  assert.notEqual(pm.calls[0].eventType, pm.calls[1].eventType);
+  for (const call of pm.calls) {
+    const parsed = parseExpiryEventType(call.eventType)!;
+    assert.ok(call.message.includes(`reminder ${parsed.key} expires`), "each id names the reminder its payload is for");
+  }
+});
+
+test("revalidateExpiryWarning delivers only for the exact key, active, unwatched, same cutoff, inside the window and before the final post", () => {
+  const { store } = memoryStore();
+  store.add(dailyReminder(), T0);
+  store.add(dailyReminder({ key: "watched", stop_obligation_id: 5 }), T0, () => null);
+  const id = expiryEventType({ key: "k1", until_at: T0 + DAY });
+  const text = expiryWarningMessage({ key: "k1", ends_at: T0 + DAY });
+  const verdict = (eventType: string, payload: string | null, at: number) => revalidateExpiryWarning(store, eventType, payload, at);
+
+  assert.equal(verdict(id, text, T0 + 12 * HOUR), "deliver", "the window opens 12h before the final post");
+  assert.equal(verdict(id, text, T0 + DAY - 1), "deliver", "still deliverable until the final post");
+  assert.equal(verdict(id, `MoP: ${text}`, T0 + 13 * HOUR), "deliver", "a wrapped payload that still contains the exact line");
+  assert.deepEqual(verdict(id, text, T0 + 12 * HOUR - 1), { drop: "reminder-outside-warning-window" });
+  assert.deepEqual(verdict(id, text, T0 + DAY), { drop: "reminder-already-expired" }, "after expiry the expiry listing reports it");
+  assert.deepEqual(verdict(id, text, T0 + DAY + 6 * HOUR), { drop: "reminder-already-expired" });
+  assert.deepEqual(verdict(id, null, T0 + 13 * HOUR), { drop: "expiry-warning-stale-message" });
+  assert.deepEqual(
+    verdict(id, expiryWarningMessage({ key: "k1", ends_at: T0 + DAY - HOUR }), T0 + 13 * HOUR),
+    { drop: "expiry-warning-stale-message" },
+    "an old date is never presented as actionable",
+  );
+  assert.deepEqual(verdict("cadence-reminder-expiry-nope", text, T0 + 13 * HOUR), { drop: "expiry-warning-unrecognized-id" });
+  assert.deepEqual(verdict(expiryEventType({ key: "missing", until_at: T0 + DAY }), text, T0 + 13 * HOUR), { drop: "reminder-missing" });
+  assert.deepEqual(
+    verdict(expiryEventType({ key: "watched", until_at: T0 + DAY }), expiryWarningMessage({ key: "watched", ends_at: T0 + DAY }), T0 + 13 * HOUR),
+    { drop: "reminder-watched-by-obligation" },
+  );
+  assert.deepEqual(
+    verdict(expiryEventType({ key: "k1", until_at: T0 + DAY + 1 }), text, T0 + 13 * HOUR),
+    { drop: "reminder-cutoff-changed" },
+    "the id names a different cutoff than the row's",
+  );
+
+  // Renewed after the claim: the older payload is dropped even though the new cutoff is inside its own window.
+  const renewedAt = T0 + 13 * HOUR;
+  const renewed = store.add(
+    normalized({ interval_s: 3600, until_at: new Date(T0 + 37 * HOUR).toISOString(), replace: true }, renewedAt),
+    renewedAt,
+  );
+  assert.ok(renewed.ok);
+  assert.deepEqual(verdict(id, text, T0 + 26 * HOUR), { drop: "reminder-cutoff-changed" });
+  assert.equal(
+    verdict(expiryEventType({ key: "k1", until_at: T0 + 37 * HOUR }), expiryWarningMessage({ key: "k1", ends_at: T0 + 37 * HOUR }), T0 + 26 * HOUR),
+    "deliver",
+    "the renewed cutoff's own warning is still deliverable",
+  );
+
+  store.stop("k1", "cancelled", T0 + 27 * HOUR);
+  assert.deepEqual(
+    verdict(expiryEventType({ key: "k1", until_at: T0 + 37 * HOUR }), expiryWarningMessage({ key: "k1", ends_at: T0 + 37 * HOUR }), T0 + 28 * HOUR),
+    { drop: "reminder-not-active" },
+  );
+});
+
+test("revalidateExpiryWarning uses the final grid post, not until_at, for a long-interval reminder", () => {
+  const { store } = memoryStore();
+  const until = T0 + 3 * DAY + 2 * HOUR;
+  store.add(normalized({ key: "daily", interval_s: 86_400, until_at: new Date(until).toISOString() }), T0);
+  const id = expiryEventType({ key: "daily", until_at: until });
+  const text = expiryWarningMessage({ key: "daily", ends_at: T0 + 3 * DAY });
+  assert.equal(revalidateExpiryWarning(store, id, text, T0 + 3 * DAY - HOUR), "deliver");
+  assert.deepEqual(
+    revalidateExpiryWarning(store, id, text, T0 + 3 * DAY + HOUR),
+    { drop: "reminder-already-expired" },
+    "the last post has passed even though until_at has not",
+  );
+});
+
+test("PMCadenceScheduler revalidates a queued expiry warning at the delivery boundary, retains on an unreadable store, and leaves other events alone", () => {
+  const { store } = memoryStore();
+  const now = Date.now();
+  store.add(normalized({ key: "live", interval_s: 1800, until_at: new Date(now + 6 * HOUR).toISOString() }, now), now);
+  const row = store.get("live")!;
+  const ends = reminderEndsAt(row);
+  const id = expiryEventType({ key: "live", until_at: row.until_at });
+  const text = expiryWarningMessage({ key: "live", ends_at: ends });
+
+  type QueuedRow = { slot: number; event_type: string; enqueued_at: string; payload?: string | null };
+  const wired: { check?: (row: QueuedRow) => unknown } = {};
+  const relay = {
+    submitToPM: async () => ({ ok: true }),
+    setPMQueuedEffectCheck: (fn: (row: QueuedRow) => unknown) => { wired.check = fn; },
+  };
+  let storeThrows = false;
+  const config = new Map<string, string>();
+  const db = {
+    getConfig: (k: string) => config.get(k) ?? null,
+    setConfig: (k: string, v: string) => config.set(k, v),
+    logEvent: () => undefined,
+    hasPMQueueDelivery: () => false,
+    alertReminderStore: () => {
+      if (storeThrows) throw new Error("database is locked");
+      return store;
+    },
+  };
+  const cadence = new PMCadenceScheduler(db as never, relay as never);
+  const queuedCheck = wired.check;
+  assert.ok(queuedCheck, "the cadence scheduler owns the queue's pre-paste check");
+
+  // Through the wired check: the queued payload reaches revalidation.
+  assert.equal(queuedCheck({ slot: 0, event_type: id, enqueued_at: "x", payload: text }), "deliver");
+  assert.deepEqual(queuedCheck({ slot: 0, event_type: id, enqueued_at: "x", payload: "reminder live expires 2020-01-01 00:00 IST; renew with mop reminder add --replace" }), { drop: "expiry-warning-stale-message" });
+  assert.deepEqual(queuedCheck({ slot: 0, event_type: id, enqueued_at: "x" }), { drop: "expiry-warning-stale-message" }, "no payload, no actionable warning");
+
+  // The direct method, with an explicit clock.
+  assert.equal(cadence.revalidateQueuedReminder(id, new Date(now), text), "deliver");
+  assert.deepEqual(cadence.revalidateQueuedReminder(id, new Date(ends + 1), text), { drop: "reminder-already-expired" });
+  store.stop("live", "cancelled", now + MIN);
+  assert.deepEqual(cadence.revalidateQueuedReminder(id, new Date(now + 2 * MIN), text), { drop: "reminder-not-active" });
+
+  // An unreadable reminder store never drops the row: it is retained for the next delivery attempt.
+  storeThrows = true;
+  assert.equal(cadence.revalidateQueuedReminder(id, new Date(now), text), "retain");
+  assert.equal(queuedCheck({ slot: 0, event_type: id, enqueued_at: "x", payload: text }), "retain");
+
+  // Non-expiry events never touch the reminder store.
+  assert.equal(cadence.revalidateQueuedReminder("something-else-entirely", new Date(now)), "deliver");
+});
+
 test("every unconfirmed outcome stays consumed: a throw, a rejection, an ambiguous, withheld or refused receipt is never retried", async () => {
-  const cases: Array<{ name: string; impl: () => Promise<PMSubmitResult>; type: string; outcome?: string; queued?: boolean }> = [
+  const cases: Array<{ name: string; impl: () => Promise<PMSubmitResult>; type: string; outcome?: string }> = [
     { name: "sync throw", impl: () => { throw new Error("pane gone"); }, type: "alert_reminder_expiry_warn_unconfirmed", outcome: "threw" },
     { name: "rejection", impl: () => Promise.reject(new Error("socket reset")), type: "alert_reminder_expiry_warn_unconfirmed", outcome: "threw" },
     { name: "ambiguous", impl: async () => ({ ok: true, submitKey: "Enter", ambiguous: true }), type: "alert_reminder_expiry_warn_unconfirmed", outcome: "ambiguous" },
     { name: "withheld", impl: async () => ({ ok: true, submitKey: "Enter", ambiguous: false, withheld: "guard" }), type: "alert_reminder_expiry_warn_unconfirmed", outcome: "withheld" },
     { name: "refused", impl: async () => ({ ok: false, submitKey: "Enter", ambiguous: false, refused: "guard" }), type: "alert_reminder_expiry_warn_unconfirmed", outcome: "refused" },
     { name: "not delivered", impl: async () => ({ ok: false, submitKey: "Enter", ambiguous: false }), type: "alert_reminder_expiry_warn_unconfirmed", outcome: "not_delivered" },
-    { name: "queued", impl: async () => ({ ok: true, submitKey: "Enter", ambiguous: false, queued: true }), type: "alert_reminder_expiry_warned", queued: true },
+    // Queued is not delivered: it is logged as queued, never as warned, and the claim stays consumed.
+    { name: "queued", impl: async () => ({ ok: true, submitKey: "Enter", ambiguous: false, queued: true }), type: "alert_reminder_expiry_warn_queued" },
   ];
   for (const c of cases) {
     const clock = { now: T0 };
@@ -1143,7 +1317,6 @@ test("every unconfirmed outcome stays consumed: a throw, a rejection, an ambiguo
     const logged = events.find((e) => e.type.startsWith("alert_reminder_expiry_warn"));
     assert.equal(logged?.type, c.type, c.name);
     if (c.outcome) assert.equal(logged?.payload.outcome, c.outcome, c.name);
-    if (c.queued !== undefined) assert.equal(logged?.payload.queued, c.queued, c.name);
 
     for (const offset of [MIN, HOUR, 8 * HOUR]) {
       clock.now = T0 + 12 * HOUR + offset;

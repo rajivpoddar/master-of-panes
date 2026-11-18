@@ -289,7 +289,9 @@ export type PMRuntime = "claude" | "omp";
  * unchanged (uncertain), or drop it because its purpose expired/completed.
  */
 export type PMQueuedEffectVerdict = "deliver" | "retain" | { drop: string };
-export type PMQueuedEffectCheck = (row: { slot: number; event_type: string; enqueued_at: string }) => PMQueuedEffectVerdict;
+export type PMQueuedEffectCheck = (
+  row: { slot: number; event_type: string; enqueued_at: string; payload?: string | null },
+) => PMQueuedEffectVerdict;
 
 export type PMSubmitResult = {
   ok: boolean;

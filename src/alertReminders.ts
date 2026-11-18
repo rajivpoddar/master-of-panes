@@ -339,6 +339,97 @@ export function expiryWarningMessage(warning: Pick<ExpiryWarning, "key" | "ends_
   return `reminder ${warning.key} expires ${when}; renew with mop reminder add --replace`;
 }
 
+/** Every PM queue event id of a pre-expiry warning starts with this ("cadence-" makes it durable). */
+export const EXPIRY_EVENT_PREFIX = "cadence-reminder-expiry-";
+
+/**
+ * Escape a reminder key for use inside a queue event id. Characters outside `[A-Za-z0-9._-]` (the
+ * key grammar also allows `:`) become `~XX` per UTF-8 byte. `~` is itself escaped, so the mapping is
+ * injective: `a:b` -> `a~3Ab` can never collide with the literal key `a-b`.
+ */
+function escapeEventKey(key: string): string {
+  let out = "";
+  for (const byte of Buffer.from(key, "utf8")) {
+    const ch = String.fromCharCode(byte);
+    out += byte < 0x80 && /[A-Za-z0-9._-]/.test(ch) ? ch : `~${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return out;
+}
+
+/**
+ * The PM queue's primary key is `(slot, event_type)` and a second enqueue under the same id REPLACES
+ * the queued payload. So the id must name the exact reminder and cutoff: the full key, escaped
+ * losslessly, then the claimed `until_at` (digits only, so the last `-` always splits them).
+ */
+export function expiryEventType(warning: Pick<ExpiryWarning, "key" | "until_at">): string {
+  return `${EXPIRY_EVENT_PREFIX}${escapeEventKey(warning.key)}-${warning.until_at}`;
+}
+
+/** Inverse of `expiryEventType`; null for anything that is not exactly its canonical output. */
+export function parseExpiryEventType(eventType: string): { key: string; until_at: number } | null {
+  if (!eventType.startsWith(EXPIRY_EVENT_PREFIX)) return null;
+  const rest = eventType.slice(EXPIRY_EVENT_PREFIX.length);
+  const cut = rest.lastIndexOf("-");
+  if (cut <= 0) return null;
+  const cutoff = rest.slice(cut + 1);
+  if (!/^[1-9]\d{0,15}$/.test(cutoff)) return null;
+  const untilAt = Number(cutoff);
+  if (!Number.isSafeInteger(untilAt)) return null;
+  const encoded = rest.slice(0, cut);
+  if (!/^(?:[A-Za-z0-9._-]|~[0-9A-F]{2})+$/.test(encoded)) return null;
+  const bytes: number[] = [];
+  for (let i = 0; i < encoded.length;) {
+    if (encoded[i] === "~") {
+      bytes.push(parseInt(encoded.slice(i + 1, i + 3), 16));
+      i += 3;
+    } else {
+      bytes.push(encoded.charCodeAt(i));
+      i += 1;
+    }
+  }
+  let key: string;
+  try {
+    key = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes));
+  } catch {
+    return null;
+  }
+  return escapeEventKey(key) === encoded ? { key, until_at: untilAt } : null;
+}
+
+export type ExpiryWarningVerdict = "deliver" | { drop: string };
+
+/**
+ * Delivery-time check for a queued pre-expiry warning (run by the PM queue immediately before the
+ * paste, whether the row is delivered at once or after a delay). A claim or an enqueue proves nothing
+ * about the reminder as it is NOW, so the warning is only presented as actionable when the exact key
+ * is still active and unwatched, still has the exact claimed cutoff, its final post is still ahead and
+ * inside the warning window, and the queued text is the warning for that final post. Anything else is
+ * dropped with a reason: a warning that arrives after expiry is the expiry listing's to report
+ * (`GET /alert-reminders?expired_since=`), and a stale one must never tell PM an old date or "renew".
+ * Never retries or re-arms anything: the claim stays consumed.
+ */
+export function revalidateExpiryWarning(
+  store: Pick<AlertReminderStore, "get">,
+  eventType: string,
+  payload: string | null,
+  nowMs: number,
+): ExpiryWarningVerdict {
+  const warning = parseExpiryEventType(eventType);
+  if (!warning) return { drop: "expiry-warning-unrecognized-id" };
+  const row = store.get(warning.key);
+  if (!row) return { drop: "reminder-missing" };
+  if (row.status !== "active") return { drop: "reminder-not-active" };
+  if (row.stop_obligation_id !== null) return { drop: "reminder-watched-by-obligation" };
+  if (row.until_at !== warning.until_at) return { drop: "reminder-cutoff-changed" };
+  const endsAt = reminderEndsAt(row);
+  if (endsAt <= nowMs) return { drop: "reminder-already-expired" };
+  if (endsAt - nowMs > ALERT_REMINDER_EXPIRY_WARN_LEAD_MS) return { drop: "reminder-outside-warning-window" };
+  if (typeof payload !== "string" || !payload.includes(expiryWarningMessage({ key: row.key, ends_at: endsAt }))) {
+    return { drop: "expiry-warning-stale-message" };
+  }
+  return "deliver";
+}
+
 // ─── Store ───────────────────────────────────────────────
 
 export interface ClaimedReminder {
@@ -882,7 +973,9 @@ export class AlertReminderScheduler {
         until_at: new Date(warning.until_at).toISOString(),
         expires_at: new Date(warning.ends_at).toISOString(),
       };
-      const eventType = `cadence-reminder-expiry-${warning.key.replace(/[^A-Za-z0-9._-]/g, "-")}-${warning.until_at}`;
+      // Lossless id: distinct reminders (or cutoffs) never share a PM queue row, which would replace
+      // the other's payload. The delivery-time check (`revalidateExpiryWarning`) decodes it again.
+      const eventType = expiryEventType(warning);
       let pending: Promise<PMSubmitResult>;
       try {
         pending = submit(expiryWarningMessage(warning), eventType);
@@ -893,7 +986,9 @@ export class AlertReminderScheduler {
         .then(
           (receipt) => {
             if (receipt?.ok === true && receipt.ambiguous === false && !receipt.withheld && !receipt.refused) {
-              log("alert_reminder_expiry_warned", { ...base, queued: receipt.queued === true });
+              // A queued receipt means MoP kept the row, not that PM saw it; the delivery-time check
+              // still decides at paste time. Only a non-queued ok receipt is a delivery.
+              log(receipt.queued === true ? "alert_reminder_expiry_warn_queued" : "alert_reminder_expiry_warned", base);
               return;
             }
             const outcome = receipt?.withheld
