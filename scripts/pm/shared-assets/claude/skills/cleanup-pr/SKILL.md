@@ -1032,12 +1032,12 @@ leave repeated PR-stall causes only in `/tmp`.
 
 ### Step 9.55: Codex review meta-analysis — BOT + slot-side companion (MANDATORY — Rajiv directive 2026-05-16 17:50 IST + PM enhancement 2026-05-16 18:40 IST)
 
-For every merged PR, retrospectively analyze BOTH (a) GitHub Codex bot inline comments AND (b) slot-side `codex-review-companion.mjs` invocations from MoP PostToolUse events + `/tmp/codex-review-companion/*.md` verdict markers, to identify gaps in the pre-Codex review gates (arch/plan/code/qa review skills) and update those skills so the same class of finding is caught earlier on future PRs.
+For every merged PR, retrospectively analyze BOTH (a) GitHub Codex bot inline comments AND (b) slot-side `codex-review-companion.mjs` invocations from MoP PostToolUse events + `/tmp/codex-review-companion/*.md` verdict markers, to identify gaps in the pre-Codex review gates (arch/plan/code/qa review skills) and propose (never land) at most one candidate check per PR (Step 9.55.e).
 
 Step 9.54 already records plan/code/qa/arch round counts into
 `/tmp/pr-retro-$PR_NUMBER.{md,json}`. Step 9.55 still reads the same slot-side
-sources because its job is deeper gate improvement: classify the finding classes
-and land/dedupe review-skill CHECK updates.
+sources because its job is deeper gate analysis: classify the finding classes
+and propose at most one candidate check. It never edits a review skill.
 
 Rajiv directive 2026-05-16 17:50 IST DM thread `1778933826.170419`: *"Analyze all the comments by codex bot and update our review agents so that this is caught earlier. Use a bg agent. Update cleanup pr skill and add this step."*
 
@@ -1246,61 +1246,22 @@ fi
 - `~/.claude/skills/codex-app-code-review/SKILL.md` (CHECK list)
 - `~/.claude/skills/codex-app-qa-review/SKILL.md` (CHECK list)
 
-If no existing gate would have caught it → DRAFT a new gate (Criterion or CHECK) addressing that class. Add to the appropriate skill `SKILL.md` + any companion templates. Tag each addition with `Codex meta-analysis YYYY-MM-DD PR #NNNN trigger` for traceability.
+If no existing check would have caught it, the class is a candidate for the single 9.55.e proposal. Do NOT add it to any skill `SKILL.md` or template.
 
 For `iterative-companion-cycle` findings: surface as a process gap rather than a content gap — the recurring class is "slot kept iterating via companion instead of escalating to PM after R3" → cross-reference `Rule 4: Codex Review Fatigue → Cap at 3 Rounds` in `buddhi-dev.md` and verify the slot's behavior matches the rule.
 
-**Validate retrospectively:** pick 2-3 of the PR's findings (bot or companion) and assert in a comment-block at the top of the new gate that the new text would have flagged them pre-Codex.
+**Validate retrospectively:** for a proposed candidate, name 1-2 of the PR's findings (bot or companion) it would have flagged pre-Codex, in the proposal itself.
 
-#### Step 9.55.e — Dedupe + land CHECK into review skill (MANDATORY — Rajiv directive 2026-05-19 10:34 IST)
+#### Step 9.55.e — Propose at most ONE candidate check; never edit a review skill (Rajiv 2026-11-18)
 
-For each finding classified as `generalizable` in 9.55.c, the bg agent MUST land a new CHECK into the appropriate `codex-app-<type>-review` SKILL.md file (NOT just write it into the retrospective — actually append it so the next PR is gated). Per Rajiv directive 2026-05-19 10:34 IST thread `1779166624.518699`: "Step 9.55 must dedupe + land + record-why-non-generalizable. Writing to retrospective is necessary but not sufficient."
+Source: Rajiv, C0C7U35LBKR thread 1794928109.634879, ts 1794982335.881169 ("do both"). This retires the 2026-05-19 auto-append directive (thread `1779166624.518699`): auto-appended CHECKs grew `~/.claude/skills/codex-app-code-review/SKILL.md` to ~2.8 MB / 916 CHECKs and #13414's review failed with `input_size_limit`. Context ts 1794981361.359359: *"we have to make our process more outcome oriented. we are wasting too much tokens and compute on things which have no return."*
 
-**Procedure for EACH generalizable finding:**
-
-1. **Identify target skill file** based on finding stage (one of):
-   - Arch-level (criterion-class) → `~/.claude/skills/codex-app-arch-review/SKILL.md`
-   - Plan-level (pre-implementation) → `~/.claude/skills/codex-app-plan-review/SKILL.md`
-   - Code-level (diff-review) → `~/.claude/skills/codex-app-code-review/SKILL.md`
-   - QA-level (post-impl verification) → `~/.claude/skills/codex-app-qa-review/SKILL.md`
-
-2. **Dedupe — grep the target file for an existing CHECK with overlapping keywords:**
-   ```bash
-   TARGET_SKILL=~/.claude/skills/codex-app-${STAGE}-review/SKILL.md
-   KEYWORDS=$(echo "$FINDING_TITLE" | tr ' ' '\n' | grep -E '^[a-zA-Z]{4,}$' | head -3 | tr '\n' '|' | sed 's/|$//')
-   if grep -qiE "$KEYWORDS" "$TARGET_SKILL"; then
-     echo "DEDUPED: finding overlaps existing CHECK in $TARGET_SKILL"
-     DEDUPED_COUNT=$((DEDUPED_COUNT + 1))
-     # Log to retrospective Skipped (rationale) section with reason "deduped"
-     continue
-   fi
-   ```
-
-3. **Land — append a new numbered CHECK to the target skill** (use Edit tool — never overwrite the file). Format:
-   ```markdown
-   <!-- Codex meta-analysis YYYY-MM-DD PR #NNNN trigger: <finding class> -->
-   ### CHECK <next-available-number>: <Rule title in imperative voice>
-
-   <One-paragraph rule body: what to look for + why + concrete repro signal.>
-
-   **Pattern (from PR #NNNN):** <Verbatim or summarized finding from bot/companion source.>
-
-   **Action when matched:** <REVISE / REJECT / NEEDS_REVISION + what slot must do.>
-   ```
-
-   The HTML comment marker is REQUIRED — it gives future meta-analyses traceability when grepping for the source PR.
-
-4. **Increment counter:**
-   ```bash
-   ADDED_COUNT=$((ADDED_COUNT + 1))
-   SKILLS_TOUCHED["$TARGET_SKILL"]=1
-   ```
-
-**Procedure for each NON-generalizable finding (one-shot symptom, fixture-only, single-call-site):**
-
-Add a line to the retrospective `## Skipped (rationale)` section. Do NOT touch any skill file. Format:
+1. **Never** edit, append to or renumber a review skill, template or reviewer agent from cleanup-pr (`~/.claude/skills/codex-app-{arch,plan,code,qa}-review/SKILL.md`, their `templates/*`, `~/.claude/agents/*-reviewer.md`).
+2. The retro MAY propose **at most one** candidate check, written only in `/tmp/pm-codex-meta-analysis-PR-$PR_NUMBER.md` under `## Candidate check (proposal only)`: target skill; the one-line check; the live product rule (`~/.claude/rules/*.md`, `.claude/rules/*.md`) or general correctness class it enforces; the finding that motivated it; why the existing one-line checks missed it. Grep the target first; if an existing line already covers the class, write `none (covered by: <line>)`. The default is `none`.
+3. Adding any CHECK to a review skill requires Rajiv's explicit OK, quoted with its Slack ts on the added line. Without that OK the proposal stays in the retro file.
+4. Each non-generalizable or already-covered finding gets one line under `## Skipped (rationale)`:
 ```
-- Finding: <id-or-path>; Class: <class-from-9.55.c>; Reason: <one-line — why non-generalizable, e.g. "single call-site fixture-only" / "production-grounded but one-shot" / "deduped with existing CHECK <N>" / "iterative-companion-cycle on healthy fixture authoring (no gate needed per feedback_codex_high_round_count_healthy_iterative_fixture_authoring)">
+- Finding: <id-or-path>; Class: <class-from-9.55.c>; Reason: <one-line — e.g. "single call-site fixture-only" / "covered by <line>">
 ```
 
 #### Step 9.55.d — SAVE retrospective + Slack summary
@@ -1318,9 +1279,9 @@ cat > /tmp/pm-codex-meta-analysis-PR-$PR_NUMBER.md <<EOF
 ## Findings classification
 <populated by bg agent per 9.55.c classification>
 
-## Gate updates
-<list of skill SKILL.md files updated + new CHECK/Criterion numbers — populated by 9.55.e>
-Total: $ADDED_COUNT new CHECKs added across ${#SKILLS_TOUCHED[@]} review skills (deduped: $DEDUPED_COUNT)
+## Candidate check (proposal only — needs Rajiv's OK with ts before any review-skill edit)
+<at most one candidate from 9.55.e, or: none>
+Candidate proposed: ${CANDIDATE_PROPOSED:-no} (not landed)
 
 ## Skipped (rationale)
 <populated by 9.55.e — one line per non-generalizable finding + per deduped finding:
@@ -1335,7 +1296,7 @@ EOF
 # fresh top-level channel message.
 CODEX_RETRO_SLACK="/tmp/cleanup-pr-$PR_NUMBER-codex-retro-slack.md"
 cat > "$CODEX_RETRO_SLACK" <<EOF
-:mag: *Codex retrospective PR #$PR_NUMBER* — $BOT_COUNT bot comments + $COMPANION_COUNT companion runs ($MARKER_COUNT markers) analyzed, $ADDED_COUNT new gates added across ${#SKILLS_TOUCHED[@]} review skills (deduped: $DEDUPED_COUNT; skipped non-generalizable: $SKIPPED_NON_GEN_COUNT). Output: /tmp/pm-codex-meta-analysis-PR-$PR_NUMBER.md.
+:mag: *Codex retrospective PR #$PR_NUMBER* — $BOT_COUNT bot comments + $COMPANION_COUNT companion runs ($MARKER_COUNT markers) analyzed; candidate check proposed: ${CANDIDATE_PROPOSED:-no} (not landed; adding one needs Rajiv's OK). Output: /tmp/pm-codex-meta-analysis-PR-$PR_NUMBER.md.
 EOF
 ~/.claude/scripts/pm-transition-alert.sh \
   --event cleanup-tracker \

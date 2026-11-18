@@ -184,6 +184,18 @@ Source: Rajiv C0ALZJHGE49 ts 1794900575.602869 ("avoid mixing frontend and backe
 - Both sides without a quoted Rajiv waiver (ts) → BLOCK / REQUEST_CHANGES; required pattern: backend issue+PR first, frontend child issue blocked-by it.
 - Tests/fixtures/inventories of one side don't count as mixing.
 
+## Proof-proportional-to-risk gate (rule 58, anti-bloat)
+Source: Rajiv C0C7U35LBKR thread 1794928109.634879, ts 1794978918.618269 ("this pr was just suppsoed to add logging but it added tons of test") / ts 1794979484.237099 ("a logging pr should not take 10h+"). Rule: ~/.claude/rules/58-heydonna-proof-proportional-to-risk.md.
+- Every AC / Proof matrix states its risk class. Low risk = observability, logging, telemetry, copy, docs-only (no behavior change).
+- Low-risk proof is exactly ONE table-driven unit test over the reason-code/field map + ONE test that the event reaches the existing transport. No per-site integration tests, RED-on-revert/mutation matrix, source-inspection guard or new QA spec. This overrides the per-control-point Proof matrix rows for low-risk changes.
+- BLOCK / REQUEST_CHANGES when a low-risk change's test lines exceed ~2× its product lines, or it demands that extra proof, unless the plan names the concrete data-loss or security risk. Data-loss, save-path, billing and security changes keep their existing proof rules.
+
+## Outcome-first gate (rule 59)
+Source: Rajiv C0C7U35LBKR thread 1794928109.634879, ts 1794981361.359359 ("privacy, security, safety should be secondary to outcome. we need to deliver results first. privacy, security, safety can be followups.") / ts 1794981537.792259 ("all product rules stay"). Rule: ~/.claude/rules/59-heydonna-outcome-first-followups.md.
+- Plan review: deliver the outcome first; a plan is not blocked or revised for extra privacy/security/safety proof or hardening that no existing product rule requires.
+- List extra privacy/security/safety proof or hardening NOT required by an existing product rule (00 safety rails, 34, 40, 41, 47, 48, 51, 52, 58 high class) as `FOLLOW_UP: <item> -> issue #<n>` ("issue to file" if no number yet), never BLOCK / REQUEST_CHANGES. All existing product rules stay in force.
+- Integration tests are demanded only for functional tests spanning several components/modules; otherwise unit (rule 58). A blocker on a privacy/security/safety item must cite the existing rule that requires it.
+
 ## Review Source Invariant
 
 Before reading the plan file, adjudicating the plan, or writing a `/tmp` plan

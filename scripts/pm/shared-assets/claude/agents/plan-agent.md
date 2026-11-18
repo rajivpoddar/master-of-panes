@@ -238,6 +238,7 @@ The plan is the contract that the implementer codes against and hd-proof-qa exec
 - Add the affected-test list (changed tests plus the tests over each changed source, including source-guard tests) and the remote typecheck command.
 - For each browser AC, add `### QA spec design`: spec path under `tests/e2e/specs/qa-tests/<issue>-<slug>.spec.ts` (never core/core-rest, never e2e.yml); seed `SEED_PROJECT_MEDIUM` (the Frazier medium deposition, the only seed with captured fixtures) unless the AC needs another, with the reason; a proven helper/pattern to reuse, citing an existing passing qa-tests spec and the helper it imports; numbered steps; and assertions (DOM/toast/network/Convex read-back) per AC. Video and trace are on; hd-proof-qa runs the blank check.
 - No browser AC → write `### QA spec design: N/A (no browser AC)`.
+- Rule 58: state the risk class; a low-risk (observability/logging/telemetry/copy/docs) matrix is just the two rule-58 tests, not one RED-on-revert row per control point.
 - codex-plan-reviewer BLOCKs a plan whose matrix lacks a row for a changed control point, names a non-behavioural test, omits the mutation or remote command, or omits the QA spec design for a browser AC.
 
 ## No per-commit main CI queues Planning Gate
@@ -254,6 +255,18 @@ Source: Rajiv C0ALZJHGE49 ts 1794900575.602869 ("avoid mixing frontend and backe
 ## Smallest-Fix Check (Mandatory)
 Source: Rajiv C0ALZJHGE49 thread 1794905468.610899, ts 1794909798.838929 ("why did plan grow?"), after #13962 grew from one hard-reject→warning change into three parts.
 Rajiv, same thread, ts 1794909891.984209: "all bug fixes should be the smallest possible change to fixing the issue. no scope creep." For every bug fix, before planning, state in one line the smallest change that fixes the issue's reported production failure. If any AC goes beyond it (refactor, ladder rework, new logging, adjacent cleanup), flag it in `## Scope check` as "beyond the smallest fix" and ask PM to confirm or drop it; do not expand scope on your own. Plan the smallest fix first.
+
+## Proof-proportional-to-risk Planning Gate (rule 58, anti-bloat)
+Source: Rajiv C0C7U35LBKR thread 1794928109.634879, ts 1794978918.618269 ("this pr was just suppsoed to add logging but it added tons of test") / ts 1794979484.237099 ("a logging pr should not take 10h+"). Rule: ~/.claude/rules/58-heydonna-proof-proportional-to-risk.md.
+- Every AC / Proof matrix states its risk class. Low risk = observability, logging, telemetry, copy, docs-only (no behavior change).
+- Low-risk proof is exactly ONE table-driven unit test over the reason-code/field map + ONE test that the event reaches the existing transport. No per-site integration tests, RED-on-revert/mutation matrix, source-inspection guard or new QA spec. This overrides the per-control-point Proof matrix rows for low-risk changes.
+- BLOCK / REQUEST_CHANGES when a low-risk change's test lines exceed ~2× its product lines, or it demands that extra proof, unless the plan names the concrete data-loss or security risk. Data-loss, save-path, billing and security changes keep their existing proof rules.
+
+## Outcome-first Planning Gate (rule 59)
+Source: Rajiv C0C7U35LBKR thread 1794928109.634879, ts 1794981361.359359 ("privacy, security, safety should be secondary to outcome. we need to deliver results first. privacy, security, safety can be followups.") / ts 1794981537.792259 ("all product rules stay"). Rule: ~/.claude/rules/59-heydonna-outcome-first-followups.md.
+- Deliver the outcome first: the plan scopes only what the issue ACs need. Extra privacy/security/safety hardening or proof goes in a `## Follow-ups` list (one follow-up issue each), not in the outcome PR or its Proof matrix.
+- File extra privacy/security/safety proof or hardening NOT required by an existing product rule (00 safety rails, 34, 40, 41, 47, 48, 51, 52, 58 high class) as `FOLLOW_UP: <item> -> issue #<n>` ("issue to file" if no number yet), never BLOCK / REQUEST_CHANGES. All existing product rules stay in force.
+- Integration tests are demanded only for functional tests spanning several components/modules; otherwise unit (rule 58). A blocker on a privacy/security/safety item must cite the existing rule that requires it.
 
 ## Input
 

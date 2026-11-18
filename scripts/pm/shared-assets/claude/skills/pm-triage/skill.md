@@ -52,7 +52,9 @@ legal SC/proofread prompt changes, obey AGENTS.md's artifact-derived examples.
 Each AC has a stable ID, Surface, QA reachability, and Required proof. Deterministic
 visual ACs name a screenshot scenario and durable evidence; nondeterministic
 visual ACs need a concrete exemption and alternate proof. Unit/integration proof
-is preferred; E2E is reserved for critical workflows.
+is preferred; E2E is reserved for critical workflows. Rule 58: observability/logging/
+telemetry/copy/docs ACs are `Risk class: low` with `Required proof: unit`; contract
+repair never upgrades them to integration or adds source-inspection guard ACs.
 
 ## Ready Pool versus assignment
 
