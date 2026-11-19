@@ -1907,81 +1907,20 @@ proxy_agent_print_selection() {
   printf 'proxy-agent: tier=%s model=%s reason=%s\n' "$SELECT_TIER" "$id" "$SELECT_REASON" >&2
 }
 
-# Enforce the PR-wide review budget before routing or dry-run success. A cap
-# summary is not another QA review round; neither is a quoted Codex verdict.
-proxy_agent_review_cap() {
-  local stage
-  case "$TYPE" in
-    pm-admission-reviewer) stage=12b;;
-    hd-proof-qa) stage=qa;;
-    *) return 0;;
-  esac
-  python3 -I - "$stage" "$ROLE_BRIEF" <<'PY_REVIEW_CAP'
-import json
-import os
-from pathlib import Path
-import re
-import subprocess
-import sys
-
-stage, brief_path = sys.argv[1:]
-try:
-    brief = Path(brief_path).read_text(encoding="utf-8")
-except (OSError, UnicodeError):
-    sys.exit(0)  # The launcher validates the brief separately.
-# Prefer the explicit PR field over inline references to related PRs.
-match = re.search(r"^PR:[ \t]*#?([1-9][0-9]*)\b", brief, re.M)
-match = match or re.search(r"\bPR(?:[ \t]+#|:[ \t]*#?)([1-9][0-9]*)\b", brief)
-if not match:
-    print(f"proxy-agent: warning: review cap skipped stage={stage}: no PR number in brief", file=sys.stderr)
-    sys.exit(0)
-pr = match[1]
-try:
-    result = subprocess.run(
-        ["gh", "api", "--paginate", "--slurp", f"repos/Scribie/heydonna-app/issues/{pr}/comments?per_page=100"],
-        check=True, capture_output=True, timeout=15,
-    )
-    pages = json.loads(result.stdout)
-    if not isinstance(pages, list) or not pages or any(not isinstance(page, list) for page in pages):
-        raise ValueError("unexpected comments response")
-    comments = [comment for page in pages for comment in page]
-    if any(not isinstance(c, dict) or not isinstance(c.get("body"), str) for c in comments):
-        raise ValueError("unexpected comment body")
-except (OSError, subprocess.SubprocessError, ValueError):
-    print(f"proxy-agent: warning: review cap skipped stage={stage} pr={pr}: GitHub comments unavailable", file=sys.stderr)
-    sys.exit(0)
-
-# Keep PM SHA length and suffix boundaries in sync with ci/pm-admit-12b.py MARKER.
-pm_marker = re.compile(r"^#{0,6} ?PM 12b(?: delta)?: (REVISE|BLOCK|FAIL) at [0-9a-fA-F]{7,40}(?=$|[\s.,;)])")
-qa_marker = re.compile(
-    r"^#{0,6} ?(?:QA(?: verdict)?|hd-proof-qa|hd-proof-qa QA)(?::[ \t]*|[ \t]+)"
-    r"(?:NEEDS_REVISION|REVISE)(?: (?:at |head=)[0-9a-fA-F]{7,40})?$"
-)
-rounds = 0
-for comment in comments:
-    lines = comment["body"].splitlines()
-    if not lines:
-        continue
-    if stage == "12b":
-        rounds += bool(pm_marker.match(lines[0]))
-    else:
-        last = next((line for line in reversed(lines) if line.strip()), "")
-        rounds += any(qa_marker.fullmatch(line) for line in (lines[0], last))
-
-summary = f"stage={stage} pr={pr} revise_rounds={rounds}"
-if rounds >= 2:
-    override = os.environ.get("PROXY_AGENT_REVIEW_CAP_OVERRIDE", "")
-    if not re.fullmatch(r"rajiv:[0-9]+\.[0-9]+", override):
-        print(f"proxy-agent: REVIEW_CAP_2 {summary}", file=sys.stderr)
-        sys.exit(76)
-    print(f"proxy-agent: REVIEW_CAP_OVERRIDE {summary} override={override}", file=sys.stderr)
-elif os.environ.get("PROXY_AGENT_DRY_RUN") == "1":
-    print(f"proxy-agent: REVIEW_CAP_OK {summary}", file=sys.stderr)
-PY_REVIEW_CAP
-}
-
+# Share the same verdict counter as the PM PreToolUse Agent hook.
 proxy_agent_resolve_type
-proxy_agent_review_cap || exit $?
+REVIEW_CAP_HELPER="$(dirname "$0")/review-launch-cap.py"
+case "$TYPE" in
+  pm-admission-reviewer|hd-proof-qa)
+    if [[ -r "$REVIEW_CAP_HELPER" ]]; then
+      review_cap_rc=0
+      python3 -I "$REVIEW_CAP_HELPER" "$TYPE" "$ROLE_BRIEF" || review_cap_rc=$?
+      [[ "$review_cap_rc" != 76 ]] || exit 76
+      [[ "$review_cap_rc" == 0 ]] || printf 'proxy-agent: warning: review cap helper unavailable\n' >&2
+    else
+      printf 'proxy-agent: warning: review cap helper unavailable\n' >&2
+    fi;;
+esac
 proxy_agent_select || exit 75  # includes the primary burn check (proxy_agent_primary_burn_check), before alias probes
 # Direct DeepSeek emergency gate, on the CANONICAL router identity and BEFORE the dry-run return (CTO REVISE of fbdfbdc, C0ALZJHGE49
 # thread 1795038046.056679, ts 1795038184.764339). The earlier gate matched the raw $MODEL after the dry-run exit, so a supported suffix
@@ -2372,6 +2311,10 @@ CLAUDE_BIN="$(command -v claude)"
   printf 'python3 -I - %q %q %q %q %q > %q <<'"'"'PY'"'"'\n' "$PROMPT_FILE" "$NAME" "$MODEL" "$MODEL_ID" "$PM_ROLE" "$LOG"
   printf '%s\n' 'import datetime, pathlib, re, sys' 'brief, name, alias, model, pm = sys.argv[1:]' 'text = pathlib.Path(brief).read_text(errors="replace")' 'refs = []' 'for key in ("ISSUE", "PR"):' '    m = re.search(r"^\s*" + key + r"\s*:\s*#?(\d{3,6})\b", text, re.I | re.M)' '    refs.append(key + ":" + (m.group(1) if m else "UNKNOWN"))' 'print("[{}] LAUNCH name={} {} model_alias={} model_id={} MODE:{}".format(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), name, " ".join(refs), alias, model, "pm" if pm == "1" else "dev"))' 'PY'
   printf '{ cat %q; printf "\\n\\n---\\nNOTE: Project skills may not be discoverable through Skill in proxy sessions. If a skill is unavailable, read its SKILL.md directly from %s and follow its instructions; do not repeatedly self-call an unknown skill.\\nPROXY RUN CONTRACT: end your turn ONLY when the task is finished or truly blocked, with a final line starting DONE:, BLOCKED: (exact external blocker) or HANDOFF:. Ending without a marker auto-resumes this session.\\nDo not send interim progress peer messages to PM; send ONE message only for a blocker that needs a PM decision, plus the final Stop.\\nSANDBOX (OS write fence ON, Rajiv 18 Nov): you can write only to /tmp, \$TMPDIR and caches. git worktree add is blocked, so create checkouts with: git clone --shared <existing checkout> /tmp/<lane>-<x>, then git fetch origin. Run ~/.claude/scripts/remote-test-box.sh and remote-browser-box.sh as a BARE command: no cd x && prefix, no pipe (| tail, | grep), no redirect (2>&1, > file), no ; or && chaining, or the sandbox refuses its ssh. Read long output from the file the tool saves it to instead of piping. If a needed write is refused, report BLOCKED with the path; never work around the fence. To check out a PR, fetch and check out its BRANCH (git fetch origin <branch> && git checkout -B pr origin/<branch>), never refs/pull/<n>/merge or head, which are GitHub test-merge commits.\\n"; } > %q\n' "$PROMPT_FILE" "$SKILL_NOTE_DIRS" "$JOB_DIR/prompt0.md"
+  if [[ "$TYPE" == hd-proof-qa && -r "$REVIEW_CAP_HELPER" ]]; then
+    qa_receipt="$(python3 -I "$REVIEW_CAP_HELPER" --qa-receipt)"
+    printf 'printf "\\n\\n%%s\\n" %q >> %q\n' "$qa_receipt" "$JOB_DIR/prompt0.md"
+  fi
   printf '%q ' "$CLAUDE_BIN" "${ARGS[@]}"
   printf '< %q 2>> %q | python3 -I -u %q %q %q\n' "$JOB_DIR/prompt0.md" "$LOG" "$HOME/.claude/scripts/proxy-agent-stream.py" "$OUT" "$JSONL"
   printf 'statuses=("${PIPESTATUS[@]}"); rc=${statuses[0]}; if [[ "$rc" == 0 ]]; then rc=${statuses[1]}; fi\n'

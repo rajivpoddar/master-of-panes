@@ -875,12 +875,23 @@
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/proxy-agent.sh",
-      "dependencies": [],
+      "dependencies": [
+        "~/.claude/scripts/review-launch-cap.py"
+      ],
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "63d7073f4e7a790648997069b355b2583da0f208a3e6ef99a1d2787e68210910",
+      "sha256": "a296542472b7af4a37e6f950e3b8fd710de5f37651b0a2ee9f7302acc4abc91e",
       "source_path": "claude/scripts/proxy-agent.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/review-launch-cap.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "9ee37975fb3525bbbc95673db28af1dc74219a3b581fa614df35a40811b152ee",
+      "source_path": "claude/scripts/review-launch-cap.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/tests/test-proxy-agent-review-cap.sh",
@@ -890,7 +901,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "187f7bfa63970a6a5cc20dbc0b0b9c768a028b24a6106cf83cfb46e6ec344887",
+      "sha256": "97c97dcdca1dd48a9978bbdc7618398738c31ab19531ee694bbec0c84dd796f4",
       "source_path": "claude/scripts/tests/test-proxy-agent-review-cap.sh"
     },
     {
@@ -1988,7 +1999,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 216,
+    "selected_count": 218,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
