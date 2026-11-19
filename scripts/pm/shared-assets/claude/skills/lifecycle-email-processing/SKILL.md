@@ -9,7 +9,7 @@ Source: Rajiv, C0ALZJHGE49 thread 1793076476.707989; design ts 1793086314.202589
 Basis: `docs/investigations/2026-10-27-activation-aha-analysis.md`. The aha is the user's OWN file coming back formatted.
 
 ## How PM runs it
-launch via Skill(launch-agent) (S148: in-process PM subagent under PM_SUBAGENT_CAP, proxy-agent.sh only on overflow; 12b stays in-process cap-exempt): launch `lifecycle-email-agent` in the background (`run_in_background=true`) with the prompt "Run Skill(lifecycle-email-processing)". Then return to normal event processing. Do not run it inline.
+launch via Skill(launch-agent) (S148: in-process PM subagent under PM_SUBAGENT_CAP, proxy-agent.sh only on overflow; 12b and hd-proof-qa launch ONLY via proxy-agent.sh, burn-cap exempt): launch `lifecycle-email-agent` in the background (`run_in_background=true`) with the prompt "Run Skill(lifecycle-email-processing)". Then return to normal event processing. Do not run it inline.
 
 ## Pieces
 - Selector (deterministic, no LLM): `~/.claude/scripts/growth/lifecycle-drip.py`

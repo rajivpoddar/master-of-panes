@@ -36,7 +36,7 @@ The original 910-line v2.2.1 skill is backed up next to the live target as
 1. MoP `PMCadenceScheduler` owns the cadence (task `heartbeat`, 3h buckets
    `YYYY-MM-DD:N`) and queues a normal PM prompt to invoke
    `Skill(heartbeat-tasks)`. It never injects `/heartbeat-tasks`.
-2. launch via Skill(launch-agent) (S148: in-process PM subagent under PM_SUBAGENT_CAP, proxy-agent.sh only on overflow; 12b stays in-process cap-exempt): PM launches ONE background agent (`run_in_background=true`) with the agent
+2. launch via Skill(launch-agent) (S148: in-process PM subagent under PM_SUBAGENT_CAP, proxy-agent.sh only on overflow; 12b and hd-proof-qa launch ONLY via proxy-agent.sh, burn-cap exempt): PM launches ONE background agent (`run_in_background=true`) with the agent
    prompt below, then returns to normal event processing. Do not run it inline.
 3. The agent posts. PM acts on the agent's returned `ACTIONS:` list (it cannot
    launch nested agents itself).
@@ -94,7 +94,7 @@ STEP 5 — return exactly:
 
 ## PM follow-through on the returned ACTIONS
 
-- `investigate <code>` → launch via Skill(launch-agent) (S148: in-process PM subagent under PM_SUBAGENT_CAP, proxy-agent.sh only on overflow; 12b stays in-process cap-exempt): launch `customer-artifact-investigator` (read-only,
+- `investigate <code>` → launch via Skill(launch-agent) (S148: in-process PM subagent under PM_SUBAGENT_CAP, proxy-agent.sh only on overflow; 12b and hd-proof-qa launch ONLY via proxy-agent.sh, burn-cap exempt): launch `customer-artifact-investigator` (read-only,
   background) with the code, window and `/tmp/heartbeat-3h-latest/axiom.json`.
   When the code is not user-visible, file a pm-ops obligation instead.
 - `reply-needed` → answer the customer in that thread (customer notes go to the
@@ -139,7 +139,7 @@ python3 /Users/rajiv/.claude/scripts/pm-ops.py snapshot --surface heartbeat --li
 ```
 
 Needs a human (one `_Ops:_` thread reply each):
-- `READY_POOL_LOW` / `READY_POOL_CONTRACT_REPAIR_REQUIRED` → launch via Skill(launch-agent) (S148: in-process PM subagent under PM_SUBAGENT_CAP, proxy-agent.sh only on overflow; 12b stays in-process cap-exempt): PM launches
+- `READY_POOL_LOW` / `READY_POOL_CONTRACT_REPAIR_REQUIRED` → launch via Skill(launch-agent) (S148: in-process PM subagent under PM_SUBAGENT_CAP, proxy-agent.sh only on overflow; 12b and hd-proof-qa launch ONLY via proxy-agent.sh, burn-cap exempt): PM launches
   `pm-triage-agent`.
 - A probe or script exit ≠ 0.
 
