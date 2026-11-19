@@ -64,30 +64,61 @@ run() {
 pm=pm-admission-reviewer
 printf 'Related: PR #999\nPR: 321\n' > "$work/brief"
 printf '%s\n' '[[]]' > "$FIXTURE"
-FIXTURE_GH_ERROR=1 run no-history "$pm" 76 'REVIEW_CAP_UNKNOWN stage=12b pr=321'
 PROXY_AGENT_DRY_RUN=1 run dry "$pm" 0 'REVIEW_CAP_OK stage=12b pr=321 revise_rounds=0'
 [[ ! -s "$STARTS" ]]
 run first "$pm" 0 'REVIEW_CAP_OK stage=12b pr=321 revise_rounds=0'
 first=$(grep -o 'receipt=[0-9a-f]*' "$work/first.err"); first=${first#receipt=}
-printf '[[{"id":1,"body":"## PM 12b: PASS at abcdef1\nREVIEW_ROUND_RECEIPT: %s"},{"id":2,"body":"PM 12b: PASS at abcdef2\nCARRY_FORWARD: proof only"},{"id":3,"body":"PM 12b: PASS at abcdef2 (S153 disposition)"},{"id":4,"body":"PM 12b delta: REVISE at abcdef2"}],[{"id":5,"body":"PM 12b: PASS at abcdef1\nREVIEW_ROUND_RECEIPT: %s"}]]\n' "$first" "$first" | python3 -I -c 'import sys; print(sys.stdin.read().strip().replace("\n", "\\n"))' > "$FIXTURE"
+python3 -I - "$first" > "$FIXTURE" <<'PY'
+import json, sys
+receipt = f"PM 12b: PASS at abcdef1\nREVIEW_ROUND_RECEIPT: {sys.argv[1]}"
+print(json.dumps([[
+    {"id": 1, "body": receipt},
+    {"id": 6984189252, "body": "PM 12b: PASS at eaf3885fc9cea53e6a350440d45b4d92d4cdf160\nCARRY_FORWARD: proof only"},
+    {"id": 3, "body": "PM 12b: PASS at abcdef2 (S153 disposition)"},
+    {"id": 4, "body": "PM 12b delta: PASS at abcdef2\n\nDelta since the PASS: merge-only, no PR-owned change."},
+], [{"id": 5, "body": receipt}]]))
+PY
 run second "$pm" 0 'revise_rounds=1 receipts=2 reservations=1 round=2'
 run third "$pm" 76 'REVIEW_CAP_2 stage=12b pr=321 revise_rounds=2'
-FIXTURE_GH_ERROR=1 run cached-outage "$pm" 76 'warning: using saved review history stage=12b pr=321'
-PROXY_AGENT_REVIEW_CAP_OVERRIDE=rajiv:1000000000.000001 run unrecorded "$pm" 76 'REVIEW_CAP_2'
+FIXTURE_GH_ERROR=1 run cached-outage "$pm" 76 'warning: GitHub review history unavailable stage=12b pr=321'
+grep -Fq 'REVIEW_CAP_2 stage=12b pr=321' "$work/cached-outage.err"
 (umask 077; printf '%s\n' '[{"pr":321,"stage":"12b","round":3,"ts":"1000000000.000002"}]' > "$HOME/.claude/state/proxy-review-cap-approvals.json")
-PROXY_AGENT_REVIEW_CAP_OVERRIDE=rajiv:1000000000.000002 run approved "$pm" 0 'round=3 override=rajiv:1000000000.000002'
-PROXY_AGENT_REVIEW_CAP_OVERRIDE=rajiv:1000000000.000002 run replay "$pm" 76 'REVIEW_CAP_2'
+PROXY_AGENT_REVIEW_CAP_OVERRIDE=rajiv:1000000000.000002 run pm-owned-approval "$pm" 76 'REVIEW_CAP_OVERRIDE_DISABLED stage=12b'
+[[ $(wc -l < "$STARTS") -eq 2 ]]
+
+printf 'PR: 322\n' > "$work/brief"
+FIXTURE_GH_ERROR=1 run no-history "$pm" 0 'warning: GitHub review history unavailable stage=12b pr=322'
+grep -Fq 'revise_rounds=0 receipts=0 reservations=0 round=1' "$work/no-history.err"
 [[ $(wc -l < "$STARTS") -eq 3 ]]
+
+# Exact real verdict from PR #14161. The CARRY_FORWARD line is supplementary.
+printf 'PR: 14161\n' > "$work/brief"
+python3 -I - > "$FIXTURE" <<'PY'
+import json
+print(json.dumps([[{"id": 7001054897, "body": """PM 12b: REVISE at c924f568239e4364c4398a24df836ace71134899
+PR: 14161
+HEAD_SHA: c924f568239e4364c4398a24df836ace71134899
+VERDICT: REVISE
+REVIEWER: pm-admission-reviewer
+TIMESTAMP: 2026-11-19T05:53:14Z
+behavior: AC-1 billing: the seed repair covers empty databases only. A persisted base AssemblyAI row effective after 2026-11-19T00:00:00Z still wins at $0.21/h. Ensure upgrade seeding selects $0.23/h without rewriting historical pricing, and prove the existing-row case.
+other: S133: publish remote RED-on-revert for changed test coverage and remote typecheck on the reviewed/reworked head; rerun overlapping usage-metering.test.ts. Current fresh-seed GREEN and disjoint audio GREEN were inspected.
+CARRY_FORWARD: c99cb43e1eb10c8ff4d1ece10b382310a9d4e4c1→c924f568239e4364c4398a24df836ace71134899, diff files=2, audio overlap=none (GREEN only); metering overlap=convex/migrations/seedProviderPricing.ts; TypeScript delta disallows typecheck carry-forward.
+"""}]]))
+PY
+run real-revise "$pm" 0 'stage=12b pr=14161 revise_rounds=1 receipts=1 reservations=0 round=2'
+run real-revise-cap "$pm" 76 'REVIEW_CAP_2 stage=12b pr=14161 revise_rounds=2'
 
 printf 'for PR #321\n' > "$work/brief"
 printf '%s\n' '[[{"id":1,"body":"QA report\n\nQA: NEEDS_REVISION"},{"id":2,"body":"Codex QA: REVISE"},{"id":3,"body":"REVIEW_CAP_2 stage=qa"}]]' > "$FIXTURE"
 # One historical QA verdict leaves one slot. The alias shares the stage.
 for label in qa-a qa-b; do
-  (rc=0; bash "$launcher" pm-proof-qa "$work/brief" --cwd "$work/checkout" --model astra >"$work/$label.out" 2>"$work/$label.err" || rc=$?; printf '%s\n' "$rc" > "$work/$label.rc") &
+  if [[ "$label" == qa-a ]]; then type=hd-proof-qa; else type=pm-proof-qa; fi
+  (rc=0; bash "$launcher" "$type" "$work/brief" --cwd "$work/checkout" --model astra >"$work/$label.out" 2>"$work/$label.err" || rc=$?; printf '%s\n' "$rc" > "$work/$label.rc") &
   if [[ "$label" == qa-a ]]; then a=$!; else b=$!; fi
 done
 wait "$a" "$b"
 [[ $(sort -n "$work/qa-a.rc" "$work/qa-b.rc" | tr '\n' ' ') == '0 76 ' ]]
 grep -Fq 'REVIEW_CAP_2 stage=qa pr=321 revise_rounds=2' "$work/qa-a.err" "$work/qa-b.err"
-[[ $(wc -l < "$STARTS") -eq 4 ]]
-printf 'PASS concurrent QA alias: exactly one dispatch, one refusal (0, 76)\n'
+[[ $(wc -l < "$STARTS") -eq 5 ]]
+printf 'PASS concurrent canonical QA and alias: exactly one dispatch, one refusal (0, 76)\n'
