@@ -19,6 +19,9 @@ QA = re.compile(
 )
 QA_PASS = re.compile(rf"^DONE: proof complete at {SHA} - .*\bCodex QA (?:PASS|APPROVE), ready for PM 12b$")
 TOKEN = re.compile(r"^REVIEW_ROUND_RECEIPT: ([0-9a-f]{32})$", re.M)
+S153_ROUND_TWO = "s153:round-2"  # Cached history evidence, not a receipt ID.
+S153_DISPOSITION = re.compile(rf"^PM 12b: PASS at {SHA} \(S153 disposition\)$")
+S153_REVISE = "Reviewer verdict at this head was REVISE with REVIEW_CAP_2 (round 2)"
 
 
 def read_receipts(stage, pages):
@@ -31,9 +34,14 @@ def read_receipts(stage, pages):
                 raise ValueError("unexpected comment record")
             body = comment["body"].rstrip()
             lines = body.splitlines()
-            if not lines or "(S153 disposition)" in lines[0]:
+            if not lines:
                 continue
             first, last = lines[0], lines[-1]
+            if "(S153 disposition)" in first:
+                if (stage == "12b" and S153_DISPOSITION.fullmatch(first)
+                        and len(lines) > 1 and lines[1].startswith(S153_REVISE)):
+                    receipts[S153_ROUND_TWO] = None
+                continue
             tokens = set(TOKEN.findall(body))
             if stage == "12b":
                 verdict = PM.match(first)
@@ -74,20 +82,18 @@ def check(conn, stage, pr, reserve):
         # cannot reuse this snapshot while we're claiming a slot.
         current = fetch_receipts(stage, pr)
     except (OSError, subprocess.SubprocessError, ValueError):
-        # Fail open on unavailable GitHub history, not on rounds we already know.
-        print(f"proxy-agent: warning: GitHub review history unavailable {label}; "
-              "enforcing only saved receipts and local reservations", file=sys.stderr)
-    else:
-        receipts.update(current)
+        return 76, f"REVIEW_CAP_UNKNOWN {label} reason=github_history_unavailable", ""
+    receipts.update(current)
 
     # A matching receipt and reservation are one review, including reposts of
     # that receipt. An untagged receipt cannot silently free a reserved slot.
     reserved = set(reservations)
-    receipt_count = sum(token is None for token in receipts.values()) + len(
-        {token for token in receipts.values() if token is not None} - reserved
-    )
-    occupied = receipt_count + len(reserved)
-    summary = f"{label} revise_rounds={occupied} receipts={len(receipts)} reservations={len(reserved)}"
+    tokens = [token for key, token in receipts.items() if key != S153_ROUND_TWO]
+    receipt_count = tokens.count(None) + len({token for token in tokens if token is not None} - reserved)
+    # The disposition attests that round two already happened. It sets a floor
+    # rather than adding another receipt if the verdict is also in history.
+    occupied = max(receipt_count + len(reserved), 2 if S153_ROUND_TWO in receipts else 0)
+    summary = f"{label} revise_rounds={occupied} receipts={len(tokens)} reservations={len(reserved)}"
     token = ""
     if occupied >= 2:
         rc, note = 76, f"REVIEW_CAP_2 {summary}"
@@ -133,7 +139,7 @@ def main(mode, agent_type, brief_path):
             conn.execute("BEGIN IMMEDIATE")
         elif database.exists():
             conn = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
-        rc, note, token = check(conn, root, stage, pr, reserve)
+        rc, note, token = check(conn, stage, pr, reserve)
         print(f"proxy-agent: {note}", file=sys.stderr)
         if token:
             print(token)

@@ -906,7 +906,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "d99aa9581c5221175202f727b71afa570e64396eb40384cd76c8812b9bf58a4d",
+      "sha256": "aefb540693e72e874cda6f4cd530befbf2270ca0b817cb2f4db4e624e7a8c9d1",
       "source_path": "claude/scripts/proxy-review-cap.py"
     },
     {
@@ -1016,7 +1016,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "c2238f5f378b035ceebe574fbeabd1022f1866c101849f4adac0219db9d011cc",
+      "sha256": "e732b8ab62119598dfe1cb72d93d961e7856de06e9dda0bb0c2bd16d1e2101ef",
       "source_path": "claude/scripts/tests/test-proxy-agent-review-cap.sh"
     },
     {
