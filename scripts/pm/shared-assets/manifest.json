@@ -375,7 +375,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-buddhi",
-      "sha256": "d754757176fc67a21b9db3aa04fbb4122aead1513c357f7ef25877e3f69e605f",
+      "sha256": "8859b2fc17c408834e11d26cf7c5c5ecfe5842d15852a2adff4028efbe92ed07",
       "source_path": "claude/rules/20-buddhi-pm.md"
     },
     {
