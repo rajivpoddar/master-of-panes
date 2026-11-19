@@ -3576,7 +3576,7 @@ def block_pr_command(n, reason, head="", dep_reason="", from_state=""):
     return cmd
 
 def pm_review_command(n):
-    return f"gh\\ pr\\ edit\\ {n}\\ --add-label\\ pm-state:pm-review-pending\\ &&\\ Agent(pm-admission-reviewer)"
+    return f"gh\\ pr\\ edit\\ {n}\\ --add-label\\ pm-state:pm-review-pending\\ &&\\ proxy-agent.sh(pm-admission-reviewer)"
 
 def pm_review_done_command(n):
     return f"post_the_PM_12b_PR_comment\\ &&\\ ~/.claude/scripts/ci/pm-admit-ci.sh\\ {n}"
@@ -5548,7 +5548,7 @@ if [ -n "$ACTION_LINES" ]; then
           --owner pm \
           --horizon hourly \
           --title "PR #$pr needs PM Claude phase-A review transition" \
-          --action "Run/finish PM Claude phase-A review only. Mark review pending with gh pr edit $pr --add-label pm-state:pm-review-pending, run Agent(pm-admission-reviewer), then post the PM 12b PR comment, then run ~/.claude/scripts/ci/pm-admit-ci.sh $pr. Merge-ready uses pm-readiness-contract, not pm-review --scope merge-ready." \
+          --action "Run/finish PM Claude phase-A review only. Mark review pending with gh pr edit $pr --add-label pm-state:pm-review-pending, run proxy-agent.sh(pm-admission-reviewer), then post the PM 12b PR comment, then run ~/.claude/scripts/ci/pm-admit-ci.sh $pr. Merge-ready uses pm-readiness-contract, not pm-review --scope merge-ready." \
           --blocker "pm_review_pending" \
           --evidence "$line"
         ;;
