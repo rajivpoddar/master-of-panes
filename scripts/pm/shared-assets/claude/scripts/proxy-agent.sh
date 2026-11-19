@@ -2114,6 +2114,8 @@ if os.environ.get("HELPER_READONLY") == "1":
 allow_write = [
     "/tmp",
     "/private/tmp",
+    # Browser QA disposable-Convex lease records (remote-qa-convex.py); pq14072e BLOCKED 2026-11-19 04:32 IST on EPERM.
+    "/Users/rajiv/.heydonna/qa-convex-leases",
     "/Users/rajiv/.npm",
     "/Users/rajiv/.bun",
     "/Users/rajiv/.cache",
@@ -2150,6 +2152,10 @@ excluded_commands = [
     "/Users/rajiv/.claude/scripts/remote-test-box.sh *",
     "~/.claude/scripts/remote-browser-box.sh *",
     "/Users/rajiv/.claude/scripts/remote-browser-box.sh *",
+    # Browser QA wrapper: provisions disposable Convex (management API) + drives remote-browser-box; same class as the
+    # box scripts above. pq14072e/f BLOCKED 2026-11-19 04:32/04:40 IST (lease writes, Convex node probes) inside the fence.
+    "~/.claude/scripts/remote-qa-spec.sh *",
+    "/Users/rajiv/.claude/scripts/remote-qa-spec.sh *",
     # Rajiv D0AMF0XE6TS ts 1795017876.764629: exempt ssh; ssh back to this Mac is denied by the permission rules below.
     "ssh *",
 ]
@@ -2164,7 +2170,7 @@ allowed_domains = [
 # Ops-repair lanes must write MoP/autoscaler repos, ~/.claude/scripts and restart launchd (sandbox9 BLOCKED
 # 2026-11-18 21:03 IST: "Sandbox denies MoP repository metadata writes and launchd access"). They run
 # unsandboxed; deletion/cleanup briefs never go to these types (launch-agent rule, Rajiv ts 1795011960.567969).
-_ops_lane = (os.environ.get("PROXY_AGENT_TYPE_FOR_SANDBOX", "") in ("mop-main-repair", "autoscaler-main-repair", "pm-ops-tooling", "pm-triage-agent", "pm-backlog-promoter")
+_ops_lane = (os.environ.get("PROXY_AGENT_TYPE_FOR_SANDBOX", "") in ("mop-main-repair", "autoscaler-main-repair", "pm-ops-tooling", "pm-triage-agent", "pm-backlog-promoter", "cleanup-pr-runner")  # cleanup-pr-runner: state lane (pm-ops.db, receipts, retros); deletions = own git worktrees + merged branches only (Rajiv D0AMF0XE6TS ts 1795070120.628959)
              or os.environ.get("HELPER_READONLY") == "1")
 # Ops/state lanes (MoP + autoscaler repair, PM ops tooling, triage, heartbeat/hourly helpers) must write ~/.claude
 # state (pm-ops.db, state files) and restart launchd. Claude Code's sandbox protects .claude paths even when they are

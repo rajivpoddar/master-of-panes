@@ -375,7 +375,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-buddhi",
-      "sha256": "dff368d529fa3157b4f095016dd1726c330a36eb5ed6d25c9ee4342de8006b56",
+      "sha256": "aaccd6605011ca5536a59868d1c8e35604f87eeccd06e65c84df798cb44297de",
       "source_path": "claude/rules/20-buddhi-pm.md"
     },
     {
@@ -879,7 +879,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "ab10e550f22cb61515583267260ddc91777ab693633b1a8539971c2cfc5ba85b",
+      "sha256": "cd5bc7522c231d7c1c6387e372f3fe02cade3d9b87a29d121563399cbf575615",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -1241,7 +1241,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "45827b4c9de8b8f7eaf1f293340d0095dab69d14b4f7985d99a6ab7a084b4d2d",
+      "sha256": "52d8215b49a61f6de3b6a3b3d0d00b47306418afa6392c9252fc476b29ba0cd2",
       "source_path": "claude/skills/hourly-report-processing/SKILL.md"
     },
     {
