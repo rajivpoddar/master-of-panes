@@ -1907,7 +1907,81 @@ proxy_agent_print_selection() {
   printf 'proxy-agent: tier=%s model=%s reason=%s\n' "$SELECT_TIER" "$id" "$SELECT_REASON" >&2
 }
 
+# Enforce the PR-wide review budget before routing or dry-run success. A cap
+# summary is not another QA review round; neither is a quoted Codex verdict.
+proxy_agent_review_cap() {
+  local stage
+  case "$TYPE" in
+    pm-admission-reviewer) stage=12b;;
+    hd-proof-qa) stage=qa;;
+    *) return 0;;
+  esac
+  python3 -I - "$stage" "$ROLE_BRIEF" <<'PY_REVIEW_CAP'
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+stage, brief_path = sys.argv[1:]
+try:
+    brief = Path(brief_path).read_text(encoding="utf-8")
+except (OSError, UnicodeError):
+    sys.exit(0)  # The launcher validates the brief separately.
+# Prefer the explicit PR field over inline references to related PRs.
+match = re.search(r"^PR:[ \t]*#?([1-9][0-9]*)\b", brief, re.M)
+match = match or re.search(r"\bPR(?:[ \t]+#|:[ \t]*#?)([1-9][0-9]*)\b", brief)
+if not match:
+    print(f"proxy-agent: warning: review cap skipped stage={stage}: no PR number in brief", file=sys.stderr)
+    sys.exit(0)
+pr = match[1]
+try:
+    result = subprocess.run(
+        ["gh", "api", "--paginate", "--slurp", f"repos/Scribie/heydonna-app/issues/{pr}/comments?per_page=100"],
+        check=True, capture_output=True, timeout=15,
+    )
+    pages = json.loads(result.stdout)
+    if not isinstance(pages, list) or not pages or any(not isinstance(page, list) for page in pages):
+        raise ValueError("unexpected comments response")
+    comments = [comment for page in pages for comment in page]
+    if any(not isinstance(c, dict) or not isinstance(c.get("body"), str) for c in comments):
+        raise ValueError("unexpected comment body")
+except (OSError, subprocess.SubprocessError, ValueError):
+    print(f"proxy-agent: warning: review cap skipped stage={stage} pr={pr}: GitHub comments unavailable", file=sys.stderr)
+    sys.exit(0)
+
+# Keep PM SHA length and suffix boundaries in sync with ci/pm-admit-12b.py MARKER.
+pm_marker = re.compile(r"^#{0,6} ?PM 12b(?: delta)?: (REVISE|BLOCK|FAIL) at [0-9a-fA-F]{7,40}(?=$|[\s.,;)])")
+qa_marker = re.compile(
+    r"^#{0,6} ?(?:QA(?: verdict)?|hd-proof-qa|hd-proof-qa QA)(?::[ \t]*|[ \t]+)"
+    r"(?:NEEDS_REVISION|REVISE)(?: (?:at |head=)[0-9a-fA-F]{7,40})?$"
+)
+rounds = 0
+for comment in comments:
+    lines = comment["body"].splitlines()
+    if not lines:
+        continue
+    if stage == "12b":
+        rounds += bool(pm_marker.match(lines[0]))
+    else:
+        last = next((line for line in reversed(lines) if line.strip()), "")
+        rounds += any(qa_marker.fullmatch(line) for line in (lines[0], last))
+
+summary = f"stage={stage} pr={pr} revise_rounds={rounds}"
+if rounds >= 2:
+    override = os.environ.get("PROXY_AGENT_REVIEW_CAP_OVERRIDE", "")
+    if not re.fullmatch(r"rajiv:[0-9]+\.[0-9]+", override):
+        print(f"proxy-agent: REVIEW_CAP_2 {summary}", file=sys.stderr)
+        sys.exit(76)
+    print(f"proxy-agent: REVIEW_CAP_OVERRIDE {summary} override={override}", file=sys.stderr)
+elif os.environ.get("PROXY_AGENT_DRY_RUN") == "1":
+    print(f"proxy-agent: REVIEW_CAP_OK {summary}", file=sys.stderr)
+PY_REVIEW_CAP
+}
+
 proxy_agent_resolve_type
+proxy_agent_review_cap || exit $?
 proxy_agent_select || exit 75  # includes the primary burn check (proxy_agent_primary_burn_check), before alias probes
 # Direct DeepSeek emergency gate, on the CANONICAL router identity and BEFORE the dry-run return (CTO REVISE of fbdfbdc, C0ALZJHGE49
 # thread 1795038046.056679, ts 1795038184.764339). The earlier gate matched the raw $MODEL after the dry-run exit, so a supported suffix
