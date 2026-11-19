@@ -875,9 +875,7 @@
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/proxy-agent.sh",
-      "dependencies": [
-        "~/.claude/scripts/review-launch-cap.py"
-      ],
+      "dependencies": [],
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
@@ -1014,9 +1012,7 @@
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/tests/test-proxy-agent-review-cap.sh",
-      "dependencies": [
-        "~/.claude/scripts/proxy-agent.sh"
-      ],
+      "dependencies": [],
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
