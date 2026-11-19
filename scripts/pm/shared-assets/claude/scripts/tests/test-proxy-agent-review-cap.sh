@@ -1,82 +1,93 @@
 #!/usr/bin/env bash
-# Launcher dry-run contract with paginated GitHub comment fixtures.
+# Real launcher path; no agents, notifications, network, or live state.
 set -euo pipefail
 launcher=${1:-$(cd "$(dirname "$0")/.." && pwd)/proxy-agent.sh}
 work=$(mktemp -d "${TMPDIR:-/tmp}/proxy-review-cap-test.XXXXXX")
-mkdir -p "$work/bin" "$work/home"
-live_home=$HOME
-export PATH="$work/bin:$PATH" HOME="$work/home" PROXY_AGENT_OUT_DIR="$work/out"
-export PROXY_AGENT_DRY_RUN=1 PROXY_AGENT_NO_SUBSCRIPTION=1 PROXY_BURN_GATE=shadow
-unset PROXY_AGENT_REVIEW_CAP_OVERRIDE
-export FIXTURE="$work/comments.json"
+export PATH="$work/bin:$PATH" HOME="$work/home" TMPDIR="$work"
+export PROXY_AGENT_OUT_DIR="$work/out" PROXY_AGENT_STATE_DIR="$work/model-state"
+export PROXY_AGENT_NO_SUBSCRIPTION=1 PROXY_BURN_GATE=shadow
+unset PROXY_AGENT_REVIEW_CAP_OVERRIDE PROXY_AGENT_DRY_RUN PROXY_AGENT_NAME
+export FIXTURE="$work/comments.json" STARTS="$work/starts"
+mkdir -p "$work/bin" "$HOME/.claude"/{scripts,agents,state} "$HOME/.config/cliproxyapi" "$work/checkout"
+printf 'CLIPROXY_API_KEY=fixture\n' > "$HOME/.config/cliproxyapi/client.env"
+for type in pm-admission-reviewer hd-proof-qa; do
+  printf 'fixture agent\n' > "$HOME/.claude/agents/$type.md"
+done
+for helper in proxy-run-state proxy-assignment-notice proxy-agent-notify; do
+  printf 'raise SystemExit(0)\n' > "$HOME/.claude/scripts/$helper.py"
+done
+cat > "$work/bin/git" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == -C ]] || exit 98
+case "$3" in
+  rev-parse) printf '%s\n' "$2";;
+  status) :;;
+  branch) printf 'fixture\n';;
+  *) exit 98;;
+esac
+STUB
 cat > "$work/bin/gh" <<'STUB'
 #!/usr/bin/env bash
-[[ "$*" == 'api --paginate --slurp repos/Scribie/heydonna-app/issues/321/comments?per_page=100' ]] || exit 98
+[[ "$*" == 'api --hostname github.com --paginate --slurp repos/Scribie/heydonna-app/issues/'*'/comments?per_page=100' ]] || exit 98
 [[ "${FIXTURE_GH_ERROR:-0}" != 1 ]] || exit 1
 exec /bin/cat "$FIXTURE"
 STUB
-chmod +x "$work/bin/gh"
+cat > "$work/bin/tmux" <<'STUB'
+#!/usr/bin/env python3
+import os, pathlib, re, shlex, sys
+if sys.argv[1] == 'has-session':
+    sys.exit(1)
+if sys.argv[1] == 'new-session':
+    run = pathlib.Path(shlex.split(sys.argv[-1])[1])
+    assert re.search(r'REVIEW_ROUND_RECEIPT: [0-9a-f]{32}', run.read_text())
+    with open(os.environ['STARTS'], 'a') as stream:
+        print('START', file=stream)
+    run.with_name('rc').write_text('0\n')
+else:
+    assert sys.argv[1] == 'wait-for'
+STUB
+printf '#!/usr/bin/env bash\nexit 99\n' > "$work/bin/claude"
+chmod +x "$work/bin/"*
+: > "$STARTS"
 
-check() {
-  local label=$1 expected_rc=$2 expected_line=$3 type=${4:-pm-admission-reviewer} rc=0
-  bash "$launcher" "$type" "$work/brief" --model astra >"$work/stdout" 2>"$work/stderr" || rc=$?
-  if [[ "$rc" != "$expected_rc" ]] || ! grep -Fxq "$expected_line" "$work/stderr"; then
-    printf 'FAIL %s: rc=%s expected=%s\n' "$label" "$rc" "$expected_rc" >&2
-    /bin/cat "$work/stderr" >&2
+run() {
+  local label=$1 type=${2:-pm-admission-reviewer} expected=${3:-0} marker=$4 rc=0
+  bash "$launcher" "$type" "$work/brief" --cwd "$work/checkout" --model astra >"$work/$label.out" 2>"$work/$label.err" || rc=$?
+  if [[ "$rc" != "$expected" ]] || ! grep -Fq "$marker" "$work/$label.err"; then
+    printf 'FAIL %s: rc=%s expected=%s\n' "$label" "$rc" "$expected" >&2
+    /bin/cat "$work/$label.err" >&2
     exit 1
-  fi
-  if [[ "$rc" == 0 ]]; then
-    grep -q '^PROXY_AGENT_PATHS ' "$work/stdout"
-  else
-    [[ ! -s "$work/stdout" ]]
   fi
   printf 'PASS %s (rc=%s)\n' "$label" "$rc"
 }
 
-relay=${2:-$(cd "$(dirname "$0")/../../../../.." && pwd)/hook-relay.sh}
-if [[ ! -f "$relay" && $# -lt 2 ]]; then
-  relay="$live_home/.local/share/master-of-panes/current/scripts/hook-relay.sh"
-fi
-
-check_agent() {
-  local label=$1 expected=$2 type=${3:-pm-admission-reviewer}
-  printf '{"cwd":"/tmp/heydonna-app","tool_name":"Agent","tool_input":{"subagent_type":"%s","prompt":"for PR #321"}}\n' "$type" \
-    | MOP_HOOK_BASE=http://127.0.0.1:1 bash "$relay" PreToolUse > "$work/hook"
-  python3 -I - "$work/hook" "$expected" <<'PY'
-import json, pathlib, sys
-text = pathlib.Path(sys.argv[1]).read_text()
-output = json.loads(text) if text else {}
-decision = output.get('hookSpecificOutput', {}).get('permissionDecision')
-expected = sys.argv[2]
-if expected == 'deny':
-    assert decision == 'deny' and 'REVIEW_CAP_2' in output['hookSpecificOutput']['permissionDecisionReason'], output
-else:
-    assert decision != 'deny', output
-    if expected != 'allow':
-        assert expected in output.get('systemMessage', ''), output
-PY
-  printf 'PASS in-process hook: %s\n' "$label"
-}
-
-printf 'Work for PR #321\n' > "$work/brief"
-printf '%s\n' '[[{"id":1,"body":"Proof\nPM 12b: REVISE at abcdef1"}]]' > "$FIXTURE"
-check 'attempt 1; ignore non-first-line PM marker' 0 'proxy-agent: REVIEW_CAP_OK stage=12b pr=321 revise_rounds=0'
-check_agent 'attempt 1' allow
+pm=pm-admission-reviewer
 printf 'Related: PR #999\nPR: 321\n' > "$work/brief"
-printf '%s\n' '[[{"id":1,"body":"## PM 12b: PASS at abcdef1"},{"id":2,"body":"PM 12b delta: REVISE at abcdef2"},{"id":3,"body":"PM 12b: PASS at abcdef2 (S153 disposition)"}],[{"id":1,"body":"## PM 12b: PASS at abcdef1"}]]' > "$FIXTURE"
-check 'attempt 2; exclude carry-forwards, S153 and duplicate IDs' 0 'proxy-agent: REVIEW_CAP_OK stage=12b pr=321 revise_rounds=1'
-check_agent 'attempt 2' allow
-printf '%s\n' '[[{"id":1,"body":"PM 12b: PASS at abcdef1"}],[{"id":2,"body":"PM 12b: REVISE at abcdef2"}]]' > "$FIXTURE"
-check 'attempt 3; two full verdicts across heads and pages' 76 'proxy-agent: REVIEW_CAP_2 stage=12b pr=321 revise_rounds=2'
-check_agent 'attempt 3' deny
-PROXY_AGENT_REVIEW_CAP_OVERRIDE=rajiv:1795072424.329699 check 'authorized override' 0 'proxy-agent: REVIEW_CAP_OVERRIDE stage=12b pr=321 revise_rounds=2 override=rajiv:1795072424.329699'
-PROXY_AGENT_REVIEW_CAP_OVERRIDE=rajiv:1795072424.329699 check_agent 'authorized override' REVIEW_CAP_OVERRIDE
-PROXY_AGENT_REVIEW_CAP_OVERRIDE=rajiv:invalid check 'malformed override' 76 'proxy-agent: REVIEW_CAP_2 stage=12b pr=321 revise_rounds=2'
-FIXTURE_GH_ERROR=1 check 'GitHub error fails open' 0 'proxy-agent: warning: review cap skipped stage=12b pr=321: GitHub comments unavailable'
-FIXTURE_GH_ERROR=1 check_agent 'GitHub error fails open' 'GitHub comments unavailable'
-printf '%s\n' '[[{"id":1,"body":"Codex QA: NEEDS_REVISION"},{"id":2,"body":"REVIEW_CAP_2 stage=qa head=abcdef1"},{"id":3,"body":"QA: NEEDS_REVISION\nQA: REVISE"}]]' > "$FIXTURE"
-check 'one QA round per comment; ignore Codex and cap summaries' 0 'proxy-agent: REVIEW_CAP_OK stage=qa pr=321 revise_rounds=1' hd-proof-qa
-check_agent 'QA attempt 2' allow hd-proof-qa
-printf '%s\n' '[[{"id":1,"body":"hd-proof-qa: PASS at abcdef1"},{"id":2,"body":"QA report\n\nQA: REVISE at abcdef2\n"}]]' > "$FIXTURE"
-check 'two QA rounds including final-line verdict via alias' 76 'proxy-agent: REVIEW_CAP_2 stage=qa pr=321 revise_rounds=2' pm-proof-qa
-check_agent 'QA attempt 3' deny hd-proof-qa
+printf '%s\n' '[[]]' > "$FIXTURE"
+FIXTURE_GH_ERROR=1 run no-history "$pm" 76 'REVIEW_CAP_UNKNOWN stage=12b pr=321'
+PROXY_AGENT_DRY_RUN=1 run dry "$pm" 0 'REVIEW_CAP_OK stage=12b pr=321 revise_rounds=0'
+[[ ! -s "$STARTS" ]]
+run first "$pm" 0 'REVIEW_CAP_OK stage=12b pr=321 revise_rounds=0'
+first=$(grep -o 'receipt=[0-9a-f]*' "$work/first.err"); first=${first#receipt=}
+printf '[[{"id":1,"body":"## PM 12b: PASS at abcdef1\nREVIEW_ROUND_RECEIPT: %s"},{"id":2,"body":"PM 12b: PASS at abcdef2\nCARRY_FORWARD: proof only"},{"id":3,"body":"PM 12b: PASS at abcdef2 (S153 disposition)"},{"id":4,"body":"PM 12b delta: REVISE at abcdef2"}],[{"id":5,"body":"PM 12b: PASS at abcdef1\nREVIEW_ROUND_RECEIPT: %s"}]]\n' "$first" "$first" | python3 -I -c 'import sys; print(sys.stdin.read().strip().replace("\n", "\\n"))' > "$FIXTURE"
+run second "$pm" 0 'revise_rounds=1 receipts=2 reservations=1 round=2'
+run third "$pm" 76 'REVIEW_CAP_2 stage=12b pr=321 revise_rounds=2'
+FIXTURE_GH_ERROR=1 run cached-outage "$pm" 76 'warning: using saved review history stage=12b pr=321'
+PROXY_AGENT_REVIEW_CAP_OVERRIDE=rajiv:1000000000.000001 run unrecorded "$pm" 76 'REVIEW_CAP_2'
+(umask 077; printf '%s\n' '[{"pr":321,"stage":"12b","round":3,"ts":"1000000000.000002"}]' > "$HOME/.claude/state/proxy-review-cap-approvals.json")
+PROXY_AGENT_REVIEW_CAP_OVERRIDE=rajiv:1000000000.000002 run approved "$pm" 0 'round=3 override=rajiv:1000000000.000002'
+PROXY_AGENT_REVIEW_CAP_OVERRIDE=rajiv:1000000000.000002 run replay "$pm" 76 'REVIEW_CAP_2'
+[[ $(wc -l < "$STARTS") -eq 3 ]]
+
+printf 'for PR #321\n' > "$work/brief"
+printf '%s\n' '[[{"id":1,"body":"QA report\n\nQA: NEEDS_REVISION"},{"id":2,"body":"Codex QA: REVISE"},{"id":3,"body":"REVIEW_CAP_2 stage=qa"}]]' > "$FIXTURE"
+# One historical QA verdict leaves one slot. The alias shares the stage.
+for label in qa-a qa-b; do
+  (rc=0; bash "$launcher" pm-proof-qa "$work/brief" --cwd "$work/checkout" --model astra >"$work/$label.out" 2>"$work/$label.err" || rc=$?; printf '%s\n' "$rc" > "$work/$label.rc") &
+  if [[ "$label" == qa-a ]]; then a=$!; else b=$!; fi
+done
+wait "$a" "$b"
+[[ $(sort -n "$work/qa-a.rc" "$work/qa-b.rc" | tr '\n' ' ') == '0 76 ' ]]
+grep -Fq 'REVIEW_CAP_2 stage=qa pr=321 revise_rounds=2' "$work/qa-a.err" "$work/qa-b.err"
+[[ $(wc -l < "$STARTS") -eq 4 ]]
+printf 'PASS concurrent QA alias: exactly one dispatch, one refusal (0, 76)\n'

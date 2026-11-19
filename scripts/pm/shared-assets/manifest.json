@@ -879,7 +879,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "a296542472b7af4a37e6f950e3b8fd710de5f37651b0a2ee9f7302acc4abc91e",
+      "sha256": "50fa43520e1637abf0e0618b63d0fc3142eaf78d868b22d78d3655308fe1cb2c",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -899,6 +899,15 @@
       "ownership_class": "shared-claude-proxy-launcher",
       "sha256": "733b33cad849f372bdd4f505a1c1a1a524d15fe42b92604838fea245b7446b0d",
       "source_path": "claude/scripts/proxy-cap-count.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/proxy-review-cap.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "f3002f8e1e9840d8a8dd560c71e6f87a50e50b0d5a645d68c8d4d4c6dd169d7d",
+      "source_path": "claude/scripts/proxy-review-cap.py"
     },
     {
       "additional_targets": [
@@ -957,15 +966,6 @@
       "source_path": "claude/scripts/remote-qa-spec.sh"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/scripts/review-launch-cap.py",
-      "dependencies": [],
-      "dependency_status": "closed",
-      "mode": 420,
-      "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "9ee37975fb3525bbbc95673db28af1dc74219a3b581fa614df35a40811b152ee",
-      "source_path": "claude/scripts/review-launch-cap.py"
-    },
-    {
       "canonical_target": "/Users/rajiv/.claude/scripts/sakshi-heartbeat.sh",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1016,7 +1016,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "97c97dcdca1dd48a9978bbdc7618398738c31ab19531ee694bbec0c84dd796f4",
+      "sha256": "89efb744657fc0cd5bdb9c8852a1287cd3031c4383d9a07c1787c85e717f0e8a",
       "source_path": "claude/scripts/tests/test-proxy-agent-review-cap.sh"
     },
     {

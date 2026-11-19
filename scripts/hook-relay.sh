@@ -19,8 +19,7 @@ if [ "$HOOK_TYPE" = "Stop" ] && [ "${HEYDONNA_SLOT_STOP_GATED:-}" = "1" ]; then
 fi
 
 python3 -c '
-import json, sys, re, urllib.request, os, runpy
-from pathlib import Path
+import json, sys, re, urllib.request, os
 hook_type = sys.argv[1]
 try:
     data = json.load(sys.stdin)
@@ -34,39 +33,6 @@ elif re.search(r"heydonna-app(?!-300)", cwd):
     slot = "0"
 else:
     sys.exit(0)
-# This hook is already registered for PM PreToolUse. Do not put this on
-# UserPromptSubmit or make MoP transport health a prerequisite for review.
-review_note = ""
-review_input = None
-review_checked = False
-if slot == "0" and hook_type == "PreToolUse" and data.get("tool_name") == "Agent":
-    tool_input = data.get("tool_input") or {}
-    agent_type = tool_input.get("subagent_type")
-    if agent_type in ("pm-admission-reviewer", "hd-proof-qa", "pm-proof-qa"):
-        review_checked = True
-        try:
-            helpers = Path(sys.argv[2]).parent / "pm/shared-assets/claude/scripts/review-launch-cap.py"
-            cap = runpy.run_path(str(helpers))
-            prompt = tool_input.get("prompt", "")
-            rc, review_note = cap["check"](agent_type, prompt, timeout=2)
-            if rc == 76:
-                print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                    "permissionDecision": "deny", "permissionDecisionReason": review_note}}))
-                sys.exit(0)  # Claude Code requires hook JSON, not launcher exit 76.
-            if cap["STAGES"][agent_type] == "qa":
-                review_input = dict(tool_input, prompt=prompt + "\n\n" + cap["QA_RECEIPT"])
-        except Exception:
-            review_note = "warning: review cap skipped: cap helper unavailable"
-
-def emit_pretool(result):
-    if review_note:
-        result["systemMessage"] = "review-launch: " + review_note
-    if review_input is not None:
-        output = result.setdefault("hookSpecificOutput", {"hookEventName": "PreToolUse"})
-        if output.get("permissionDecision") != "deny":
-            output.setdefault("updatedInput", review_input)
-    print(json.dumps(result))
-
 data["hook_event_name"] = hook_type
 if slot == "0":
     data["mop_tool_tracking"] = 1
@@ -78,13 +44,13 @@ try:
         f"{base}/hooks/slot/{slot}",
         data=json.dumps(data).encode(),
         headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=1 if review_checked else 3) as response:
+    with urllib.request.urlopen(req, timeout=3) as response:
         result = json.load(response)
     if slot == "0" and hook_type == "PreToolUse":
         if result.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":
-            emit_pretool(result)
+            print(json.dumps(result))
         elif result.pop("mop_tool_admitted", False) is True:
-            emit_pretool(result)
+            print(json.dumps(result))
         else:
             raise RuntimeError("MoP did not acknowledge admission")
     elif slot == "0" and hook_type == "UserPromptSubmit":
@@ -92,6 +58,5 @@ try:
 except Exception:
     # Admission tracking is best effort when MoP cannot acknowledge. Never
     # turn a service outage into a session-wide lockout of recovery tools.
-    if review_note or review_input is not None:
-        emit_pretool({})
-' "$HOOK_TYPE" "$0" 2>/dev/null
+    pass
+' "$HOOK_TYPE" 2>/dev/null
