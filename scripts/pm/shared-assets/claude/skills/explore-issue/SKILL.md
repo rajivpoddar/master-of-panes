@@ -184,7 +184,7 @@ bound to a single channel/root/message.
    customer JSON/DOCX or capture new data merely to satisfy this gate. (Lesson: #2833.)
 
 3. Create a tracking task: "Explore: [short description]"
-4. launch via Skill(launch-agent) (S148: in-process PM subagent under PM_SUBAGENT_CAP, proxy-agent.sh only on overflow; 12b stays in-process cap-exempt): launch background Agent with `run_in_background: true` — **MANDATORY**
+4. launch via Skill(launch-agent) (S148: in-process PM subagent under PM_SUBAGENT_CAP, proxy-agent.sh only on overflow; 12b and hd-proof-qa launch ONLY via proxy-agent.sh, burn-cap exempt): launch background Agent with `run_in_background: true` — **MANDATORY**
    Use the named agent type `explore-issue-agent`. Do not use `general-purpose`
    or the older `feature-dev:code-explorer` + issue-creator split for this workflow.
    The agent MUST receive exactly ONE Slack source (channel + root thread_ts).

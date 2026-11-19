@@ -1214,7 +1214,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-intake",
-      "sha256": "b455465ee42be799c054843a2f62aca7d5d68f848b3234631e9d7224fbad5207",
+      "sha256": "932b3797dc3af4d21ceef06c70ff9b9789ec019b7650756e1b59c420685bc741",
       "source_path": "claude/skills/explore-issue/SKILL.md"
     },
     {
