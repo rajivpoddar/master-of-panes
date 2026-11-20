@@ -74,17 +74,20 @@ def test_admission_only_requests_required_main_merges(tmp_path, case):
     stub("gh", f"#!{sys.executable}\n" + '''
 import json, os, subprocess, sys
 args = sys.argv[1:]
+case = os.environ["CASE"]
 with open(os.environ["CALLS"], "a") as log:
     print(json.dumps(args), file=log)
 git = [os.environ["REAL_GIT"], "-C", os.environ["ORIGIN"]]
 if args[:2] == ["pr", "view"]:
     field = args[args.index("--json") + 1]
     head = subprocess.check_output(git + ["rev-parse", "refs/pull/123/head"], text=True).strip()
-    print({"headRefOid": head, "headRefOid,mergeable": head + " " + os.environ["MERGEABLE"],
+    # The CLI owns MERGEABLE; derive GitHub's verdict from the fixture case instead.
+    mergeable = "CONFLICTING" if case == "github_conflict" else "MERGEABLE"
+    print({"headRefOid": head, "headRefOid,mergeable": f"{head} {mergeable}",
            "state": "OPEN", "closingIssuesReferences": "42", "baseRefName": "main",
            "labels": '{"labels":[]}', "labels,closingIssuesReferences": '{"labels":[{"name":"P2"}]}'}[field])
 elif args[:3] == ["api", "-X", "PUT"]:
-    if os.environ["CASE"] == "update_pending":
+    if case == "update_pending":
         sys.exit(0)  # Accepted, but no new head is visible yet.
     if not os.environ["MERGED"]:
         sys.exit(1)  # GitHub cannot resolve the conflict itself.
@@ -96,29 +99,29 @@ elif args[:2] not in (["label", "create"], ["pr", "edit"]):
     calls = tmp_path / "calls"
     env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", HOME=str(tmp_path),
                TMPDIR=str(tmp_path), CALLS=str(calls), REAL_GIT=real_git, CHECKOUT=str(checkout),
-               ORIGIN=str(origin), MERGEABLE="CONFLICTING" if case == "github_conflict" else "MERGEABLE",
-               MERGED=merged, CASE=case, PM_ADMIT_RETRY_SLEEP="0")
+               ORIGIN=str(origin), MERGED=merged, CASE=case, PM_ADMIT_RETRY_SLEEP="0")
     flags = ["--no-update"] if case == "no_update" else []
     result = subprocess.run(["bash", str(wrapper), "123", *flags], env=env,
                             capture_output=True, text=True, timeout=30)
     log = calls.read_text().splitlines()
     requests = [json.loads(line) for line in log if "update-branch" in line]
     lines = result.stdout.splitlines()
+    output = result.stdout + result.stderr
 
     if case == "disjoint":
         assert requests == []
-        assert "MAIN_MERGE: skipped reason=no_conflict_no_overlap" in lines
+        assert "MAIN_MERGE: skipped reason=no_conflict_no_overlap" in lines, output
         assert result.returncode == 0 and f"ADMITTED #123 at {head}" in lines
     elif case == "no_update":
         assert requests == []
-        assert result.returncode == 2
+        assert result.returncode == 2, output
         assert "REFUSE: --no-update cannot admit this head; main integration required reason=overlap files=1" in lines
         assert not any(line.startswith("ADMITTED ") for line in lines)
         gh_calls = [json.loads(line) for line in log if line.startswith("[")]
         assert not any(call[:2] in (["label", "create"], ["pr", "edit"]) for call in gh_calls)
     else:
         assert requests == [["api", "-X", "PUT", "repos/Scribie/heydonna-app/pulls/123/update-branch",
-                             "-f", f"expected_head_sha={head}"]]
+                             "-f", f"expected_head_sha={head}"]], output
         if case == "overlap":
             assert "MAIN_MERGE: performed reason=overlap files=1" in lines
             label_write = next(i for i, line in enumerate(log) if f"ci-head:{merged}" in line
