@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# PM CI admission (Rajiv 2026-09-28 13:30 IST, thread 1790582222.927069):
-# "ci admission should merge main and add the label."
+# PM CI admission (Rajiv, C0ALZJHGE49 thread 1795150401.563959, ts 1795161348.814749):
+# "main merge is required only on conflict or if the diff overlaps."
 # The CI/E2E trigger is the exact `ci-head:<40-hex head>` label (e2e.yml/ci.yml `labeled` gate).
 # Related-tests gate (Rajiv "go", DM D0AMF0XE6TS thread 1791298729.215119): vitest related + tsc on the PR head before admission.
 # Usage: pm-admit-ci.sh <PR> [--no-update] [--dry-run] [--skip-related-tests "<reason>"] [--force-ci "<reason>"] [--allow-main-red "<reason>"]
@@ -340,16 +340,65 @@ clean_bad_ci_head_labels
 scope_gate "$H0" || exit 5
 related_tests_gate "$H0" || exit 4
 
-if [ "$NO_UPDATE" = 0 ]; then
-  gh api -X PUT "repos/$REPO/pulls/$PR/update-branch" >/dev/null 2>&1 || echo "update-branch: already up to date or refused"
-  sleep 8
-fi
-HM=$(gh_get pr_head_mergeable head_mergeable gh pr view "$PR" --repo "$REPO" --json headRefOid,mergeable --jq '.headRefOid+" "+.mergeable') || api_fail pr_head_mergeable
-read -r HEAD MERGEABLE <<<"$HM"
+read_pr_head() {
+  HM=$(gh_get pr_head_mergeable head_mergeable gh pr view "$PR" --repo "$REPO" --json headRefOid,mergeable --jq '.headRefOid+" "+.mergeable') || api_fail pr_head_mergeable
+  read -r HEAD MERGEABLE <<<"$HM"
+}
+
+main_merge_probe() {
+  local head="$1" mergeable="$2" main base pr_files main_files overlap count=0 rc=0 reason
+  git -C "$MAIN_REPO" fetch -q --no-tags origin +refs/heads/main:refs/remotes/origin/main "refs/pull/$PR/head" || return 1
+  main=$(git -C "$MAIN_REPO" rev-parse --verify 'origin/main^{commit}') || return 1
+  base=$(git -C "$MAIN_REPO" merge-base "$main" "$head") || return 1
+  # C-quoted names are one path per line even with embedded newlines. Include both sides of renames.
+  pr_files=$(git -C "$MAIN_REPO" -c core.quotePath=true diff --no-renames --name-only "$base" "$head" --) || return 1
+  main_files=$(git -C "$MAIN_REPO" -c core.quotePath=true diff --no-renames --name-only "$base" "$main" --) || return 1
+  overlap=$(LC_ALL=C comm -12 <(printf '%s\n' "$pr_files" | LC_ALL=C sort -u) <(printf '%s\n' "$main_files" | LC_ALL=C sort -u)) || return 1
+  if [ -n "$overlap" ]; then count=$(printf '%s\n' "$overlap" | wc -l | tr -d ' '); fi
+  if [ "$mergeable" = CONFLICTING ]; then
+    rc=1
+  elif [ "$base" != "$head" ] && [ "$base" != "$main" ]; then
+    git -C "$MAIN_REPO" merge-tree --write-tree "$head" "$main" >/dev/null || rc=$?
+  fi
+  case "$rc" in
+    1) reason=conflict ;;
+    0) if [ "$count" -gt 0 ]; then reason=overlap; else reason=no_conflict_no_overlap; fi ;;
+    *) return 1 ;;  # A failed probe is not evidence of a conflict or a clean merge.
+  esac
+  printf '%s %s %s\n' "$reason" "$count" "$main"
+}
+
+read_pr_head
 # A concurrent push or merge-main update must not carry stale review into dispatch.
-if [ "$HEAD" != "$H0" ]; then
-  rc=0; gate_12b "$HEAD" || rc=$?
-  [ "$rc" = 0 ] || exit "$rc"
+if [ "$HEAD" != "$H0" ]; then gate_12b "$HEAD" || exit "$?"; fi
+if [ "$NO_UPDATE" = 1 ]; then
+  echo 'MAIN_MERGE: skipped reason=no_update'
+else
+  MERGE_PLAN=$(main_merge_probe "$HEAD" "$MERGEABLE") || { echo 'REFUSE: main merge probe failed; retry admission'; exit 2; }
+  read -r MERGE_REASON MERGE_FILES MAIN_SHA <<<"$MERGE_PLAN"
+  if [ "$MERGE_REASON" = no_conflict_no_overlap ]; then
+    echo 'MAIN_MERGE: skipped reason=no_conflict_no_overlap'
+  else
+    PRE_MERGE_HEAD="$HEAD"
+    PR_BASE=$(gh_get pr_base ok gh pr view "$PR" --repo "$REPO" --json baseRefName --jq .baseRefName) || api_fail pr_base
+    [ "$PR_BASE" = main ] || { echo 'REFUSE: update-branch would not merge main; route to slot'; exit 2; }
+    if ! gh api -X PUT "repos/$REPO/pulls/$PR/update-branch" -f "expected_head_sha=$PRE_MERGE_HEAD" >/dev/null 2>&1; then
+      if [ "$MERGE_REASON" = conflict ]; then echo 'REFUSE: conflict with main; route to slot'
+      else echo 'REFUSE: required main update-branch was rejected; retry admission or route to slot'; fi
+      exit 2
+    fi
+    sleep 8
+    read_pr_head
+    # GitHub accepts the request asynchronously. Confirm the merge, not just a 202 or a different head.
+    if [ "$HEAD" = "$PRE_MERGE_HEAD" ] ||
+       ! git -C "$MAIN_REPO" fetch -q --no-tags origin "refs/pull/$PR/head" ||
+       ! git -C "$MAIN_REPO" merge-base --is-ancestor "$MAIN_SHA" "$HEAD" ||
+       ! git -C "$MAIN_REPO" merge-base --is-ancestor "$PRE_MERGE_HEAD" "$HEAD"; then
+      echo 'REFUSE: required main merge not confirmed; retry admission or route to slot'; exit 2
+    fi
+    echo "MAIN_MERGE: performed reason=$MERGE_REASON files=$MERGE_FILES"
+    gate_12b "$HEAD" || exit "$?"
+  fi
 fi
 echo "PR #$PR head=$HEAD mergeable=$MERGEABLE"
 [ "$MERGEABLE" = "CONFLICTING" ] && { echo "REFUSE: conflict with main; route to slot"; exit 2; }
