@@ -105,11 +105,17 @@ elif args[:2] not in (["label", "create"], ["pr", "edit"]):
     requests = [json.loads(line) for line in log if "update-branch" in line]
     lines = result.stdout.splitlines()
 
-    if case in {"disjoint", "no_update"}:
+    if case == "disjoint":
         assert requests == []
-        reason = "no_update" if case == "no_update" else "no_conflict_no_overlap"
-        assert f"MAIN_MERGE: skipped reason={reason}" in lines
+        assert "MAIN_MERGE: skipped reason=no_conflict_no_overlap" in lines
         assert result.returncode == 0 and f"ADMITTED #123 at {head}" in lines
+    elif case == "no_update":
+        assert requests == []
+        assert result.returncode == 2
+        assert "REFUSE: --no-update cannot admit this head; main integration required reason=overlap files=1" in lines
+        assert not any(line.startswith("ADMITTED ") for line in lines)
+        gh_calls = [json.loads(line) for line in log if line.startswith("[")]
+        assert not any(call[:2] in (["label", "create"], ["pr", "edit"]) for call in gh_calls)
     else:
         assert requests == [["api", "-X", "PUT", "repos/Scribie/heydonna-app/pulls/123/update-branch",
                              "-f", f"expected_head_sha={head}"]]
