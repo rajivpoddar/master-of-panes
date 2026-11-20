@@ -849,18 +849,27 @@ proxy_agent_mask_exhausted() {
 # Record that model's exhaustion window for its exact model id (and slot alias) in quota.json
 # so subsequent auto launches skip it, and print one clear PROXY_AGENT_MODEL_EXHAUSTED line.
 proxy_agent_note_log_exhaustion() {
-  local model="$1" logfile="${2:-}" outfile="${3:-}" model_id alias state
+  local model="$1" logfile="${2:-}" outfile="${3:-}" model_id alias
   [[ -n "$logfile" || -n "$outfile" ]] || return 0
   read -r model_id _ _ < <(resolve_model "$model")
   # A reasoning/context suffix is not part of the pool identity: the cooldown must key on the base id the picker reads (`gpt-6.2-sol(xhigh)` -> `gpt-6.2-sol`).
   model_id="${model_id%%(*}"; model_id="${model_id%%\[*}"
   alias="$(proxy_agent_alias_for_id "$model_id")"
   [[ -n "$alias" ]] || alias="$model"
+  proxy_agent_log_exhaustion "$model_id" "$alias" "$logfile" "$outfile"
+}
+
+# Claude's account switch needs a provider-shaped error, not a mention of 429 in a brief/report.
+# 'detect' is read-only; 'claude-cooldown' records only the terminal attempt's error.
+proxy_agent_log_exhaustion() {
+  local model_id="$1" alias="$2" logfile="$3" outfile="$4" mode="${5:-legacy}" state
   state="$(proxy_agent_state_dir)"
-  mkdir -p "$state" 2>/dev/null || return 0
-  chmod 700 "$state" 2>/dev/null || true
+  if [[ "$mode" != detect ]]; then
+    mkdir -p "$state" 2>/dev/null || return 0
+    chmod 700 "$state" 2>/dev/null || true
+  fi
   PROXY_AGENT_EXHAUST_MODEL_ID="$model_id" PROXY_AGENT_EXHAUST_ALIAS="$alias" \
-    python3 -I - "$state/quota.json" "$logfile" "$outfile" <<'PY'
+    python3 -I - "$state/quota.json" "$logfile" "$outfile" "$mode" "${6:-}" "${7:-0}" "${8:-1}" <<'PY'
 import json, os, re, sys, tempfile, time
 
 def parse_reset(text):
@@ -889,32 +898,68 @@ def parse_reset(text):
             return "1h", 3600
     return "1h", 3600
 
-path, logfile, outfile = sys.argv[1], sys.argv[2], sys.argv[3]
-chunks = []
-for candidate in (outfile, logfile):
-    if not candidate or not os.path.isfile(candidate):
-        continue
+def tail(file, start=0):
     try:
-        lines = [line for line in open(candidate, errors="replace").read().splitlines() if line.strip()]
-        if lines:
-            chunks.append("\n".join(lines[-30:]).lower())
-    except Exception:
-        continue
-if not chunks:
-    raise SystemExit(0)
+        with open(file, "rb") as stream:
+            length = stream.seek(0, os.SEEK_END)
+            stream.seek(max(start, length - 65536))
+            return stream.read().decode(errors="replace")
+    except OSError:
+        return ""
 
+
+def claude_failure():
+    # A successful CLI result can quote a 429 (or follow a recovered one).
+    for line in reversed(tail(jsonl).splitlines()):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("type") not in ("error", "result"):
+            continue
+        if event.get("type") == "error" or event.get("is_error") or str(event.get("subtype", "")).startswith("error"):
+            errors = event.get("errors") or []
+            if not isinstance(errors, list):
+                errors = [errors]
+            text = "\n".join(str(item or "") for item in (event.get("result"), event.get("message"), event.get("error"), *errors))
+            if re.search(r"[\"'](?:type|code)[\"']\s*:\s*[\"']rate_limit_error[\"']|[\"']status(?:_code)?[\"']\s*:\s*429\b", text, re.I):
+                return text.lower()
+            if provider_error.search(text):
+                return text.lower()
+            break
+        return None
+    if cli_rc != "0":
+        for text in (tail(logfile, int(log_start)), tail(outfile)):
+            if provider_error.search(text):
+                return text.lower()
+    return None
+
+
+path, logfile, outfile, mode, jsonl, log_start, cli_rc = sys.argv[1:]
+provider_error = re.compile(
+    r"^\s*(?:API Error:\s*429\b|(?:Error:\s*)?429\s+(?:rate[_ -]limit|too many requests|quota|\{))"
+    r"|^\s*(?:Error:\s*)?You(?:['’]ve| have) hit your (?:usage )?limit(?:[\s.!·-]|$)"
+    r"|^\s*(?:API Error:\s*)?(?:usage limit (?:reached|exceeded)|(?:individual )?quota (?:reached|exceeded))\b",
+    re.I | re.M,
+)
 matched_text = None
-for chunk in chunks:
-    has_429 = "429" in chunk or "402" in chunk
-    has_quota = (
-        "quota reached" in chunk
-        or "individual quota" in chunk
-        or "quota exceeded" in chunk
-        or "resource_exhausted" in chunk
-    )
-    if has_429:
-        matched_text = chunk
-        break
+if mode == "legacy":
+    for candidate in (outfile, logfile):
+        if not candidate or not os.path.isfile(candidate):
+            continue
+        try:
+            with open(candidate, errors="replace") as stream:
+                lines = [line for line in stream.read().splitlines() if line.strip()]
+        except OSError:
+            continue
+        text = "\n".join(lines[-30:]).lower()
+        if "429" in text or "402" in text:
+            matched_text = text
+            break
+else:
+    matched_text = claude_failure()
+if mode == "detect":
+    raise SystemExit(0 if matched_text else 1)
 if matched_text is None:
     raise SystemExit(0)
 
@@ -986,6 +1031,64 @@ sys.stderr.write(
     "PROXY_AGENT_MODEL_EXHAUSTED model=%s resets_in=%s seconds=%d until=%d\n"
     % (model_id, resets_in, seconds, until)
 )
+PY
+}
+
+proxy_agent_uses_claude_account() {
+  case "$(proxy_agent_router_identity "$1")" in
+    claude-opus-5-5-high|claude-sonnet-5-5-high) return 1;; # legacy Antigravity routes
+    claude-*) return 0;;
+    *) return 1;;
+  esac
+}
+
+# Serialize recovery callers (the switcher separately locks against hourly/manual
+# switches). Lanes from the same old account reuse the replacement, not rotate again.
+proxy_agent_switch_after_429() {
+  python3 -I - "$1" <<'PY'
+import fcntl, pathlib, re, subprocess, sys
+
+home = pathlib.Path.home() / ".claude"
+switcher = home / "scripts/cliproxy-claude-switch.py"
+pin = home / "state/proxy-claude-account-pin"
+old = sys.argv[1].strip().lower()
+
+
+def finish(reason, ok=False):
+    print(reason)
+    raise SystemExit(0 if ok else 1)
+
+
+def run(flag, timeout):
+    return subprocess.run([sys.executable, str(switcher), flag], capture_output=True, text=True,
+                          errors="replace", timeout=timeout, stdin=subprocess.DEVNULL)
+
+
+if not switcher.is_file():
+    finish("switcher_unavailable")
+try:
+    help_result = run("--help", 5)
+    if help_result.returncode or not re.search(r"(?<![\w-])--on-429(?![\w-])", help_result.stdout):
+        finish("on_429_flag_unavailable")
+    if not old:
+        finish("launch_account_unknown")
+    with pin.with_name("proxy-claude-on429.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        current = pin.read_text().strip().lower()
+        if current and current != old:
+            finish("account_already_switched", ok=True)
+        if not current:
+            finish("current_account_unknown")
+        result = run("--on-429", 220)
+        if result.returncode:
+            finish("switch_failed")
+        if any(line.startswith("SWITCHED claude ") for line in result.stdout.splitlines()):
+            current = pin.read_text().strip().lower()
+            if current and current != old:
+                finish("account_switched", ok=True)
+        finish("no_confirmed_switch")
+except (OSError, subprocess.SubprocessError):
+    finish("switcher_unavailable")
 PY
 }
 
@@ -2367,10 +2470,22 @@ REVIEW_ROUND_TOKEN="$(proxy_agent_review_cap reserve)" || exit $?
     receipt_instruction+="REVIEW_ROUND_RECEIPT: $REVIEW_ROUND_TOKEN"
     printf 'printf "\\n\\n%%s\\n" %q >> %q\n' "$receipt_instruction" "$JOB_DIR/prompt0.md"
   fi
+  printf 'pa_claude_429=0; pa_retry=0\n'
+  if proxy_agent_uses_claude_account "$MODEL_ID"; then
+    PA_MODEL="$(proxy_agent_router_identity "$MODEL_ID")"
+    printf 'pa_claude_429=1; PA_LOG=%q; PA_OUT=%q; PA_JSONL=%q; PA_JOB=%q; PA_MODEL=%q; PA_ALIAS=%q\n' \
+      "$LOG" "$OUT" "$JSONL" "$JOB_DIR" "$PA_MODEL" "$(proxy_agent_alias_for_id "$PA_MODEL")"
+    printf 'TYPE=%q; ROLE_BRIEF=%q; CLAUDE_PROXY_CAP=%q; PROXY_BURN_GATE=%q; PA_BURN=%q\n' \
+      "$TYPE" "$ROLE_BRIEF" "${CLAUDE_PROXY_CAP:-$PROXY_AGENT_CLAUDE_CAP}" "$PROXY_BURN_GATE" "$(cd "$(dirname "$0")" && pwd)/proxy-burn-shadow.py"
+    declare -f proxy_agent_state_dir proxy_agent_log_exhaustion proxy_agent_switch_after_429 proxy_agent_cap_exempt proxy_agent_is_capped
+  fi
+  printf 'pa_n=0; pa_max=${PROXY_AGENT_MAX_CONTINUE:-6}; pa_wall=${PROXY_AGENT_MAX_WALL_S:-10800}\n'
+  printf 'pa_account=""; if [[ "$pa_claude_429" == 1 && -r "$HOME/.claude/state/proxy-claude-account-pin" ]]; then IFS= read -r pa_account < "$HOME/.claude/state/proxy-claude-account-pin"; fi\n'
+  printf 'while :; do\n'
+  printf 'if [[ "$pa_claude_429" == 1 ]]; then pa_log_start=$(wc -c < "$PA_LOG"); pa_terminal_jsonl="$PA_JSONL"; fi\n'
   printf '%q ' "$CLAUDE_BIN" "${ARGS[@]}"
   printf '< %q 2>> %q | python3 -I -u %q %q %q\n' "$JOB_DIR/prompt0.md" "$LOG" "$HOME/.claude/scripts/proxy-agent-stream.py" "$OUT" "$JSONL"
-  printf 'statuses=("${PIPESTATUS[@]}"); rc=${statuses[0]}; if [[ "$rc" == 0 ]]; then rc=${statuses[1]}; fi\n'
-  printf 'pa_n=0; pa_max=${PROXY_AGENT_MAX_CONTINUE:-6}; pa_wall=${PROXY_AGENT_MAX_WALL_S:-10800}\n'
+  printf 'statuses=("${PIPESTATUS[@]}"); pa_cli_rc=${statuses[0]}; rc=$pa_cli_rc; if [[ "$rc" == 0 ]]; then rc=${statuses[1]}; fi\n'
   # Production-touching / safety-stop agent types NEVER auto-continue (side-agent flag
   # 2026-11-12): a deliberate abort must not be retried. Single-shot by type.
   case "$TYPE" in
@@ -2397,8 +2512,9 @@ REVIEW_ROUND_TOKEN="$(proxy_agent_review_cap reserve)" || exit $?
   printf 'printf "Continue the task in your brief from exactly where you stopped. Do not end your turn until it is DONE, or BLOCKED with the exact external blocker (or HANDOFF). Do not send interim progress peer messages to PM; send ONE message only for a blocker that needs a PM decision, plus the final Stop.\\n" > %q\n' "$JOB_DIR/continue.md"
   # Also continue after an error_max_turns stop (rc!=0): 4 sol runs died that way on 2026-11-13 with work mid-flight (PM).
   printf 'pa_maxturns() { tail -c 6000 %q 2>/dev/null | grep -q "\\"subtype\\":\\"error_max_turns\\""; }\n' "$JSONL"
+  printf '%s\n' 'pa_terminal_429() { [[ "$pa_claude_429" == 1 ]] && proxy_agent_log_exhaustion "$PA_MODEL" "$PA_ALIAS" "$PA_LOG" "$PA_OUT" detect "$pa_terminal_jsonl" "$pa_log_start" "$pa_cli_rc"; }'
   printf 'while [[ ( "$rc" == 0 || $(pa_maxturns && echo 1 || echo 0) == 1 ) && "${PROXY_AGENT_NO_CONTINUE:-0}" != 1 && "$pa_n" -lt "$pa_max" && $(( $(date +%%s) - PA_START )) -lt "$pa_wall" ]]; do\n'
-  printf '  if python3 -I %q quota --out %q --log %q --jsonl %q; then break; fi\n' "$STATE_HELPER" "$OUT" "$LOG" "$JSONL"
+  printf '  if pa_terminal_429 || python3 -I %q quota --out %q --log %q --jsonl %q; then break; fi\n' "$STATE_HELPER" "$OUT" "$LOG" "$JSONL"
   printf '  IFS=$'"'"'\\t'"'"' read -r pa_sid pa_term < <(python3 -I %q %q)\n' "$HOME/.claude/scripts/proxy-agent-result.py" "$JSONL"
   printf '  [[ "$pa_term" == 1 || -z "$pa_sid" ]] && break\n'
   printf '  pa_reason=other; if pa_maxturns; then pa_reason=max_turns; elif [[ "$rc" != 0 ]]; then pa_reason=stream_error; fi\n'
@@ -2412,11 +2528,36 @@ REVIEW_ROUND_TOKEN="$(proxy_agent_review_cap reserve)" || exit $?
   printf '    OPENCODE_PROXY_CAP="$(proxy_agent_resolve_opencode_cap "${OPENCODE_PROXY_CAP:-}")"\n'
   printf '    if proxy_agent_pool_blocked "$MODEL_ID"; then printf "[%%s] PROXY_AGENT_CONTINUE_REFUSED model=%%s cap=%%s reason=opencode_pool_cap capacity-stop\\n" "$(date -u +%%FT%%TZ)" "$MODEL_ID" "$OPENCODE_PROXY_CAP" >> %q; printf "PROXY_AGENT_CAPACITY_STOP rc=75 model=%%s cap=%%s reason=opencode_pool_cap\\n" "$MODEL_ID" "$OPENCODE_PROXY_CAP" >&2; rc=75; exit 75; fi\n' "$LOG"
   printf '  fi\n'
+  printf '  if [[ "$pa_claude_429" == 1 ]]; then pa_log_start=$(wc -c < "$PA_LOG"); fi\n'
   printf '  %q ' "$CLAUDE_BIN" "${ARGS[@]}"
   printf ' --resume "$pa_sid" < %q 2>> %q | python3 -I -u %q %q %q\n' "$JOB_DIR/continue.md" "$LOG" "$HOME/.claude/scripts/proxy-agent-stream.py" "$OUT.c" "$JSONL.c"
-  printf '  statuses=("${PIPESTATUS[@]}"); rc=${statuses[0]}; if [[ "$rc" == 0 ]]; then rc=${statuses[1]}; fi\n'
-  printf '  cat %q >> %q 2>/dev/null; cp %q %q 2>/dev/null; rm -f %q %q\n' "$JSONL.c" "$JSONL" "$OUT.c" "$OUT" "$JSONL.c" "$OUT.c"
+  printf '  statuses=("${PIPESTATUS[@]}"); pa_cli_rc=${statuses[0]}; rc=$pa_cli_rc; if [[ "$rc" == 0 ]]; then rc=${statuses[1]}; fi\n'
+  printf '  cat %q >> %q 2>/dev/null; cp %q %q 2>/dev/null\n' "$JSONL.c" "$JSONL" "$OUT.c" "$OUT"
+  printf '  if [[ "$pa_claude_429" == 1 ]]; then pa_terminal_jsonl="$PA_JOB/terminal.jsonl"; mv -f %q "$pa_terminal_jsonl"; fi\n' "$JSONL.c"
+  printf '  rm -f %q %q\n' "$JSONL.c" "$OUT.c"
   printf 'done\n'
+  # Restart the original brief in the same runner, before the only Stop receipt.
+  # Never reselect a rung or cool a replacement account on a recovered failure.
+  printf '%s\n' 'if ! pa_terminal_429; then break; fi'
+  printf '%s\n' '[[ "$rc" != 0 ]] || rc=1'
+  printf '%s\n' 'pa_reason=retry_already_used; pa_switched=0' \
+    'if [[ "$pa_retry" == 0 ]]; then' \
+    '  if (( $(date +%s) - PA_START >= pa_wall )); then pa_reason=wall_budget;' \
+    '  elif proxy_agent_pool_blocked "$PA_MODEL"; then pa_reason=pool_cap;' \
+    '  elif pa_reason=$(proxy_agent_switch_after_429 "$pa_account"); then' \
+    '    pa_switched=1' \
+    '    if (( $(date +%s) - PA_START >= pa_wall )); then pa_reason=wall_budget;' \
+    '    elif proxy_agent_pool_blocked "$PA_MODEL"; then pa_reason=pool_cap;' \
+    '    elif ! python3 -I "$PA_BURN" "$PA_MODEL" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >> "$PA_LOG" 2>&1 && [[ "$PROXY_BURN_GATE" == enforce ]] && proxy_agent_is_capped "$TYPE"; then pa_reason=burn_gate;' \
+    '    elif cp -p "$PA_JSONL" "$PA_JOB/before-429.jsonl" && cp -p "$PA_OUT" "$PA_JOB/before-429.md"; then' \
+    '      printf "[%s] PROXY_AGENT_429_RELAUNCH name=%s type=%s model=%s reason=%s\n" "$(date -u +%FT%TZ)" "$PROXY_AGENT_NAME" "$TYPE" "$PA_MODEL" "$pa_reason" >> "$PA_LOG"' \
+    '      pa_retry=1; continue' \
+    '    else pa_reason=archive_failed; fi' \
+    '  else pa_reason=${pa_reason:-switcher_unavailable}; fi' \
+    'fi' \
+    'printf "[%s] PROXY_AGENT_429_NO_RELAUNCH name=%s model=%s reason=%s\n" "$(date -u +%FT%TZ)" "$PROXY_AGENT_NAME" "$PA_MODEL" "$pa_reason" >> "$PA_LOG"' \
+    'if [[ "$pa_switched" == 0 ]]; then proxy_agent_log_exhaustion "$PA_MODEL" "$PA_ALIAS" "$PA_LOG" "$PA_OUT" claude-cooldown "$pa_terminal_jsonl" "$pa_log_start" "$pa_cli_rc" >> "$PA_LOG" 2>&1; fi' \
+    'break' 'done'
   printf 'printf "PROXY_AGENT_CONTINUATIONS n=%%s\\n" "$pa_n" >> %q\n' "$LOG"
   printf 'exit "$rc"\n'
 } > "$JOB_DIR/run.sh"
@@ -2464,8 +2605,9 @@ read -r RC < "$JOB_DIR/rc"
 [[ "$RC" =~ ^[0-9]+$ ]] || exit 125
 # Clear secret-bearing runner after completion; retain result/rc for inspection.
 : > "$JOB_DIR/run.sh"
-# A 429 quota rejection in the output (.md) or log (.log) sticks in the quota cache for the reset window.
-if [[ "$RC" -ne 0 ]]; then
+# Claude's final 429 is recorded inside the runner, where each attempt has its
+# own log boundary. Keep the legacy cooldown behavior for every other pool.
+if [[ "$RC" -ne 0 ]] && ! proxy_agent_uses_claude_account "$MODEL_ID"; then
   proxy_agent_note_log_exhaustion "$MODEL_ID" "$LOG" "$OUT" || true
 fi
 echo "PROXY_AGENT_DONE rc=$RC type=$TYPE model=$MODEL_ID window=$WINDOW out=$OUT log=$LOG"
