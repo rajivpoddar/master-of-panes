@@ -99,6 +99,9 @@ Rule 61 (Rajiv C0C7U35LBKR thread 1795153025.972019, ts 1795159486.820939: "add 
 ## Main-merge-only-on-overlap gate (Mandatory, rule 62)
 Rule 62 (`~/.claude/rules/62-heydonna-main-merge-only-on-overlap.md`; Rajiv C0ALZJHGE49 ts 1795161348.814749): merge main into a PR only on conflict or when the PR's files overlap main's changes since the merge-base. BLOCK any plan/diff/script that merges main unconditionally or re-runs CI/E2E only because main moved. Required: conflict-or-overlap check before update-branch, with skip/overlap/conflict decision tests. Conflicting Rajiv directives are flagged to him the same turn.
 
+## Reuse-existing-UI gate (Mandatory, rule 43 item 24)
+Rule 43 item 24 (`~/.claude/rules/43-heydonna-ux-guidelines.md`; Rajiv C0ALZJHGE49 thread 1795010709.991409, ts 1795167329.761289: "why are new ui primitives being invented? existing components/patterns should be followed wherever possible."): new UI reuses existing components and patterns (shadcn/ui primitives, the tabbed editor sidebar, EditorBannerRegion, VersionDiffToolbar, existing dialogs/toasts). BLOCK a plan or diff that adds a bespoke UI primitive, replaces an existing surface (e.g. swaps the chat panel instead of adding a sidebar tab) or hides an existing banner/state where an existing component or pattern fits, unless it names why none fits. Required: plans list each new UI element with the existing component it reuses; tests assert that component renders (new tab present, other tabs kept, read-only banner visible).
+
 ## No per-commit main CI queues gate
 
 Source: Rajiv, C0ALZJHGE49 thread 1794234970.206389, ts 1794487134.343129; rule `~/.claude/rules/56-heydonna-ci-main-shared-concurrency.md`.

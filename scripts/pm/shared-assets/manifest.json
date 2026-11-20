@@ -15,7 +15,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "1263d7c554054600d5a3b5827e15a3220e93769be39835bfc05a87a2f68172fc",
+      "sha256": "11e0ad695698ad94fd3fc0c02b126cb2b194924061fe17f47fd029f7debf5ec4",
       "source_path": "claude/agents/codex-code-reviewer.md"
     },
     {
@@ -24,7 +24,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "c028a42ab6f1cced25def64da3027b8b930faa39a46385d13e1defb0a243bfde",
+      "sha256": "2a02140261df818f16bc7969fb9c93a8d60ce8017540a5f4fae0651abf2d1deb",
       "source_path": "claude/agents/codex-plan-reviewer.md"
     },
     {
@@ -33,7 +33,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-planning-agents",
-      "sha256": "a32ec6906c85cc4e1123a0646e06ddc00575b831e52dc803940754ba1ee01d6f",
+      "sha256": "7088a2663a99a1f9f621fffeb0e6e330fdedf65048df8e3e6665ca669bd1be2e",
       "source_path": "claude/agents/plan-agent.md"
     },
     {
@@ -357,7 +357,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "687bdc40a8a54c2ee48e78b4356b0d7c06614dd6fd4b9e34ac9fd635ff71428f",
+      "sha256": "c0829b588168a5e08f9ca33ff1f4f4b13b9a298482d00c2b4aa959d773362f1e",
       "source_path": "claude/project-agents/pm-code-reviewer.md"
     },
     {
@@ -366,7 +366,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "c55a1a9b7ed28375abb2126cdd223672921cd5dcbb3b9ab1190c3cfb4b217c29",
+      "sha256": "75c3228795ec788a3cb3fcbbb348c080d753cf2aa09175997e5af6cc28804022",
       "source_path": "claude/project-agents/pm-plan-reviewer.md"
     },
     {
