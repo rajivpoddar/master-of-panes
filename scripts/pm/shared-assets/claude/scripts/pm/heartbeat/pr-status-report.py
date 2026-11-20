@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import fcntl
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,20 @@ DB = Path(os.environ.get('PM_OPS_DB', str(
     HOME / '.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db')))
 REPO = 'heydonna-app/heydonna-app'
 RED = {'FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'}
+PROXY_LOG_DIR = Path('/tmp/proxy-agent')
+PROXY_PROCESS = re.compile(
+    r'^\s*\d+\s+(?:\S*/)?claude\s+-p\s+--name\s+'
+    r'(proxy-([a-z0-9-]+)-\d{8}T\d{6}Z-\d+)(?=\s|$)')
+PROXY_LAUNCH = re.compile(
+    r'^\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\] LAUNCH name=(\S+) '
+    r'ISSUE:\S+ PR:([1-9]\d*|UNKNOWN)(?=\s|$)')
+PROXY_STAGE = {'pm-admission-reviewer': '12b', 'hd-proof-qa': 'QA', 'pm-proof-qa': 'QA',
+               'hd-builder': 'build/rework', 'pm-hotfix': 'rework'}
+
+_REVIEW_GATE_SPEC = importlib.util.spec_from_file_location(
+    'pm_admit_12b_report', Path(__file__).resolve().parents[2] / 'ci/pm-admit-12b.py')
+_REVIEW_GATE = importlib.util.module_from_spec(_REVIEW_GATE_SPEC)
+_REVIEW_GATE_SPEC.loader.exec_module(_REVIEW_GATE)
 
 
 def stamp(value):
@@ -54,6 +69,43 @@ def fetch_checks(head, retry_delay=3):
             if attempt == 0:
                 time.sleep(retry_delay)
     return None
+
+
+def live_proxy_lanes(log_dir):
+    """One process snapshot; bind only live names with an explicit launcher PR."""
+    try:
+        result = subprocess.run(['pgrep', '-fl', 'claude -p --name proxy-'],
+                                capture_output=True, text=True, timeout=5)
+        if result.returncode == 1:  # no matches
+            return {}
+        result.check_returncode()
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f'WARN proxy liveness lookup failed: {exc}', file=sys.stderr)
+        return {}
+
+    owners = {}
+    for line in result.stdout.splitlines():
+        process = PROXY_PROCESS.match(line)
+        if not process:
+            continue
+        name, role = process.groups()
+        # The launcher normally writes <type>-<name>-<pid>-<stamp>.log.
+        paths = [log_dir / f'{name}.log', *log_dir.glob(f'*-{name}-*-????????T??????Z.log')]
+        launches = []
+        for path in paths:
+            try:
+                with path.open(encoding='utf-8', errors='replace') as handle:
+                    launch = PROXY_LAUNCH.match(handle.readline(2048))
+            except OSError:
+                continue
+            if launch and launch[2] == name:
+                launches.append((launch[1], launch[3]))
+        if launches:
+            launched_at, pr = max(launches)
+            if pr != 'UNKNOWN':
+                entry = (launched_at, name, PROXY_STAGE.get(role, role))
+                owners[int(pr)] = max(entry, owners.get(int(pr), entry))
+    return {pr: (name, stage) for pr, (_, name, stage) in owners.items()}
 
 
 def collect():
@@ -106,6 +158,10 @@ def collect():
             pr['merge_ask_sent'] = any(
                 re.search(r'#' + str(pr['number']) + r'\b', body)
                 and pr['headRefOid'][:12] in body for body in messages)
+    proxies = live_proxy_lanes(PROXY_LOG_DIR)
+    for pr in prs:
+        if pr['number'] in proxies:
+            pr['live_proxy'] = proxies[pr['number']]
     return prs, checks, slots, obligations
 
 
@@ -239,6 +295,22 @@ def pending_ci(head):
         return False
 
 
+def report_annotations(pr):
+    proxy = pr.get('live_proxy')
+    owner = f'owner={proxy[0]} · {proxy[1]}' if proxy else None
+    # gh pr view returns createdAt, while the shared parser expects REST keys.
+    # This is display-only: a completed marker never claims an active lane.
+    comments = [dict(body=c.get('body'), created_at=c.get('createdAt') or '', id=i)
+                for i, c in enumerate(pr.get('comments') or [])]
+    markers = [(verdict, sha) for verdict, sha, canonical, _ in
+               _REVIEW_GATE.canonical_markers(comments, None) if canonical]
+    if not markers:
+        return owner, ''
+    verdict, sha = markers[-1]
+    head_note = '' if pr['headRefOid'].lower().startswith(sha.lower()) else ' (different head)'
+    return owner, f' · PM 12b: {verdict} at {sha[:12]}{head_note}'
+
+
 def classify(pr, runs, slots, obligations, prior, now):
     number, head = pr['number'], pr['headRefOid']
     labels = [item['name'] for item in pr['labels']]
@@ -247,14 +319,16 @@ def classify(pr, runs, slots, obligations, prior, now):
     gate, action, g = merge_gate(pr, runs, obligations)
     ci, e2e = g['ci'], g['e2e']
     blocked = hold_reason(pr, obligations)
-    owner = None
-    for slot in slots:
-        # Checkout branches survive release/reassignment; only MoP's current,
-        # occupied PR+head assignment is authority, never leftover git state.
-        if slot.get('occupied') is True and slot.get('pr') == number and slot.get('head_sha') == head:
-            owner = f'S{slot["slot"]}'
-            break
-    active_owner = False
+    proxy_owner, review = report_annotations(pr)
+    owner = proxy_owner
+    if owner is None:
+        for slot in slots:
+            # Checkout branches survive release/reassignment; only MoP's current,
+            # occupied PR+head assignment is authority, never leftover git state.
+            if slot.get('occupied') is True and slot.get('pr') == number and slot.get('head_sha') == head:
+                owner = f'S{slot["slot"]}'
+                break
+    active_owner = bool(proxy_owner)
     if owner is None:
         for row in obligations:
             until = stamp(row.get('suppress_until'))
@@ -276,7 +350,7 @@ def classify(pr, runs, slots, obligations, prior, now):
             evidence = claim_evidence(row)
             merge_ask = merge_ask or evidence.get('head') == head
     if gate == 'dual-green/merge ask' and merge_ask:
-        owner, action = 'CTO (merge ask sent)', 'await merge decision'
+        owner, action = proxy_owner or 'CTO (merge ask sent)', 'await merge decision'
     previous = prior.get(str(number), {})
     since = stamp(previous.get('since')) if previous.get('gate') == gate else None
     since = since or now
@@ -298,14 +372,14 @@ def classify(pr, runs, slots, obligations, prior, now):
 
     if active_owner:
         movement = 'OWNED'
-    if workflow_wait:
+    if workflow_wait and not proxy_owner:
         movement = 'WAITING'
     if blocked:
         movement = 'PARKED'
     safe_owner = re.sub(r'[\r\n]+', ' ', owner or 'unowned')
     line = (f'#{number} {"draft" if pr["isDraft"] else "ready"} · {gate} '
             f'[ci-head {admission}; CI {ci}; E2E {e2e}; mergeable {pr.get("mergeable", "UNKNOWN")}] '
-            f'· {safe_owner} · {action} · {movement}')
+            f'· {safe_owner}{review} · {action} · {movement}')
     return line, {'gate': gate, 'since': since.isoformat(), 'head': head}
 
 
@@ -316,11 +390,13 @@ def render(prs, checks, slots, obligations, prior, now):
         if runs is None:
             failed += 1
             labels = [item['name'] for item in pr['labels']]
+            proxy_owner, review = report_annotations(pr)
             lines.append(f'#{pr["number"]} {"draft" if pr["isDraft"] else "ready"} · '
                          f'checks: unavailable (GitHub API error) · head {pr["headRefOid"][:12]} '
                          f'· mergeable {pr.get("mergeable", "UNKNOWN")}'
                          + (' · ' + ','.join(sorted(x for x in labels if x.startswith('pm-blocked:')))
-                            if any(x.startswith('pm-blocked:') for x in labels) else ''))
+                            if any(x.startswith('pm-blocked:') for x in labels) else '')
+                         + (f' · {proxy_owner}' if proxy_owner else '') + review)
             if str(pr['number']) in prior:
                 state[str(pr['number'])] = prior[str(pr['number'])]  # keep gate age
             continue

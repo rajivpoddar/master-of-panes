@@ -1,9 +1,11 @@
 """Mixed-state fixtures and the production Slack success callback."""
 import datetime as dt
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
+import sqlite3
 import sys
 import subprocess
 import pytest
@@ -61,6 +63,73 @@ def test_unowned_expired_and_wrong_head():
     lines, _ = report.render([prs[5]], checks, [], [dict(pr=6, owner='expired', suppress_until='2026-10-26T00:00:00Z')], {}, NOW)
     assert 'CI running' in lines[0] and 'E2E MISSING' in lines[0]
     assert 'unowned' in lines[0] and 'STUCK' in lines[0]
+
+
+def launch_log(name, pr, time='09:00:00'):
+    return f'[2026-10-27T{time}Z] LAUNCH name={name} ISSUE:999 PR:{pr} model_alias=auto MODE:dev\n'
+
+
+def test_collect_renders_each_process_bound_proxy_and_latest_12b(tmp_path, monkeypatch):
+    prs, _ = fixture()
+    head = 'a' * 40
+    cases = [('pm-admission-reviewer', '12b'), ('hd-proof-qa', 'QA'), ('hd-builder', 'build/rework')]
+    selected = prs[:len(cases)]
+    processes, by_pr = [], {}
+    for pr, (role, stage) in zip(selected, cases):
+        number = pr['number']
+        lane = f'proxy-{role}-20261027T090000Z-{number}'
+        processes.append(f'{number + 100} /usr/local/bin/claude -p --name {lane} --model auto')
+        filename = f'{role}-{lane}-{number}-20261027T090001Z.log' if role == 'hd-proof-qa' else f'{lane}.log'
+        (tmp_path / filename).write_text(launch_log(lane, number))
+        pr.update(headRefOid=head, labels=[], comments=[
+            {'body': f'## PM 12b: REVISE at {head}', 'createdAt': '2026-10-27T09:10:00Z'},
+            {'body': f'PM 12b: PASS at {head}', 'createdAt': '2026-10-27T08:10:00Z'},
+        ])
+        by_pr[number] = (pr, f'owner={lane} · {stage}')
+    db = tmp_path / 'pm.db'
+    with sqlite3.connect(db) as con:
+        con.execute('CREATE TABLE obligations (id, pr, target_type, target_id, owner, '
+                    'suppress_until, kind, evidence_json, status)')
+    monkeypatch.setattr(report, 'DB', db)
+    monkeypatch.setattr(report, 'HOME', tmp_path)
+    monkeypatch.setattr(report, 'PROXY_LOG_DIR', tmp_path)
+    monkeypatch.setattr(report.urllib.request, 'urlopen', lambda *a, **kw: io.StringIO('{"slots": []}'))
+    monkeypatch.setattr(report, 'gh', lambda *args: [[{'number': n} for n in by_pr]]
+                        if args[0] == 'api' else by_pr[int(args[2])][0])
+    monkeypatch.setattr(report, 'fetch_checks', lambda *_: [])
+    with patch.object(report.subprocess, 'run', return_value=subprocess.CompletedProcess(
+            [], 0, '\n'.join(processes), '')) as run:
+        inputs = report.collect()
+        lines, _ = report.render(*inputs, {str(pr['number']): {'gate': '12b', 'since': '2026-10-26T13:00:00Z'}
+                                          for pr in selected}, NOW)
+    assert run.call_args.args[0] == ['pgrep', '-fl', 'claude -p --name proxy-']
+    assert run.call_count == 1
+    assert len(lines) == len(by_pr)
+    for line in lines:
+        number = int(line.split()[0][1:])
+        assert f'· {by_pr[number][1]} · PM 12b: REVISE at {head[:12]}' in line
+        assert line.endswith('· OWNED') and 'unowned' not in line
+
+
+def test_proxy_logs_and_completed_markers_cannot_claim_without_live_pr_binding(tmp_path):
+    dead = 'proxy-hd-proof-qa-20261027T090000Z-1'
+    live = 'proxy-hd-builder-20261027T090000Z-2'
+    (tmp_path / f'{dead}.log').write_text(launch_log(dead, 1))
+    (tmp_path / f'{live}.log').write_text(launch_log(live, 1))
+    (tmp_path / f'hd-builder-{live}-3-20261027T093000Z.log').write_text(
+        launch_log(live, 'UNKNOWN', '09:30:00') + 'Later output references PR:1\n')
+    with patch.object(report.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0,
+            f'10 /bin/sh -c claude -p --name {dead}\n11 /bin/claude -p --name {live}\n', '')):
+        proxies = report.live_proxy_lanes(tmp_path)
+    assert proxies == {}
+    prs, checks = fixture()
+    pr = dict(prs[0], headRefOid='a' * 40, live_proxy=proxies.get(1), comments=[
+        {'body': 'PM 12b: PASS at bbbbbbb'},
+        {'body': '> PM 12b: BLOCK at aaaaaaa'},
+    ])
+    lines, _ = report.render([pr], checks, [], [], {}, NOW)
+    assert '· unowned · PM 12b: PASS at bbbbbbb (different head)' in lines[0]
+    assert lines[0].endswith('· STUCK')
 
 
 def test_split_preserves_every_line():
