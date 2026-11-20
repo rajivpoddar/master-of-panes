@@ -860,11 +860,11 @@ proxy_agent_note_log_exhaustion() {
 }
 
 # Claude's account switch needs a provider-shaped error, not a mention of 429 in a brief/report.
-# 'detect' is read-only; 'claude-cooldown' records only the terminal attempt's error.
+# 'detect' and 'prework' are read-only; 'claude-cooldown' records the terminal error.
 proxy_agent_log_exhaustion() {
   local model_id="$1" alias="$2" logfile="$3" outfile="$4" mode="${5:-legacy}" state
   state="$(proxy_agent_state_dir)"
-  if [[ "$mode" != detect ]]; then
+  if [[ "$mode" != detect && "$mode" != prework ]]; then
     mkdir -p "$state" 2>/dev/null || return 0
     chmod 700 "$state" 2>/dev/null || true
   fi
@@ -908,6 +908,58 @@ def tail(file, start=0):
         return ""
 
 
+def error_event(event):
+    return event.get("type") == "error" or event.get("is_error") is True or str(event.get("subtype", "")).startswith("error")
+
+
+def quota_event(event):
+    if not error_event(event):
+        return None
+    errors = event.get("errors") or []
+    if not isinstance(errors, list):
+        errors = [errors]
+    text = "\n".join(str(item or "") for item in (event.get("result"), event.get("message"), event.get("error"), *errors))
+    if (re.search(r"[\"'](?:type|code)[\"']\s*:\s*[\"']rate_limit_error[\"']|[\"']status(?:_code)?[\"']\s*:\s*429\b", text, re.I)
+            or provider_error.search(text)):
+        return text.lower()
+    return None
+
+
+def prework_quota():
+    # Only the full, cleanly rendered stream can establish absence of work.
+    # Unknown events and content blocks are not evidence of a replay-safe attempt.
+    terminal = False
+    try:
+        with open(jsonl, encoding="utf-8") as transcript:
+            for line in transcript:
+                if terminal or not line.endswith("\n"):
+                    return False
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    return False
+                kind = event.get("type")
+                if kind == "result":
+                    if not quota_event(event):
+                        return False
+                    terminal = True
+                elif kind in ("assistant", "user"):
+                    message = event.get("message")
+                    blocks = message.get("content") if isinstance(message, dict) else None
+                    if not isinstance(blocks, list) or any(
+                        not isinstance(block, dict) or block.get("type") not in ("text", "thinking", "redacted_thinking")
+                        for block in blocks
+                    ):
+                        return False
+                elif kind == "error":
+                    if not quota_event(event):
+                        return False
+                elif kind != "system" or event.get("subtype") != "init":
+                    return False
+    except (OSError, ValueError):
+        return False
+    return terminal
+
+
 def claude_failure():
     # A successful CLI result can quote a 429 (or follow a recovered one).
     for line in reversed(tail(jsonl).splitlines()):
@@ -917,15 +969,9 @@ def claude_failure():
             continue
         if not isinstance(event, dict) or event.get("type") not in ("error", "result"):
             continue
-        if event.get("type") == "error" or event.get("is_error") or str(event.get("subtype", "")).startswith("error"):
-            errors = event.get("errors") or []
-            if not isinstance(errors, list):
-                errors = [errors]
-            text = "\n".join(str(item or "") for item in (event.get("result"), event.get("message"), event.get("error"), *errors))
-            if re.search(r"[\"'](?:type|code)[\"']\s*:\s*[\"']rate_limit_error[\"']|[\"']status(?:_code)?[\"']\s*:\s*429\b", text, re.I):
-                return text.lower()
-            if provider_error.search(text):
-                return text.lower()
+        if error_event(event):
+            if text := quota_event(event):
+                return text
             break
         return None
     if cli_rc != "0":
@@ -942,6 +988,8 @@ provider_error = re.compile(
     r"|^\s*(?:API Error:\s*)?(?:usage limit (?:reached|exceeded)|(?:individual )?quota (?:reached|exceeded))\b",
     re.I | re.M,
 )
+if mode == "prework":
+    raise SystemExit(0 if cli_rc != "0" and prework_quota() else 1)
 matched_text = None
 if mode == "legacy":
     for candidate in (outfile, logfile):
@@ -1059,34 +1107,41 @@ def finish(reason, ok=False):
     raise SystemExit(0 if ok else 1)
 
 
-def run(flag, timeout):
-    return subprocess.run([sys.executable, str(switcher), flag], capture_output=True, text=True,
+def run(timeout, *args):
+    return subprocess.run([sys.executable, str(switcher), *args], capture_output=True, text=True,
                           errors="replace", timeout=timeout, stdin=subprocess.DEVNULL)
 
 
 if not switcher.is_file():
     finish("switcher_unavailable")
 try:
-    help_result = run("--help", 5)
+    help_result = run(5, "--help")
     if help_result.returncode or not re.search(r"(?<![\w-])--on-429(?![\w-])", help_result.stdout):
         finish("on_429_flag_unavailable")
+    if not re.search(r"(?<![\w-])--verify-pinned(?![\w-])", help_result.stdout):
+        finish("switch_verification_unavailable")
     if not old:
         finish("launch_account_unknown")
     with pin.with_name("proxy-claude-on429.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         current = pin.read_text().strip().lower()
-        if current and current != old:
-            finish("account_already_switched", ok=True)
         if not current:
             finish("current_account_unknown")
-        result = run("--on-429", 220)
-        if result.returncode:
-            finish("switch_failed")
-        if any(line.startswith("SWITCHED claude ") for line in result.stdout.splitlines()):
+        reason = "account_already_switched"
+        if current == old:
+            result = run(240, "--on-429")
+            if result.returncode:
+                finish("switch_failed")
             current = pin.read_text().strip().lower()
-            if current and current != old:
-                finish("account_switched", ok=True)
-        finish("no_confirmed_switch")
+            if not current or current == old or not any(
+                line.startswith(f"SWITCHED claude account={current} ") for line in result.stdout.splitlines()
+            ):
+                finish("no_confirmed_switch")
+            reason = "account_switched"
+        verified = run(10, f"--verify-pinned={current}")
+        if verified.returncode or verified.stdout.strip() != "VERIFIED claude pin":
+            finish("switch_readback_unverified")
+        finish(reason, ok=True)
 except (OSError, subprocess.SubprocessError):
     finish("switcher_unavailable")
 PY
@@ -2542,7 +2597,9 @@ REVIEW_ROUND_TOKEN="$(proxy_agent_review_cap reserve)" || exit $?
   printf '%s\n' '[[ "$rc" != 0 ]] || rc=1'
   printf '%s\n' 'pa_reason=retry_already_used; pa_switched=0' \
     'if [[ "$pa_retry" == 0 ]]; then' \
-    '  if (( $(date +%s) - PA_START >= pa_wall )); then pa_reason=wall_budget;' \
+    '  if [[ "${PROXY_AGENT_NO_CONTINUE:-0}" == 1 ]]; then pa_reason=single_shot;' \
+    '  elif [[ "$pa_n" != 0 || "${statuses[1]}" != 0 ]] || ! proxy_agent_log_exhaustion "$PA_MODEL" "$PA_ALIAS" "$PA_LOG" "$PA_OUT" prework "$PA_JSONL" "$pa_log_start" "$pa_cli_rc"; then pa_reason=prework_not_proven;' \
+    '  elif (( $(date +%s) - PA_START >= pa_wall )); then pa_reason=wall_budget;' \
     '  elif proxy_agent_pool_blocked "$PA_MODEL"; then pa_reason=pool_cap;' \
     '  elif pa_reason=$(proxy_agent_switch_after_429 "$pa_account"); then' \
     '    pa_switched=1' \
