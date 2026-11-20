@@ -54,6 +54,53 @@ def test_budget_and_unknown(tmp_path):
         assert burn.account_decision(key, rows, 'claude', now, {})[0] == 'unknown'
 
 
+@pytest.mark.parametrize('history,sample_offset,pct,decision', [
+    ('old_week', 120, 0, 'allow'),
+    ('none', 120, 0, 'allow'),
+    ('old_week', -1, 0, 'unknown'),
+    ('old_week', 120, 1, 'unknown'),
+    ('old_week', 120, False, 'unknown'),
+    ('same_week', 4200, 0, 'unknown'),  # an observed drop inside one window is not a reset
+])
+def test_codex_zero_sample_at_weekly_rollover(tmp_path, monkeypatch, history, sample_offset, pct, decision):
+    start = 1_800_000_000
+    new_reset = start + 7 * 24 * 3600
+    ts = start + sample_offset
+    now = max(start, ts)
+    key = 'codex:account:weekly'
+    log = tmp_path / 'snapshots'
+    anchor = {'key': key, 'ts': ts - 4000, 'pct': 1 if history == 'same_week' else 100,
+              'reset': new_reset if history == 'same_week' else start}
+    log.write_text('' if history == 'none' else json.dumps(anchor) + '\n')
+    monkeypatch.setattr(burn, 'LOG', str(log))
+    row = {'key': key, 'ts': ts, 'pct': pct, 'reset': new_reset}
+    assert burn.account_decision(key, {key: row}, 'codex', now, {})[0] == decision
+    assert burn.account_decision(key, {key: row}, 'codex', ts + 7201, {})[0] == 'unknown'
+    row['reset'] = start  # even a recent 0% sample from an already expired week is unusable
+    assert burn.account_decision(key, {key: row}, 'codex', now, {})[0] == 'unknown'
+
+
+def test_fresh_codex_rollover_contributes_to_non_p0_sol_gate(tmp_path, monkeypatch, capsys):
+    start, now = 1_800_000_000, 1_800_000_120
+    log = tmp_path / 'snapshots'
+    rows = [
+        {'key': 'codex:recent:weekly', 'ts': now - 7200, 'pct': 100, 'reset': start},
+        {'key': 'codex:recent:weekly', 'ts': now, 'pct': 0, 'reset': start + 7 * 24 * 3600},
+        {'key': 'codex:busy:weekly', 'ts': now - 7200, 'pct': 85, 'reset': now + 28 * 3600},
+        {'key': 'codex:busy:weekly', 'ts': now, 'pct': 87, 'reset': now + 28 * 3600},
+    ]
+    log.write_text(''.join(json.dumps(row) + '\n' for row in rows))
+    for account in ('recent', 'busy'):
+        (tmp_path / f'{account}.json').write_text(json.dumps({'type': 'codex', 'account_id': account}))
+    monkeypatch.setattr(burn, 'LOG', str(log))
+    monkeypatch.setattr(burn, 'read_config', lambda _: {'auth-dir': str(tmp_path)})
+    monkeypatch.setattr(burn, 'load_horizons', lambda: {'codex': now + 96 * 3600})
+    assert burn.shadow('gpt-6.2-sol', 'hd-builder', '', 'unused', str(log), now) == 'allow'
+    assert 'usable_accounts=2/2' in capsys.readouterr().out
+    log.write_text(''.join(json.dumps(row) + '\n' for row in rows if row is not rows[1]))
+    assert burn.shadow('gpt-6.2-sol', 'hd-builder', '', 'unused', str(log), now) == 'would_refuse'
+
+
 def test_load_horizons_is_the_one_config(tmp_path, monkeypatch):
     cfg = tmp_path / 'burn-horizons.json'
     cfg.write_text(json.dumps({'_comment': 'ignored', 'claude': '2026-11-18T04:00:00Z',

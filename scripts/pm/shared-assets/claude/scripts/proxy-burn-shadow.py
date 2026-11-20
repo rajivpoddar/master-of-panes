@@ -36,6 +36,8 @@ HORIZON_FILE = os.path.join(HOME, '.claude/state/burn-horizons.json')
 HORIZON_SLACK = 1800
 # A session (5h) sample older than this, from the future, or whose reset already passed says nothing about capacity now.
 SESSION_MAX_AGE = 7200
+WEEKLY_MAX_AGE = 7200
+CODEX_WEEKLY_SECONDS = 7 * 24 * 3600
 # Session states that count as usable capacity. 'n/a' = the pool has no session meter (Codex, Grok): weekly decides alone.
 USABLE_SESSION = ('n/a', 'open')
 
@@ -52,7 +54,14 @@ def prev(key):
 
 def burn_for(key, pct, reset):
     p = prev(key)
-    if p and (not all(isinstance(p.get(k), (int, float)) and not isinstance(p.get(k), bool) and math.isfinite(p[k]) for k in ('ts', 'pct', 'reset')) or not 0 <= p['pct'] <= 100 or abs(reset - p['reset']) >= 60):
+    if p and (not all(isinstance(p.get(k), (int, float)) and not isinstance(p.get(k), bool) and math.isfinite(p[k]) for k in ('ts', 'pct', 'reset')) or not 0 <= p['pct'] <= 100):
+        return None
+    if (not p or p['reset'] <= NOW) and key.startswith('codex:') and key.endswith(':weekly') and pct == 0:
+        # A fresh observation in the current week reports no usage. Don't wait for the
+        # one-hour anchor to cross the reset before admitting this capacity.
+        if reset - CODEX_WEEKLY_SECONDS <= NOW:
+            return 0.0
+    if p and abs(reset - p['reset']) >= 60:
         return None
     burn = eta = None
     if p and reset - p["reset"] < 60 and pct >= p["pct"]:  # same window, no reset between
@@ -186,7 +195,7 @@ def account_detail(key, rows, pool, now, horizons=None):
         ts, pct, reset = (meter(latest, k) for k in ('ts', 'pct', 'reset'))
         if all(map(math.isfinite, (ts, pct, reset))) and 0 <= pct <= 100:
             d.update(pct=pct, reset=reset, ts=ts)  # kept for display even when the sample is unusable
-        if not all(map(math.isfinite, (ts, pct, reset))) or not 0 <= pct <= 100 or not 0 <= now - ts <= 7200 or reset <= now:
+        if not all(map(math.isfinite, (ts, pct, reset))) or not 0 <= pct <= 100 or not 0 <= now - ts <= WEEKLY_MAX_AGE or reset <= now:
             return d
         budget, after, target = pace_budget(pct, reset, now, active_horizon(pool, horizons, now))
         d.update(budget=budget, after=after, target=target)
