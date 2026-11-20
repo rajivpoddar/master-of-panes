@@ -184,14 +184,14 @@ bound to a single channel/root/message.
    customer JSON/DOCX or capture new data merely to satisfy this gate. (Lesson: #2833.)
 
 3. Create a tracking task: "Explore: [short description]"
-4. launch via Skill(launch-agent) (S148: in-process PM subagent under PM_SUBAGENT_CAP, proxy-agent.sh only on overflow; 12b and hd-proof-qa launch ONLY via proxy-agent.sh, burn-cap exempt): launch background Agent with `run_in_background: true` — **MANDATORY**
+4. launch via Skill(launch-agent) (it picks transport from env PM_SUBAGENT_CAP; 12b and hd-proof-qa always launch via proxy-agent.sh; due 12b alone is burn-cap exempt): launch the `explore-issue-agent` in the background (detached, never blocking the PM) — **MANDATORY**
    Use the named agent type `explore-issue-agent`. Do not use `general-purpose`
    or the older `feature-dev:code-explorer` + issue-creator split for this workflow.
    The agent MUST receive exactly ONE Slack source (channel + root thread_ts).
 5. PM is free — continue processing other events immediately
 6. When agent completes (background notification), review the filed issue and notify Rajiv
 
-**CRITICAL: Always use `run_in_background: true` when launching the Agent tool.**
+**CRITICAL: Always launch it in the background through `Skill(launch-agent)` → `proxy-agent.sh explore-issue-agent <brief>`; never call Agent/Task directly.**
 The PM must remain event-driven. Never block on code exploration — the investigation
 can take 5-15 minutes. Rajiv directive: "explore-issue skill should use a background
 agent so that the pm remains event driven."
@@ -201,10 +201,9 @@ agent so that the pm remains event driven."
 Launch shape:
 
 ```
-Task(
+launch_agent(   # Skill(launch-agent) → proxy-agent.sh explore-issue-agent <brief>; not a direct Agent/Task call
   description: "Explore issue: <short summary>",
-  subagent_type: "explore-issue-agent",
-  run_in_background: true,
+  agent_type: "explore-issue-agent",
   prompt: "Investigate and file via the explore-issue contract.
 
   ORIGINAL REQUEST:

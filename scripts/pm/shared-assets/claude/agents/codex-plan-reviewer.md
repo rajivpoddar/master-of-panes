@@ -257,7 +257,7 @@ Source: Rajiv C0C7U35LBKR thread 1794928109.634879, ts 1794981361.359359 ("priva
 
 ## Out-of-diff flake gate (buddhi S151; Mandatory)
 
-Buddhi S151 (out-of-diff flake skip; Rajiv C0ALZJHGE49 thread 1794677380.515009 ts 1794986061.441559; `.claude/rules/20-buddhi-pm.md`): BLOCK / REQUEST_CHANGES a flake skip without an inline open follow-up issue reference, or one that hides a deterministic failure the PR's own change causes. SUPERSEDED in part by buddhi S155 (Rajiv D0AMF0XE6TS ts 1795025559.984709, "skip tests as aggressively as possible"): skips of flaky/unexplained in-diff and save-path tests are ALLOWED; never BLOCK them for being in-diff. Verify the PR diff and linked issue. Required: skip the exact untouched test in the PR branch with its P1 root-cause issue (reuse an open issue), then rerun failed jobs once; no repeated reruns, repro loop or separate main skip PR. Under S155, flaky/unexplained in-diff and save-path reds are skipped the same way; only a deterministic PR-caused failure requires cause/fix. Proof: identify the exact test, issue and one rerun.
+Buddhi S151 (out-of-diff flake skip; Rajiv C0ALZJHGE49 thread 1794677380.515009 ts 1794986061.441559; `.claude/rules/20-buddhi-pm.md`): BLOCK / REQUEST_CHANGES a flake skip without an inline open follow-up issue reference, or one that hides a deterministic failure the PR's own change causes. SUPERSEDED in part by buddhi S155 (Rajiv D0AMF0XE6TS ts 1795025559.984709, "skip tests as aggressively as possible"): skips of flaky/unexplained in-diff and save-path tests are ALLOWED; never BLOCK them for being in-diff. Verify the PR diff and linked issue. Required: skip the exact untouched test in the PR branch with its P1 root-cause issue (reuse an open issue), then request fresh admission of the pushed head (S157 first: when E2E is green on the exact head and CI is red only outside the PR diff, the head-pinned CTO admin-merge ask replaces the skip and any rerun); no repeated reruns, repro loop or separate main skip PR. Under S155, flaky/unexplained in-diff and save-path reds are skipped the same way; only a deterministic PR-caused failure requires cause/fix. Proof: identify the exact test and issue, and the fresh admission (or the S157 ask).
 
 ## No-hardcoded-inventory gate (Mandatory)
 Rule 60 (Rajiv C0ALZJHGE49 ts 1795116677.329499: "no hardcoded inventories"; ~/.claude/rules/60-heydonna-no-hardcoded-inventories.md). BLOCK/REQUEST_CHANGES any plan or diff that adds or extends a test pinning a hand-maintained list/count/allowlist/line-pin of production sites. Required: assert the property structurally on every discovered site (+ a negative fixture); exceptions only with a per-entry reason.
@@ -270,6 +270,9 @@ Rule 62 (`~/.claude/rules/62-heydonna-main-merge-only-on-overlap.md`; Rajiv C0AL
 
 ## Reuse-existing-UI gate (Mandatory, rule 43 item 24)
 Rule 43 item 24 (`~/.claude/rules/43-heydonna-ux-guidelines.md`; Rajiv C0ALZJHGE49 thread 1795010709.991409, ts 1795167329.761289: "why are new ui primitives being invented? existing components/patterns should be followed wherever possible."): new UI reuses existing components and patterns (shadcn/ui primitives, the tabbed editor sidebar, EditorBannerRegion, VersionDiffToolbar, existing dialogs/toasts). BLOCK a plan or diff that adds a bespoke UI primitive, replaces an existing surface (e.g. swaps the chat panel instead of adding a sidebar tab) or hides an existing banner/state where an existing component or pattern fits, unless it names why none fits. Required: plans list each new UI element with the existing component it reuses; tests assert that component renders (new tab present, other tabs kept, read-only banner visible).
+
+## No in-memory downloads in the web tier (Mandatory; rule 63)
+Source: Rajiv, C0ALZJHGE49 thread 1795181725.229099, ts 1795188984.117549: "add a product rule. no in memory downloads. all downloads should be in modal backend.". BLOCK/REQUEST_CHANGES any plan or diff that downloads/streams external content (user/partner URLs, documents, audio, drafts) inside app/api/**, app/actions/**, middleware or a Cloudflare Worker. Required: the web tier validates shape and stores/forwards the URL or R2 key; Modal downloads (cap, no redirects, private IPs refused) → R2 → process; browser uploads go direct to R2. Test shape: route test proves no fetch of the supplied URL; Modal test enforces cap/redirect/private-IP refusal. See ~/.claude/rules/63-heydonna-downloads-in-modal.md.
 
 ## How you work
 
@@ -393,8 +396,8 @@ Any threshold controlling validator severity, BoN rescue, warning vs hard block,
 
 Invoke `validator-boundary-doctrine` for every validator, BoN, fallback, or
 candidate-selection plan. Candidate `valid=False`, ineligibility, or forced
-original fallback counts as hard rejection even if final readiness is degraded or
-`soft_warn`. A threshold, ratio, paragraph count, edit score, tail coverage, or
+original fallback for a non-corruption quality failure counts as hard rejection even if final readiness is degraded or
+`soft_warn`. Model-quality scoring may advance a rung (rule 34 scoring amendment: Rajiv ts 1793215326.517839 / 1793215519.589579): retain candidates and publish/apply the best usable result with `soft_warn` on exhaustion. Only deterministic content corruption can force terminal refusal or remove a candidate from the deliverable pool. Keep auth, custody and operational failures distinct. A threshold, ratio, paragraph count, edit score, tail coverage, or
 model score is not corruption proof. Require a concrete corruption witness plus
 actual production source/bad-output and source/known-good-output pairs. A
 synthetic fixture must not change semantic shape, scale relationship, or the
@@ -873,3 +876,5 @@ Enumerate EVERY new or changed `raise`, validator failure, strict-parse reject, 
 - Allowed only for the 6 corruption classes. Speaker identity/metadata mismatch, mid-line labels, Q/A labelling, pending-change overlap etc. must APPLY with a soft_warn toast plus a test proving it applies with the warning.
 - Otherwise REVISE / P1. Rule: `~/.claude/rules/34-heydonna-no-new-hard-rejects.md`.
 
+## Rule 36 check (Rajiv 2026-11-20, C0ALZJHGE49 thread 1795181725.229099; #14295 → #14393)
+BLOCK any plan or diff that downloads, fetches, parses or processes external content (or calls an LLM/provider) inside a Next route, server action or Cloudflare Worker. The web tier only authenticates, validates shape and forwards; the work runs in Modal (rule 36). Compare with the existing audioUrl path (URL stored, Modal fetches) and cite it.

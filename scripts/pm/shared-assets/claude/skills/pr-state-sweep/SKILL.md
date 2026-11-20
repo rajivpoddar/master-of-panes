@@ -158,7 +158,7 @@ work before dispatching new issue work through `Skill(direct-assign)`.
   `pm-state:qa-passed-awaiting-ci` label. When the named dependency reaches
   terminal state, the sweep emits `PR_DEPENDENCY_UNBLOCKED_REQUIRED` with the
   packet:
-  `gh pr edit <PR> --remove-label pm-blocked:dependency` then `Skill(direct-release)`/`Skill(direct-assign)` with the complete authoritative tuple. PM must record that stop before claiming the board is quiet.
+  clear the stale wait by its authoritative dependency/custody tuple (dependencies are GitHub blocked-by only); if new work is needed, assign it through the hd-* proxy conveyor (`Skill(launch-agent)`), not direct-release/direct-assign. PM must record that stop before claiming the board is quiet.
 - `qa-passed-awaiting-ci` PRs with a deliberately classified same-head CI hold
   return `UNSUPPORTED_LIFECYCLE_ACTION:ci-watch` rather than any blocker
   transition; no state changes execute. The marker is valid
@@ -253,7 +253,7 @@ the readiness contract, write the merge-ready proof with exact current
 `headRefOid`, ask the CTO for the exact-head merge in the alert thread (head-pinned, with the screenshot thread or
 `No user-visible UI change: <reason>`); no merge-ready label flip executes.
 `PR_PM_REVIEW_REQUIRED` means PM must start or finish PM Claude
-phase-A review; mark `pm-state:pm-review-pending` with `gh pr edit <PR> --add-label pm-state:pm-review-pending` and launch via Skill(launch-agent) (S148: in-process PM subagent under PM_SUBAGENT_CAP, proxy-agent.sh only on overflow; 12b and hd-proof-qa launch ONLY via proxy-agent.sh, burn-cap exempt (CTO ts 1795074821.126009)): run
+phase-A review; mark `pm-state:pm-review-pending` with `gh pr edit <PR> --add-label pm-state:pm-review-pending` and launch via Skill(launch-agent) (it picks transport from env PM_SUBAGENT_CAP; 12b and hd-proof-qa always launch via proxy-agent.sh; due 12b alone is burn-cap exempt (CTO ts 1795074821.126009)): run
 `proxy-agent.sh pm-admission-reviewer <brief>` (never in-process Agent) when review is not already in flight. Readiness is satisfied at 12b admission; green exact-head CI+E2E means merge-ask due, with no post-green readiness check. [HIGH] NEVER start or wait on a 12b/PM review after dual green: dual green goes straight to the CTO merge ask the same turn (Rajiv D0AMF0XE6TS thread 1793027212.095579: "dual green shoudl go directly to cto for merges").
 `PR_PM_REVIEW_SLOT_RELEASE_REQUIRED` means a dev slot is still held
 while PM owns review; drain/release that slot through `Skill(direct-release)`
@@ -371,7 +371,7 @@ the dependency block packet or remove the
 dependency label and continue capture/CI/rework.
 `PR_DEPENDENCY_UNBLOCKED_REQUIRED` is never suppressed and must fire immediately
 when the dependency reaches terminal state. PM action is
-`gh pr edit <PR> --remove-label pm-blocked:dependency` then `Skill(direct-release)`/`Skill(direct-assign)` with the complete authoritative tuple.
+clear the stale wait by its authoritative dependency/custody tuple (dependencies are GitHub blocked-by only); if new work is needed, assign it through the hd-* proxy conveyor (`Skill(launch-agent)`), not direct-release/direct-assign.
 Already-classified
 `pm-state:blocked-rework + pm-blocked:ci` terminal-bad PRs are rework routing
 work, not CI classification work: keep live slot owners quiet, nudge idle

@@ -212,6 +212,9 @@ Rule 62 (`~/.claude/rules/62-heydonna-main-merge-only-on-overlap.md`; Rajiv C0AL
 ## Reuse-existing-UI gate (Mandatory, rule 43 item 24)
 Rule 43 item 24 (`~/.claude/rules/43-heydonna-ux-guidelines.md`; Rajiv C0ALZJHGE49 thread 1795010709.991409, ts 1795167329.761289: "why are new ui primitives being invented? existing components/patterns should be followed wherever possible."): new UI reuses existing components and patterns (shadcn/ui primitives, the tabbed editor sidebar, EditorBannerRegion, VersionDiffToolbar, existing dialogs/toasts). BLOCK a plan or diff that adds a bespoke UI primitive, replaces an existing surface (e.g. swaps the chat panel instead of adding a sidebar tab) or hides an existing banner/state where an existing component or pattern fits, unless it names why none fits. Required: plans list each new UI element with the existing component it reuses; tests assert that component renders (new tab present, other tabs kept, read-only banner visible).
 
+## No in-memory downloads in the web tier (Mandatory; rule 63)
+Source: Rajiv, C0ALZJHGE49 thread 1795181725.229099, ts 1795188984.117549: "add a product rule. no in memory downloads. all downloads should be in modal backend.". BLOCK/REQUEST_CHANGES any plan or diff that downloads/streams external content (user/partner URLs, documents, audio, drafts) inside app/api/**, app/actions/**, middleware or a Cloudflare Worker. Required: the web tier validates shape and stores/forwards the URL or R2 key; Modal downloads (cap, no redirects, private IPs refused) → R2 → process; browser uploads go direct to R2. Test shape: route test proves no fetch of the supplied URL; Modal test enforces cap/redirect/private-IP refusal. See ~/.claude/rules/63-heydonna-downloads-in-modal.md.
+
 ## Review Source Invariant
 
 Before reading the plan file, adjudicating the plan, or writing a `/tmp` plan
@@ -425,3 +428,5 @@ For `PATCHED`, write a unified diff patch to
 file under `docs/plans/` and only plan, acceptance criteria, proof, scope, or
 runtime-control-point text.
 
+## Rule 36 check (Rajiv 2026-11-20, C0ALZJHGE49 thread 1795181725.229099; #14295 → #14393)
+BLOCK any plan or diff that downloads, fetches, parses or processes external content (or calls an LLM/provider) inside a Next route, server action or Cloudflare Worker. The web tier only authenticates, validates shape and forwards; the work runs in Modal (rule 36). Compare with the existing audioUrl path (URL stored, Modal fetches) and cite it.

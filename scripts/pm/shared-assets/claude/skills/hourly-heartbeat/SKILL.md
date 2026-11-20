@@ -194,14 +194,14 @@ STEP 5 — return exactly:
 
 Rule: the receipt-bound `cadence-hourly-processing-<ts>` PM handoff consumes this exact report through `Skill(hourly-report-processing)`, including the read-only all-slot Step 3 inspection and PM-owned direction. On `HOURLY_POSTED ts=…`, reconcile that handoff and any already-running/completed inspection first; never launch a second inspector or replay an issued/UNKNOWN direction. If the handoff failed or is uncertain, retain its evidence and report the processing blocker; do not blindly repeat it. The heartbeat agent's ACTIONS summary does not certify processing, and a launched inspector does not certify delivered steering. PM's reply must carry each current lane's evidence, tailored direction, native communication disposition and next checkpoint; the existing +5m CTO verification checks it. Normal agent limits apply, with no short-proxy exception. No new completion gate blocks customer recovery or product merges.
 
-Also: a `new_issue` assign via `mop-assign-slot.py` MUST pass `--task-file` with the full packet. Assigning without one leaves the slot with a null task after its clear (S2/S6/S7 on 2026-10-14).
+Numbered dev slots S1–S4 are retired (S137): assign new issues through the hd-* proxy conveyor with the full persisted packet. The old `mop-assign-slot.py --task-file` rule (S2/S6/S7 null-task incident, 2026-10-14) is historical only.
 
 ## PM follow-through (the open-PR drive)
 
 PM owns all CI/E2E/capture terminals, on PRs and on main (rule 14):
 
 - `ci-repair` → `ci-repair-agent` (test/config/infra) or a free slot (product).
-  After the fix, `gh run rerun <id> --failed` directly; no CTO re-admission.
+  After a pushed fix, apply the applicable exact-head review and fresh admission for the new head; do not rerun jobs from the prior commit (same-head S60 infrastructure/flake reruns only).
 - `e2e-investigate` → one `e2e-failure-investigator`. Proven flake →
   `gh run rerun <id> --failed`; otherwise a slot does repro + rework, then a
   direct rerun on the new head.

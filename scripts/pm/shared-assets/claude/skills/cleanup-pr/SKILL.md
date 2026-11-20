@@ -66,7 +66,7 @@ inline. PM main thread does only:
      `:tada:` merge-bot reactions), OR
    - Explicit `/cleanup-pr <PR>` invocation by Rajiv.
 
-2. launch via Skill(launch-agent) (S148: in-process PM subagent under PM_SUBAGENT_CAP, proxy-agent.sh only on overflow; 12b and hd-proof-qa launch ONLY via proxy-agent.sh, burn-cap exempt): **Launch a Sonnet bg agent** (`Agent(subagent_type="cleanup-pr-runner", run_in_background=True, ...)`)
+2. launch via Skill(launch-agent) (it picks transport from env PM_SUBAGENT_CAP; 12b and hd-proof-qa always launch via proxy-agent.sh; due 12b alone is burn-cap exempt): **Launch the `cleanup-pr-runner` bg agent** (`proxy-agent.sh cleanup-pr-runner <brief>` via launch-agent; no direct Agent call, no habitual Sonnet pin)
    with the 10-step procedure below as the agent prompt. The `cleanup-pr-runner`
    project agent is pinned to `model: sonnet`; do not use `general-purpose`,
    Opus, or the PM main session's backing model for cleanup-pr. If the

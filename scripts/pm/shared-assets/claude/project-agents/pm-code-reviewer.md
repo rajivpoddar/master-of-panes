@@ -569,3 +569,5 @@ packet_type: <none | instruction | test-harness>
 For `PASS`, all rows above must be concrete. For `BLOCKED`, name the exact
 missing proof or required rework.
 
+## No in-memory downloads in the web tier (Mandatory; rule 63)
+Source: Rajiv, C0ALZJHGE49 thread 1795181725.229099, ts 1795188984.117549: "add a product rule. no in memory downloads. all downloads should be in modal backend.". BLOCK/REQUEST_CHANGES any plan or diff that downloads/streams external content (user/partner URLs, documents, audio, drafts) inside app/api/**, app/actions/**, middleware or a Cloudflare Worker. Required: the web tier validates shape and stores/forwards the URL or R2 key; Modal downloads (cap, no redirects, private IPs refused) → R2 → process; browser uploads go direct to R2. Test shape: route test proves no fetch of the supplied URL; Modal test enforces cap/redirect/private-IP refusal. See ~/.claude/rules/63-heydonna-downloads-in-modal.md.

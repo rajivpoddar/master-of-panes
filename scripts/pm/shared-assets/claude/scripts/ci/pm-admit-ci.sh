@@ -4,14 +4,21 @@
 # The CI/E2E trigger is the exact `ci-head:<40-hex head>` label (e2e.yml/ci.yml `labeled` gate).
 # Related-tests gate (Rajiv "go", DM D0AMF0XE6TS thread 1791298729.215119): vitest related + tsc on the PR head before admission.
 # Usage: pm-admit-ci.sh <PR> [--no-update] [--dry-run] [--skip-related-tests "<reason>"] [--force-ci "<reason>"] [--allow-main-red "<reason>"]
+# Pre-review: pm-admit-ci.sh --merge-only <PR> integrates main if S166 requires it; never admits CI/E2E.
 # 12b: --check-12b-only <PR> is read-only; --no-12b-gate --reason "<text>" audits an explicit override.
 # Main-red gate REMOVED (Rajiv C0ALZJHGE49 thread 1793958692.281499, ts 1793960417.571149: "remove it outright. note main red flakes have to be rerun. ... the skip pr has to be immediately merged with a followup issue. for affected pr's, merge main and re-admit."). Supersedes DM ts 1791877690.725089. --allow-main-red is still accepted (no-op) for compatibility.
 # Scope gate (Rajiv 2026-10-08, DM thread 1791461793.117869): site/docs-only PRs are refused (no CI/E2E); PM may override with --force-ci.
 set -euo pipefail
-CHECK_12B_ONLY=0
-if [ "${1:-}" = --check-12b-only ]; then CHECK_12B_ONLY=1; shift; fi
+CHECK_12B_ONLY=0; MERGE_ONLY=0
+case "${1:-}" in
+  --check-12b-only) CHECK_12B_ONLY=1; shift ;;
+  --merge-only) MERGE_ONLY=1; shift ;;
+esac
 PR="${1:-}"; [ -n "$PR" ] || exit 64
 shift; REPO=Scribie/heydonna-app
+if [ "$MERGE_ONLY" = 1 ] && { [[ ! "$PR" =~ ^[0-9]+$ ]] || [ "$#" -ne 0 ]; }; then
+  echo 'Usage: pm-admit-ci.sh --merge-only <PR number>'; exit 64
+fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MAIN_REPO=/Users/rajiv/Downloads/projects/heydonna-app
 # Crash = non-zero (never 0): any unexpected error/unbound var exits 70 with a REFUSE line.
@@ -99,13 +106,16 @@ gate_12b() {
   python3 -I "$SCRIPT_DIR/../pm-ops.py" record --source pm-admit-ci --event 12b_gate_override --actor PM --target-type github_pr --target-id "$PR" --pr "$PR" --head-sha "$head" --payload-json "$payload" >/dev/null || return 3
 }
 
-# This precedes ALL admission effects, including body/label writes and main updates.
-H0=$(gh_get pr_head sha gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid) || api_fail pr_head
+# The open-state guard applies to both modes; the review gate is for admission only.
+if [ "$MERGE_ONLY" = 0 ]; then
+  H0=$(gh_get pr_head sha gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid) || api_fail pr_head
+fi
 PRSTATE=$(gh_get pr_state ok gh pr view "$PR" --repo "$REPO" --json state --jq .state) || api_fail pr_state
 [ "$PRSTATE" = OPEN ] || { echo "REFUSE: PR #$PR is $PRSTATE, not OPEN; nothing admitted"; exit 8; }
-rc=0; gate_12b "$H0" || rc=$?
-[ "$rc" = 0 ] || exit "$rc"
-[ "$CHECK_12B_ONLY" = 0 ] || exit 0
+if [ "$MERGE_ONLY" = 0 ]; then
+  gate_12b "$H0" || exit "$?"
+  [ "$CHECK_12B_ONLY" = 0 ] || exit 0
+fi
 
 related_tests_gate() {
   local head="$1" wt="/tmp/admit-$PR-${1:0:12}" out rc=0 files n
@@ -317,11 +327,45 @@ plan_main_merge() {
   local plan
   plan=$(main_merge_probe "$HEAD" "$MERGEABLE") || { echo 'REFUSE: main merge probe failed; retry admission'; exit 2; }
   read -r MERGE_REASON MERGE_FILES MAIN_SHA <<<"$plan"
-  if [ "$NO_UPDATE" = 1 ] && [ "$MERGE_REASON" != no_conflict_no_overlap ]; then
-    echo "REFUSE: --no-update cannot admit this head; main integration required reason=$MERGE_REASON files=$MERGE_FILES"
+  if [ "$MERGE_ONLY" = 0 ] && [ "$MERGE_REASON" != no_conflict_no_overlap ]; then
+    if [ "$NO_UPDATE" = 1 ]; then
+      echo "REFUSE: --no-update cannot admit this head; main integration required reason=$MERGE_REASON files=$MERGE_FILES"
+    else
+      echo "REFUSE: main integration required reason=$MERGE_REASON files=$MERGE_FILES; run pm-admit-ci.sh --merge-only $PR and review its resulting head before admission"
+    fi
     exit 2
   fi
 }
+
+# Integrate main before review, not during admission. Exit before any admission effects.
+if [ "$MERGE_ONLY" = 1 ]; then
+  read_pr_head
+  plan_main_merge
+  if [ "$MERGE_REASON" = no_conflict_no_overlap ]; then
+    echo "MAIN_MERGE: skipped head=$HEAD reason=$MERGE_REASON"
+    exit 0
+  fi
+
+  PRE_MERGE_HEAD="$HEAD"
+  PR_BASE=$(gh_get pr_base ok gh pr view "$PR" --repo "$REPO" --json baseRefName --jq .baseRefName) || api_fail pr_base
+  [ "$PR_BASE" = main ] || { echo 'REFUSE: update-branch would not merge main; route to slot'; exit 2; }
+  if ! gh api -X PUT "repos/$REPO/pulls/$PR/update-branch" -f "expected_head_sha=$PRE_MERGE_HEAD" >/dev/null 2>&1; then
+    if [ "$MERGE_REASON" = conflict ]; then echo 'REFUSE: conflict with main; route to slot'
+    else echo 'REFUSE: required main update-branch was rejected; retry --merge-only or route to slot'; fi
+    exit 2
+  fi
+  sleep 8
+  read_pr_head
+  # GitHub accepts the request asynchronously. Confirm the merge, not just a 202 or a different head.
+  if [ "$HEAD" = "$PRE_MERGE_HEAD" ] ||
+     ! git -C "$MAIN_REPO" fetch -q --no-tags origin "refs/pull/$PR/head" ||
+     ! git -C "$MAIN_REPO" merge-base --is-ancestor "$MAIN_SHA" "$HEAD" ||
+     ! git -C "$MAIN_REPO" merge-base --is-ancestor "$PRE_MERGE_HEAD" "$HEAD"; then
+    echo 'REFUSE: required main merge not confirmed; retry --merge-only or route to slot'; exit 2
+  fi
+  echo "MAIN_MERGE: performed head=$HEAD reason=$MERGE_REASON files=$MERGE_FILES"
+  exit 0
+fi
 
 if [ "$DRY" = 1 ]; then
   if [ "$NO_UPDATE" = 1 ]; then
@@ -386,32 +430,11 @@ scope_gate "$H0" || exit 5
 related_tests_gate "$H0" || exit 4
 
 read_pr_head
-# A concurrent push or merge-main update must not carry stale review into dispatch.
+# A concurrent push must not carry stale review into dispatch. If main now needs
+# integration, refuse rather than moving the head after review.
 if [ "$HEAD" != "$H0" ]; then gate_12b "$HEAD" || exit "$?"; fi
 plan_main_merge
-if [ "$MERGE_REASON" = no_conflict_no_overlap ]; then
-  echo 'MAIN_MERGE: skipped reason=no_conflict_no_overlap'
-else
-  PRE_MERGE_HEAD="$HEAD"
-  PR_BASE=$(gh_get pr_base ok gh pr view "$PR" --repo "$REPO" --json baseRefName --jq .baseRefName) || api_fail pr_base
-  [ "$PR_BASE" = main ] || { echo 'REFUSE: update-branch would not merge main; route to slot'; exit 2; }
-  if ! gh api -X PUT "repos/$REPO/pulls/$PR/update-branch" -f "expected_head_sha=$PRE_MERGE_HEAD" >/dev/null 2>&1; then
-    if [ "$MERGE_REASON" = conflict ]; then echo 'REFUSE: conflict with main; route to slot'
-    else echo 'REFUSE: required main update-branch was rejected; retry admission or route to slot'; fi
-    exit 2
-  fi
-  sleep 8
-  read_pr_head
-  # GitHub accepts the request asynchronously. Confirm the merge, not just a 202 or a different head.
-  if [ "$HEAD" = "$PRE_MERGE_HEAD" ] ||
-     ! git -C "$MAIN_REPO" fetch -q --no-tags origin "refs/pull/$PR/head" ||
-     ! git -C "$MAIN_REPO" merge-base --is-ancestor "$MAIN_SHA" "$HEAD" ||
-     ! git -C "$MAIN_REPO" merge-base --is-ancestor "$PRE_MERGE_HEAD" "$HEAD"; then
-    echo 'REFUSE: required main merge not confirmed; retry admission or route to slot'; exit 2
-  fi
-  echo "MAIN_MERGE: performed reason=$MERGE_REASON files=$MERGE_FILES"
-  gate_12b "$HEAD" || exit "$?"
-fi
+echo 'MAIN_MERGE: skipped reason=no_conflict_no_overlap'
 echo "PR #$PR head=$HEAD mergeable=$MERGEABLE"
 [ "$MERGEABLE" = "CONFLICTING" ] && { echo "REFUSE: conflict with main; route to slot"; exit 2; }
 # Even malformed-label cleanup is a write; don't do it on a refused head.

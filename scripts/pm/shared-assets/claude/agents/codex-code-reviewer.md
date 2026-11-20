@@ -144,9 +144,9 @@ other workflow evidence:
    best-effort, so storage trouble cannot replace a passing product-test
    verdict with a false red. Required release evidence must use a separate,
    explicitly named fail-closed gate.
-4. Run
-   `python3 -m pytest -q scripts/ci/tests/test_github_artifact_storage_contract.py`
-   when present, and verify mandatory CI invokes the repository-wide contract
+4. Host tests/typecheck: NOT_RUN (rules 45/46). Run the affected
+   `scripts/ci/tests/test_github_artifact_storage_contract.py` (when present) only via remote-test-runner or
+   required exact-head CI, never on the Mac, and verify mandatory CI invokes the repository-wide contract
    before broad tests. An uninvoked policy test is not enforcement.
 5. Require an explicit Modal retrieval and cleanup path.
 
@@ -271,8 +271,8 @@ Any threshold controlling validator severity, BoN rescue, warning vs hard block,
 **Code review**: P0/P1 on any NEW `hard_reject`, `valid:false`, `operation_success:false`, or fallback/original-text path that discards a non-empty content-safe candidate. Existing code with these patterns is grandfathered IF tagged with a "legacy reject path — does not apply to warn-not-reject default" comment; new code is NOT.
 
 Invoke `validator-boundary-doctrine` on every matching diff. Candidate exclusion,
-BoN ineligibility, or forced original fallback is the hard reject under review;
-later `soft_warn` operation metadata does not cure it. Ratio/count/score thresholds
+BoN ineligibility, or forced original fallback for a non-corruption quality failure is the hard reject under review;
+later `soft_warn` operation metadata does not cure it. Model-quality scoring may advance a rung (rule 34 scoring amendment: Rajiv ts 1793215326.517839 / 1793215519.589579): retain candidates and publish/apply the best usable result with `soft_warn` on exhaustion. Only deterministic content corruption can force terminal refusal or remove a candidate from the deliverable pool. Keep auth, custody and operational failures distinct. Ratio/count/score thresholds
 may warn or rank but may not exclude a usable candidate without a concrete
 corruption witness. Require actual production source/bad-output and
 source/known-good-output artifact pairs, including a false-positive test proving
@@ -608,7 +608,7 @@ Rule 43 item 24 (`~/.claude/rules/43-heydonna-ux-guidelines.md`; Rajiv C0ALZJHGE
 
 ## Out-of-diff flake gate (buddhi S151; Mandatory)
 
-Buddhi S151 (out-of-diff flake skip; Rajiv C0ALZJHGE49 thread 1794677380.515009 ts 1794986061.441559; `.claude/rules/20-buddhi-pm.md`): BLOCK / REQUEST_CHANGES a flake skip without an inline open follow-up issue reference, or one that hides a deterministic failure the PR's own change causes. SUPERSEDED in part by buddhi S155 (Rajiv D0AMF0XE6TS ts 1795025559.984709, "skip tests as aggressively as possible"): skips of flaky/unexplained in-diff and save-path tests are ALLOWED; never BLOCK them for being in-diff. Verify the PR diff and linked issue. Required: skip the exact untouched test in the PR branch with its P1 root-cause issue (reuse an open issue), then rerun failed jobs once; no repeated reruns, repro loop or separate main skip PR. Under S155, flaky/unexplained in-diff and save-path reds are skipped the same way; only a deterministic PR-caused failure requires cause/fix. Proof: identify the exact test, issue and one rerun.
+Buddhi S151 (out-of-diff flake skip; Rajiv C0ALZJHGE49 thread 1794677380.515009 ts 1794986061.441559; `.claude/rules/20-buddhi-pm.md`): BLOCK / REQUEST_CHANGES a flake skip without an inline open follow-up issue reference, or one that hides a deterministic failure the PR's own change causes. SUPERSEDED in part by buddhi S155 (Rajiv D0AMF0XE6TS ts 1795025559.984709, "skip tests as aggressively as possible"): skips of flaky/unexplained in-diff and save-path tests are ALLOWED; never BLOCK them for being in-diff. Verify the PR diff and linked issue. Required: skip the exact untouched test in the PR branch with its P1 root-cause issue (reuse an open issue), then request fresh admission of the pushed head (S157 first: when E2E is green on the exact head and CI is red only outside the PR diff, the head-pinned CTO admin-merge ask replaces the skip and any rerun); no repeated reruns, repro loop or separate main skip PR. Under S155, flaky/unexplained in-diff and save-path reds are skipped the same way; only a deterministic PR-caused failure requires cause/fix. Proof: identify the exact test and issue, and the fresh admission (or the S157 ask).
 
 ## Proof-proportional-to-risk gate (Mandatory - rule 58, anti-bloat)
 Source: Rajiv C0C7U35LBKR thread 1794928109.634879, ts 1794978918.618269 ("this pr was just suppsoed to add logging but it added tons of test") / ts 1794979484.237099 ("a logging pr should not take 10h+"). Rule: ~/.claude/rules/58-heydonna-proof-proportional-to-risk.md.
@@ -985,3 +985,5 @@ The corruption-only rule governs rejection of model content on content/quality g
 The corruption-only rule governs rejection of model content on content/quality grounds. It does not override authorization, writer custody, edited-source/currentness, save CAS, pricing authority or uncertain-publication safeguards. A warning-only quality result is applied or published only when those existing admission conditions permit it. Operational failure or UNKNOWN does not authorize a resend. Classify and log the actual cause; do not label a safety precondition as corruption or convert it into forced application.
 - Otherwise REQUEST_CHANGES / P1. Rule: `~/.claude/rules/34-heydonna-no-new-hard-rejects.md`.
 
+## No in-memory downloads in the web tier (Mandatory; rule 63)
+Source: Rajiv, C0ALZJHGE49 thread 1795181725.229099, ts 1795188984.117549: "add a product rule. no in memory downloads. all downloads should be in modal backend.". BLOCK/REQUEST_CHANGES any plan or diff that downloads/streams external content (user/partner URLs, documents, audio, drafts) inside app/api/**, app/actions/**, middleware or a Cloudflare Worker. Required: the web tier validates shape and stores/forwards the URL or R2 key; Modal downloads (cap, no redirects, private IPs refused) → R2 → process; browser uploads go direct to R2. Test shape: route test proves no fetch of the supplied URL; Modal test enforces cap/redirect/private-IP refusal. See ~/.claude/rules/63-heydonna-downloads-in-modal.md.

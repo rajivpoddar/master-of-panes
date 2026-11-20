@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Fail-closed tests for pm-admit-ci.sh (2026-10-27 empty-head bug on #11173).
-# Stubs gh and git on PATH; never touches GitHub.
+# Stubs gh and git on PATH; never touches GitHub. Pass --merge-only for the focused S166 case.
 set -u
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/pm-admit-ci.sh"
 SHA=0123456789abcdef0123456789abcdef01234567
+export STUB_BASE_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+export STUB_MAIN_SHA=cccccccccccccccccccccccccccccccccccccccc
+export STUB_MERGED_SHA=dddddddddddddddddddddddddddddddddddddddd
 PASS=0; FAIL=0
 T=$(mktemp -d "${TMPDIR:-/tmp}/pm-admit-test.XXXXXX")
 
@@ -14,8 +17,18 @@ mkstubs() {
 printf 'git %s\n' "$*" >> "$STUB_LOG"
 case "$*" in
   *'fetch -q --no-tags origin +refs/heads/main:'*) exit 0 ;;
-  *'rev-parse --verify origin/main^{commit}'|*'merge-base '*) printf '%s\n' "$STUB_SHA" ;;
-  *'diff --no-renames --name-only '*) exit 0 ;;
+  *'fetch -q --no-tags origin refs/pull/'*) [ -f "$STUB_DIR/updated" ] ;;
+  *'rev-parse --verify origin/main^{commit}')
+    if [ -n "${S166_CASE:-}" ]; then printf '%s\n' "$STUB_MAIN_SHA"; else printf '%s\n' "$STUB_SHA"; fi ;;
+  *'merge-base --is-ancestor '*)
+    if [ -z "${S166_CASE:-}" ]; then printf '%s\n' "$STUB_SHA"; exit 0; fi
+    [ -f "$STUB_DIR/updated" ] && [[ "$*" = *" $STUB_MAIN_SHA $STUB_MERGED_SHA" || "$*" = *" $STUB_SHA $STUB_MERGED_SHA" ]] ;;
+  *'merge-base '*)
+    if [ -n "${S166_CASE:-}" ]; then printf '%s\n' "$STUB_BASE_SHA"; else printf '%s\n' "$STUB_SHA"; fi ;;
+  *'diff --no-renames --name-only '*)
+    [ -n "${S166_CASE:-}" ] || exit 0
+    if [[ "$*" = *" $STUB_SHA --" ]] || [ "$S166_CASE" = overlap ]; then printf 'lib/pr.ts\n'; else printf 'lib/main.ts\n'; fi ;;
+  *'merge-tree --write-tree '*) [ -n "${S166_CASE:-}" ] ;;
   *) exit 1 ;;
 esac
 EOF
@@ -50,10 +63,16 @@ case "$args" in
     else content=e30=; fi
     printf '{"content":"%s"}\n' "$content" ;;
   "pr view"*"--json state"*) printf 'OPEN\n' ;;
+  "pr view"*"--json baseRefName"*) printf 'main\n' ;;
   "pr view"*"--json closingIssuesReferences"*) printf '11173\n' ;;
+  "api -X PUT repos/"*"/update-branch -f expected_head_sha=$STUB_SHA")
+    [ "${S166_CASE:-}" = overlap ] || exit 1
+    : > "$STUB_DIR/updated" ;;
   "run list"*) exit 1 ;;
   "pr diff"*) exit 1 ;;
-  "pr view"*"--json headRefOid,mergeable"*) emit "$MODE_HM" "$HM_VALUE" hm ;;
+  "pr view"*"--json headRefOid,mergeable"*)
+    if [ -f "$STUB_DIR/updated" ]; then emit "$MODE_HM" "$STUB_MERGED_SHA MERGEABLE" hm
+    else emit "$MODE_HM" "$HM_VALUE" hm; fi ;;
   "pr view"*"--json headRefOid"*) emit "$MODE_HEAD" "$STUB_SHA" head ;;
   "pr view"*"--json labels,closingIssuesReferences"*) printf '{"labels":[{"name":"P2"}],"closingIssuesReferences":[]}\n' ;;
   "pr view"*"--json labels"*) emit "$MODE_LABELS" "$LABELS_JSON" labels ;;
@@ -73,13 +92,14 @@ EOF
   chmod +x "$T/bin/gh" "$T/bin/git" "$T/bin/python3"
 }
 
-run_case() { # name; env pre-set by caller
+run_script() { # name, then script arguments; fixture env pre-set by caller
   local name="$1"; shift
   STUB_DIR="$T/$name"; mkdir -p "$STUB_DIR"; STUB_LOG="$STUB_DIR/gh.log"; : > "$STUB_LOG"
   export STUB_DIR STUB_LOG STUB_SHA="$SHA" PM_ADMIT_RETRY_SLEEP=0
-  OUT=$(PATH="$T/bin:$PATH" HOME="$T/home" bash "$SCRIPT" 11173 --no-update "$@" 2>&1); RC=$?
+  OUT=$(PATH="$T/bin:$PATH" HOME="$T/home" bash "$SCRIPT" "$@" 2>&1); RC=$?
   LOG=$(cat "$STUB_LOG")
 }
+run_case() { local name="$1"; shift; run_script "$name" 11173 --no-update "$@"; }
 check() { if eval "$2"; then PASS=$((PASS+1)); echo "  ok   $1"; else FAIL=$((FAIL+1)); echo "  FAIL $1"; echo "$OUT" | sed 's/^/       out: /'; fi; }
 
 assert_refused() { # name step
@@ -89,9 +109,35 @@ assert_refused() { # name step
   check "$1: no ci-head label write" '! printf "%s" "$LOG" | grep -qE "add-label ci-head|label create"'
 }
 
+finish() {
+  printf '\nRESULT: %s passed, %s failed\n' "$PASS" "$FAIL"
+  /Users/rajiv/.local/bin/trash "$T" >/dev/null 2>&1 || true
+  [ "$FAIL" -eq 0 ]; exit "$?"
+}
+
 mkstubs; mkdir -p "$T/home/.claude/logs"
 OKLABELS='{"labels":[]}'
-export HM_VALUE="$SHA MERGEABLE" LABELS_JSON="$OKLABELS" MODE_LABELS=ok MODE_HM=ok MODE_WRITE=ok
+export HM_VALUE="$SHA MERGEABLE" LABELS_JSON="$OKLABELS" MODE_LABELS=ok MODE_HM=ok MODE_WRITE=ok MODE_HEAD=ok
+
+# Exercise both S166 branches with main and PR diverged. No 12b receipt is available.
+echo 'case: merge-only before 12b (no overlap and overlap)'
+for fixture in no_overlap overlap; do
+  S166_CASE=$fixture GATE_MODE=none run_script "merge_only_$fixture" --merge-only 11173
+  if [ "$fixture" = no_overlap ]; then
+    check 'merge-only/no overlap: skipped with unchanged head' '[ "$RC" = 0 ] && grep -qx "MAIN_MERGE: skipped head=$SHA reason=no_conflict_no_overlap" <<<"$OUT"'
+    check 'merge-only/no overlap: no update-branch call' '! grep -q update-branch "$STUB_LOG"'
+  else
+    check 'merge-only/overlap: performed with merged head' '[ "$RC" = 0 ] && grep -qx "MAIN_MERGE: performed head=$STUB_MERGED_SHA reason=overlap files=1" <<<"$OUT"'
+    check 'merge-only/overlap: one update-branch pinned to original head' '[ "$(grep -c update-branch "$STUB_LOG")" = 1 ] && grep -q "update-branch -f expected_head_sha=$SHA$" "$STUB_LOG"'
+  fi
+  check "merge-only/$fixture: no 12b, labels or CI/E2E dispatch" '! grep "^gh " "$STUB_LOG" | grep -qvE "^gh (pr view .*--json (state|headRefOid,mergeable|baseRefName) |api -X PUT .*/update-branch )" && ! grep -qE "12B_GATE|ADMITTED" <<<"$OUT"'
+done
+
+# If main moved again after review, admission must not do the preflight's write itself.
+S166_CASE=overlap GATE_MODE=exempt run_script admission_overlap 11173
+check 'admission/overlap: requires a fresh preflight' '[ "$RC" = 2 ] && grep -q "REFUSE: main integration required reason=overlap .*--merge-only 11173" <<<"$OUT"'
+check 'admission/overlap: no merge or dispatch' '! grep -qE "update-branch|pr edit|label create|workflow run|run rerun" "$STUB_LOG" && ! grep -q ADMITTED <<<"$OUT"'
+[ "${1:-}" != --merge-only ] || finish
 
 echo "case: head lookup fails (HTTP 499) twice"
 MODE_HEAD=fail; export MODE_HEAD; run_case head_fail
@@ -176,7 +222,4 @@ OUT=$(PATH="$T/bin:$PATH" HOME="$T/home" bash "$SCRIPT" --check-12b-only 11173 2
 check 'check-only: accepts seven-hex PASS' '[ "$RC" = 0 ]'
 check 'check-only PASS: no effects' '! grep -qE "^git |pm-ops |pr edit|label create|update-branch" "$STUB_LOG"'
 
-echo
-echo "RESULT: $PASS passed, $FAIL failed"
-/Users/rajiv/.local/bin/trash "$T" >/dev/null 2>&1 || true
-[ "$FAIL" -eq 0 ]
+finish
