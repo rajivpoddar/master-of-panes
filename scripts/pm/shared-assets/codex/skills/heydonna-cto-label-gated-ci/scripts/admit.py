@@ -294,51 +294,82 @@ def _fetch_head_and_main(checkout, head, main, branch):
                    cwd=checkout, timeout=remaining)
 
 
-def integrate(pr, main):
+def main_integration_reason(pr, main, checkout):
+    """Fetch the pinned commits once; reuse them if an overlap needs integration."""
     head, branch = pr["head"]["sha"], pr["head"]["ref"]
-    with tempfile.TemporaryDirectory(prefix="heydonna-admission-") as checkout:
+
+    def paths(base, tip):
+        # C-quoted paths are one record per line, including embedded newlines.
+        return set(command("git", "-c", "core.quotePath=true", "diff", "--no-renames",
+                           "--name-only", base, tip, "--", cwd=checkout).splitlines())
+
+    try:
         command("git", "init", "--quiet", checkout)
         command("git", "remote", "add", "origin", f"https://github.com/{REPO}.git", cwd=checkout)
         _fetch_head_and_main(checkout, head, main, branch)
-        command("git", "checkout", "--quiet", "--detach", head, cwd=checkout)
-        command("git", "-c", "user.name=Abhijit CTO", "-c", "user.email=abhijit-cto@users.noreply.github.com",
-                "merge", "--no-edit", main, cwd=checkout)
-        new_head = command("git", "rev-parse", "HEAD", cwd=checkout).strip()
-        command("git", "merge-base", "--is-ancestor", head, new_head, cwd=checkout)
-        pr_at(pr["number"], head)
-        try:
-            command("git", "push", f"--force-with-lease=refs/heads/{branch}:{head}",
-                    "origin", f"HEAD:refs/heads/{branch}", cwd=checkout)
-        except (Refusal, subprocess.TimeoutExpired) as exc:
-            raise Refusal(f"PUSH_UNCERTAIN expected_head={new_head}: {exc}") from exc
+        base = command("git", "merge-base", main, head, cwd=checkout).strip()
+        if base not in (head, main):
+            result = subprocess.run(["git", "merge-tree", "--write-tree", head, main],
+                                    cwd=checkout, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                    text=True, timeout=DEFAULT_COMMAND_TIMEOUT)
+            if result.returncode == 1:
+                return "conflict"
+            if result.returncode != 0:
+                raise Refusal(result.stderr.strip() or f"merge-tree exited {result.returncode}")
+        return "overlap" if paths(base, head) & paths(base, main) else None
+    except (Refusal, OSError, subprocess.TimeoutExpired) as exc:
+        raise Refusal(f"MAIN_MERGE_PROBE_FAILED: {exc}") from exc
+
+
+def integrate(pr, main, checkout):
+    head, branch = pr["head"]["sha"], pr["head"]["ref"]
+    command("git", "checkout", "--quiet", "--detach", head, cwd=checkout)
+    command("git", "-c", "user.name=Abhijit CTO", "-c", "user.email=abhijit-cto@users.noreply.github.com",
+            "merge", "--no-edit", main, cwd=checkout)
+    new_head = command("git", "rev-parse", "HEAD", cwd=checkout).strip()
+    command("git", "merge-base", "--is-ancestor", head, new_head, cwd=checkout)
+    command("git", "merge-base", "--is-ancestor", main, new_head, cwd=checkout)
+    pr_at(pr["number"], head)
+    try:
+        command("git", "push", f"--force-with-lease=refs/heads/{branch}:{head}",
+                "origin", f"HEAD:refs/heads/{branch}", cwd=checkout)
+    except (Refusal, subprocess.TimeoutExpired) as exc:
+        raise Refusal(f"PUSH_UNCERTAIN expected_head={new_head}: {exc}") from exc
     return new_head
 
 
-def admit(number, head, apply=False, integrate_only=False):
+def admit(number, head, apply=False, integrate_only=False, no_update=False):
     pr = pr_at(number, head)
+    if pr.get("mergeable") is False:
+        raise Refusal("CONFLICT_WITH_MAIN: route to PR owner")
     main = api("git/ref/heads/main")["object"]["sha"]
     comparison = api(f"compare/{main}...{head}")
-    behind = comparison["merge_base_commit"]["sha"] != main
-    prior = existing(pr)
-    if behind:
-        # Only genuine unresolved active runs protect a behind head. A stale
-        # ci-head label with no active runs must not block the required
-        # current-main integration, so defer the duplicate check to the
-        # post-integration re-check.
-        if prior and prior.get("runs"):
+    if comparison["merge_base_commit"]["sha"] != main:
+        with tempfile.TemporaryDirectory(prefix="heydonna-admission-") as checkout:
+            reason = main_integration_reason(pr, main, checkout)
+            if reason == "conflict":
+                raise Refusal("CONFLICT_WITH_MAIN: route to PR owner")
+            if reason == "overlap":
+                if no_update:
+                    raise Refusal("MAIN_INTEGRATION_REQUIRED: --no-update cannot admit an overlapping head")
+                # An unresolved run still owns its head. A stale label alone
+                # does not block a required integration.
+                prior = existing(pr)
+                if prior and prior.get("runs"):
+                    return {"status": "ALREADY_ADMITTED", "head": head, **prior}
+                if not apply:
+                    return {"status": "MAIN_INTEGRATION_REQUIRED", "head": head, "main": main}
+                head = integrate(pr, main, checkout)
+                if integrate_only:
+                    return {"status": "MAIN_INTEGRATED", "head": head, "main": main}
+    if not apply or integrate_only:
+        prior = existing(pr)
+        if prior:
             return {"status": "ALREADY_ADMITTED", "head": head, **prior}
-    elif prior:
-        # Head already contains current main: honor any admission (label or
-        # active runs) as-is, exactly as the installed preimage did.
-        return {"status": "ALREADY_ADMITTED", "head": head, **prior}
-    if not apply:
-        return {"status": "MAIN_INTEGRATION_REQUIRED" if behind else "READY_TO_ADMIT",
-                "head": head, "main": main}
-    if behind:
-        head = integrate(pr, main)
-    if integrate_only:
-        return {"status": "MAIN_INTEGRATED", "head": head, "main": main}
+        return {"status": "READY_TO_ADMIT", "head": head, "main": main}
     pr = pr_at(number, head)
+    if pr.get("mergeable") is False:
+        raise Refusal("CONFLICT_WITH_MAIN: route to PR owner")
     if api("git/ref/heads/main")["object"]["sha"] != main:
         raise Refusal(f"MAIN_MOVED_BEFORE_ADMISSION head={head}")
     prior = existing(pr)
@@ -365,12 +396,14 @@ def main():
     parser.add_argument("--pr", required=True, type=int)
     parser.add_argument("--head", required=True)
     parser.add_argument("--apply", action="store_true")
-    parser.add_argument("--integrate-only", action="store_true")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--integrate-only", action="store_true")
+    modes.add_argument("--no-update", action="store_true", help="refuse when main integration is required")
     args = parser.parse_args()
     if args.pr <= 0 or not re.fullmatch(r"[0-9a-f]{40}", args.head):
         parser.error("positive PR number and full lowercase head SHA required")
     try:
-        print(json.dumps(admit(args.pr, args.head, args.apply, args.integrate_only), sort_keys=True))
+        print(json.dumps(admit(args.pr, args.head, args.apply, args.integrate_only, args.no_update), sort_keys=True))
         return 0
     except (Refusal, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
         print(json.dumps({"status": "REFUSED", "reason": str(exc)}))

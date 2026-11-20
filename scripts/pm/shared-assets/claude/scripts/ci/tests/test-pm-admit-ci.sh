@@ -12,7 +12,12 @@ mkstubs() {
   cat > "$T/bin/git" <<'EOF'
 #!/usr/bin/env bash
 printf 'git %s\n' "$*" >> "$STUB_LOG"
-exit 1
+case "$*" in
+  *'fetch -q --no-tags origin +refs/heads/main:'*) exit 0 ;;
+  *'rev-parse --verify origin/main^{commit}'|*'merge-base '*) printf '%s\n' "$STUB_SHA" ;;
+  *'diff --no-renames --name-only '*) exit 0 ;;
+  *) exit 1 ;;
+esac
 EOF
   # gh stub: behaviour from env. MODE_HEAD / MODE_HM / MODE_LABELS = ok|fail|empty|flaky
   cat > "$T/bin/gh" <<'EOF'

@@ -45,9 +45,11 @@ scope-aware is a separate follow-up, not a reason to delay this policy.
    integration changes the head or visual behavior, refresh the affected proof
    and rerun the gate on the new full head. Non-UI changes need no visual proof.
 2. For app, mixed, or unknown scope, inspect the live head, then run the
-   bundled script. It integrates exact current main by an ordinary merge in a
-   temporary checkout and pushes only a descendant with an old-head lease. A
-   conflict returns for resolution by the existing owner. A changed visual
+   bundled script. Disjoint changes retain the reviewed head. Overlapping files
+   require an ordinary merge of exact current main in a temporary checkout; the
+   script pushes only a descendant with an old-head lease. `--no-update` refuses
+   an overlapping head instead. A conflict or failed probe never labels the old
+   head; send conflicts to the existing owner. A changed visual
    surface stops before the CI label is added. For confirmed site-only scope,
    do not use this script's `--apply` path; verify the exact-head site proof.
 3. For app, mixed, or unknown scope, add `ci-head:<full-head>` once to start

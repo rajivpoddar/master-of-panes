@@ -438,7 +438,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-ci-admission",
-      "sha256": "e378854689a04b680f5266a1e9565093013045f346104fe4d160368811224cca",
+      "sha256": "8d44494a220f37ae3911e86bdd26436583edeff1cea45a4782bd5c6de8568226",
       "source_path": "claude/scripts/ci/pm-admit-ci.sh"
     },
     {
@@ -456,7 +456,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-ci-admission",
-      "sha256": "491f2464de295a0dd968d640252669507789160936a9af385b6ad5f6bcb781ef",
+      "sha256": "fa9d912962adb0faf56803d5f7c8ef229e2866b1329f20a9ede5ca4f36f5c893",
       "source_path": "claude/scripts/ci/tests/test-pm-admit-ci.sh"
     },
     {
@@ -1833,7 +1833,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
-      "sha256": "8b6f74e703b8c8d5a478e2981b55950575f6e0a55f4c80c79f2d0e5468d454fa",
+      "sha256": "6ad8d3e14dff831978387618c68e4d76e9b10f48d9ac2cce5f51f1a9be7a8633",
       "source_path": "codex/skills/heydonna-cto-label-gated-ci/SKILL.md"
     },
     {
@@ -1842,7 +1842,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill-executable",
-      "sha256": "c476254b72ed2faf0aa9fee99ab5075b298367eb223df0d9e9e3a040e1c2ecfd",
+      "sha256": "b193cea3ab594aefbcb322dbbbc58068e4ef399661b15739a5d001837634c6dc",
       "source_path": "codex/skills/heydonna-cto-label-gated-ci/scripts/admit.py"
     },
     {
