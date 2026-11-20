@@ -409,5 +409,8 @@ Use the single S141 procedure (Step 3a item 0): an exact-server `hcloud server d
 Rajiv, D0AMF0XE6TS thread 1793254511.567489, ts 1793256031.251919: "P0 and p1's should be done with pm hotfix agent when slots are not available."
 Each hourly pass lists every ready P0/P1 issue that has neither a running `hd-planner`/`hd-builder` lane nor a live owner. PM starts an `hd-planner` (plan) and then an `hd-builder` (implement) for each one in the SAME turn via `Skill(launch-agent)`; Convex/Modal/browser proof runs on isolated remote boxes, not a slot (S14 retired with S137). An idle ready P0/P1 with no owner is reported as UNOWNED_P0P1.
 
+## [HIGH] Disk ≥95% → empty Trash (Rajiv D0AMF0XE6TS thread 1795194166.074639, ts 1795194280.697719: "update the rules and empty trash whenever it reaches <95%")
+Every hourly and on every worktree-lru disk alert: if `df -h /` shows ≥95% used, run `osascript -e 'with timeout of 3600 seconds' -e 'tell application "Finder" to empty trash' -e 'end timeout'` in the background from the PM session (no ask), then report before/after free GiB in the thread.
+
 ## [HIGH] Trash purge runs from the PM session (Rajiv C0ALZJHGE49 thread 1795055851.351669, 2026-11-19)
 launchd's worktree-lru can't read ~/.Trash (macOS TCC; logs TRASH-SKIP-ROOT), so its purge_owned_trash never runs and cleanups free nothing. Do NOT grant Full Disk Access to a shared interpreter. Each hourly cycle PM runs from the PM session: `python3 -c "import importlib.util as u;s=u.spec_from_file_location('w','/Users/rajiv/.claude/scripts/worktree-lru-cleanup.py');m=u.module_from_spec(s);s.loader.exec_module(m);m.purge_owned_trash(True)"` (purges only entries the job trashed >24 h ago), then reports `df -h /` free GiB in the hourly reply.
