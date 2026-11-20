@@ -11,7 +11,7 @@
 #                 SDK built-ins such as general-purpose or claude work only if a matching
 #                 definition file exists; list those directories for currently valid types.
 #   <prompt-file> complete one-shot brief (native named-peer steering remains available)
-#   --model M     auto: *-reviewer REVIEW (fable -> astra); hd-planner / hd-investigator PLAN ladder; hd-builder BUILD1-3; hd-proof-qa PROOF1-2; other roles MID
+#   --model M     auto: gpt-6.2-sol FIRST in every tier, launched at effort xhigh (Rajiv ts 1795158067.051479), old ladders behind it: *-reviewer REVIEW; hd-planner / hd-investigator PLAN; hd-builder BUILD1-3; hd-proof-qa PROOF1-2; other roles MID
 #                 aliases: luna/haiku LIGHT (hd-builder BUILD1), terra/sonnet MID (hd-builder BUILD2, hd-proof-qa PROOF1), opus TOP (hd-builder BUILD3, hd-proof-qa PROOF2); sol = exact gpt-6.2-sol (S149, no tier picker); fable, astra exact
 #                 Escalate a stalled run with --rung N or --model; raw model ids pass through unchanged.
 #                 or any raw CLIProxyAPI model id (unknown ids get a 200k window + stderr warning)
@@ -670,7 +670,7 @@ def reset_seconds(text):
     return 3600
 
 model = os.environ.get("PROXY_AGENT_CLAUDE_PROBE_MODEL", "")
-if model not in ("claude-opus-5-5-high", "claude-sonnet-5-5-high", "gemini-4-argon-high", "gemini-3.8-flash-high", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-high", "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "grok-4.7", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6-astra", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-fable-5-2", "hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor"):
+if model not in ("claude-opus-5-5-high", "claude-sonnet-5-5-high", "gemini-4-argon-high", "gemini-3.8-flash-high", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-high", "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "grok-4.7", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-sol(xhigh)", "gpt-6-astra", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-fable-5-2", "hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor"):
     finish("fail", 0)
 
 state_dir = os.environ.get("PROXY_AGENT_STATE_DIR") or os.path.expanduser("~/.cache/proxy-agent")
@@ -852,6 +852,8 @@ proxy_agent_note_log_exhaustion() {
   local model="$1" logfile="${2:-}" outfile="${3:-}" model_id alias state
   [[ -n "$logfile" || -n "$outfile" ]] || return 0
   read -r model_id _ _ < <(resolve_model "$model")
+  # A reasoning/context suffix is not part of the pool identity: the cooldown must key on the base id the picker reads (`gpt-6.2-sol(xhigh)` -> `gpt-6.2-sol`).
+  model_id="${model_id%%(*}"; model_id="${model_id%%\[*}"
   alias="$(proxy_agent_alias_for_id "$model_id")"
   [[ -n "$alias" ]] || alias="$model"
   state="$(proxy_agent_state_dir)"
@@ -1419,7 +1421,15 @@ proxy_agent_is_free_trial_id() {
 # model, before the emergency gate and before `last` is set), the resolved primary (raw --model, and --resume which requires an explicit
 # model), and the auto-continuation block of the generated run.sh.
 proxy_agent_free_guard_refuses() {
-  proxy_agent_is_free_trial_id "$(proxy_agent_router_identity "$1")"
+  local _ident
+  _ident="$(proxy_agent_router_identity "$1")"
+  proxy_agent_is_free_trial_id "$_ident" || return 1
+  # Narrow allow (Rajiv D0AMF0XE6TS thread 1795104790.271149, ts 1795104956.054309: "enable it for all builders/provers. they don't
+  # touch customer data"): hy4-flash identities only, only for the RESOLVED builder/prover types. Muse and every other type stay denied.
+  case "$_ident" in
+    hy4-flash-free) [[ "$1" == "hy4-flash-free" ]] && case "${TYPE:-}" in hd-builder|hd-proof-qa) return 1;; esac;;  # exact canonical id only: the hy4-flash alias and decorated forms are not OpenCode-pool counted (CTO REVISE ts 1795105173.231299), so they stay denied
+  esac
+  return 0
 }
 # Unresolved automatic selection (CTO REVISE of c901e33 / f1a7f8a, C0ALZJHGE49 thread 1794985651.254889, ts 1794991405.296039). Only the LITERAL
 # `auto` is a tier request in proxy_agent_select; a decorated `auto(high)` / `AUTO` / `auto[1m]` falls through to RAW and reaches the router
@@ -1435,27 +1445,31 @@ proxy_agent_is_unresolved_auto() {
 proxy_agent_tier_models() {
   local models _m _kept=""
   case "$1" in
+    # SOL FIRST IN EVERY TIER (Rajiv C0ALZJHGE49 thread 1794677380.515009, ts 1795158067.051479: "put 6.2 sol xhigh agents on it. we have spare capacity on codex. move all agents to sol."):
+    # gpt-6.2-sol heads every list and launches at reasoning effort xhigh (proxy_agent_launch_model_id). The previous entries stay behind it, in their old order, as the
+    # fallbacks (Codex pool cap, 402/429 cooldown, probe failure). Supersedes sol only on BUILD3/PROOF2 (S149, ts 1794941131.743129), sol dropped from TOP (ts 1794720589.429929)
+    # and hy4 first (ts 1795106112.425109; non-builder/prover types still skip hy4 via the free-model guard). gpt-6.1-terra stays in the tiers (ts 1794941131.743129).
     # OpenCode Go pool (Rajiv D0AMF0XE6TS thread 1794926930.078169, ts 1794930258.014469): hy4-flash-free joins LIGHT, deepseek-v4.1-flash joins MID.
     # Every tier ends with the emergency-only Muse Spark entry (see proxy_agent_is_emergency_muse). Grok stays in its existing slot.
-    LIGHT) models="claude-haiku-5-5 hy4-flash-free grok-4.7 gpt-6-luna muse-spark-1.3-contributor";;
+    LIGHT) models="gpt-6.2-sol hy4-flash-free claude-haiku-5-5 grok-4.7 gpt-6-luna muse-spark-1.3-contributor";;
     # glm-5.3 registered, explicit --model only until one test build passes, Rajiv condition ts 1794942421.644269 (PM steer 2026-11-18: not in any automatic tier list).
-    MID) models="claude-sonnet-5-5 deepseek-v4.1-flash grok-4.7 gpt-6.1-terra muse-spark-1.3-contributor";;
-    TOP) models="claude-opus-5-5 grok-4.7 gpt-6.1-terra muse-spark-1.3-contributor";;  # sol dropped (Rajiv C0ALZJHGE49 ts 1794720589.429929: "cut down sol usage on proxies")
+    MID) models="gpt-6.2-sol hy4-flash-free claude-sonnet-5-5 deepseek-v4.1-flash grok-4.7 gpt-6.1-terra muse-spark-1.3-contributor";;
+    TOP) models="gpt-6.2-sol claude-opus-5-5 grok-4.7 gpt-6.1-terra muse-spark-1.3-contributor";;
     # gpt-6.2-sol replaces gpt-6.1-sol (the "sol" alias); gpt-6.1-terra stays in the tiers (Rajiv D0AMF0XE6TS thread 1794939318.063889, ts 1794941131.743129: "6.1 terra should stay. 6.2 sol should replace 6.1 sol").
     # Per-role ladders (Rajiv D0AMF0XE6TS thread 1794624936.567599: ts 1794639918.387399 ladder, ts 1794640102.756179 hydrogen in the mid rungs).
     # First id not in 429/402 cooldown wins within a rung; claude-* ids still skip at the cap (claude_cap), then the next id in the SAME rung is tried.
-    PLAN) models="grok-4.7 claude-opus-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
+    PLAN) models="gpt-6.2-sol grok-4.7 claude-opus-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
     # Grok before Codex in every rung: Codex must last to Thu (Rajiv ts 1794660714.234059 "only grok, claude, codex").
     # Dev ladder (Rajiv C0ALZJHGE49 thread 1794665799.784789, ts 1794665970.826379): haiku/luna → sonnet/terra → opus/sol. No Grok on dev rungs.
-    BUILD1) models="claude-haiku-5-5 deepseek-v4.1-flash gpt-6-luna muse-spark-1.3-contributor";;  # DeepSeek after Claude (Rajiv C0ALZJHGE49 ts 1794998807.846819 "ok for 2")
-    BUILD2) models="claude-sonnet-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
-    # S149 (Rajiv ts 1794941131.743129 "6.1 terra should stay. 6.2 sol should replace 6.1 sol"): gpt-6.2-sol follows terra on the top conveyor rungs only; never MID/TOP/PLAN (ts 1794720589.429929).
-    BUILD3) models="claude-opus-5-5 gpt-6.1-terra gpt-6.2-sol muse-spark-1.3-contributor";;
-    PROOF1) models="claude-sonnet-5-5 deepseek-v4.1-flash gpt-6.1-terra muse-spark-1.3-contributor";;  # DeepSeek after Claude (Rajiv ts 1794998807.846819 "ok for 2")
-    PROOF2) models="claude-opus-5-5 gpt-6.1-terra gpt-6.2-sol muse-spark-1.3-contributor";;
+    BUILD1) models="gpt-6.2-sol hy4-flash-free claude-haiku-5-5 deepseek-v4.1-flash gpt-6-luna muse-spark-1.3-contributor";;
+    BUILD2) models="gpt-6.2-sol claude-sonnet-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
+    # S149 (Rajiv ts 1794941131.743129 "6.1 terra should stay. 6.2 sol should replace 6.1 sol"); sol now leads every rung (ts 1795158067.051479, header above).
+    BUILD3) models="gpt-6.2-sol claude-opus-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
+    PROOF1) models="gpt-6.2-sol hy4-flash-free claude-sonnet-5-5 deepseek-v4.1-flash gpt-6.1-terra muse-spark-1.3-contributor";;
+    PROOF2) models="gpt-6.2-sol claude-opus-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
     # 12b reviews: carbon -> fable -> astra (Rajiv D0AMF0XE6TS thread 1794624936.567599, ts 1794640502.657479 "the 12b reviewer ladder can be carbon/fable/astra").
     # Supersedes the earlier fable-first list (thread 1794573312.657559, ts 1794623641.572859). Reviews never skip claude-* at the cap (see below).
-    REVIEW) models="claude-fable-5-2 gpt-6-astra muse-spark-1.3-contributor";;
+    REVIEW) models="gpt-6.2-sol claude-fable-5-2 gpt-6-astra muse-spark-1.3-contributor";;
     *) return 1;;
   esac
   # No Codex for proxies (Rajiv ts 1794834402.077499): drop gpt-* from every rung while the flag file exists.
@@ -1599,7 +1613,9 @@ proxy_agent_burn_refused() {
   esac
   # OpenCode Go has no %/h budget meter: OPENCODE_PROXY_CAP and a 402/429 cooldown decide.
   if proxy_agent_is_opencode_id "$1"; then return 1; fi
-  python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$1" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >&2 && return 1
+  # proxy-burn-shadow.py resolves the pool from the EXACT model id (model_pool), so a reasoning-suffixed id (`gpt-6.2-sol(xhigh)`) was pool=unknown and
+  # refused (coordinator report 2026-11-20). The router bills the base model: ask the gate about the router-equivalent identity.
+  python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$(proxy_agent_router_identity "$1")" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >&2 && return 1
   return 0
 }
 
@@ -1757,6 +1773,8 @@ proxy_agent_primary_pool_guard() {
 proxy_agent_primary_burn_check() {
   local _burn_model _burn_window _burn_max _burn_rc=0
   read -r _burn_model _burn_window _burn_max < <(resolve_model "$MODEL")
+  # Router-equivalent identity (see proxy_agent_burn_refused): an explicit `--model gpt-6.2-sol(xhigh)` must reach the codex pool decision, not pool=unknown.
+  _burn_model="$(proxy_agent_router_identity "$_burn_model")"
   # Grok is balance-metered. The %/h shadow decision is "unknown" and must not refuse the launch.
   case "$_burn_model" in
     grok-4.7|grok) return 0;;
@@ -1874,6 +1892,13 @@ proxy_agent_alias_for_id() {
 
 resolve_model() {
   # echoes: <model_id> <window> <max_output>
+  # A reasoning-suffixed Codex id (`gpt-6.2-sol(xhigh)`, an explicit --model) keeps its text and takes the window/output of its base model.
+  if [[ "$1" == gpt-*\(*\) ]]; then
+    local _rm_id _rm_win _rm_max
+    read -r _rm_id _rm_win _rm_max < <(resolve_model "${1%%(*}")
+    echo "$1 $_rm_win $_rm_max"
+    return
+  fi
   case "$1" in
     luna)         echo "gpt-6-luna 1050000 128000";;
     terra)        echo "gpt-6.1-terra 1050000 128000";;
@@ -1901,10 +1926,24 @@ resolve_model() {
   esac
 }
 
+# Reasoning effort for gpt-6.2-sol (Rajiv C0ALZJHGE49 thread 1794677380.515009, ts 1795158067.051479: "put 6.2 sol xhigh agents on it").
+# Mechanism = the router's own: CLIProxyAPI strips a `model(level)` suffix, validates the level against the model's supported set and resolves the provider
+# from the base id (probed 2026-11-20: `gpt-6.2-sol(xhigh)` 200, `gpt-6.2-sol(bogus)` 400 "valid levels: low, medium, high, xhigh, max"). The suffix is added ONLY where
+# the launcher emits --model (primary ARGS, which the continuation reuses) and the nested Haiku/Sonnet/Opus exports. Selection, tier lists, pool caps, cooldown records,
+# the burn gate, run state and notices all keep the canonical id. An id that already carries a suffix is the caller's explicit choice and is left alone.
+PROXY_AGENT_SOL_EFFORT="xhigh"
+proxy_agent_launch_model_id() {
+  case "$1" in
+    gpt-6.2-sol) printf 'gpt-6.2-sol(%s)\n' "$PROXY_AGENT_SOL_EFFORT";;
+    *) printf '%s\n' "$1";;
+  esac
+}
+
 proxy_agent_print_selection() {
-  local id window max_out
+  local id window max_out launch
   read -r id window max_out < <(resolve_model "$MODEL")
-  printf 'proxy-agent: tier=%s model=%s reason=%s\n' "$SELECT_TIER" "$id" "$SELECT_REASON" >&2
+  launch="$(proxy_agent_launch_model_id "$id")"
+  printf 'proxy-agent: tier=%s model=%s reason=%s%s\n' "$SELECT_TIER" "$id" "$SELECT_REASON" "$([[ "$launch" == "$id" ]] || printf ' launch_model=%s' "$launch")" >&2
 }
 
 # Cap only the proxy launch paths. In-process Agent hooks are intentionally untouched.
@@ -2014,6 +2053,8 @@ if [[ "$PM_ROLE" == "1" ]]; then SETTING_SOURCES="user"; else SETTING_SOURCES="u
 
 # Launch resolution. Same table as the dry-run line; defined above so dry-run can print it.
 read -r MODEL_ID WINDOW MAX_OUT < <(resolve_model "$MODEL")
+# MODEL_ID stays canonical (run state, notices, stop relay, cooldown records); LAUNCH_MODEL carries the reasoning-effort suffix and is what --model receives.
+LAUNCH_MODEL="$(proxy_agent_launch_model_id "$MODEL_ID")"
 # Emergency Muse Spark launches are logged (primary model and any nested alias that resolved to it). Best effort, never blocks a launch.
 proxy_agent_log_emergency_muse() {
   local role="$1" id="$2" reason
@@ -2029,7 +2070,7 @@ proxy_agent_log_emergency_muse haiku "${HAIKU_MODEL:-}"
 proxy_agent_log_emergency_muse sonnet "${SONNET_MODEL:-}"
 proxy_agent_log_emergency_muse opus "${OPUS_MODEL:-}"
 case "$MODEL" in
-  ag-opus|ag-sonnet|luna|terra|sol|astra|grok|hydrogen|ernie|gemini-pro|gemini-flash|gpt-6-luna|gpt-6.1-terra|gpt-6.1-sol|gpt-6.2-sol|gpt-6-astra|grok-4.7|gemini-4-argon-high|gemini-3.8-flash-high|gemini-4-hydrogen-xhigh|claude-opus-5-5-high|claude-sonnet-5-5-high|haiku|sonnet|opus|fable|claude-haiku-5-5|claude-sonnet-5-5|claude-opus-5-5|claude-fable-5-2) ;;
+  ag-opus|ag-sonnet|luna|terra|sol|astra|grok|hydrogen|ernie|gemini-pro|gemini-flash|gpt-6-luna|gpt-6.1-terra|gpt-6.1-sol|gpt-6.2-sol|gpt-6.2-sol\(*\)|gpt-6-astra|grok-4.7|gemini-4-argon-high|gemini-3.8-flash-high|gemini-4-hydrogen-xhigh|claude-opus-5-5-high|claude-sonnet-5-5-high|haiku|sonnet|opus|fable|claude-haiku-5-5|claude-sonnet-5-5|claude-opus-5-5|claude-fable-5-2) ;;
   hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor) ;;  # OpenCode Go via CLIProxyAPI; conservative 200000/32000 window until a source is added
   deepseek|deepseek-flash-4.1) ;;  # direct DeepSeek: the P0:<digits> gate (canonical identity, decorated forms included) runs before the dry-run return above
   *) echo "proxy-agent: model '$MODEL' not in alias table; using 200000-token window (warning)" >&2;;
@@ -2059,9 +2100,10 @@ unset ANTHROPIC_API_KEY
 # S129: nested models come from the pre-launch selector (or the static fallback when --model is explicit).
 # An empty alias (burn-refused for a capped role) exports a sentinel that is not a model id, so a nested call fails at the
 # proxy instead of unsetting the alias (which would let Claude Code fall back to its built-in id, unchecked).
-export ANTHROPIC_DEFAULT_HAIKU_MODEL="${HAIKU_MODEL:-burn-refused-haiku}"
-export ANTHROPIC_DEFAULT_SONNET_MODEL="${SONNET_MODEL:-burn-refused-sonnet}"
-export ANTHROPIC_DEFAULT_OPUS_MODEL="${OPUS_MODEL:-burn-refused-opus}"
+# A nested pick that lands on gpt-6.2-sol runs at the same effort as the primary (proxy_agent_launch_model_id; sentinels and other ids pass through).
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="$(proxy_agent_launch_model_id "${HAIKU_MODEL:-burn-refused-haiku}")"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="$(proxy_agent_launch_model_id "${SONNET_MODEL:-burn-refused-sonnet}")"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="$(proxy_agent_launch_model_id "${OPUS_MODEL:-burn-refused-opus}")"
 export CLAUDE_CODE_ATTRIBUTION_HEADER=0
 export PROXY_AGENT=1
 # Context sizing for the selected model (Claude Code docs: env-vars, model-config).
@@ -2240,7 +2282,7 @@ if proxy_agent_is_capped "$TYPE"; then
     fi
   fi
 fi
-ARGS=(-p --name "${PROXY_AGENT_NAME:-proxy-$TYPE-$STAMP}" --model "$MODEL_ID" --max-turns "$MAX_TURNS" --output-format stream-json --verbose
+ARGS=(-p --name "${PROXY_AGENT_NAME:-proxy-$TYPE-$STAMP}" --model "$LAUNCH_MODEL" --max-turns "$MAX_TURNS" --output-format stream-json --verbose
       --dangerously-skip-permissions --setting-sources "$SETTING_SOURCES" --settings "$SAFETY_SETTINGS"
       --append-system-prompt "$BODY")
 if [[ -n "$TOOLS" && "$TOOLS" != "*" && "$TOOLS" != "All tools" ]]; then
@@ -2380,7 +2422,13 @@ REVIEW_ROUND_TOKEN="$(proxy_agent_review_cap reserve)" || exit $?
 } > "$JOB_DIR/run.sh"
 chmod 700 "$JOB_DIR/run.sh"
 VISIBLE_SESSION="${PROXY_AGENT_TMUX_SESSION:-0}"
-WINDOW_NAME="px-${NAME#proxy-}"
+# Short tmux window label px-<short-type>-<issue|PR|pid4>. Only the window name is short:
+# --name, run state and every log/out/jsonl filename stay proxy-<type>-<stamp>-<pid>.
+# The run name is bound to the window by the @proxy_name window option set below; consumers
+# read it first and fall back to the legacy px-<run-name> derivation. Fail-open to legacy.
+WINDOW_NAME="$(tmux list-windows -a -F '#{window_name}' 2>/dev/null \
+  | python3 -I "$HOME/.claude/scripts/proxy-window-label.py" --type "$TYPE" --brief "$PROMPT_FILE" --pid "$$" 2>/dev/null || true)"
+[[ "$WINDOW_NAME" =~ ^px-[a-z0-9]+-[0-9]+(-[0-9]+)?$ ]] || WINDOW_NAME="px-${NAME#proxy-}"
 proxy_agent_print_selection
 python3 -I "$STATE_HELPER" start --name "$PROXY_AGENT_RUN_NAME" --token "$PROXY_AGENT_RUN_TOKEN" \
   --type "$TYPE" --brief "$PROMPT_FILE" --cwd "$CWD" --out "$OUT" --model "$MODEL_ID" --pm-role "$PM_ROLE" \
@@ -2403,10 +2451,12 @@ case "$TYPE" in
         </dev/null >/dev/null 2>>"$LOG" & ) 2>/dev/null || true;;
 esac
 if tmux has-session -t "=$VISIBLE_SESSION" 2>/dev/null; then
-  tmux new-window -d -t "$VISIBLE_SESSION:" -n "$WINDOW_NAME" -c "$CWD" "bash $(printf '%q' "$JOB_DIR/run.sh")"
+  WINDOW_ID="$(tmux new-window -d -P -F '#{window_id}' -t "$VISIBLE_SESSION:" -n "$WINDOW_NAME" -c "$CWD" "bash $(printf '%q' "$JOB_DIR/run.sh")")"
 else
-  tmux new-session -d -s "$VISIBLE_SESSION" -n "$WINDOW_NAME" -c "$CWD" "bash $(printf '%q' "$JOB_DIR/run.sh")"
+  WINDOW_ID="$(tmux new-session -d -P -F '#{window_id}' -s "$VISIBLE_SESSION" -n "$WINDOW_NAME" -c "$CWD" "bash $(printf '%q' "$JOB_DIR/run.sh")")"
 fi
+# Bind run name to window (consumers: proxy-escalate, proxy-observe, ready_pool_select, pxtail, heartbeat).
+[[ -n "$WINDOW_ID" ]] && { tmux set-option -w -t "$WINDOW_ID" @proxy_name "$NAME" 2>/dev/null || true; }
 RUN_LOCK_PARENT=0
 tmux wait-for "$CHANNEL"
 [[ -s "$JOB_DIR/rc" ]] || { echo "PROXY_AGENT_FAILED reason=missing_completion_rc" >&2; exit 125; }

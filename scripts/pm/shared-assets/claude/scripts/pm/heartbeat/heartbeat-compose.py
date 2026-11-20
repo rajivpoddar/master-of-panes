@@ -2273,21 +2273,27 @@ def _proxy_live_processes() -> dict[str, list[tuple[int, int]]] | None:
 
 
 def _proxy_live_panes() -> dict[str, set[int]] | None:
-    """Return pane roots for each live proxy window."""
+    """Return pane roots for each live proxy window, keyed by the proxy RUN name.
+
+    The run name is the window's @proxy_name binding (proxy-agent.sh names windows with a short
+    px-<type>-<n> label). A window with no binding (launched before the label change) falls back
+    to the legacy px-<run-name> derivation."""
     try:
         result = subprocess.run(['tmux', 'list-panes', '-a', '-F',
-                                 '#{session_name}\t#{window_name}\t#{pane_dead}\t#{pane_pid}'],
+                                 '#{session_name}\t#{window_name}\t#{pane_dead}\t#{pane_pid}\t#{@proxy_name}'],
                                 capture_output=True, text=True, timeout=3, check=True)
         names = {}
         for line in result.stdout.splitlines():
             parts = line.split('\t')
-            if len(parts) != 4:
+            if len(parts) == 4:
+                parts.append('')  # legacy 4-column rows carry no binding
+            if len(parts) != 5:
                 return None
-            session, window, dead, pid = parts
+            session, window, dead, pid, bound = parts
             if dead not in {'0', '1'} or not pid.isdigit():
                 return None
             if dead == '0' and window.startswith('px-'):
-                names.setdefault(window[3:], set()).add(int(pid))
+                names.setdefault(bound or window[3:], set()).add(int(pid))
         return names
     except (OSError, subprocess.SubprocessError):
         return None

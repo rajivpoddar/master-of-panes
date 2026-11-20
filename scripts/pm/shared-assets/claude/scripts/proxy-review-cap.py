@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Reserve proxy review rounds per PR and stage, independent of head SHA."""
+"""Reserve proxy review rounds per PR and stage, independent of head SHA.
+
+Stage 12b: a reservation is a round (the verdict reaches GitHub only via PM), so receipts + reservations count.
+Stage qa (Rajiv C0ALZJHGE49 thread 1795010709.991409, ts 1795138738.993769): only POSTED QA verdict receipts
+occupy rounds. A launch still gets a receipt token (so a posted verdict pairs with its launch) but a launch that
+ends without a verdict consumes nothing, so proof/debug runs can never lock QA debugging out. When the qa verdict
+cap is reached, a brief whose first non-empty line is exactly `MODE: DEBUG` is still allowed (no reservation, no token).
+"""
 import json
 import os
 from pathlib import Path
@@ -72,7 +79,15 @@ def fetch_receipts(stage, pr):
     return read_receipts(stage, json.loads(response.stdout))
 
 
-def check(conn, stage, pr, reserve):
+def is_debug_brief(brief):
+    """True when the brief's first non-empty line is exactly `MODE: DEBUG` (trailing blanks only are tolerated)."""
+    for line in brief.splitlines():
+        if line.strip():
+            return line.rstrip() == "MODE: DEBUG"
+    return False
+
+
+def check(conn, stage, pr, reserve, debug=False):
     key = (pr, stage)
     label = f"stage={stage} pr={pr}"
     saved = conn.execute("SELECT receipts, reservations FROM rounds WHERE pr=? AND stage=?", key).fetchone() if conn else None
@@ -89,13 +104,21 @@ def check(conn, stage, pr, reserve):
     # that receipt. An untagged receipt cannot silently free a reserved slot.
     reserved = set(reservations)
     tokens = [token for key, token in receipts.items() if key != S153_ROUND_TWO]
-    receipt_count = tokens.count(None) + len({token for token in tokens if token is not None} - reserved)
-    # The disposition attests that round two already happened. It sets a floor
-    # rather than adding another receipt if the verdict is also in history.
-    occupied = max(receipt_count + len(reserved), 2 if S153_ROUND_TWO in receipts else 0)
+    if stage == "qa":
+        # Posted verdicts only. A reposted receipt (same token) is still one review; reservations are
+        # kept for pairing and diagnostics but never occupy a QA round.
+        occupied = tokens.count(None) + len({token for token in tokens if token is not None})
+    else:
+        receipt_count = tokens.count(None) + len({token for token in tokens if token is not None} - reserved)
+        # The disposition attests that round two already happened. It sets a floor
+        # rather than adding another receipt if the verdict is also in history.
+        occupied = max(receipt_count + len(reserved), 2 if S153_ROUND_TWO in receipts else 0)
     summary = f"{label} revise_rounds={occupied} receipts={len(tokens)} reservations={len(reserved)}"
     token = ""
-    if occupied >= 2:
+    if occupied >= 2 and stage == "qa" and debug:
+        # MODE: DEBUG never posts a verdict, so it takes no reservation and gets no receipt token.
+        rc, note = 0, f"REVIEW_CAP_DEBUG_ALLOWED {label} revise_rounds={occupied}"
+    elif occupied >= 2:
         rc, note = 76, f"REVIEW_CAP_2 {summary}"
     else:
         rc = 0
@@ -139,7 +162,7 @@ def main(mode, agent_type, brief_path):
             conn.execute("BEGIN IMMEDIATE")
         elif database.exists():
             conn = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)
-        rc, note, token = check(conn, stage, pr, reserve)
+        rc, note, token = check(conn, stage, pr, reserve, is_debug_brief(brief))
         print(f"proxy-agent: {note}", file=sys.stderr)
         if token:
             print(token)

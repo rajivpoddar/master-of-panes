@@ -43,6 +43,8 @@ The original 910-line v2.2.1 skill is backed up next to the live target as
 
 ## Agent prompt
 
+(PM: when launching, append the "Housekeeping (silent side jobs)" section below verbatim to this prompt; the agent cannot see the skill file. HOUSEKEEPING_INLINE fix 2026-11-20 after a lane blocked on the missing list.)
+
 ```
 You are the 3h heartbeat agent. Work from /Users/rajiv/Downloads/projects/heydonna-app (main).
 
@@ -61,7 +63,7 @@ STEP 1 — compose (prints the post; never posts):
 
 STEP 2 — sanity check before posting:
   - first line starts with "*Heartbeat" (strip any leading CTO mention with sed 's/^<@[A-Z0-9]*> //' before posting)
-  - at most ~24 lines (five blocks incl. slot occupancy), no tables, no
+  - at most ~24 lines (four blocks; NO slot-occupancy block, dev slots retired per S137), no tables, no
     housekeeping lines
   Do not hand-edit block content. If a block says "unavailable", keep it; the
   _Ops:_ footer already names the failure.

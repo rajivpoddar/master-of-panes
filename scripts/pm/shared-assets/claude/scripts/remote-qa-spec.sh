@@ -227,7 +227,9 @@ qa_net() {
 onmiss_label() {
   local out="$1"
   ONMISS_RC="$2"; ONMISS_REASON=$(sed -n 's/^QA_ONMISS_TERMINAL reason=//p' "$out/llm-onmiss.txt" 2>/dev/null | head -1)
-  ONMISS_CAPTURES=$(python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r.get("mode")=="capture-on-miss"; assert r.get("canonical_fixture_keys")==[] and r.get("fixtures_written")==[]; print(len(r.get("attempts") or {}))' "$out/out/llm-ledger.json" 2>/dev/null || echo unknown)
+  ONMISS_CAPTURES=$(python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r.get("mode")=="capture-on-miss"; print(len(r.get("attempts") or {}))' "$out/out/llm-ledger.json" 2>/dev/null || echo unknown)
+  # S161: valid on-miss replies are published canonical PUT-if-absent; report how many keys were written.
+  ONMISS_PUBLISHED=$(python3 -I -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("fixtures_written") or []))' "$out/out/llm-ledger.json" 2>/dev/null || echo unknown)
   ONMISS_BOUND=$(python3 -I -c 'import json,sys; print(round(json.load(open(sys.argv[1])).get("charged_upper_bound_usd",0),6))' "$out/out/llm-ledger.json" 2>/dev/null || echo unknown)
   if [ -n "$ONMISS_REASON" ]; then ONMISS_LABEL=ON_MISS_TERMINAL; ONMISS_RC=1
   elif [ "$ONMISS_CAPTURES" = unknown ]; then ONMISS_LABEL=ON_MISS_UNVERIFIED; ONMISS_REASON=QA_ONMISS_REPORT_MISSING; ONMISS_RC=1
@@ -347,7 +349,7 @@ cleanup() {
   verdict=$([ "$rc" = 0 ] && echo lane-ok || echo lane-fail)
   if [ -n "$llm_onmiss" ]; then
     onmiss_label "$out" "$rc"; rc=$ONMISS_RC; verdict=$ONMISS_VERDICT; reason=$ONMISS_REASON
-    echo "LLM_MODE=capture-on-miss label=$ONMISS_LABEL live_captures=$ONMISS_CAPTURES charged_upper_bound_usd=$ONMISS_BOUND${reason:+ reason=$reason} payloads=box-local canonical_writes=0" | tee -a "$out/lane.txt"
+    echo "LLM_MODE=capture-on-miss label=$ONMISS_LABEL live_captures=$ONMISS_CAPTURES charged_upper_bound_usd=$ONMISS_BOUND${reason:+ reason=$reason} payloads=staged+canonical-put-if-absent canonical_writes=$ONMISS_PUBLISHED" | tee -a "$out/lane.txt"
   fi
   if [ "$media_status" = PARTIAL ]; then
     [ "$rc" != 0 ] || rc=3

@@ -15,7 +15,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "fe483699c750b7db3e847623dc1934c9e26ac5cc10fa8da34381d0e4f33ab990",
+      "sha256": "2bfabe9cf557d9ea687f96dc69de57a9bdab4ee00b819e76b132dd98fe18e080",
       "source_path": "claude/agents/codex-code-reviewer.md"
     },
     {
@@ -24,7 +24,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "b6158ec7f0046b3437d3d5aeba0ffefcab2a9b8f6dfdd66000e0e0e8284cdb1d",
+      "sha256": "a7684df53763b62818ca0593fb0b8523ce44aec1ca61e9eb52570c51e8938d1b",
       "source_path": "claude/agents/codex-plan-reviewer.md"
     },
     {
@@ -33,7 +33,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-planning-agents",
-      "sha256": "caa64c298b6de5d1ecda0ef9883c645e9aac5d106ab419927c02fe7371d5b62d",
+      "sha256": "a69c7d0371c0b7e5484a741375f84df08f6431926806ede61a0a86208544e770",
       "source_path": "claude/agents/plan-agent.md"
     },
     {
@@ -42,7 +42,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "0e4aed49078c373b58c94da436875e6e7c1f5acf57293e0f63cbbe9700ae300c",
+      "sha256": "e3f707175468b56e5cf8f6d926732e5a7bcf2743adfd43f3839e92fa2fcf1d4c",
       "source_path": "claude/agents/remote-qa-runner.md"
     },
     {
@@ -357,7 +357,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "88d594645c58d6392bd899d8d504d01eaf89d94a0f21534c15c079aec7932f0b",
+      "sha256": "f516b1c89beb0f421cc038029d4a6177712b736f59fd037322f6415a39c4d808",
       "source_path": "claude/project-agents/pm-code-reviewer.md"
     },
     {
@@ -366,7 +366,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "3606003aa8bb89308c5306df347585f35fab65821bb6bbd19d80e47c91284b09",
+      "sha256": "a2c0e28e5e94723f1767a8a795704ab91873513bfbff09d3fd4d2d0250cba9fc",
       "source_path": "claude/project-agents/pm-plan-reviewer.md"
     },
     {
@@ -375,7 +375,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-buddhi",
-      "sha256": "ae32682bd37bcb71771428ca49e306d6b8611c3981a802f9bc3972c77afab235",
+      "sha256": "915478a92171996573daa17efa4a5d63f5c9f625acfb3b67f0479aaa2be150c9",
       "source_path": "claude/rules/20-buddhi-pm.md"
     },
     {
@@ -789,7 +789,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "3b9fe0b62e6bf9ec9d73bdb24ad1ca3f471bb3f403e3be136c8e5938b1ff9ebf",
+      "sha256": "a5732e3321412a6b8e950a1efdff4e34707ee5c6efc41e9ae401ccf1357b55ec",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -879,7 +879,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "50fa43520e1637abf0e0618b63d0fc3142eaf78d868b22d78d3655308fe1cb2c",
+      "sha256": "34ac8c185274087c7bec47ab8993a2123952212bf0ae8559e748e8937f3103b2",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -906,7 +906,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "aefb540693e72e874cda6f4cd530befbf2270ca0b817cb2f4db4e624e7a8c9d1",
+      "sha256": "6ec8e0d0d92e465a8ccaca7abce61131a27f95cebeee7b2b80522fd6134ae77d",
       "source_path": "claude/scripts/proxy-review-cap.py"
     },
     {
@@ -935,7 +935,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "5cb3bb2ac543a6718632007dd88588e85353df6812de05b8de594d293cdef12b",
+      "sha256": "b7aa0d7f3bf16a518aeb5207d8d737000ff10feef7f6bf51c5d25f98e041ce3e",
       "source_path": "claude/scripts/ready-pool-contract-repair.py"
     },
     {
@@ -944,7 +944,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "32816a6a531c7aa18302d41afd23268771887f64109b5c26af8c10d1597f4b2f",
+      "sha256": "6c6d9673975400957d6470b789283f8ced8c65a5e66c84e33148abe467a929f9",
       "source_path": "claude/scripts/ready_pool_select.py"
     },
     {
@@ -962,7 +962,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "dee3772a43c4ce5c728090ba591d44268e7f24aeb30890a1a1a507d1dd9b7aff",
+      "sha256": "8ae04542671294809e8baad6b4f27bdd7463743e3626403dc31f3a4a0657689a",
       "source_path": "claude/scripts/remote-qa-spec.sh"
     },
     {
@@ -1016,7 +1016,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "e732b8ab62119598dfe1cb72d93d961e7856de06e9dda0bb0c2bd16d1e2101ef",
+      "sha256": "027a41baeffc4661901f3dba2a1499324b0a33741f0b07451320ab9196203943",
       "source_path": "claude/scripts/tests/test-proxy-agent-review-cap.sh"
     },
     {
@@ -1223,7 +1223,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-heartbeat-tasks",
-      "sha256": "feafce2298e2467e697d6c43d3118ec59bc8b532d13712a0838586c2ceb90e10",
+      "sha256": "bc688b9bdafcedb2966d4b977fdc17772861603c320ba562bc67e22e2717cee6",
       "source_path": "claude/skills/heartbeat-tasks/SKILL.md"
     },
     {
@@ -1259,7 +1259,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "1853f76e8b4e0e63ff13903e000b9d25b40d5f057c9abe8daa573d09477d10fe",
+      "sha256": "f8b4aed0e2a794f60bf521886e6cfee0ebf04c361eff9dbeaa3527c726d322ad",
       "source_path": "claude/skills/hourly-report-processing/SKILL.md"
     },
     {

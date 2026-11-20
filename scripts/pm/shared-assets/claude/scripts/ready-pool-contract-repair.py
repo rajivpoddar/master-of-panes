@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -60,10 +61,38 @@ DECISION_KINDS = {"cto_review", "product_decision", "directive_clarification"}
 TERMINAL_OUTCOMES = {"REPAIRABLE", "PARKED", "NEEDS_CTO", "EXTERNAL_ACTION"}
 TERMINAL_STATUSES = {"PROMOTED", "PARKED", "NEEDS_CTO", "EXTERNAL_ACTION", "INVESTIGATION_REQUIRED"}
 REPAIR_BUFFER = 3
+# Bounded-subprocess guard (2026-11-20). The pm-triage lane runs this under `timeout 420`, but
+# `backlog-triage.py promote` makes ~300 serial GitHub dependency calls (>9 min for ONE issue), and
+# the old per-call caps were 1200-1800s, so the lane always saw rc=124 / a 55 min kill. Every child now
+# has a short cap and the deterministic run has a wall-clock budget; overrun is an explicit UNKNOWN.
+GH_CALL_TIMEOUT = int(os.environ.get("READY_POOL_REPAIR_GH_TIMEOUT", "60"))
+VALIDATOR_TIMEOUT = int(os.environ.get("READY_POOL_REPAIR_VALIDATOR_TIMEOUT", "30"))
+PROMOTER_CALL_TIMEOUT = int(os.environ.get("READY_POOL_REPAIR_PROMOTER_TIMEOUT", "300"))
+RUN_BUDGET_SECONDS = int(os.environ.get("READY_POOL_REPAIR_RUN_BUDGET", "360"))
+_DEADLINE: float | None = None  # time.monotonic() deadline; None = unbounded (legacy auditor paths)
 
 
 class RepairError(RuntimeError):
     pass
+
+
+class RepairUnknown(RepairError):
+    """A bounded call timed out or the run budget is spent: outcome UNKNOWN, never guessed."""
+
+
+def set_run_budget(seconds: int | float | None) -> None:
+    global _DEADLINE
+    _DEADLINE = time.monotonic() + seconds if seconds and seconds > 0 else None
+
+
+def _budgeted(timeout: float, what: str) -> float:
+    """Cap one call's timeout by the time left in the run budget; spent budget => UNKNOWN."""
+    if _DEADLINE is None:
+        return timeout
+    left = _DEADLINE - time.monotonic()
+    if left <= 1:
+        raise RepairUnknown(f"UNKNOWN: run budget exhausted before {what}")
+    return min(timeout, left)
 
 
 def now_id() -> str:
@@ -186,7 +215,12 @@ class RepairLease:
 
 
 def run(cmd: list[str], *, timeout: int = 1200) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=REPO_ROOT, text=True, capture_output=True, timeout=timeout)
+    what = " ".join([Path(cmd[0]).name, *[str(c) for c in cmd[1:4]]])[:80]
+    effective = _budgeted(timeout, what)
+    try:
+        return subprocess.run(cmd, cwd=REPO_ROOT, text=True, capture_output=True, timeout=effective)
+    except subprocess.TimeoutExpired:
+        raise RepairUnknown(f"UNKNOWN: `{what}` timed out after {effective:.0f}s") from None
 
 
 def post_alert(args: list[str], *, timeout: int = 1200) -> subprocess.CompletedProcess[str]:
@@ -269,7 +303,7 @@ def body_hash_matches(body: str, expected: str) -> bool:
 
 
 def live_issue_body(issue: int) -> str:
-    proc = run([GH, "issue", "view", str(issue), "--repo", REPO, "--json", "body", "--jq", ".body"])
+    proc = run([GH, "issue", "view", str(issue), "--repo", REPO, "--json", "body", "--jq", ".body"], timeout=GH_CALL_TIMEOUT)
     if proc.returncode != 0:
         raise RepairError(f"gh issue view #{issue} failed: {proc.stderr.strip()}")
     return proc.stdout.rstrip("\n")
@@ -425,11 +459,15 @@ def promote_exact(issue: int, timeout: int) -> Path:
         if any(int(row.get("number") or 0) == issue for row in data.get("skipped", {}).get("p3_refill_not_needed") or []):
             raise RepairError("p3_refill_not_selected")
         raise RepairError("repaired issue is still not a clean promotion candidate")
-    applied = run(
-        [str(BACKLOG_TRIAGE), "promote", "--apply", "--defer-reconcile",
-         "--issues", str(issue)],
-        timeout=timeout,
-    )
+    try:
+        applied = run(
+            [str(BACKLOG_TRIAGE), "promote", "--apply", "--defer-reconcile",
+             "--issues", str(issue)],
+            timeout=timeout,
+        )
+    except RepairUnknown as exc:
+        # The apply may have written labels before it was cut off: never claim failed OR promoted.
+        raise RepairUnknown(f"{exc}; promotion of #{issue} unverified, re-check live labels") from None
     if applied.returncode != 0:
         raise RepairError(f"promotion apply failed: {applied.stderr.strip()}")
     applied_path = output_path(applied.stdout)
@@ -1098,7 +1136,11 @@ def extract_acs(body: str) -> list[str]:
 
 def ledger_errors(body: str, *, require_qa_proof: bool = True) -> list[str]:
     cmd = [sys.executable, str(ICL_VALIDATOR), "--json"] + (["--require-qa-proof"] if require_qa_proof else [])
-    proc = subprocess.run(cmd, input=body or "", text=True, capture_output=True, check=False)
+    try:
+        proc = subprocess.run(cmd, input=body or "", text=True, capture_output=True, check=False,
+                              timeout=_budgeted(VALIDATOR_TIMEOUT, "icl validator"))
+    except subprocess.TimeoutExpired:
+        raise RepairUnknown(f"UNKNOWN: icl validator timed out after {VALIDATOR_TIMEOUT}s") from None
     try:
         return [str(e) for e in json.loads(proc.stdout).get("errors", [])]
     except json.JSONDecodeError:
@@ -1292,16 +1334,19 @@ def repair_contract(issue: dict[str, Any], *, fallback_priority: str = "") -> di
 
 
 def _gh_json_issue(number: int) -> dict[str, Any]:
-    proc = run([GH, "issue", "view", str(number), "--repo", REPO, "--json", "number,title,labels,body,state"])
+    proc = run([GH, "issue", "view", str(number), "--repo", REPO, "--json", "number,title,labels,body,state"],
+               timeout=GH_CALL_TIMEOUT)
     if proc.returncode != 0:
         raise RepairError(f"gh issue view #{number} failed: {proc.stderr.strip()}")
     return json.loads(proc.stdout)
 
 
-def run_deterministic(source: Path, data: dict[str, Any], issue_filter: set[int] | None, apply: bool) -> int:
+def run_deterministic(source: Path, data: dict[str, Any], issue_filter: set[int] | None, apply: bool,
+                      *, command_timeout: int = PROMOTER_CALL_TIMEOUT) -> int:
     run_id = now_id()
     rows = candidate_rows(data, issue_filter)
     summary: dict[str, list[Any]] = {k: [] for k in ("repaired", "already_complete", "promoted", "needs_contract", "blocked_contract", "skipped", "failed")}
+    promoter_down: str | None = None  # set once a promoter call times out: later calls would hang the same way
     for row in rows:
         n = int(row["number"])
         try:
@@ -1314,42 +1359,53 @@ def run_deterministic(source: Path, data: dict[str, Any], issue_filter: set[int]
                "BLOCKED_CONTRACT": "blocked_contract"}.get(st, "skipped")
         entry = {"issue": n, "reasons": res["reasons"]}
         if apply and st == "REPAIRED":
-            path = OUT_DIR / f"ready-pool-repair-{n}-{run_id}.md"
-            path.write_text(res["body"], encoding="utf-8")
-            if ledger_errors(path.read_text(encoding="utf-8")):
-                summary["failed"].append({"issue": n, "error": "validator rejected final body"}); continue
-            if not body_hash_matches(live_issue_body(n), sha256_text(issue.get("body") or "")):
-                summary["failed"].append({"issue": n, "error": "stale_issue_body_before_apply"}); continue
-            proc = run([GH, "issue", "edit", str(n), "--repo", REPO, "--body-file", str(path)])
-            if proc.returncode != 0:
-                summary["failed"].append({"issue": n, "error": proc.stderr.strip()[:200]}); continue
-            if live_issue_body(n) != res["body"].rstrip("\n"):
-                summary["failed"].append({"issue": n, "error": "live_body_verification_failed"}); continue
-            for label in res["add_label"]:
-                proc = run([GH, "issue", "edit", str(n), "--repo", REPO, "--add-label", label])
+            try:
+                path = OUT_DIR / f"ready-pool-repair-{n}-{run_id}.md"
+                path.write_text(res["body"], encoding="utf-8")
+                if ledger_errors(path.read_text(encoding="utf-8")):
+                    summary["failed"].append({"issue": n, "error": "validator rejected final body"}); continue
+                if not body_hash_matches(live_issue_body(n), sha256_text(issue.get("body") or "")):
+                    summary["failed"].append({"issue": n, "error": "stale_issue_body_before_apply"}); continue
+                proc = run([GH, "issue", "edit", str(n), "--repo", REPO, "--body-file", str(path)], timeout=120)
                 if proc.returncode != 0:
-                    summary["failed"].append({"issue": n, "error": "priority_label_edit_failed"})
-                    break
-            else:
-                entry["body_file"] = str(path)
+                    summary["failed"].append({"issue": n, "error": proc.stderr.strip()[:200]}); continue
+                if live_issue_body(n) != res["body"].rstrip("\n"):
+                    summary["failed"].append({"issue": n, "error": "live_body_verification_failed"}); continue
+                for label in res["add_label"]:
+                    proc = run([GH, "issue", "edit", str(n), "--repo", REPO, "--add-label", label], timeout=120)
+                    if proc.returncode != 0:
+                        summary["failed"].append({"issue": n, "error": "priority_label_edit_failed"})
+                        break
+                else:
+                    entry["body_file"] = str(path)
+            except (RepairError, OSError) as exc:  # RepairUnknown: the edit may or may not have landed
+                summary["failed"].append({"issue": n, "error": str(exc)[:200]}); continue
             if "body_file" not in entry:
                 continue
         if apply and st in {"REPAIRED", "ALREADY_COMPLETE"}:
+            if promoter_down:
+                summary["failed"].append({"issue": n, "error": f"UNKNOWN: promotion skipped, promoter unavailable earlier in run ({promoter_down})"})
+                summary[key].append(entry)
+                continue
             try:
-                entry["promotion_manifest"] = str(promote_exact(n, 1800))
+                entry["promotion_manifest"] = str(promote_exact(n, command_timeout))
                 summary["promoted"].append({**entry, "status": "PROMOTED"})
             except (RepairError, OSError, subprocess.TimeoutExpired) as exc:
                 if str(exc) == "p3_refill_not_selected":
                     summary["skipped"].append({"issue": n, "reasons": ["P3 remains parked until selected for a claimable deficit after higher priorities."]})
                 else:
+                    if isinstance(exc, (RepairUnknown, subprocess.TimeoutExpired)):
+                        promoter_down = str(exc)[:120]
                     summary["failed"].append({"issue": n, "error": str(exc)[:200]})
         summary[key].append(entry)
     manifest = OUT_DIR / f"pm-ready-pool-contract-repair-deterministic-{run_id}.json"
     final_scan = None
     remaining = None
-    if apply:
+    if apply and promoter_down:
+        summary["failed"].append({"issue": 0, "error": "final_scan_failed:UNKNOWN: skipped, promoter unavailable earlier in run"})
+    elif apply:
         try:
-            _current, _deficit, final_scan = live_deficit(1800)
+            _current, _deficit, final_scan = live_deficit(command_timeout)
             fresh = read_json(final_scan)
             remaining = len(fresh.get("would_promote") or []) + len(fresh.get("needs_ready_pool_metadata") or [])
         except (RepairError, OSError, subprocess.TimeoutExpired) as exc:
@@ -1373,7 +1429,10 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--issues", nargs="*", type=int)
     parser.add_argument("--max-concurrency", type=int, default=3, help=argparse.SUPPRESS)
     parser.add_argument("--auditor-timeout", type=int, default=1800, help=argparse.SUPPRESS)
-    parser.add_argument("--command-timeout", type=int, default=1800)
+    parser.add_argument("--command-timeout", type=int, default=PROMOTER_CALL_TIMEOUT,
+                        help="cap in seconds for ONE backlog-triage promote call (also clamped by --run-budget)")
+    parser.add_argument("--run-budget", type=int, default=RUN_BUDGET_SECONDS,
+                        help="total wall-clock seconds for the whole run; stay under the caller's own timeout (0 = unbounded)")
     parser.add_argument("--use-auditors", action="store_true", help="deprecated; uses deterministic repair without nested agents or architecture review")
     parser.add_argument("--finalize-aggregate", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--slack-ts", help=argparse.SUPPRESS)
@@ -1385,16 +1444,25 @@ def main(argv: list[str]) -> int:
     if not args.source_manifest:
         parser.error("--source-manifest is required")
     source, data = source_manifest(args.source_manifest)
+    set_run_budget(args.run_budget)
     if not args.apply:
-        return run_deterministic(source, data, set(args.issues or []) or None, False)
+        return run_deterministic(source, data, set(args.issues or []) or None, False, command_timeout=args.command_timeout)
     lease = RepairLease(run_id=now_id(), source=source, candidates=len(candidate_rows(data, set(args.issues or []) or None)),
                         current=int(data.get("current_ready_pool_count") or 0), deficit=int(data.get("promotion_deficit") or 0))
     if not lease.acquire():
         print("READY_POOL_CONTRACT_REPAIR_ALREADY_RUNNING")
         return 2
     lease.start()
+
+    def _on_sigterm(signum: int, _frame: Any) -> None:
+        # A caller's `timeout N` sends SIGTERM (rc=124). Python's default handler skips `finally`,
+        # which left a stale "running" lease JSON behind; exiting via SystemExit runs lease.finish
+        # and subprocess.run kills its child on the way out.
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
     try:
-        code = run_deterministic(source, data, set(args.issues or []) or None, True)
+        code = run_deterministic(source, data, set(args.issues or []) or None, True, command_timeout=args.command_timeout)
         return code
     finally:
         lease.finish(status="stopped", aggregate=source)
@@ -1403,6 +1471,6 @@ def main(argv: list[str]) -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main(sys.argv[1:]))
-    except (RepairError, OSError, ValueError, json.JSONDecodeError) as exc:
+    except (RepairError, OSError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as exc:
         print(f"READY_POOL_CONTRACT_REPAIR_DEGRADED\nerror={exc}", file=sys.stderr)
         raise SystemExit(2)

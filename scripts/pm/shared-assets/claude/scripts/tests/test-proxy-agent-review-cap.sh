@@ -42,7 +42,11 @@ if sys.argv[1] == 'has-session':
     sys.exit(1)
 if sys.argv[1] == 'new-session':
     run = pathlib.Path(shlex.split(sys.argv[-1])[1])
-    assert re.search(rb'REVIEW_ROUND_RECEIPT: [0-9a-f]{32}', run.read_bytes())
+    if os.environ.get('FIXTURE_NO_RECEIPT') == '1':
+        # MODE: DEBUG launches take no reservation: no receipt instruction may reach the agent.
+        assert b'REVIEW_ROUND_RECEIPT' not in run.read_bytes()
+    else:
+        assert re.search(rb'REVIEW_ROUND_RECEIPT: [0-9a-f]{32}', run.read_bytes())
     with open(os.environ['STARTS'], 'a') as stream:
         print('START', file=stream)
     run.with_name('rc').write_text('0\n')
@@ -131,9 +135,10 @@ PY
 run real-revise-reposted "$pm" 76 'REVIEW_CAP_2 stage=12b pr=14161 revise_rounds=2 receipts=2 reservations=0'
 [[ $(wc -l < "$STARTS") -eq 2 ]]
 
-race() {
-  local stage=$1 pr=$2 label type i=0 pids=()
-  shift 2
+# Launch the given agent types at once; leaves $work/<stage>-<n>.{out,err,rc}. Callers assert the outcome.
+race_launch() {
+  local stage=$1 label type i=0 pids=()
+  shift
   for type in "$@"; do
     i=$((i + 1))
     label="$stage-$i"
@@ -141,6 +146,12 @@ race() {
     pids+=("$!")
   done
   wait "${pids[@]}"
+}
+
+race() {
+  local stage=$1 pr=$2
+  shift 2
+  race_launch "$stage" "$@"
   [[ $(sort -n "$work/$stage-1.rc" "$work/$stage-2.rc" | tr '\n' ' ') == '0 76 ' ]]
   grep -Fq "REVIEW_CAP_OK stage=$stage pr=$pr revise_rounds=1 receipts=1 reservations=0 round=2" "$work/$stage-1.err" "$work/$stage-2.err"
   grep -Fq "REVIEW_CAP_2 stage=$stage pr=$pr revise_rounds=2 receipts=1 reservations=1" "$work/$stage-1.err" "$work/$stage-2.err"
@@ -153,8 +164,77 @@ printf '%s\n' '[[{"id":1,"body":"PM 12b: REVISE at abcdef1"}]]' > "$FIXTURE"
 race 12b 323 "$pm" "$pm"
 [[ $(wc -l < "$STARTS") -eq 3 ]]
 
+token_of() { local t; t=$(grep -o 'receipt=[0-9a-f]\{32\}' "$work/$1.err"); printf '%s' "${t#receipt=}"; }
+# Fixture: one POSTED hd-proof-qa verdict comment per argument (a receipt token, or - for none).
+verdicts() {
+  python3 -I - "$@" > "$FIXTURE" <<'PY'
+import json, sys
+comments = []
+for n, token in enumerate(sys.argv[1:], 1):
+    body = f"hd-proof-qa: REVISE at abcdef{n}"
+    if token != "-":
+        body += f"\nREVIEW_ROUND_RECEIPT: {token}"
+    comments.append({"id": 100 + n, "body": body})
+print(json.dumps([comments]))
+PY
+}
+
+# 12b (d): bare reservations with no posted verdict still cap. The QA-stage change must not touch 12b.
+printf 'PR: 340\n' > "$work/brief"
+printf '%s\n' '[[]]' > "$FIXTURE"
+run pm-bare-1 "$pm" 0 'REVIEW_CAP_OK stage=12b pr=340 revise_rounds=0 receipts=0 reservations=0 round=1'
+run pm-bare-2 "$pm" 0 'REVIEW_CAP_OK stage=12b pr=340 revise_rounds=1 receipts=0 reservations=1 round=2'
+run pm-bare-3 "$pm" 76 'REVIEW_CAP_2 stage=12b pr=340 revise_rounds=2 receipts=0 reservations=2'
+# MODE: DEBUG is a QA-stage allowance only; a capped 12b launch stays refused.
+printf 'MODE: DEBUG\nPR: 340\n' > "$work/brief"
+run pm-debug-ignored "$pm" 76 'REVIEW_CAP_2 stage=12b pr=340 revise_rounds=2 receipts=0 reservations=2'
+[[ $(wc -l < "$STARTS") -eq 5 ]]
+
+# QA (Rajiv C0ALZJHGE49 thread 1795010709.991409): only POSTED verdicts occupy QA rounds.
+qa=hd-proof-qa
+# (a) three launches that never post a verdict: each is allowed, none consumes a round.
+printf 'PR: 331\n' > "$work/brief"
+printf '%s\n' '[[]]' > "$FIXTURE"
+run qa-open-1 "$qa" 0 'REVIEW_CAP_OK stage=qa pr=331 revise_rounds=0 receipts=0 reservations=0 round=1'
+run qa-open-2 "$qa" 0 'REVIEW_CAP_OK stage=qa pr=331 revise_rounds=0 receipts=0 reservations=1 round=1'
+run qa-open-3 "$qa" 0 'REVIEW_CAP_OK stage=qa pr=331 revise_rounds=0 receipts=0 reservations=2 round=1'
+[[ $(wc -l < "$STARTS") -eq 8 ]]
+# (b) two posted verdicts cap a normal launch; the three unposted reservations above add nothing to them.
+verdicts - -
+run qa-two-verdicts "$qa" 76 'REVIEW_CAP_2 stage=qa pr=331 revise_rounds=2 receipts=2 reservations=3'
+# (c) the same capped state admits a brief whose first non-empty line is MODE: DEBUG: no reservation, no receipt line.
+printf '\n  \nMODE: DEBUG\nPR: 331\n' > "$work/brief"
+PROXY_AGENT_DRY_RUN=1 run qa-debug-dry "$qa" 0 'REVIEW_CAP_DEBUG_ALLOWED stage=qa pr=331 revise_rounds=2'
+FIXTURE_NO_RECEIPT=1 run qa-debug "$qa" 0 'REVIEW_CAP_DEBUG_ALLOWED stage=qa pr=331 revise_rounds=2'
+if grep -Fq 'receipt=' "$work/qa-debug.err"; then echo 'FAIL qa-debug: a receipt token was issued' >&2; exit 1; fi
+[[ $(wc -l < "$STARTS") -eq 9 ]]
+# Only an exact first-line MODE: DEBUG unlocks the cap. Each refusal also shows reservations=3: the DEBUG launch took none.
+for debug_brief in $'PR: 331\nMODE: DEBUG\n' $'MODE: DEBUG now\nPR: 331\n' $'MODE: DEBUGGING\nPR: 331\n' $'MODE: debug\nPR: 331\n' $'  MODE: DEBUG\nPR: 331\n'; do
+  printf '%s' "$debug_brief" > "$work/brief"
+  run qa-debug-negative "$qa" 76 'REVIEW_CAP_2 stage=qa pr=331 revise_rounds=2 receipts=2 reservations=3'
+done
+[[ $(wc -l < "$STARTS") -eq 9 ]]
+# A posted verdict still pairs with its own launch token (one round, not two); unposted launches stay free.
+printf 'PR: 332\n' > "$work/brief"
+printf '%s\n' '[[]]' > "$FIXTURE"
+run qa-pair-1 "$qa" 0 'REVIEW_CAP_OK stage=qa pr=332 revise_rounds=0 receipts=0 reservations=0 round=1'
+t1=$(token_of qa-pair-1)
+verdicts "$t1"
+run qa-pair-2 "$qa" 0 'REVIEW_CAP_OK stage=qa pr=332 revise_rounds=1 receipts=1 reservations=1 round=2'
+t2=$(token_of qa-pair-2)
+run qa-pair-3 "$qa" 0 'REVIEW_CAP_OK stage=qa pr=332 revise_rounds=1 receipts=1 reservations=2 round=2'
+verdicts "$t1" "$t2"
+run qa-pair-capped "$qa" 76 'REVIEW_CAP_2 stage=qa pr=332 revise_rounds=2 receipts=2 reservations=3'
+[[ $(wc -l < "$STARTS") -eq 12 ]]
+
+# One posted QA verdict: two concurrent launches (the alias shares the stage) both fit, serialized by the DB transaction,
+# because the first one's in-flight reservation consumes nothing.
 printf 'for PR #321\n' > "$work/brief"
 printf '%s\n' '[[{"id":1,"body":"QA report\n\nQA: NEEDS_REVISION"},{"id":2,"body":"Codex QA: REVISE"},{"id":3,"body":"REVIEW_CAP_2 stage=qa"}]]' > "$FIXTURE"
-# One historical QA verdict leaves one slot. The alias shares the stage.
-race qa 321 hd-proof-qa pm-proof-qa
-[[ $(wc -l < "$STARTS") -eq 4 ]]
+race_launch qa hd-proof-qa pm-proof-qa
+[[ $(sort -n "$work/qa-1.rc" "$work/qa-2.rc" | tr '\n' ' ') == '0 0 ' ]]
+grep -Fq 'REVIEW_CAP_OK stage=qa pr=321 revise_rounds=1 receipts=1 reservations=0 round=2' "$work/qa-1.err" "$work/qa-2.err"
+grep -Fq 'REVIEW_CAP_OK stage=qa pr=321 revise_rounds=1 receipts=1 reservations=1 round=2' "$work/qa-1.err" "$work/qa-2.err"
+printf 'PASS concurrent qa (rc=0,0):\n'
+grep -hE 'REVIEW_CAP_(OK|2) ' "$work/qa-1.err" "$work/qa-2.err" | sed -E 's/ receipt=[0-9a-f]{32}$/ receipt=[reserved]/'
+[[ $(wc -l < "$STARTS") -eq 14 ]]

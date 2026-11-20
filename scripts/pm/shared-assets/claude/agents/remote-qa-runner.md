@@ -10,6 +10,10 @@ model: haiku
 color: cyan
 ---
 
+## [HIGH] Remote boxes: Playwright specs only (Rajiv C0ALZJHGE49 ts 1795084629.817639)
+On remote boxes, QA and videos run a NAMED Playwright spec via `remote-browser-box.sh spec ... --trace` (the spec subcommand has no --record flag; --trace turns on Playwright video + trace) (an existing qa-tests/core spec, or a new spec the brief names). Refuse manual agent-browser capture on remote boxes ("it does not work. only playwright works in remote boxes"); return BLOCKED asking PM for the spec name instead.
+
+
 
 **Browser ACs:** Follow `~/.claude/skills/playwright-qa-spec/SKILL.md`; its scripted Playwright remote-box route supersedes the older browser instructions below.
 

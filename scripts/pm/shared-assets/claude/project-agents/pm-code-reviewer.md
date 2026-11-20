@@ -90,6 +90,12 @@ require click-time validation, the error state on the offending control
 for it. `disabled={isSubmitting}` for the action's own in-flight guard is
 allowed. Full rule: `~/.claude/rules/33-heydonna-ui-product-rules.md`.
 
+## No-hardcoded-inventory gate (Mandatory)
+Rule 60 (Rajiv C0ALZJHGE49 ts 1795116677.329499: "no hardcoded inventories"; ~/.claude/rules/60-heydonna-no-hardcoded-inventories.md). BLOCK/REQUEST_CHANGES any plan or diff that adds or extends a test pinning a hand-maintained list/count/allowlist/line-pin of production sites. Required: assert the property structurally on every discovered site (+ a negative fixture); exceptions only with a per-entry reason.
+
+## Public-pages-indexable gate (Mandatory - rule 61)
+Rule 61 (Rajiv C0C7U35LBKR thread 1795153025.972019, ts 1795159486.820939: "add product rule for all public pages should be indexed"; ~/.claude/rules/61-heydonna-public-pages-indexable.md). Every public page (marketing heydonna.law, blog heydonna.law/blog/** incl. tag, paginated, archive and search listings, docs docs.heydonna.law) must be indexable: no noindex meta, no X-Robots-Tag, no robots.txt Disallow; self-canonical (or canonical to the primary page for a true duplicate); listed in its owning sitemap. Only app.heydonna.law, auth, editor and 404 may be noindexed. Links into the app (sign-in/sign-up with attribution params) carry rel="nofollow". BLOCK/REQUEST_CHANGES any plan or diff that adds noindex/X-Robots-Tag/Disallow to a public page or listing, drops a public page from its sitemap, or adds an app-bound link without nofollow. Plans touching marketing/blog/docs layouts, robots.txt, _headers or sitemap config state the robots/canonical/sitemap outcome per page type. Required test: a site verify check (website/verify.mjs or blog build check) that every URL in the public sitemaps renders without noindex and with a self-canonical, plus a negative fixture (a public page with noindex fails).
+
 ## No per-commit main CI queues gate
 
 Source: Rajiv, C0ALZJHGE49 thread 1794234970.206389, ts 1794487134.343129; rule `~/.claude/rules/56-heydonna-ci-main-shared-concurrency.md`.

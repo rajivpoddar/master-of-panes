@@ -202,12 +202,21 @@ def _live_proxy_briefs() -> dict[str, set[int]]:
             if et:
                 d, h, mi, se = (int(x or 0) for x in et.groups())
                 started[int(parts[0])] = now - (((d * 24 + h) * 60 + mi) * 60 + se)
-    windows = subprocess.run(["tmux", "list-windows", "-a", "-F", "#{window_name} #{pane_dead}"],
+    windows = subprocess.run(["tmux", "list-windows", "-a", "-F", "#{window_name}\t#{pane_dead}\t#{@proxy_name}"],
                              capture_output=True, text=True, timeout=5, check=True).stdout
     alive_windows = set()
     for line in windows.splitlines():
-        name, _, dead = line.rpartition(" ")
+        if "\t" in line:
+            cols = line.split("\t")
+            name, dead, bound = cols[0], cols[1] if len(cols) > 1 else "", cols[2] if len(cols) > 2 else ""
+        else:  # legacy "<name> <dead>" rows
+            name, _, dead = line.rpartition(" ")
+            bound = ""
         if dead == "0":
+            # Short px-<type>-<n> window labels carry the run name in @proxy_name; unbound
+            # (pre-label) windows are matched by the legacy px-<run-name> window name.
+            if bound:
+                alive_windows.add(bound)
             alive_windows.add(re.sub(r"^px-(?=px-)", "", name))
     seen: dict[str, list[int]] = {}
     for pid, (_ppid, cmd) in procs.items():
