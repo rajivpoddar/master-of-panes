@@ -1047,15 +1047,6 @@
       "source_path": "claude/scripts/validate-issue-contract-ledger.py"
     },
     {
-      "canonical_target": "/Users/rajiv/.claude/skills/anthropic-529-overload-inline-fallback/SKILL.md",
-      "dependencies": [],
-      "dependency_status": "closed",
-      "mode": 420,
-      "ownership_class": "shared-claude-anthropic-529-overload-inline-fallback",
-      "sha256": "20768dfefe924ca21c77b08dba08735cfa50211ceeb488f8ddbb74d5ed40a3f5",
-      "source_path": "claude/skills/anthropic-529-overload-inline-fallback/SKILL.md"
-    },
-    {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/backlog-triage/SKILL.md",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1063,15 +1054,6 @@
       "ownership_class": "shared-claude-issue-triage",
       "sha256": "378cdd1b606640563a5bffccecf0774b6a346ac5ae9738ffb938f93da0418c3b",
       "source_path": "claude/skills/backlog-triage/SKILL.md"
-    },
-    {
-      "canonical_target": "/Users/rajiv/.claude/skills/bash-single-quote-python-c-inner-quote-collision/SKILL.md",
-      "dependencies": [],
-      "dependency_status": "closed",
-      "mode": 420,
-      "ownership_class": "shared-claude-bash-single-quote-collision",
-      "sha256": "ad44a086f5f158fb78feebc55a4787e80fd38b94f26d57c19b5dff36f42f2330",
-      "source_path": "claude/skills/bash-single-quote-python-c-inner-quote-collision/SKILL.md"
     },
     {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/ci-success-reconciliation/SKILL.md",
@@ -1315,24 +1297,6 @@
       "ownership_class": "shared-claude-lifecycle-email",
       "sha256": "aa03cea0176ee570956f93d8865c0f7dda48a83344a5f340e6845dde228b1e59",
       "source_path": "claude/skills/lifecycle-email-processing/templates/FIRST_FILE_READY.txt"
-    },
-    {
-      "canonical_target": "/Users/rajiv/.claude/skills/macos-word-window-screenshot/SKILL.md",
-      "dependencies": [],
-      "dependency_status": "closed",
-      "mode": 420,
-      "ownership_class": "shared-claude-word-window-screenshot",
-      "sha256": "5b8081d06cbabb65ab8b6c3a2c6b882c4dc67679ff5b792673ba6ab17bb0d9f8",
-      "source_path": "claude/skills/macos-word-window-screenshot/SKILL.md"
-    },
-    {
-      "canonical_target": "/Users/rajiv/.claude/skills/macos-word-window-screenshot/scripts/capture-word-window.swift",
-      "dependencies": [],
-      "dependency_status": "closed",
-      "mode": 420,
-      "ownership_class": "shared-claude-word-window-screenshot",
-      "sha256": "8d3c470e514a24727aee84ad05090334212b41fb4d083b3380d129a6a1994b7a",
-      "source_path": "claude/skills/macos-word-window-screenshot/scripts/capture-word-window.swift"
     },
     {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/message-slot/SKILL.md",
@@ -1995,7 +1959,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 218,
+    "selected_count": 214,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
@@ -2041,14 +2005,10 @@
       "~/Downloads/projects/heydonna-app/.claude/skills/ci-success-reconciliation/SKILL.md",
       "~/.claude/skills/codex-companion-cap-mechanism/SKILL.md",
       "~/Downloads/projects/heydonna-app/.claude/skills/cp-repair-request/SKILL.md",
-      "~/.claude/skills/anthropic-529-overload-inline-fallback/SKILL.md",
       "~/.claude/skills/heydonna-review-cap-cto-approve-handoff/SKILL.md",
-      "~/.claude/skills/macos-word-window-screenshot/SKILL.md",
-      "~/.claude/skills/macos-word-window-screenshot/scripts/capture-word-window.swift",
       "~/Downloads/projects/heydonna-app/.claude/skills/message-slot/SKILL.md",
       "~/Downloads/projects/heydonna-app/.claude/skills/message-slot/scripts/message-slot.sh",
       "~/.claude/skills/tmux-slot-command/scripts/send-to-slot.sh",
-      "~/.claude/skills/bash-single-quote-python-c-inner-quote-collision/SKILL.md",
       "~/.claude/skills/codex-review-companion/SKILL.md",
       "~/Downloads/projects/heydonna-app/.claude/skills/todo-prioritize/SKILL.md",
       "~/.claude/agents/codex-code-reviewer.md",
