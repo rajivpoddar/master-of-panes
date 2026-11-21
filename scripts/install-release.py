@@ -1789,10 +1789,22 @@ def retire_shared_assets(
 
 # Decommissioned numbered-slot mappings may have an absent old preimage.
 # Never recreate or remove a reappearing file; present targets remain protected.
+# Also: managed skills that Rajiv's 2026-11-22 skills cleanup moved to ~/.claude/skills-archive/2026-11-22/ (restore.sh brings one
+# back, and then it is an ordinary managed asset again). Their manifest entries stay; while the target is absent it is skipped, never
+# recreated. Without this an activation crashed with FileNotFoundError on the first missing target.
+ARCHIVED_SKILL_TARGETS = (
+    ".claude/skills/anthropic-529-overload-inline-fallback/SKILL.md",
+    ".claude/skills/bash-single-quote-python-c-inner-quote-collision/SKILL.md",
+    ".claude/skills/macos-word-window-screenshot/SKILL.md",
+    ".claude/skills/macos-word-window-screenshot/scripts/capture-word-window.swift",
+)
 RETIRED_ABSENT_TARGETS = frozenset(
-    str(Path.home() / "Downloads/projects" / f"heydonna-app-{slot}" / suffix)
-    for slot in range(3001, 3009)
-    for suffix in (".claude/skills/respawn/SKILL.md", ".claude/skills/respawn/scripts/respawn.sh")
+    {
+        str(Path.home() / "Downloads/projects" / f"heydonna-app-{slot}" / suffix)
+        for slot in range(3001, 3009)
+        for suffix in (".claude/skills/respawn/SKILL.md", ".claude/skills/respawn/scripts/respawn.sh")
+    }
+    | {str(Path.home() / target) for target in ARCHIVED_SKILL_TARGETS}
 )
 
 
