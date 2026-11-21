@@ -99,6 +99,11 @@ else
 fi
 [ -z "$pre_write_check" ] || [ "$disposable_convex" = 1 ] || { echo '--pre-write-check requires --disposable-convex (it verifies the ownership receipt)' >&2; exit 2; }
 [ -z "$stripe_test_env" ] || [ "$disposable_convex" = 1 ] || { echo '--stripe-test-env requires --disposable-convex (never a slot/shared dev backend)' >&2; exit 2; }
+# The M15 spec cannot attach an ASR draft without the receipt signer/verifier pair. Use the same
+# box-generated secret path as an explicit opt-in, so an omitted flag cannot produce a false QA failure.
+if [ "$spec" = tests/e2e/specs/qa-tests/m15-asr-draft-langsmith.spec.ts ] && [ ${#extra_secrets[@]} -eq 0 ]; then
+  extra_secrets+=(SUPPORTING_DOCUMENT_RECEIPT_SECRET=generate)
+fi
 # --extra-secret fails closed BEFORE any credential, lease, box or Convex deployment exists. Refusal text never echoes the spec
 # (a pasted secret would otherwise land in the log). modal-lane.py prepare re-validates the same allowlist on the box.
 extra_args_remote=''

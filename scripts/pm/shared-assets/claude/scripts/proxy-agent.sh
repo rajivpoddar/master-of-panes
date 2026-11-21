@@ -670,7 +670,7 @@ def reset_seconds(text):
     return 3600
 
 model = os.environ.get("PROXY_AGENT_CLAUDE_PROBE_MODEL", "")
-if model not in ("claude-opus-5-5-high", "claude-sonnet-5-5-high", "gemini-4-argon-high", "gemini-3.8-flash-high", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-high", "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "grok-4.7", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-sol(xhigh)", "gpt-6-astra", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-fable-5-2", "hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor"):
+if model not in ("claude-opus-5-5-high", "claude-sonnet-5-5-high", "gemini-4-argon-high", "gemini-3.8-flash-high", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-high", "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "grok-4.7", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-sol(xhigh)", "gpt-6-astra", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-fable-5-2", "hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor", "inkling-2-mini"):
     finish("fail", 0)
 
 state_dir = os.environ.get("PROXY_AGENT_STATE_DIR") or os.path.expanduser("~/.cache/proxy-agent")
@@ -1533,7 +1533,7 @@ proxy_agent_live_count() {
 proxy_agent_is_opencode_id() {
   local id
   id="$(proxy_agent_router_identity "$1")"
-  case "$id" in hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor) return 0;; *) return 1;; esac
+  case "$id" in hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor|inkling-2-mini) return 0;; *) return 1;; esac  # inkling-2-mini: local Inkling on DGX Spark via CLIProxyAPI, unmetered, counted in OPENCODE_PROXY_CAP (Rajiv ts 1795280232.066559)
 }
 # Muse Spark Contributor trains on prompts: last-resort emergency entry (Rajiv D0AMF0XE6TS thread 1794926930.078169, ts 1794929496.349809).
 proxy_agent_is_emergency_muse() {
@@ -1604,30 +1604,32 @@ proxy_agent_tier_models() {
   local models _m _kept=""
   case "$1" in
     # SOL FIRST IN EVERY TIER (Rajiv C0ALZJHGE49 thread 1794677380.515009, ts 1795158067.051479: "put 6.2 sol xhigh agents on it. we have spare capacity on codex. move all agents to sol."):
+    # INKLING RE-ADDED 21 Nov 23:50 IST (healthy since 23:20 at util 0.65; Rajiv DM ts 1795285172.440479 "is any agent on inkling? it’s idle"); 3 s health gate skips it if down. History: PULLED FROM TIERS 21 Nov 23:07 IST: Spark unreachable (ssh timeouts, :18120 no reply); re-add after a health check. Was: INKLING FIRST (Rajiv D0AMF0XE6TS ts 1795280519.029359: "when it is available proxy use, we should maximise it"): inkling-2-mini heads LIGHT/MID/BUILD1/PROOF1.
+    # TERRA FIRST (Rajiv D0AMF0XE6TS ts 1795280170.905869 (21 Nov 22:26 IST): 'reduce the codex proxy cap to 10 ... rajiv@scribie ... has to last 7 days till renewal. we have to go back to using terra before trying sol on codex.'): gpt-6.1-terra now heads every list, gpt-6.2-sol second.
     # gpt-6.2-sol heads every list and launches at reasoning effort xhigh (proxy_agent_launch_model_id). The previous entries stay behind it, in their old order, as the
     # fallbacks (Codex pool cap, 402/429 cooldown, probe failure). Supersedes sol only on BUILD3/PROOF2 (S149, ts 1794941131.743129), sol dropped from TOP (ts 1794720589.429929)
     # and hy4 first (ts 1795106112.425109; non-builder/prover types still skip hy4 via the free-model guard). gpt-6.1-terra stays in the tiers (ts 1794941131.743129).
     # OpenCode Go pool (Rajiv D0AMF0XE6TS thread 1794926930.078169, ts 1794930258.014469): hy4-flash-free joins LIGHT, deepseek-v4.1-flash joins MID.
     # Every tier ends with the emergency-only Muse Spark entry (see proxy_agent_is_emergency_muse). Grok stays in its existing slot.
-    LIGHT) models="gpt-6.2-sol hy4-flash-free claude-haiku-5-5 grok-4.7 gpt-6-luna muse-spark-1.3-contributor";;
+    LIGHT) models="inkling-2-mini gpt-6.1-terra gpt-6.2-sol hy4-flash-free claude-haiku-5-5 grok-4.7 gpt-6-luna muse-spark-1.3-contributor";;
     # glm-5.3 registered, explicit --model only until one test build passes, Rajiv condition ts 1794942421.644269 (PM steer 2026-11-18: not in any automatic tier list).
-    MID) models="gpt-6.2-sol hy4-flash-free claude-sonnet-5-5 deepseek-v4.1-flash grok-4.7 gpt-6.1-terra muse-spark-1.3-contributor";;
-    TOP) models="gpt-6.2-sol claude-opus-5-5 grok-4.7 gpt-6.1-terra muse-spark-1.3-contributor";;
+    MID) models="inkling-2-mini gpt-6.1-terra gpt-6.2-sol hy4-flash-free claude-sonnet-5-5 deepseek-v4.1-flash grok-4.7 muse-spark-1.3-contributor";;
+    TOP) models="gpt-6.1-terra gpt-6.2-sol claude-opus-5-5 grok-4.7 muse-spark-1.3-contributor";;
     # gpt-6.2-sol replaces gpt-6.1-sol (the "sol" alias); gpt-6.1-terra stays in the tiers (Rajiv D0AMF0XE6TS thread 1794939318.063889, ts 1794941131.743129: "6.1 terra should stay. 6.2 sol should replace 6.1 sol").
     # Per-role ladders (Rajiv D0AMF0XE6TS thread 1794624936.567599: ts 1794639918.387399 ladder, ts 1794640102.756179 hydrogen in the mid rungs).
     # First id not in 429/402 cooldown wins within a rung; claude-* ids still skip at the cap (claude_cap), then the next id in the SAME rung is tried.
-    PLAN) models="gpt-6.2-sol grok-4.7 claude-opus-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
+    PLAN) models="gpt-6.1-terra gpt-6.2-sol grok-4.7 claude-opus-5-5 muse-spark-1.3-contributor";;
     # Grok before Codex in every rung: Codex must last to Thu (Rajiv ts 1794660714.234059 "only grok, claude, codex").
     # Dev ladder (Rajiv C0ALZJHGE49 thread 1794665799.784789, ts 1794665970.826379): haiku/luna → sonnet/terra → opus/sol. No Grok on dev rungs.
-    BUILD1) models="gpt-6.2-sol hy4-flash-free claude-haiku-5-5 deepseek-v4.1-flash gpt-6-luna muse-spark-1.3-contributor";;
-    BUILD2) models="gpt-6.2-sol claude-sonnet-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
+    BUILD1) models="inkling-2-mini gpt-6.1-terra gpt-6.2-sol hy4-flash-free claude-haiku-5-5 deepseek-v4.1-flash gpt-6-luna muse-spark-1.3-contributor";;
+    BUILD2) models="gpt-6.1-terra gpt-6.2-sol claude-sonnet-5-5 muse-spark-1.3-contributor";;
     # S149 (Rajiv ts 1794941131.743129 "6.1 terra should stay. 6.2 sol should replace 6.1 sol"); sol now leads every rung (ts 1795158067.051479, header above).
-    BUILD3) models="gpt-6.2-sol claude-opus-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
-    PROOF1) models="gpt-6.2-sol hy4-flash-free claude-sonnet-5-5 deepseek-v4.1-flash gpt-6.1-terra muse-spark-1.3-contributor";;
-    PROOF2) models="gpt-6.2-sol claude-opus-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
+    BUILD3) models="gpt-6.1-terra gpt-6.2-sol claude-opus-5-5 muse-spark-1.3-contributor";;
+    PROOF1) models="inkling-2-mini gpt-6.1-terra gpt-6.2-sol hy4-flash-free claude-sonnet-5-5 deepseek-v4.1-flash muse-spark-1.3-contributor";;
+    PROOF2) models="gpt-6.1-terra gpt-6.2-sol claude-opus-5-5 muse-spark-1.3-contributor";;
     # 12b reviews: carbon -> fable -> astra (Rajiv D0AMF0XE6TS thread 1794624936.567599, ts 1794640502.657479 "the 12b reviewer ladder can be carbon/fable/astra").
     # Supersedes the earlier fable-first list (thread 1794573312.657559, ts 1794623641.572859). Reviews never skip claude-* at the cap (see below).
-    REVIEW) models="gpt-6.2-sol claude-fable-5-2 gpt-6-astra muse-spark-1.3-contributor";;
+    REVIEW) models="gpt-6.1-terra gpt-6.2-sol claude-fable-5-2 gpt-6-astra muse-spark-1.3-contributor";;
     *) return 1;;
   esac
   # No Codex for proxies (Rajiv ts 1794834402.077499): drop gpt-* from every rung while the flag file exists.
@@ -1687,11 +1689,24 @@ proxy_agent_pick_tier() {
     for _m in $models; do proxy_agent_is_opencode_id "$_m" || _kept="${_kept:+$_kept }$_m"; done
     models="$_kept"
   fi
+  # Judgment-work guard (side-agent note 22 Nov 00:33 IST, PM ruling): P0 lanes and diagnosis/verdict roles never route to the small
+  # local Inkling model. Their verdicts decide admin-merge asks and save-path fixes. Inkling stays first for routine build/proof/ops work.
+  if [[ "${PROXY_AGENT_CAP_OVERRIDE:-}" == P0:* ]] || [[ " ci-repair-agent e2e-failure-investigator hd-investigator customer-artifact-investigator pm-admission-reviewer hd-planner " == *" ${TYPE:-} "* ]]; then
+    _kept=""; for _m in $models; do [[ "$_m" == inkling-2-mini ]] || _kept="${_kept:+$_kept }$_m"; done
+    models="$_kept"
+  fi
   for id in $models; do
     # Free-model guard (unconditional): before the emergency gate and before `last` is set, so a refused id can never become the fallback pick.
     if proxy_agent_free_guard_refuses "$id"; then
       skipped="${skipped:+$skipped,}$id:free_model_guard"
       printf 'proxy-agent: REFUSED free-model guard model=%s type=%s (free/trial ids are unconditionally ineligible; trying the next tier model)\n' "$id" "${TYPE:-}" >&2
+      continue
+    fi
+    # Local Inkling health gate (side-agent note 21 Nov 23:07 IST: the picker skips rate-limited/over-budget models but not a dead host). A Spark that
+    # doesn't answer /v1/models within 3 s is skipped like a cooled model, before `last` is set, so it can never become the fallback pick.
+    if [[ "$id" == inkling-2-mini ]] && ! curl -s -o /dev/null -m 3 --fail "${INKLING_HEALTH_URL:-http://192.168.68.113:18120/v1/models}"; then
+      skipped="${skipped:+$skipped,}$id:host_down"
+      printf 'proxy-agent: host_down skip model=%s (Inkling /v1/models did not answer in 3s)\n' "$id" >&2
       continue
     fi
     if proxy_agent_is_emergency_muse "$id"; then
@@ -1824,7 +1839,7 @@ for line in out.splitlines():
     # Same cut as proxy_agent_router_identity: lowercase, drop the first '(' or '[' suffix, trim.
     # A decorated OpenCode primary must count toward OPENCODE_PROXY_CAP (CTO REVISE ts 1795010788.320629).
     model = re.split(r"[(\[]", raw.lower(), 1)[0].strip()
-    kind = "claude" if model.startswith("claude-") else "codex" if model.startswith("gpt-") else "grok" if model.startswith("grok") else "opencode" if model in ("hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor") else ""
+    kind = "claude" if model.startswith("claude-") else "codex" if model.startswith("gpt-") else "grok" if model.startswith("grok") else "inkling" if model == "inkling-2-mini" else "opencode" if model in ("hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor") else ""
     if kind == pool:
         n += 1
 print(n)
@@ -1848,6 +1863,8 @@ proxy_agent_pool_blocked() {
     gpt-*) pool=codex; cap="${CODEX_PROXY_CAP:-8}";;
     grok-4.7|grok) pool=grok; cap="${GROK_PROXY_CAP:-8}";;
     hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor) pool=opencode; cap="${OPENCODE_PROXY_CAP:-2}";;
+    # Inkling (local DGX Spark, unmetered) has its OWN cap, outside the OpenCode pool (Rajiv D0AMF0XE6TS ts 1795286017.407799: "yes, do b. set the cap to 4").
+    inkling-2-mini) pool=inkling; cap="${INKLING_PROXY_CAP:-8}";;  # cap 8 with vLLM --max-num-seqs 6 (Rajiv D0AMF0XE6TS ts 1795286725.047469 "go")
     *) return 1;;
   esac
   if [[ "$pool" != opencode ]] && proxy_agent_cap_exempt "$TYPE"; then return 1; fi
@@ -1856,7 +1873,7 @@ proxy_agent_pool_blocked() {
   if [[ "$pool" == opencode && "$cap" =~ ^0+$ ]]; then return 0; fi
   if ! live="$(proxy_agent_pool_live "$pool")"; then
     printf 'proxy-agent: pool_cap UNAVAILABLE pool=%s\n' "$pool" >&2
-    if [[ "$pool" == opencode ]]; then return 0; fi
+    if [[ "$pool" == opencode || "$pool" == inkling ]]; then return 0; fi
     return 1
   fi
   [[ "${live:-0}" -ge "$cap" ]]
@@ -2077,6 +2094,7 @@ resolve_model() {
     # DeepSeek direct (balance-metered, emergencies only; Rajiv D0AMF0XE6TS ts 1794806595.680589). Never in a tier list.
     # (The OpenCode Go entry deepseek-v4.1-flash is a different id and a MID tier entry: see proxy_agent_pick_tier.)
     deepseek|deepseek-flash-4.1) echo "deepseek-flash-4.1 128000 8192";;
+    inkling-2-mini) echo "inkling-2-mini 262144 32000";;  # vLLM max_model_len 262144 (served 21 Nov 22:53 IST)
     gpt-6.2-sol)  echo "gpt-6.2-sol 1050000 128000";;  # Rajiv D0AMF0XE6TS ts 1794940288.370549; exact id only, not in any tier ladder
     gpt-6-luna|gpt-6.1-terra|gpt-6.1-sol|gpt-6-astra|grok-4.7|gemini-4-argon-high|gemini-3.8-flash-high|gemini-4-hydrogen-xhigh|claude-opus-5-5-high|claude-sonnet-5-5-high|claude-haiku-5-5|claude-sonnet-5-5|claude-opus-5-5|claude-fable-5-2)
                   resolve_model "$(proxy_agent_alias_for_id "$1")";;
@@ -2229,6 +2247,7 @@ proxy_agent_log_emergency_muse sonnet "${SONNET_MODEL:-}"
 proxy_agent_log_emergency_muse opus "${OPUS_MODEL:-}"
 case "$MODEL" in
   ag-opus|ag-sonnet|luna|terra|sol|astra|grok|hydrogen|ernie|gemini-pro|gemini-flash|gpt-6-luna|gpt-6.1-terra|gpt-6.1-sol|gpt-6.2-sol|gpt-6.2-sol\(*\)|gpt-6-astra|grok-4.7|gemini-4-argon-high|gemini-3.8-flash-high|gemini-4-hydrogen-xhigh|claude-opus-5-5-high|claude-sonnet-5-5-high|haiku|sonnet|opus|fable|claude-haiku-5-5|claude-sonnet-5-5|claude-opus-5-5|claude-fable-5-2) ;;
+  inkling-2-mini) ;;  # local Inkling 2 Mini (DGX Spark vLLM via CLIProxyAPI openai-compat "inkling-spark"), 262144-token window
   hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor) ;;  # OpenCode Go via CLIProxyAPI; conservative 200000/32000 window until a source is added
   deepseek|deepseek-flash-4.1) ;;  # direct DeepSeek: the P0:<digits> gate (canonical identity, decorated forms included) runs before the dry-run return above
   *) echo "proxy-agent: model '$MODEL' not in alias table; using 200000-token window (warning)" >&2;;
