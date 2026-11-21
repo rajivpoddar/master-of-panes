@@ -3651,12 +3651,13 @@ def compose(
     opencode_extra = len(opencode_lines)
     ci_extra = 1 if mode == "1h" else 0  # the CI selection line must never be folded away
     reminders_extra = 1 if mode == "1h" else 0  # nor the expired-reminders line
+    if mode == "3h":
+        # Mask complete addresses before compact_report can wrap inside a username.
+        lines = _mask_post_emails("\n".join(lines)).splitlines()
     report = compact_report(lines, 23 if mode == "3h" else 20 + burn_extra + pace_extra + memory_extra + opencode_extra + ci_extra + reminders_extra,
                             cadence=mode)
     if mode == "3h":
-        # Saved inputs and other collectors can carry raw customer addresses.
-        # Mask the entire post before capping lines, not just its active-user rows.
-        report = _mask_post_emails(report.replace(CTO, ''))
+        report = report.replace(CTO, '')
     report = cap_lines(report, MAX_LINE_CHARS - LINE_NOTE_RESERVE)
     separator = "\n" if mode == "3h" else "\n\n"
     return report + f"{separator}_MoP composer release: {composer_release_sha()}_"

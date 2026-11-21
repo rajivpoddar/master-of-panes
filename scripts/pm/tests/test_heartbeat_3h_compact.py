@@ -32,6 +32,29 @@ def test_3h_post_masks_addresses_across_the_entire_report():
     assert local_parts and all("*" in local for local in local_parts)
 
 
+def long_cleanup_alert():
+    left, right = "split-fixture-private-prefix", "-private-tail"
+    address = f"{left}{right}@example.org"
+    boundary = composer.MAX_LINE_CHARS - composer.LINE_NOTE_RESERVE - 20
+    # compact_report's fallback hard wrap (no '; ') cuts between left and right.
+    prefix = "stale-process-cleanup REFUSED: ".ljust(boundary - len("*ALERT:* ") - len(left) - 1, "x")
+    return f"{prefix} {address} {'x' * 80} done", left, right
+
+
+def test_3h_masks_cleanup_address_before_wrapping_inside_username():
+    alert, left, right = long_cleanup_alert()
+    limit = composer.MAX_LINE_CHARS - composer.LINE_NOTE_RESERVE
+    report = composer.compose(
+        "3h", datetime.now(timezone.utc), {"events": 0, "users": 0}, {}, [],
+        cleanup_alert=alert,
+    )
+
+    assert re.findall(r"\S+@example\.org", report) == ["sp***@example.org"]
+    assert left not in report and right not in report
+    assert "\n↳ " in report and "done" in report
+    assert all(len(row) <= limit for row in report.splitlines())
+
+
 def test_3h_summary_and_physical_line_budget():
     hashes = ['aaa'] * 12 + ['bbb'] * 8 + ['ccc'] * 5 + ['ddd'] * 3
     refs = [{'time': '12:34', 'identity_kind': 'userIdSha256', 'user_hash': h} for h in hashes]
