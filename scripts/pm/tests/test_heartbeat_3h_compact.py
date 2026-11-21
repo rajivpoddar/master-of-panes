@@ -1,5 +1,6 @@
 """Three-hour heartbeat output contract."""
 import importlib.util
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -8,6 +9,27 @@ PATH = Path(__file__).resolve().parents[1] / 'shared-assets/claude/scripts/pm/he
 spec = importlib.util.spec_from_file_location('heartbeat_3h_compact', PATH)
 composer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(composer)
+
+
+def test_3h_post_masks_addresses_across_the_entire_report():
+    active = {"count": 3, "users": [
+        {"user": "reporter+case@example.org", "files": 2},
+        {"user": "q*mz*@example.net", "files": 1},
+        {"user": "excluded@team.scribie.com", "files": 1},
+    ]}
+    report = composer.compose(
+        "3h", datetime.now(timezone.utc), {"events": 0, "users": 0}, {}, [],
+        active=active, include_active=True,
+        failures=["collector: *operator@example.com*"],
+    )
+
+    assert "re***@example.org (2f)" in report
+    assert "q*mz*@example.net (1f)" in report
+    assert "*op***@example.com*" in report
+    assert "1 Scribie excluded" in report and "team.scribie.com" not in report
+    # Scan the entire output, not a fixed list of lines or render sites.
+    local_parts = re.findall(r"([\w.+%'-][\w.+%'*-]*)@[\w-]+(?:\.[\w-]+)+", report)
+    assert local_parts and all("*" in local for local in local_parts)
 
 
 def test_3h_summary_and_physical_line_budget():

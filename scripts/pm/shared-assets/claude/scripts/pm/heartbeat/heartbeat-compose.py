@@ -514,6 +514,20 @@ def pr_block(prs: list[dict] | None, max_prs: int = MAX_PRS) -> tuple[list[str],
 
 EMAIL_UNKNOWN_SENDER = "(unknown sender)"
 _EMAIL_ADDR = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+# Match the whole local part of an ingest-masked address, but not a leading
+# Slack formatting asterisk (which would make a raw address look masked).
+_POST_EMAIL_ADDR = re.compile(r"(?<![\w.+%'-])[\w.+%'-][\w.+%'*-]*@[\w-]+(?:\.[\w-]+)+")
+
+
+def _mask_post_emails(text: str) -> str:
+    if not _POST_EMAIL_ADDR.search(text):
+        return text
+    spec = importlib.util.spec_from_file_location("heartbeat_axiom", AXIOM_REPORT)
+    if spec is None or spec.loader is None:
+        raise ImportError("heartbeat Axiom email masker unavailable")
+    axiom = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(axiom)
+    return _POST_EMAIL_ADDR.sub(lambda match: axiom.mask_email(match[0]), text)
 
 
 def _email_field(value, limit: int) -> str:
@@ -3637,15 +3651,15 @@ def compose(
     opencode_extra = len(opencode_lines)
     ci_extra = 1 if mode == "1h" else 0  # the CI selection line must never be folded away
     reminders_extra = 1 if mode == "1h" else 0  # nor the expired-reminders line
-    report = cap_lines(compact_report(lines, 23 if mode == "3h" else 20 + burn_extra + pace_extra + memory_extra + opencode_extra + ci_extra + reminders_extra,
-                                      cadence=mode),
-                       MAX_LINE_CHARS - LINE_NOTE_RESERVE)
+    report = compact_report(lines, 23 if mode == "3h" else 20 + burn_extra + pace_extra + memory_extra + opencode_extra + ci_extra + reminders_extra,
+                            cadence=mode)
     if mode == "3h":
-        # compact_report already placed exactly one empty line before each
-        # *section* and _Ops:_ header. Do not strip those (Rajiv ts 1794919016.184639).
-        report = report.replace(CTO, '')
-        return report + f"\n_MoP composer release: {composer_release_sha()}_"
-    return report + f"\n\n_MoP composer release: {composer_release_sha()}_"
+        # Saved inputs and other collectors can carry raw customer addresses.
+        # Mask the entire post before capping lines, not just its active-user rows.
+        report = _mask_post_emails(report.replace(CTO, ''))
+    report = cap_lines(report, MAX_LINE_CHARS - LINE_NOTE_RESERVE)
+    separator = "\n" if mode == "3h" else "\n\n"
+    return report + f"{separator}_MoP composer release: {composer_release_sha()}_"
 
 
 
