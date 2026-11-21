@@ -1535,6 +1535,12 @@ proxy_agent_is_opencode_id() {
   id="$(proxy_agent_router_identity "$1")"
   case "$id" in hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor|inkling-2-mini) return 0;; *) return 1;; esac  # inkling-2-mini: local Inkling on DGX Spark via CLIProxyAPI, unmetered, counted in OPENCODE_PROXY_CAP (Rajiv ts 1795280232.066559)
 }
+# Judgment/diagnosis lanes (PM 22 Nov 00:33 and 00:42 IST: "NEVER delegate debugging/root cause"): P0 lanes and these roles never route to the
+# local Inkling model and are exempt from the MoP bulk-read Read guard (scripts/bulk_read_guard.py reads BULK_READ_EXEMPT and PROXY_AGENT_TYPE).
+proxy_agent_is_judgment_lane() {
+  [[ "${PROXY_AGENT_CAP_OVERRIDE:-}" == P0:* ]] && return 0
+  [[ " ci-repair-agent e2e-failure-investigator hd-investigator customer-artifact-investigator pm-admission-reviewer hd-planner " == *" ${TYPE:-} "* ]]
+}
 # Muse Spark Contributor trains on prompts: last-resort emergency entry (Rajiv D0AMF0XE6TS thread 1794926930.078169, ts 1794929496.349809).
 proxy_agent_is_emergency_muse() {
   [[ "$(proxy_agent_router_identity "$1")" == muse-spark-1.3-contributor ]]
@@ -1691,7 +1697,7 @@ proxy_agent_pick_tier() {
   fi
   # Judgment-work guard (side-agent note 22 Nov 00:33 IST, PM ruling): P0 lanes and diagnosis/verdict roles never route to the small
   # local Inkling model. Their verdicts decide admin-merge asks and save-path fixes. Inkling stays first for routine build/proof/ops work.
-  if [[ "${PROXY_AGENT_CAP_OVERRIDE:-}" == P0:* ]] || [[ " ci-repair-agent e2e-failure-investigator hd-investigator customer-artifact-investigator pm-admission-reviewer hd-planner " == *" ${TYPE:-} "* ]]; then
+  if proxy_agent_is_judgment_lane; then
     # Also drop gpt-6-luna (Inkling's routine fallback, Rajiv ts 1795289410.866129) so judgment lanes start on terra/sol.
     _kept=""; for _m in $models; do [[ "$_m" == inkling-2-mini || "$_m" == gpt-6-luna ]] || _kept="${_kept:+$_kept }$_m"; done
     models="$_kept"
@@ -2226,6 +2232,9 @@ if [[ "$PM_ROLE" != "1" && -z "$RESUME_NAME" ]]; then
 fi
 PROMPT_FILE="$(cd "$(dirname "$PROMPT_FILE")" && pwd)/$(basename "$PROMPT_FILE")"
 export PROXY_AGENT_RUN=1
+# MoP bulk-read Read guard inputs (scripts/bulk_read_guard.py): the lane type, and an explicit exemption for judgment lanes.
+export PROXY_AGENT_TYPE="$TYPE"
+if proxy_agent_is_judgment_lane; then export BULK_READ_EXEMPT=1; fi
 if [[ "$PM_ROLE" == "1" ]]; then SETTING_SOURCES="user"; else SETTING_SOURCES="user,project"; fi
 
 # Launch resolution. Same table as the dry-run line; defined above so dry-run can print it.
@@ -2319,6 +2328,13 @@ except Exception:
     pass
 keep.append({"matcher": "Bash", "hooks": [{"type": "command",
              "command": "bash /Users/rajiv/.claude/hooks/block-force-push-rebase.sh"}]})
+# MoP bulk-read guard (Rajiv D0AMF0XE6TS ts 1795287629.063499; PM 22 Nov 00:54 IST: proxy lanes must load it). It redirects a >400-line Read or lone
+# cat/head/tail without offset/limit to bulk-read, for routine lanes only: the hook exempts judgment/P0 lanes (BULK_READ_EXEMPT, PROXY_AGENT_TYPE) and
+# fails open. The wrapper exits 0 when the script is missing (a hook exit 2 would block every Read and Bash).
+_guard = "/Users/rajiv/.local/share/master-of-panes/current/scripts/bulk_read_guard.py"
+_guard_cmd = "bash -c 'f=\"$1\"; if [ -f \"$f\" ]; then python3 -I \"$f\"; fi; exit 0' _ " + _guard
+for _matcher in ("Read", "Bash"):
+    keep.append({"matcher": _matcher, "hooks": [{"type": "command", "command": _guard_cmd, "timeout": 8}]})
 import os
 deny = ["Bash(git reset --hard*)", "Bash(git restore *)",
         "Bash(gh pr merge *)", "Bash(git push --force*)",
@@ -2392,6 +2408,10 @@ excluded_commands = [
     # box scripts above. pq14072e/f BLOCKED 2026-11-19 04:32/04:40 IST (lease writes, Convex node probes) inside the fence.
     "~/.claude/scripts/remote-qa-spec.sh *",
     "/Users/rajiv/.claude/scripts/remote-qa-spec.sh *",
+    # bulk-read only READS the named files and asks a cheap model (local Inkling via the 127.0.0.1 router, LAN health URL, both outside the fence's
+    # network allowlist) and keeps its log/bypass state under ~/.local/share/master-of-panes/bulk-read. code-write is NOT excluded: it writes arbitrary targets.
+    "bulk-read *",
+    "/Users/rajiv/.local/bin/bulk-read *",
     # Rajiv D0AMF0XE6TS ts 1795017876.764629: exempt ssh; ssh back to this Mac is denied by the permission rules below.
     "ssh *",
 ]
@@ -2510,7 +2530,7 @@ REVIEW_ROUND_TOKEN="$(proxy_agent_review_cap reserve)" || exit $?
   # tmux server may predate the caller: explicitly transfer child-only env.
   while IFS= read -r key; do
     case "$key" in
-      ANTHROPIC_*|CLAUDE_*|PROXY_*|PATH|HOME) printf 'export %s=%q\n' "$key" "${!key}";;
+      ANTHROPIC_*|CLAUDE_*|PROXY_*|BULK_READ_*|MOP_BULK_READ_*|PATH|HOME) printf 'export %s=%q\n' "$key" "${!key}";;
     esac
   done < <(compgen -e)
   printf 'unset ANTHROPIC_API_KEY CLAUDECODE\n'

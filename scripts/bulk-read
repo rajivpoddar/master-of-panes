@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""bulk-read: ask a question about files; a cheap model answers in bullets.
+
+  bulk-read --paths <f1> [<f2> ...] --question "<q>"
+
+Prints ONLY bullets, each ending with a file:line reference (lines are numbered for the model). Same flags as the
+retired ./scripts/codex-read.sh. Understanding only: edit work and debugging use Read with offset/limit (a small model
+finds surface facts and misses subtle bugs).
+
+Backend: in a proxy lane (PROXY_AGENT_RUN set) inkling-2-mini (3 s /health gate), then gpt-6-luna, both through CLIProxyAPI;
+in any other session (the PM) Claude Haiku, or Sonnet with BULK_READ_CLAUDE_MODEL=sonnet, through a nested direct `claude -p`.
+Exit codes: 0 answered; 2 usage or unreadable path; 3 every backend unavailable (down, breaker open, 30 s timeout, error):
+the next plain Read of those files is then allowed for 10 minutes (fail open); 4 corpus over BULK_READ_MAX_CHARS
+(default 80000): narrow --paths or use Read offset/limit.
+Env: BULK_READ_TIMEOUT_S (30), BULK_READ_MAX_CHARS (80000), BULK_READ_MODEL (inkling-2-mini), BULK_READ_FALLBACK_MODEL (gpt-6-luna),
+BULK_READ_INKLING_TIMEOUT_S (15), BULK_READ_CLAUDE_MODEL (haiku), INKLING_HEALTH_URL.
+Every run appends one line (paths count, lines, chars, backend, latency; no content) to the guard's events.jsonl.
+"""
+import argparse
+import os
+import re
+import signal
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import bulk_read_lib as lib  # noqa: E402
+
+SYSTEM = ("You answer questions about source files. Output ONLY terse markdown bullets, one fact per bullet. Every bullet "
+          "ends with a reference like (path:line) or (path:start-end) using the line numbers shown in the corpus. "
+          "No preamble, no summary, no prose paragraphs, no code fences, at most %d bullets. If the files do not answer "
+          "the question, output the single bullet: - not found in the given files.")
+BULLET = re.compile(r"^\s*(?:[-*\u2022]|\d+[.)])\s+(\S.*)$")
+
+
+def to_bullets(text, limit):
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    bullets = [m.group(1).strip() for m in (BULLET.match(line) for line in lines) if m]
+    return ["- " + b for b in (bullets or [line.strip() for line in lines])][:limit]
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="bulk-read", description="Bullet answers about files from the local Inkling model.")
+    parser.add_argument("--paths", nargs="+", required=True)
+    parser.add_argument("--question", required=True)
+    parser.add_argument("--max-bullets", type=int, default=30)
+    args = parser.parse_args(argv)
+    started = time.time()
+    parts, total_lines = [], 0
+    for path in args.paths:
+        if not os.path.isfile(path):
+            print("bulk-read: not a file: %s" % path, file=sys.stderr)
+            return 2
+        lines, binary = lib.line_count(path)
+        if binary:
+            print("bulk-read: binary file: %s" % path, file=sys.stderr)
+            return 2
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            body = "\n".join("%5d| %s" % (n, text) for n, text in enumerate(handle.read().split("\n"), 1))
+        parts.append('<file path="%s">\n%s\n</file>' % (path, body))
+        total_lines += lines
+    user = "\n".join(parts) + "\n\nQuestion: " + args.question
+    limit = int(os.environ.get("BULK_READ_MAX_CHARS", "80000"))
+    if len(user) > limit:
+        print("bulk-read: %d chars over the %d cap: narrow --paths, or use Read with offset/limit." % (len(user), limit),
+              file=sys.stderr)
+        return 4
+
+    def fail_open(reason, breaker):
+        if breaker:
+            lib.breaker_record(False, name=lib.route())
+        granted = lib.bypass_grant(args.paths)
+        lib.log_event("delegate_fail_open", reason=reason, files=len(args.paths), lines=total_lines, chars_in=len(user),
+                      latency_ms=int((time.time() - started) * 1000))
+        print("bulk-read: no backend answered (%s). %s" % (reason, "A plain Read of these files is allowed for the next 10 minutes."
+                                                           if granted else "Use Read with offset/limit."), file=sys.stderr)
+        return 3
+
+    kind = lib.route()
+    if lib.breaker_open(name=kind):
+        return fail_open("breaker_open", False)
+    available, why = lib.backend_available(kind)
+    if not available:
+        return fail_open(why, False)
+    timeout = float(os.environ.get("BULK_READ_TIMEOUT_S", "30"))
+
+    def on_alarm(signum, frame):
+        raise lib.InkError("timeout")
+
+    try:
+        signal.signal(signal.SIGALRM, on_alarm)
+        signal.setitimer(signal.ITIMER_REAL, timeout + 5)  # backstop; each backend call has its own shorter timeout
+        text, usage, backend = lib.complete(SYSTEM % args.max_bullets, user, 3000, timeout)
+    except lib.InkError as exc:
+        return fail_open(exc.reason, True)
+    except Exception as exc:
+        return fail_open("error_" + type(exc).__name__, True)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+    out = "\n".join(to_bullets(text, args.max_bullets))
+    lib.breaker_record(True, name=kind)
+    lib.log_event("delegate", files=len(args.paths), lines=total_lines, chars_in=len(user), chars_out=len(out),
+                  latency_ms=int((time.time() - started) * 1000), backend=backend,
+                  prompt_tokens=usage.get("prompt_tokens"), completion_tokens=usage.get("completion_tokens"),
+                  cost_usd=usage.get("cost_usd"))
+    print(out)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

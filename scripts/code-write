@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""code-write: spec + reference file -> target file, written by a cheap model.
+
+  code-write [--force] "<spec>" <reference-file> <target-output-path>
+
+Wraps the retired ./scripts/codex-write.sh contract: boilerplate only (tests, configs, repetitive patterns), review the
+result before committing. Writes the raw file (code fences stripped), refuses an existing target without --force, and
+prints ONLY "<target> <N> lines".
+
+Backend: in a proxy lane inkling-2-mini then gpt-6-luna through CLIProxyAPI; in any other session (the PM) Claude Haiku, or Sonnet
+with BULK_READ_CLAUDE_MODEL=sonnet, through a nested direct `claude -p`.
+Exit codes: 0 written; 2 usage or unreadable input; 3 every backend unavailable or failed (nothing written: write the file
+yourself); 4 empty output (nothing written); 5 spec + reference over CODE_WRITE_MAX_CHARS (default 80000).
+Env: CODE_WRITE_TIMEOUT_S (120), CODE_WRITE_MAX_CHARS (80000), BULK_READ_MODEL, BULK_READ_FALLBACK_MODEL, BULK_READ_CLAUDE_MODEL, INKLING_HEALTH_URL.
+Each run appends one line (sizes, backend, latency; no content) to the guard's events.jsonl.
+"""
+import argparse
+import os
+import re
+import signal
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import bulk_read_lib as lib  # noqa: E402
+
+SYSTEM = ("You write one file. Output ONLY the raw file contents that satisfy the spec, using the reference for context. "
+          "No code fences, no explanation, no prose, no leading or trailing commentary.")
+
+
+def strip_fences(text):
+    lines = text.strip("\n").split("\n")
+    if len(lines) >= 2 and re.match(r"^```[\w+-]*\s*$", lines[0]) and lines[-1].strip() == "```":
+        lines = lines[1:-1]
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="code-write", description="Write a file from a spec with the local Inkling model.")
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("spec")
+    parser.add_argument("reference")
+    parser.add_argument("target")
+    args = parser.parse_args(argv)
+    started = time.time()
+    if not args.spec.strip():
+        print("code-write: spec must not be empty", file=sys.stderr)
+        return 2
+    if not os.path.isfile(args.reference):
+        print("code-write: reference file not found: %s" % args.reference, file=sys.stderr)
+        return 2
+    if os.path.exists(args.target) and not args.force:
+        print("code-write: target already exists: %s (use --force)" % args.target, file=sys.stderr)
+        return 2
+    with open(args.reference, "r", encoding="utf-8", errors="replace") as handle:
+        reference = handle.read()
+    user = "<spec>\n%s\n</spec>\n\n<reference path=\"%s\">\n%s\n</reference>" % (args.spec, args.reference, reference)
+    if len(user) > int(os.environ.get("CODE_WRITE_MAX_CHARS", "80000")):
+        print("code-write: spec + reference over the size cap; trim the reference.", file=sys.stderr)
+        return 5
+
+    def failed(reason, code):
+        lib.log_event("code_write_fail", reason=reason, chars_in=len(user), latency_ms=int((time.time() - started) * 1000))
+        print("code-write: no backend answered (%s); write the file directly." % reason, file=sys.stderr)
+        return code
+
+    available, why = lib.backend_available(lib.route())
+    if not available:
+        return failed(why, 3)
+    timeout = float(os.environ.get("CODE_WRITE_TIMEOUT_S", "120"))
+
+    def on_alarm(signum, frame):
+        raise lib.InkError("timeout")
+
+    try:
+        signal.signal(signal.SIGALRM, on_alarm)
+        signal.setitimer(signal.ITIMER_REAL, timeout + 5)  # backstop; each backend call has its own shorter timeout
+        text, usage, backend = lib.complete(SYSTEM, user, 12000, timeout)
+    except lib.InkError as exc:
+        return failed(exc.reason, 4 if exc.reason == "no_content" else 3)
+    except Exception as exc:
+        return failed("error_" + type(exc).__name__, 3)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+    body = strip_fences(text)
+    if not body.strip():
+        return failed("no_content", 4)
+    os.makedirs(os.path.dirname(os.path.abspath(args.target)), exist_ok=True)
+    tmp = args.target + ".code-write.%d" % os.getpid()
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(body)
+    os.replace(tmp, args.target)
+    count = body.count("\n")
+    lib.log_event("code_write", chars_in=len(user), chars_out=len(body), lines=count, backend=backend,
+                  latency_ms=int((time.time() - started) * 1000), prompt_tokens=usage.get("prompt_tokens"),
+                  completion_tokens=usage.get("completion_tokens"), cost_usd=usage.get("cost_usd"))
+    print("%s %d lines" % (args.target, count))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -48,6 +48,13 @@ def desired_hooks(scripts_dir, stop_relay=True):
     return hooks
 
 
+def guard_groups(scripts_dir):
+    """PreToolUse groups (Read, Bash) for the MoP bulk-read guard (Rajiv D0AMF0XE6TS ts 1795289208.297109: the PM session gets it too).
+    The command exits 0 when the script is missing: a hook exit 2 would block every Read and Bash. The guard itself fails open."""
+    command = f'bash -c \'f="$1"; if [ -f "$f" ]; then python3 -I "$f"; fi; exit 0\' _ "{scripts_dir}/bulk_read_guard.py"'
+    return [{"matcher": matcher, "hooks": [{"type": "command", "command": command, "timeout": 8}]} for matcher in ("Read", "Bash")]
+
+
 def is_mop_command(cmd, scripts_dir):
     legacy = "/.claude/plugins/cache/rajiv-plugins/master-of-panes/" in cmd and any(
         name in cmd for name in ("/scripts/hook-relay.sh", "/scripts/update-pane-state.sh")
@@ -70,6 +77,8 @@ def apply(settings, scripts_dir, stop_relay=True):
                 groups.append({**g, "hooks": kept})
             # a group whose only commands were MoP-owned is replaced below
         groups.append(entry)
+        if ev == "PreToolUse" and stop_relay:  # PM checkout only; dev slots are retired and keep no guard
+            groups.extend(guard_groups(scripts_dir))
         hooks[ev] = groups
     settings.setdefault("enabledPlugins", {})[PLUGIN] = False
     return settings
