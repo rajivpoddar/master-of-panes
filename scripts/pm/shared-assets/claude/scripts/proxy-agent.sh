@@ -2478,6 +2478,23 @@ if [[ "$PM_ROLE" == "1" ]]; then
 else
   SKILL_NOTE_DIRS="the main checkout .claude/skills or ~/.claude/skills"
 fi
+# Inkling lanes get a skill ALLOWLIST via skillOverrides, the same mechanism as the old Spark dev slots (Rajiv D0AMF0XE6TS
+# ts 1795287887.987329 "restrict the skills will leave more context for work"; ts 1795287991.318829 "recall skillOverrides. that was used
+# before on the spark slots."). ~1,400 discovered skills → ~26 "on" (~/.claude/scripts/inkling-skill-overrides.py), merged into this lane's
+# --settings file. Other skills can still be read directly as SKILL.md files. Failure to generate leaves the default (all skills), fail-open.
+if [[ "$MODEL_ID" == inkling-2-mini ]]; then
+  if _ovr="$(python3 /Users/rajiv/.claude/scripts/inkling-skill-overrides.py 2>/dev/null)" && [[ -n "$_ovr" ]]; then
+    OVR="$_ovr" python3 - "$SAFETY_SETTINGS" <<'PY' || echo "PROXY_AGENT_WARN reason=inkling_skill_overrides_merge_failed" >&2
+import json, os, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d["skillOverrides"] = json.loads(os.environ["OVR"])
+json.dump(d, open(p, "w"))
+PY
+  else
+    echo "PROXY_AGENT_WARN reason=inkling_skill_overrides_unavailable" >&2
+  fi
+fi
 
 # Persist a private runner, not credentials in tmux's command line/global env.
 JOB_DIR="$(mktemp -d "${TMPDIR:-/tmp}/proxy-agent-job.XXXXXX")"
