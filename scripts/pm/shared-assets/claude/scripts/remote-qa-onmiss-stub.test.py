@@ -59,6 +59,7 @@ class R2:
     objects = {}  # key -> (bytes, etag, metadata)   durable across "restarts"
     lock = threading.Lock()
     drop_ack_once = set()  # ledger keys whose NEXT successful put is applied but its ACK is lost
+    deny_get = set()  # keys whose reads fail with AccessDenied (a lookup error, never a miss)
 
 
 class Body:
@@ -75,6 +76,8 @@ class FakeS3:
 
     def get_object(self, Bucket, Key):
         with R2.lock:
+            if Key in R2.deny_get:
+                raise Err('AccessDenied', 403)
             if Key not in R2.objects:
                 raise Err('NoSuchKey', 404)
             b, etag, md = R2.objects[Key]
@@ -122,7 +125,7 @@ class FakeDict:
         return True
 
 
-UPSTREAM = {'calls': []}
+UPSTREAM = {'calls': [], 'at_send': {}, 'keys': ()}
 
 
 def upstream(request):
@@ -139,6 +142,11 @@ def upstream(request):
     usage = [int(m[1]), int(m[2])] if m else [1_000_000, 60_000]
     out = {'candidates': [{'content': {'role': 'model', 'parts': [{'text': 'PAYLOAD-SENTINEL ' + text}]}, 'finishReason': 'STOP'}],
            'usageMetadata': {'promptTokenCount': usage[0], 'candidatesTokenCount': usage[1], 'totalTokenCount': sum(usage)}}
+    if 'EXACT' in text:  # exact-mode proof: provider response id, and the ledger state at the instant of the provider send
+        out['responseId'] = 'respExact' + str(len(UPSTREAM['calls']))
+        UPSTREAM['at_send'][text] = tuple(
+            round(sum(a['charged_bound_usd'] for a in json.loads(R2.objects[k][0]).get('attempts', {}).values()), 6) if k in R2.objects else None
+            for k in UPSTREAM['keys'])
     return httpx.Response(200, json=out, headers={'content-type': 'application/json'})
 
 
@@ -448,6 +456,282 @@ try:
         check('missing scoped token does not fall back to ambient credentials', False)
 finally:
     boto3.client = saved_client
+
+# ---------------- 10. M15 scoped exact-hash mode (CTO GO C0ALZJHGE49 thread 1794677380.515009 ts 1795301055.769519) ----------------
+# Fakes: prefix-scoped sessions live in the box's Modal Dict (as the controller arms them); boto3.Session is faked so the credentials
+# every scoped client actually resolves can be asserted; boto3.client is counted so ANY application-signer client built by an exact
+# proxy for fixtures, staging or ledgers is caught.
+import hashlib as _hl
+import io as _io
+import time as _time
+
+EX_HEAD = 'd' * 40
+EX_BOX, EX2_BOX, EX3_BOX, NS_BOX = 'rtbl-dddddddddddddddd-565656', 'rtbl-eeeeeeeeeeeeeeee-676767', 'rtbl-ffffffffffffffff-898989', 'rtbl-9999999999999999-787878'
+EX_HOST, NS_HOST = 'rtb-pool-13-141414', 'rtb-pool-14-151515'
+APPROVAL = 'C0ALZJHGE49/1795301055.769519'
+
+
+def learn(text):
+    _, lc = boot(None)
+    return call(lc, text).json()['key']
+
+
+def entry(key):
+    parts = key.split('/')
+    model, op = parts[5].rsplit('.', 1)
+    return {'hash': parts[6][:-4], 'provider': parts[3], 'model': model, 'operation': op, 'canonical_key': key}
+
+
+K_OK, K_TWIN, K_LK, K_NA = learn('EXACT-OK'), learn('EXACT-TWIN SLOW'), learn('EXACT-LOOKUP'), learn('EXACT-NOT-APPROVED')
+H_NA = entry(K_NA)['hash']
+MDIR = Path(tempfile.mkdtemp())
+
+
+def manifest_for(head, keys, name):
+    p = MDIR / name
+    p.write_text(json.dumps({'version': 1, 'head': head, 'approval_ref': APPROVAL, 'hashes': [entry(k) for k in keys]}))
+    return p
+
+
+MAN_PATH = manifest_for(EX_HEAD, [K_OK, K_TWIN, K_LK], 'a.json')
+MAN = H.load_exact_manifest(MAN_PATH, EX_HEAD)
+check('exact manifest: full hashes, canonical keys bound to provider/model/operation/hash', set(MAN['entries']) == {K_OK, K_TWIN, K_LK}
+      and all(len(e['hash']) == 64 for e in MAN['entries'].values()))
+for why, mutate in (('prefix hash', lambda x: x['hashes'][0].__setitem__('hash', x['hashes'][0]['hash'][:12])),
+                    ('wildcard key', lambda x: x['hashes'][0].__setitem__('canonical_key', K_OK.replace(entry(K_OK)['hash'], '*'))),
+                    ('head mismatch', lambda x: x.__setitem__('head', 'e' * 40)),
+                    ('empty set', lambda x: x.__setitem__('hashes', [])),
+                    ('unknown field', lambda x: x.__setitem__('extra', 1)),
+                    ('duplicate hash', lambda x: x['hashes'].append(dict(x['hashes'][0])))):
+    doc = json.loads(MAN_PATH.read_text())
+    mutate(doc)
+    bad = MDIR / 'bad.json'
+    bad.write_text(json.dumps(doc))
+    try:
+        H.load_exact_manifest(bad, EX_HEAD)
+        check('exact manifest refuses ' + why, False)
+    except ValueError as error:
+        check('exact manifest refuses ' + why, 'QA_EXACT_MANIFEST' in str(error), str(error)[:50])
+
+EX_IDS = dict(ids_for(EX_BOX, EX_HOST, head=EX_HEAD), exact=MAN)
+EX2_IDS = dict(ids_for(EX2_BOX, EX_HOST, head=EX_HEAD), exact=MAN)   # second lease, same physical box + head
+EX3_IDS = dict(ids_for(EX3_BOX, EX_HOST, head=EX_HEAD), exact=MAN)   # third lease: no reclaim of a completed earlier claim
+NS_IDS = dict(ids_for(NS_BOX, NS_HOST, head='c' * 40), exact=H.load_exact_manifest(manifest_for('c' * 40, [K_OK], 'ns.json'), 'c' * 40))
+CREDS, ENV_CLIENTS = [], []
+
+
+class FakeSession:
+    def __init__(self, botocore_session=None, **_):
+        self.bs = botocore_session
+
+    def client(self, *a, **kw):
+        c = self.bs.get_credentials().get_frozen_credentials()
+        CREDS.append((c.access_key, c.secret_key, c.token, kw.get('endpoint_url')))
+        return FakeS3()
+
+
+def arm(ids, kinds=('read', 'write'), exp=None, digest=None, lease=None):
+    store = FakeDict.stores.setdefault(ids['dict'], {})
+    for kind in kinds:
+        store['scoped-session/' + kind] = {'kind': kind, 'bucket': 'heydonna-qa', 'account': 'a' * 32, 'access': 'SESS-ACCESS-' + kind,
+                                           'secret': 'SESS-SECRET', 'token': 'SESS-TOKEN', 'exp': exp or int(_time.time()) + 300,
+                                           'manifest_digest': digest or ids['exact']['digest'], 'lease': lease or ids['lease']}
+
+
+def call_x(client, text, rid='req-exact-1', section='proofread'):
+    body = {'contents': [{'role': 'user', 'parts': [{'text': text}]}], 'generationConfig': {'maxOutputTokens': 65536}}
+    hdr = {'X-Upstream-Base': 'https://aiplatform.googleapis.com', 'Authorization': 'Bearer stub',
+           'x-heydonna-request-id': rid, 'x-heydonna-section-type': section}
+    return client.post('/v1beta1/projects/p/locations/global/publishers/google/models/gemini-3.8-flash:generateContent',
+                       content=json.dumps(body), headers=hdr)
+
+
+saved_session, saved_client_ex = boto3.Session, boto3.client
+boto3.Session = FakeSession
+boto3.client = lambda *a, **k: (ENV_CLIENTS.append(k.get('aws_access_key_id')) or FakeS3())
+try:
+    UPSTREAM['keys'] = (EX_IDS['box_key'], EX_IDS['attempt_key'])
+    arm(EX_IDS)
+    me, ce = boot(EX_IDS, box=EX_BOX)
+    me._QA_EXACT_SESSION_WAIT_S = 1
+    hz = ce.get('/_healthz').json()
+    check('exact: healthz reports the baked manifest digest', hz.get('qa_onmiss') is True and hz.get('qa_exact_digest') == MAN['digest'], str(hz)[:80])
+    # a. nonmember: refused BEFORE pricing, claim or provider I/O, with its full hash
+    r = call(ce, 'EXACT-NOT-APPROVED')
+    check('exact: nonmember miss refused with its FULL hash, zero upstream, zero reservation',
+          r.status_code == 424 and r.json().get('error') == 'QA_ONMISS_NOT_APPROVED' and H_NA in r.json().get('detail', '')
+          and n_calls('EXACT-NOT-APPROVED') == 0 and committed(EX_IDS['box_key']) == 0 and committed(EX_IDS['attempt_key']) == 0,
+          str(r.status_code) + ' ' + r.text[:90])
+    r = call(ce, 'EXACT-NOT-APPROVED', model='gemini-9-ultra')
+    check('exact: an unpriced model nonmember is refused as NOT_APPROVED first (no pricing attempted)', r.status_code == 424
+          and r.json().get('error') == 'QA_ONMISS_NOT_APPROVED' and n_calls('EXACT-NOT-APPROVED') == 0)
+    # b. lookup failure is NOT a miss (the stock proxy treats a failed replay read as one)
+    R2.deny_get.add(K_LK)
+    r = call(ce, 'EXACT-LOOKUP')
+    R2.deny_get.discard(K_LK)
+    check('exact: a 403 on the replay lookup is never a miss: typed 503 QA_ONMISS_LOOKUP_UNCERTAIN, zero upstream, zero reservation',
+          r.status_code == 503 and r.json().get('error') == 'QA_ONMISS_LOOKUP_UNCERTAIN' and n_calls('EXACT-LOOKUP') == 0
+          and committed(EX_IDS['box_key']) == 0, str(r.status_code) + ' ' + r.text[:90])
+    codes = [x['code'] for x in ledger(EX_IDS['box_key']).get('refused_calls', [])]
+    s_x = H.qa_finish(FakeS3(), 'heydonna-qa', 'x', False, publisher, EX_IDS)
+    check('exact: report carries the typed refusal reason and the refused full hash',
+          'QA_ONMISS_NOT_APPROVED' in codes and 'QA_ONMISS_LOOKUP_UNCERTAIN' in codes and s_x['terminal_reason'] == 'QA_ONMISS_NOT_APPROVED'
+          and H_NA in s_x['onmiss']['refused_hashes'] and s_x['fixtures_written'] == [], str(codes))
+    # c. approved member: both CAS reservations BEFORE the single send; join identity recorded; scoped creds only
+    UPSTREAM['keys'] = (EX2_IDS['box_key'], EX2_IDS['attempt_key'])
+    arm(EX2_IDS)
+    m2e, c2e = boot(EX2_IDS, box=EX2_BOX)
+    m2e._QA_EXACT_SESSION_WAIT_S = 1
+    r = call_x(c2e, 'EXACT-OK')
+    at = UPSTREAM['at_send'].get('EXACT-OK', (None, None))
+    check('exact: approved hash dispatched exactly once, 200', r.status_code == 200 and n_calls('EXACT-OK') == 1 and 'PAYLOAD-SENTINEL' in r.text, str(r.status_code))
+    check('exact: box-lifetime AND attempt reservations were both durable at the instant of the provider send',
+          all(v and v > 0 for v in at), str(at))
+    row = [a for a in ledger(EX2_IDS['attempt_key'])['attempts'].values() if a.get('onmiss_key') == K_OK][0]
+    check('exact: claim binds approval ref + manifest digest, ingress request id and section',
+          row['approval_ref'] == APPROVAL and row['manifest_digest'] == MAN['digest'] and row['ingress_request_id'] == 'req-exact-1'
+          and row['section_type'] == 'proofread', json.dumps({k: row.get(k) for k in ('approval_ref', 'ingress_request_id')}))
+    check('exact: provider dispatch id (response id) + upstream status recorded BEFORE settlement, settled from usage',
+          row['dispatch']['upstream_status'] == 200 and row['dispatch']['provider_response_ids'][0].startswith('respExact') and row['settled'],
+          json.dumps(row.get('dispatch')))
+    # d. concurrent twins of an approved hash: one send
+    res = {}
+
+    def twin(i):
+        tm, tc = boot(EX2_IDS, box=EX2_BOX)
+        tm._QA_ONMISS_WAIT_S = 30  # the scoped clients add ledger round trips; production waits 960 s
+        res[i] = call_x(tc, 'EXACT-TWIN SLOW', rid='req-twin-%d' % i)
+    ts = [threading.Thread(target=twin, args=(i,)) for i in (0, 1)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    check('exact: concurrent twins of an approved hash send exactly once', n_calls('EXACT-TWIN') == 1 and sorted(x.status_code for x in res.values()) == [200, 200],
+          str([x.status_code for x in res.values()]) + ' upstream=' + str(n_calls('EXACT-TWIN')))
+    # e. zero retries / no reclaim: a NEW lease never re-dispatches an earlier lease's completed approved claim
+    UPSTREAM['keys'] = (EX3_IDS['box_key'], EX3_IDS['attempt_key'])
+    arm(EX3_IDS)
+    m3e, c3e = boot(EX3_IDS, box=EX3_BOX)
+    m3e._QA_EXACT_SESSION_WAIT_S = 1
+    r = call_x(c3e, 'EXACT-OK')
+    check('exact: no stock reclaim of an earlier lease completed claim (typed 424 NO_RESEND, still 1 upstream)',
+          r.status_code == 424 and r.json().get('error') == 'QA_ONMISS_NO_RESEND' and n_calls('EXACT-OK') == 1, str(r.status_code) + ' ' + r.text[:80])
+    # f. scope denial / no fallback: missing, expired, other-run and other-lease sessions fail closed and no application signer is used
+    sessions = (('no session armed', {}), ('expired session', {'exp': int(_time.time()) - 5}),
+                ('session for another manifest', {'digest': '0' * 64}), ('session for another lease', {'lease': 'f' * 12}))
+    for why, kw in sessions:
+        FakeDict.stores.pop(NS_IDS['dict'], None)
+        if why != 'no session armed':
+            arm(NS_IDS, **kw)
+        mn, cn = boot(NS_IDS, box=NS_BOX)
+        mn._QA_EXACT_SESSION_WAIT_S = 1
+        before = n_calls('EXACT-OK')
+        r = call(cn, 'EXACT-OK')
+        check('exact scope: ' + why + ' fails closed (typed 503, zero upstream, no fallback)',
+              r.status_code == 503 and r.json().get('error') == 'QA_ONMISS_LOOKUP_UNCERTAIN' and n_calls('EXACT-OK') == before,
+              str(r.status_code) + ' ' + r.text[:80])
+    check('exact scope: every scoped client resolved ONLY the armed session credentials; no application-signer client was built',
+          CREDS and all(c[0].startswith('SESS-ACCESS-') and c[1] == 'SESS-SECRET' and c[2] == 'SESS-TOKEN' and c[3] == 'https://' + 'a' * 32 + '.r2.cloudflarestorage.com'
+                        for c in CREDS) and not ENV_CLIENTS, 'creds=%d env_clients=%s' % (len(CREDS), ENV_CLIENTS))
+    # g. report: unchanged guarded publisher, approved + settled only, readback, join; a conflicting older object is not proof
+    R2.objects[K_TWIN] = (b'older different bytes', '"7"', {'response-status': '200'})
+    rogue_key = 'fixtures/llm/v2/gemini_vertex/aiplatform.googleapis.com/rogue.generate/' + '9' * 64 + '.bin'
+    sx = H.qa_finish(FakeS3(), 'heydonna-qa', 'x', False, publisher, EX2_IDS)
+    ok_row = [x for x in sx['readback'] if x['key'] == K_OK]
+    tw_row = [x for x in sx['readback'] if x['key'] == K_TWIN]
+    check('exact report: approved settled capture published PUT-if-absent and read back MATCH (bytes, status, content type)',
+          sx['fixtures_written'] == [K_OK] and ok_row and ok_row[0]['status'] == 'MATCH', json.dumps(sx['readback'])[:160])
+    check('exact report: a same-key older object with different bytes is not capture proof (MISMATCH, typed terminal), valid capture kept',
+          tw_row and tw_row[0]['status'] == 'MISMATCH' and R2.objects[K_TWIN][0] == b'older different bytes'
+          and sx['terminal_reason'] == 'QA_ONMISS_READBACK_MISMATCH' and sx['exact']['readback_match'] == 1, str(sx['terminal_reason']))
+    jr = [x for x in sx['join'] if x['key'] == K_OK]
+    check('exact report: join carries ingress request id, section and provider dispatch id',
+          jr and jr[0]['ingress_request_id'] == 'req-exact-1' and jr[0]['provider_dispatch']['provider_response_ids'] and jr[0]['settled'], json.dumps(jr)[:120])
+    stage_key = [k for k in R2.objects if k.startswith('staging/llm-capture/' + EX2_IDS['stage_run'] + '/') and k.endswith(K_OK)][0]
+    R2.objects[stage_key.replace(K_OK, rogue_key)] = (b'{"candidates":[{"finishReason":"STOP"}]}', '"9"', {'canonical-key': rogue_key, 'response-status': '200'})
+    sx2 = H.qa_finish(FakeS3(), 'heydonna-qa', 'x', False, publisher, EX2_IDS)
+    check('exact report: a staged object that is not an approved, settled claim is never published (typed STAGING_MISMATCH)',
+          rogue_key not in R2.objects and rogue_key in sx2['unapproved_staged'] and sx2['terminal_reason'] == 'QA_ONMISS_STAGING_MISMATCH', str(sx2['terminal_reason']))
+    try:
+        H.emit_report(sx2, 'x')
+        check('exact report: terminal raises (verdict fail, never PASS)', False)
+    except RuntimeError as error:
+        check('exact report: terminal raises (verdict fail, never PASS)', 'QA_ONMISS_TERMINAL QA_ONMISS_STAGING_MISMATCH' in str(error))
+    # h. session minting/arming/report-session unit checks (no network, no Modal)
+    mint_calls = []
+    saved_mint = H._mint_session
+    H._mint_session = lambda paths, actions, ttl: (mint_calls.append((list(paths), list(actions), ttl)) or (
+        dict(zip(H.SCOPED_FIXTURE_R2_ENV, ('heydonna-qa', 'a' * 32, 'acc', 'sec', 'tok'))), int(_time.time()) + ttl))
+    try:
+        stage = 'staging/llm-capture/' + EX2_IDS['stage_run'] + '/'
+        proxy_rows = H.mint_exact_sessions('proxy', EX2_IDS, MAN)
+        check('mint proxy: read = fixture store + this run staging, GetObject only; write = staging + the two ledger objects only; 5 minutes',
+              mint_calls[0] == (['fixtures/llm/v2/', stage], ['GetObject'], 300)
+              and mint_calls[1] == ([stage, EX2_IDS['box_key'], EX2_IDS['attempt_key']], ['GetObject', 'PutObject'], 300)
+              and not any(p.startswith('fixtures/') for p in mint_calls[1][0]) and set(proxy_rows) == {'read', 'write'}
+              and all(r['manifest_digest'] == MAN['digest'] and r['lease'] == EX2_IDS['lease'] for r in proxy_rows.values()), str(mint_calls[:2]))
+        mint_calls.clear()
+        H.mint_exact_sessions('report', EX2_IDS, MAN)
+        check('mint report: staging + approved canonical keys + the two ledger objects; List/Get/Put; 5 minutes',
+              mint_calls == [([stage] + sorted(MAN['entries']) + [EX2_IDS['box_key'], EX2_IDS['attempt_key']], ['ListObjectsV2', 'GetObject', 'PutObject'], 300)], str(mint_calls)[:100])
+    finally:
+        H._mint_session = saved_mint
+    expired_payload = json.dumps({k: {'kind': k, 'bucket': 'heydonna-qa', 'account': 'a' * 32, 'access': 'x', 'secret': 'y', 'token': 'z',
+                                      'exp': int(_time.time()) - 5, 'manifest_digest': MAN['digest'], 'lease': H.identity(EX_BOX)} for k in ('read', 'write')})
+    saved_stdin = sys.stdin
+    sys.stdin = _io.StringIO(expired_payload)
+    try:
+        H.arm_exact_sessions(EX_BOX, MAN_PATH)
+        check('arm: an expired session is refused before any Modal write', False)
+    except ValueError as error:
+        check('arm: an expired session is refused before any Modal write', 'QA_SCOPED_ARM_INVALID' in str(error))
+    finally:
+        sys.stdin = saved_stdin
+    os.environ.update({'MODAL_TOKEN_ID': 'tid-stub', 'MODAL_TOKEN_SECRET': 'tsecret-stub'})
+    real_host = socket.gethostname
+    socket.gethostname = lambda: EX_HOST
+    try:
+        head_manifest = manifest_for(HEAD1, [K_OK], 'head.json')
+        for why, args, needle in (('no session file', (None,), 'QA_SCOPED_R2_REFUSED'),
+                                  ('missing session file', (str(MDIR / 'absent.json'),), 'QA_SCOPED_R2_UNAVAILABLE')):
+            try:
+                H.capture_report(EX_BOX, APP, MDIR / 'rep.json', False, False, 2.0, True, False, str(head_manifest), *args)
+                check('exact report container: ' + why + ' refuses (no shared-secret fallback)', False)
+            except RuntimeError as error:
+                check('exact report container: ' + why + ' refuses (no shared-secret fallback)', needle in str(error), str(error)[:70])
+        sess = MDIR / 'report-session.json'
+        sess.write_text(json.dumps({'kind': 'report', 'bucket': 'heydonna-qa', 'account': 'a' * 32, 'access': 'x', 'secret': 'y', 'token': 'z',
+                                    'exp': int(_time.time()) - 5, 'manifest_digest': MAN['digest'], 'lease': EX2_IDS['lease']}))
+        try:
+            H.load_report_session(sess, EX2_IDS)
+            check('exact report container: an expired session refuses and the session file is deleted', False)
+        except RuntimeError as error:
+            check('exact report container: an expired session refuses and the session file is deleted', 'UNAVAILABLE' in str(error) and not sess.exists())
+        try:
+            H.capture_report(EX_BOX, APP, MDIR / 'rep.json', False, False, 2.0, False, False, str(head_manifest), None)
+            check('--exact-manifest without --on-miss is refused', False)
+        except RuntimeError as error:
+            check('--exact-manifest without --on-miss is refused', 'requires --on-miss' in str(error))
+    finally:
+        socket.gethostname = real_host
+    receipt = {'bucket': 'heydonna-qa', 'list_and_read': True, 'first_conditional_put': 'created', 'second_conditional_put': 'precondition_failed',
+               'before': {'sha256': 'a', 'etag': 'b'}, 'after': {'sha256': 'a', 'etag': 'b'}, 'out_of_scope_get': 'HTTP 403 AccessDenied',
+               'canary_objects_removed': 3, 'modal_teardown': 'verified no active canary app', 'report_secret_mount': 'ephemeral scoped session only',
+               'tooling_sha256': _hl.sha256(HELPER.read_bytes()).hexdigest(), 'at': int(_time.time())}
+    for why, mutate, expect in (('a passed canary of this controller', lambda x: None, True), ('another controller file', lambda x: x.__setitem__('tooling_sha256', '0' * 64), False),
+                                ('an older-than-48h canary', lambda x: x.__setitem__('at', int(_time.time()) - 49 * 3600), False),
+                                ('a canary without the denial proof', lambda x: x.__setitem__('out_of_scope_get', 'none'), False),
+                                ('a canary whose second PUT changed bytes', lambda x: x.__setitem__('after', {'sha256': 'c', 'etag': 'b'}), False)):
+        doc = dict(receipt)
+        mutate(doc)
+        rp = MDIR / 'receipt.json'
+        rp.write_text(json.dumps(doc))
+        try:
+            H.check_canary_receipt(rp)
+            ok = True
+        except ValueError:
+            ok = False
+        check('arming prerequisite: ' + ('accepts ' if expect else 'rejects ') + why, ok is expect)
+finally:
+    boto3.Session, boto3.client = saved_session, saved_client_ex
 
 shutil.rmtree(WORK, ignore_errors=True)
 print('ONMISS_STUB_PROOF ' + ('PASS' if not FAILS else 'FAIL ' + ','.join(FAILS)))

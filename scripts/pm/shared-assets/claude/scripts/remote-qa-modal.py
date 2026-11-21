@@ -105,6 +105,66 @@ def onmiss_dict_name(box):
 
 ONMISS_CAP_USD = 3
 
+# ---- M15 scoped exact-hash capture-on-miss (CTO GO C0ALZJHGE49 thread 1794677380.515009 ts 1795301055.769519; Option A custody
+# ts 1795301727.470839). Opt-in ONLY through --exact-manifest; stock --on-miss and every storage default are untouched. ----------
+EXACT_MANIFEST_MAX_BYTES = 16384
+EXACT_MANIFEST_MAX_HASHES = 4
+EXACT_SESSION_TTL_S = 300        # fixture and report sessions are prefix-scoped and live five minutes
+EXACT_SESSION_REFRESH_S = 100    # the controller re-mints this often while a leg runs; a stopped controller expires inside 5 minutes
+EXACT_SESSION_WAIT_S = 60        # a proxy fixture client waits this long for its first armed session, then fails closed
+CANARY_MAX_AGE_S = 48 * 3600
+EXACT_ENTRY_KEYS = {'hash', 'provider', 'model', 'operation', 'canonical_key'}
+EXACT_TERMINAL_CODES = ('QA_ONMISS_NOT_APPROVED', 'QA_ONMISS_LOOKUP_UNCERTAIN', 'QA_ONMISS_FIXTURE_EXISTS')
+
+
+def load_exact_manifest(path, head=None):
+    """Per-run exact-hash approval. Pure and fail-closed: nothing but this file widens what may be dispatched live.
+    Shape: {version:1, head:<40hex>, approval_ref, hashes:[{hash, provider, model, operation, canonical_key}]}; full 64-hex
+    hashes only (no prefixes or wildcards) and the canonical key must embed exactly that provider, model, operation and hash."""
+    p = Path(path)
+    if p.is_symlink() or not p.is_file() or p.stat().st_size > EXACT_MANIFEST_MAX_BYTES:
+        raise ValueError('QA_EXACT_MANIFEST_INVALID: unreadable, symlink or too large')
+    raw = p.read_bytes()
+    try:
+        data = json.loads(raw.decode('utf-8'))
+    except ValueError:
+        raise ValueError('QA_EXACT_MANIFEST_INVALID: not JSON') from None
+    if (not isinstance(data, dict) or set(data) != {'version', 'head', 'approval_ref', 'hashes'} or data['version'] != 1
+            or not isinstance(data['head'], str) or not re.fullmatch(r'[0-9a-f]{40}', data['head'])
+            or not isinstance(data['approval_ref'], str) or not re.fullmatch(r'[A-Za-z0-9._:/@-]{8,200}', data['approval_ref'])
+            or not isinstance(data['hashes'], list) or not 1 <= len(data['hashes']) <= EXACT_MANIFEST_MAX_HASHES):
+        raise ValueError('QA_EXACT_MANIFEST_INVALID: shape')
+    if head is not None and data['head'] != head:
+        raise ValueError('QA_EXACT_MANIFEST_HEAD_MISMATCH')
+    entries, seen = {}, set()
+    for row in data['hashes']:
+        if not isinstance(row, dict) or set(row) != EXACT_ENTRY_KEYS or not all(isinstance(v, str) for v in row.values()):
+            raise ValueError('QA_EXACT_MANIFEST_INVALID: entry shape')
+        digest, provider, model, operation, key = (row[k] for k in ('hash', 'provider', 'model', 'operation', 'canonical_key'))
+        if (not re.fullmatch(r'[0-9a-f]{64}', digest) or not re.fullmatch(r'[a-z0-9_]{3,40}', provider)
+                or not re.fullmatch(r'[A-Za-z0-9._-]{3,80}', model) or not re.fullmatch(r'[a-z0-9_]{3,20}', operation)
+                or not re.fullmatch('fixtures/llm/v2/' + re.escape(provider) + r'/[a-z0-9.-]{1,120}/' + re.escape(model) + r'\.'
+                                    + re.escape(operation) + '/' + digest + r'\.bin', key)
+                or key in entries or digest in seen):
+            raise ValueError('QA_EXACT_MANIFEST_INVALID: entry')
+        seen.add(digest)
+        entries[key] = {'hash': digest, 'provider': provider, 'model': model, 'operation': operation}
+    return {'digest': hashlib.sha256(raw).hexdigest(), 'head': data['head'], 'approval_ref': data['approval_ref'],
+            'entries': entries}
+
+
+def load_exact_ids(path):
+    """Non-secret identities the box wrote at overlay time (lease, ledger keys, staging run, manifest digest)."""
+    p = Path(path)
+    if p.is_symlink() or not p.is_file() or p.stat().st_size > 16384:
+        raise ValueError('QA_EXACT_IDS_INVALID')
+    ids = json.loads(p.read_text())
+    keys = ('lease', 'spend_box', 'head', 'dict', 'box_key', 'attempt_key', 'stage_run', 'manifest_digest')
+    if (not isinstance(ids, dict) or any(not isinstance(ids.get(k), str) or not re.fullmatch(r'[A-Za-z0-9._/-]{1,120}', ids[k])
+                                         for k in keys) or not re.fullmatch(r'[0-9a-f]{64}', ids['manifest_digest'])):
+        raise ValueError('QA_EXACT_IDS_INVALID')
+    return ids
+
 
 def onmiss_identity(root, box):
     """Server-side spend identities for capture-on-miss (CTO ts 1793378243.332849): $3 per PHYSICAL box lifetime and per
@@ -133,13 +193,19 @@ def onmiss_identity(root, box):
             'stage_run': 'remote-qa-onmiss-' + identity(box) + '-' + head[:12]}
 
 
-def onmiss_effective(root, box, onmiss):
-    """ids when capture-on-miss can bind a lifetime spend identity; otherwise None = strict replay (fail safe, visible)."""
+def onmiss_effective(root, box, onmiss, exact=None):
+    """ids when capture-on-miss can bind a lifetime spend identity; otherwise None = strict replay (fail safe, visible).
+    An --exact-manifest run NEVER degrades: an invalid manifest, head mismatch or unbound identity refuses the run."""
     if not onmiss:
         return None
     try:
-        return onmiss_identity(root, box)
+        ids = onmiss_identity(root, box)
+        if exact:
+            ids['exact'] = load_exact_manifest(exact, ids['head'])
+        return ids
     except Exception as error:
+        if exact:
+            raise
         print('QA_ONMISS_DISABLED reason=' + sanitize(error, limit=160) + ' fallback=strict-replay')
         return None
 
@@ -160,6 +226,8 @@ def onmiss_summary(box_state, attempt_state, lease):
     elif any(states.get(s) for s in ('unknown', 'upstream_error', 'completed_unstored', 'reserved')) or \
             any(c in ('QA_ONMISS_NO_RESEND', 'QA_ONMISS_IN_FLIGHT_TIMEOUT') for c in codes):
         reason = 'QA_ONMISS_NO_RESEND'
+    elif any(c in EXACT_TERMINAL_CODES for c in codes):
+        reason = next(c for c in codes if c in EXACT_TERMINAL_CODES)
     elif refused:
         reason = 'QA_ONMISS_INELIGIBLE'
     elif unsettled:
@@ -172,6 +240,7 @@ def onmiss_summary(box_state, attempt_state, lease):
             'charged_upper_bound_usd': sum(r.get('charged_bound_usd', 0) for r in attempts.values()),
             'unsettled_attempts': unsettled,
             'onmiss': {'request_states': states, 'cap_usd': ONMISS_CAP_USD,
+                       'refused_hashes': sorted({r.get('hash') for r in refused if r.get('hash')}),
                        'box_lifetime_committed_usd': committed(box_state), 'box_halted': bool(box_state.get('halted')),
                        'attempt_committed_usd': committed(attempt_state), 'attempt_halted': bool(attempt_state.get('halted')),
                        'payloads': 'box-local Modal Dict for serving + staged and published canonical PUT-if-absent (S161)'},
@@ -181,6 +250,8 @@ def onmiss_summary(box_state, attempt_state, lease):
 def qa_finish(s3, bucket, run_id, capture, publisher, onmiss=None):
     """Ledger read + canonical publication (capture lane, and capture-on-miss per S161: valid replies PUT-if-absent)."""
     import json
+    if onmiss and onmiss.get('exact'):
+        return qa_finish_exact(s3, bucket, publisher, onmiss)
     if onmiss:
         def read(key):
             try:
@@ -242,6 +313,99 @@ def qa_finish(s3, bucket, run_id, capture, publisher, onmiss=None):
     ledger['charged_upper_bound_usd'] = sum(row['charged_bound_usd'] for row in ledger['attempts'].values())
     ledger['unsettled_attempts'] = sum(not row['settled'] for row in ledger['attempts'].values())
     return ledger
+
+
+def exact_readback(s3, bucket, staged_key, canonical_key):
+    """After the UNCHANGED publisher ran: the canonical object must equal this run's staged object byte for byte, with the same
+    response status and content type. An absent object, or an older same-key object with different bytes, is not capture proof."""
+    try:
+        staged = s3.get_object(Bucket=bucket, Key=staged_key)
+        staged_body = staged['Body'].read()
+        canonical = s3.get_object(Bucket=bucket, Key=canonical_key)
+        canonical_body = canonical['Body'].read()
+    except Exception as error:
+        return {'key': canonical_key, 'status': 'UNREADABLE', 'error': type(error).__name__}
+    smeta, cmeta = staged.get('Metadata') or {}, canonical.get('Metadata') or {}
+    row = {'key': canonical_key, 'bytes': len(canonical_body), 'sha256': hashlib.sha256(canonical_body).hexdigest(),
+           'staged_sha256': hashlib.sha256(staged_body).hexdigest(), 'etag': canonical.get('ETag'),
+           'response_status': cmeta.get('response-status'), 'staged_response_status': smeta.get('response-status'),
+           'content_type': canonical.get('ContentType'), 'staged_content_type': staged.get('ContentType')}
+    same = (row['bytes'] > 0 and row['sha256'] == row['staged_sha256']
+            and row['response_status'] == row['staged_response_status'] and str(row['response_status'] or '').startswith('2')
+            and row['content_type'] == row['staged_content_type'])
+    row['status'] = 'MATCH' if same else 'MISMATCH'
+    return row
+
+
+def qa_finish_exact(s3, bucket, publisher, onmiss):
+    """Exact-hash report. Publishes ONLY approved canonical keys whose staged object matches this run's settled claim (the staged
+    canonical-key metadata alone is never trusted), through the unchanged publisher (replace_allowlist=frozenset(), PUT-if-absent),
+    reads each canonical object back, and joins dispatch identity. Spend rows are read from the durable ledgers, never recomputed."""
+    import json
+    exact = onmiss['exact']
+    approved = exact['entries']
+    def read(key):
+        try:
+            return json.loads(s3.get_object(Bucket=bucket, Key=key)['Body'].read())
+        except Exception as error:
+            if getattr(error, 'response', {}).get('Error', {}).get('Code') not in ('NoSuchKey', '404', 'NotFound'):
+                raise
+            return {}
+    box_state, attempt_state = read(onmiss['box_key']), read(onmiss['attempt_key'])
+    summary = onmiss_summary(box_state, attempt_state, onmiss['lease'])
+    requests = {k: r for k, r in (attempt_state.get('requests') or {}).items() if r.get('lease') == onmiss['lease']}
+    attempts = attempt_state.get('attempts') or {}
+    plan, _ = publisher['collect_plan'](s3, bucket, onmiss['stage_run'])
+    matched, unmatched = [], []
+    for staged_key, canonical in plan:
+        row = requests.get(canonical) or {}
+        claim = attempts.get(row.get('ticket')) or {}
+        ok = (canonical in approved and row.get('state') == 'completed' and claim.get('lease') == onmiss['lease']
+              and claim.get('onmiss_key') == canonical and claim.get('hash') == approved[canonical]['hash']
+              and claim.get('settled') is True and not claim.get('usage_missing') and not claim.get('terminal_usage_unproven'))
+        (matched if ok else unmatched).append((staged_key, canonical))
+    written, counts, publication_error = [], (0, 0, 0), None
+    canonical_keys = {key for _, key in matched}
+    original_put = s3.put_object
+    def receipt_put(**kwargs):
+        response = original_put(**kwargs)
+        if kwargs.get('Key') in canonical_keys:
+            written.append(kwargs['Key'])
+        return response
+    s3.put_object = receipt_put
+    try:
+        if matched:
+            counts = publisher['publish_plan'](s3, bucket, matched, replace_allowlist=frozenset())
+    except Exception as error:
+        publication_error = type(error).__name__
+    finally:
+        s3.put_object = original_put
+    readback = [exact_readback(s3, bucket, staged_key, canonical) for staged_key, canonical in matched]
+    completed = {k for k, r in requests.items() if k in approved and r.get('state') == 'completed'}
+    join = []
+    for ticket, claim in attempts.items():
+        if claim.get('lease') == onmiss['lease'] and claim.get('onmiss_key') in approved:
+            join.append({'hash': claim.get('hash'), 'key': claim.get('onmiss_key'), 'ticket': ticket,
+                         'ingress_request_id': claim.get('ingress_request_id'), 'section_type': claim.get('section_type'),
+                         'provider_dispatch': claim.get('dispatch'), 'settled': claim.get('settled') is True})
+    reason = summary.get('terminal_reason')
+    if not reason:
+        if unmatched:
+            reason = 'QA_ONMISS_STAGING_MISMATCH'
+        elif publication_error:
+            reason = 'QA_ONMISS_PUBLICATION_FAILED'
+        elif any(r['status'] != 'MATCH' for r in readback):
+            reason = 'QA_ONMISS_READBACK_MISMATCH'
+        elif completed - canonical_keys:
+            reason = 'QA_ONMISS_CAPTURE_UNPROVEN'
+    summary.update(fixtures_written=sorted(set(written)), canonical_fixture_keys=sorted(canonical_keys),
+                   publication_counts=counts, publication_error=publication_error, readback=readback, join=join,
+                   unapproved_staged=sorted(key for _, key in unmatched),
+                   exact={'digest': exact['digest'], 'approval_ref': exact['approval_ref'], 'approved': sorted(approved),
+                          'captured': sorted(canonical_keys), 'readback_match': sum(r['status'] == 'MATCH' for r in readback)})
+    if reason:
+        summary.update(terminal_reason=reason, halted=True, halt_reason=summary.get('halt_reason') or reason)
+    return summary
 
 
 def chat_tools_present(root):
@@ -345,7 +509,7 @@ def lease_path(box):
     return ROOT / (box + '.json')
 
 
-def register(box, ttl, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmiss=False):
+def register(box, ttl, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmiss=False, exact_digest=None):
     if not 60 <= ttl <= 10800:
         raise ValueError('QA Modal TTL must be between 60 seconds and 3 hours')
     ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -353,7 +517,8 @@ def register(box, ttl, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmis
     receipt = {'box': box, 'created_at': int(time.time()), 'expires_at': int(time.time())+ttl,
                'apps': all_names(box), 'secret': 'heydonna-qa-'+identity(box), 'state': 'registered',
                'billable_tools': tool_policy(allow_billable_tools, tool_spend_cap_usd),
-               'llm_mode': 'capture-on-miss' if onmiss else 'strict-or-explicit-capture'}
+               'llm_mode': ('capture-on-miss-exact' if exact_digest else 'capture-on-miss') if onmiss else 'strict-or-explicit-capture',
+               'exact_manifest_sha256': exact_digest}
     with p.open('x') as f:
         os.chmod(p, 0o600)
         json.dump(receipt, f)
@@ -460,18 +625,31 @@ def ledger_source(box, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmis
         source_value = onmiss[k]
         if not isinstance(source_value, str) or not re.fullmatch(r'[A-Za-z0-9._/-]{1,120}', source_value):
             raise ValueError('Invalid capture-on-miss identity: ' + k)
+    exact = onmiss.get('exact')
+    if exact is not None and (not isinstance(exact, dict) or not re.fullmatch(r'[0-9a-f]{64}', str(exact.get('digest', '')))
+                              or not isinstance(exact.get('entries'), dict) or not exact['entries']):
+        raise ValueError('Invalid exact-hash approval')
+    exact_source = None if exact is None else {'digest': exact['digest'], 'approval_ref': exact['approval_ref'],
+                                               'entries': exact['entries']}
     return source + (QA_ONMISS_SOURCE.replace('__ONMISS_DICT__', repr(onmiss['dict']))
                      .replace('__ONMISS_LEASE__', repr(onmiss['lease']))
                      .replace('__ONMISS_SPEND_ID__', repr(onmiss['spend_box']))
                      .replace('__ONMISS_BOX_KEY__', repr(onmiss['box_key']))
                      .replace('__ONMISS_ATTEMPT_KEY__', repr(onmiss['attempt_key']))
                      .replace('__ONMISS_CAP_USD__', repr(ONMISS_CAP_USD))
-                     .replace('__ONMISS_RUN__', repr(onmiss['stage_run'])))
+                     .replace('__ONMISS_RUN__', repr(onmiss['stage_run']))
+                     .replace('__ONMISS_EXACT__', repr(exact_source))
+                     .replace('__SCOPED_BUCKET__', repr(SCOPED_FIXTURE_BUCKET))
+                     .replace('__EXACT_WAIT_S__', repr(EXACT_SESSION_WAIT_S))
+                     + (QA_ONMISS_EXACT_SOURCE if exact_source else ''))
 
 
-def overlay(root, box=None, capture=False, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmiss=False):
+def overlay(root, box=None, capture=False, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmiss=False, exact=None,
+            ids_out=None):
     if onmiss and capture:
         raise ValueError('--on-miss and --capture are exclusive')
+    if exact and not onmiss:
+        raise ValueError('--exact-manifest requires --on-miss')
     # Deployed tooling overlay, like the existing UI-only overlay. Persisted app sync follows proof.
     preflight = root/'scripts/e2e/local-repro-preflight.sh'
     text = preflight.read_text()
@@ -780,10 +958,18 @@ echo "QA_MODAL_DEPLOY_SECONDS=$((SECONDS-qa_deploy_started)) parallel=true"
         changes[p] = overlay_audit_secrets(p.read_text())
     if box:
         proxy = root/'modal/shared/llm_proxy_server.py'
-        ids = onmiss_effective(root, box, onmiss)
+        ids = onmiss_effective(root, box, onmiss, exact)
         if ids:
             print('QA_ONMISS_IDENTITY lease=' + ids['lease'] + ' spend_box=' + ids['spend_box'] + ' head=' + ids['head'][:12]
                   + ' cap_usd=' + str(ONMISS_CAP_USD) + ' store=' + ids['dict'])
+        if ids and ids.get('exact'):
+            print('QA_ONMISS_EXACT digest=' + ids['exact']['digest'] + ' approved=' + str(len(ids['exact']['entries']))
+                  + ' approval_ref=' + ids['exact']['approval_ref'])
+            if ids_out:
+                record = {k: ids[k] for k in ('lease', 'spend_box', 'head', 'dict', 'box_key', 'attempt_key', 'stage_run')}
+                record['manifest_digest'] = ids['exact']['digest']
+                record['canonical_keys'] = sorted(ids['exact']['entries'])
+                Path(ids_out).write_text(json.dumps(record, indent=2) + '\n')
         changes[proxy] = overlay_proxy(proxy.read_text(), box, capture, allow_billable_tools, tool_spend_cap_usd, ids)
     # Check every anchor before replacing any file; validate shell syntax on staged copies.
     staged = []
@@ -867,6 +1053,12 @@ def overlay_proxy(text, box, capture=False, allow_billable_tools=False, tool_spe
                    '            if capture_enabled:\n                record_capture_attempt(request_hash, upstream_resp.status_code, False, _proxy_request_id)\n')
     text = replace(text, '                    "capture_run_id": capture_run_id,\n',
                    '                    "capture_run_id": capture_run_id,\n                    **_qa_onmiss_health(),\n')
+    if onmiss and onmiss.get('exact'):
+        # Exact mode: the ingress identity reaches admission, and the dispatch identity is recorded BEFORE settlement.
+        text = replace(text, '_qa_onmiss_admit(provider, model, path, key, body_bytes)',
+                       '_qa_onmiss_admit(provider, model, path, key, body_bytes, request_id=_proxy_request_id, section_type=_proxy_section_type)')
+        text = replace(text, '        _qa_settle(qa_ticket, raw)\n',
+                       '        _qa_exact_note_dispatch(qa_ticket, upstream_resp, raw)\n        _qa_settle(qa_ticket, raw)\n')
     return text
 
 
@@ -1128,6 +1320,9 @@ _QA_ONMISS_WAIT_S = 960  # >= the proxy's 900s LLM upstream timeout; bounded, ne
 _QA_LEDGER_KEYS = [_QA_ONMISS_BOX_KEY, _QA_ONMISS_ATTEMPT_KEY]
 _QA_ONMISS_OPS = (":generateContent", ":streamGenerateContent", "/messages", "/chat/completions")
 _QA_ONMISS_GEMINI_FIELDS = {"contents", "systemInstruction", "generationConfig", "tools", "toolConfig", "safetySettings", "labels"}
+_QA_EXACT = __ONMISS_EXACT__  # None (stock --on-miss) or {"digest", "approval_ref", "entries": {canonical_key: {hash, provider, model, operation}}}
+_QA_SCOPED_BUCKET = __SCOPED_BUCKET__
+_QA_EXACT_SESSION_WAIT_S = __EXACT_WAIT_S__
 
 def _qa_onmiss_active():
     import re as _re
@@ -1139,6 +1334,7 @@ def _qa_onmiss_health():
     import re as _re
     return {"qa_onmiss": _qa_onmiss_active(), "qa_onmiss_cap_usd": _QA_ONMISS_CAP_USD,
             "overlay_baked": bool(_QA_ONMISS),
+            **({"qa_onmiss_exact": True, "qa_exact_digest": _QA_EXACT["digest"]} if _QA_EXACT else {}),
             "strict": bool(_strict_fixtures()), "capture": bool(_capture_mode()),
             "ci": os.environ.get("CI", "").lower() == "true",
             "suffix_ok": bool(_re.fullmatch(r"-qa-[0-9a-f]{12}", os.environ.get("MODAL_ENV_SUFFIX", "")))}
@@ -1190,13 +1386,14 @@ def _qa_onmiss_price(provider, model, path, body_bytes):
 def _qa_onmiss_note(key, provider, model, code, detail):
     def note(state):
         state.setdefault("refused_calls", []).append({"lease": _QA_ONMISS_LEASE, "key": key, "provider": provider,
+                                                      "hash": str(key).rsplit("/", 1)[-1].removesuffix(".bin")[:64],
                                                       "model": model, "code": code, "detail": detail[:200], "at": int(time.time())})
     try:
         _qa_update(note, keys=[_QA_ONMISS_BOX_KEY])
     except Exception:
         pass
 
-def _qa_onmiss_claim(key, provider, model, priced):
+def _qa_onmiss_claim(key, provider, model, priced, request_id="", section_type=""):
     """Atomic durable claim + priced reservation: attempt ledger first (exact-request single-flight), then box lifetime."""
     ticket = uuid.uuid4().hex
     bound = priced["bound"]
@@ -1206,7 +1403,8 @@ def _qa_onmiss_claim(key, provider, model, priced):
             prior = requests.get(key)
             if ticket in state["attempts"]:
                 return None  # our own write landed but its ACK was lost: the CAS retry sees it, never a second claim
-            reclaim = (prior and prior.get("state") == "completed" and prior.get("lease") != _QA_ONMISS_LEASE)
+            # Exact mode never reclaims an earlier lease's completed claim: one approved dispatch per exact hash, ever.
+            reclaim = (prior and prior.get("state") == "completed" and prior.get("lease") != _QA_ONMISS_LEASE and not _QA_EXACT)
             # A completed response from an EARLIER lease was deleted with that lease's local store: one fresh priced claim,
             # charged to the same attempt + box-lifetime caps (never a renewal). Same lease: reuse or no-resend only.
             if single_flight and prior and prior.get("state") != "refused" and not reclaim:
@@ -1226,6 +1424,9 @@ def _qa_onmiss_claim(key, provider, model, priced):
                 "reserved_usd": bound, "charged_bound_usd": bound, "settled": False, "billable_tools": False,
                 "reserved_search_cost_usd": 0, "per_search_usd": 0,
                 "input_rate_per_million": priced["input_rate"], "output_rate_per_million": priced["output_rate"]}
+            if _QA_EXACT:  # join identity, never payload text
+                state["attempts"][ticket].update(ingress_request_id=str(request_id)[:200], section_type=str(section_type)[:100],
+                                                 approval_ref=_QA_EXACT["approval_ref"], manifest_digest=_QA_EXACT["digest"])
             requests[key] = {"state": "reserved", "ticket": ticket, "lease": _QA_ONMISS_LEASE,
                              "provider": provider, "model": model, "at": int(time.time())}
             return None
@@ -1258,12 +1459,31 @@ def _qa_onmiss_mark(key, new_state, reason=""):
     except Exception:
         pass  # an unmarked claim stays "reserved", which already forbids any resend
 
-async def _qa_onmiss_admit(provider, model, path, key, body_bytes):
+async def _qa_onmiss_admit(provider, model, path, key, body_bytes, request_id="", section_type=""):
     """Returns a reservation ticket (dispatch once) or a typed terminal Response. Never a silent pending."""
     import asyncio
+    if _QA_EXACT:
+        # Exact allowlist FIRST: a nonmember reaches no pricing, claim, reservation or provider I/O.
+        denied = _qa_exact_gate(provider, model, key)
+        if denied:
+            print(denied)
+            await asyncio.to_thread(_qa_onmiss_note, key, provider, model, "QA_ONMISS_NOT_APPROVED", denied)
+            return _qa_onmiss_terminal(424, "QA_ONMISS_NOT_APPROVED", denied + "; no provider call", key)
     record = await asyncio.to_thread(_qa_onmiss_store_get, key)
     if record is not None:
         return _qa_onmiss_serve(record)
+    if _QA_EXACT:
+        try:
+            absent = await asyncio.to_thread(_qa_exact_confirm_miss, key)
+        except Exception as error:
+            detail = "authoritative replay lookup failed (" + type(error).__name__ + ")"
+            print("QA_ONMISS_LOOKUP_UNCERTAIN hash=" + _qa_exact_hash(key) + " " + detail)
+            await asyncio.to_thread(_qa_onmiss_note, key, provider, model, "QA_ONMISS_LOOKUP_UNCERTAIN", detail)
+            return _qa_onmiss_terminal(503, "QA_ONMISS_LOOKUP_UNCERTAIN", detail + "; a lookup error is not a miss; no provider call", key)
+        if not absent:
+            detail = "the exact fixture already exists; replay it, never dispatch"
+            await asyncio.to_thread(_qa_onmiss_note, key, provider, model, "QA_ONMISS_FIXTURE_EXISTS", detail)
+            return _qa_onmiss_terminal(409, "QA_ONMISS_FIXTURE_EXISTS", detail + "; no provider call", key)
     try:
         priced = _qa_onmiss_price(provider, model, path, body_bytes)
     except Exception as error:
@@ -1271,7 +1491,7 @@ async def _qa_onmiss_admit(provider, model, path, key, body_bytes):
         await asyncio.to_thread(_qa_onmiss_note, key, provider, model, "QA_ONMISS_INELIGIBLE", detail)
         return _qa_onmiss_terminal(424, "QA_ONMISS_INELIGIBLE", detail + "; no provider call", key)
     try:
-        outcome = await asyncio.to_thread(_qa_onmiss_claim, key, provider, model, priced)
+        outcome = await asyncio.to_thread(_qa_onmiss_claim, key, provider, model, priced, request_id, section_type)
     except Exception as error:
         return _qa_onmiss_terminal(503, "QA_ONMISS_LEDGER_UNAVAILABLE", type(error).__name__ + "; no provider call", key)
     if outcome[0] == "ticket":
@@ -1345,6 +1565,140 @@ def _persist_response_record(**fields):
         raise
     _qa_onmiss_mark(key, "completed")
     return True, "qa-onmiss-local:" + _QA_ONMISS_DICT, None
+
+'''
+
+
+QA_ONMISS_EXACT_SOURCE = r'''
+# ---- exact-hash scoped mode (_QA_EXACT is None for stock --on-miss): allowlist gate, prefix-scoped five-minute sessions armed in
+# this box's Modal Dict, and NO fallback to the application R2 signer for any fixture, staging or ledger client. -----------------
+if _QA_EXACT:
+    import boto3 as _qa_boto3
+    import threading as _qa_threading
+    _QA_EXACT_CTX = _qa_threading.local()
+    _QA_EXACT_CACHE = {}
+
+    def _qa_exact_hash(key):
+        return str(key).rsplit("/", 1)[-1].removesuffix(".bin")[:64]
+
+    def _qa_exact_gate(provider, model, key):
+        """Exact per-run allowlist: the full canonical key plus provider and model. None = approved."""
+        entry = _QA_EXACT["entries"].get(key)
+        if entry and entry["provider"] == provider and entry["model"] == model and entry["hash"] == _qa_exact_hash(key):
+            return None
+        return ("QA_ONMISS_NOT_APPROVED: request hash " + _qa_exact_hash(key) + " (" + str(provider) + "/" + str(model)
+                + ") is not on this run's exact approval list")
+
+    def _qa_scoped_session(kind):
+        """The prefix-scoped five-minute session the controller armed in THIS box's Modal Dict. A missing, expired, wrong-run or
+        wrong-lease session fails closed after a bounded wait; there is no environment or application-signer fallback."""
+        import re as _re
+        deadline = time.time() + _QA_EXACT_SESSION_WAIT_S
+        while True:
+            row = _qa_onmiss_thread(_qa_onmiss_store_get, "scoped-session/" + kind)
+            if (isinstance(row, dict) and row.get("kind") == kind and row.get("bucket") == _QA_SCOPED_BUCKET
+                    and row.get("manifest_digest") == _QA_EXACT["digest"] and row.get("lease") == _QA_ONMISS_LEASE
+                    and _re.fullmatch(r"[0-9a-f]{32}", str(row.get("account", "")))
+                    and all(isinstance(row.get(f), str) and row.get(f) for f in ("access", "secret", "token"))
+                    and isinstance(row.get("exp"), int) and row["exp"] > time.time() + 15):
+                return row
+            if time.time() >= deadline:
+                raise RuntimeError("QA_SCOPED_SESSION_UNAVAILABLE kind=" + kind + "; no fallback to application credentials")
+            time.sleep(2)
+
+    def _qa_scoped_cached(kind):
+        row = _QA_EXACT_CACHE.get(kind)
+        if row is not None and row["exp"] > time.time() + 45:
+            return row
+        row = _qa_scoped_session(kind)
+        _QA_EXACT_CACHE[kind] = row
+        return row
+
+    def _qa_scoped_boto_client(kind, config=None):
+        """One S3 client whose credentials are RE-READ from the armed session whenever botocore needs them, so a refreshed session
+        is picked up without rebuilding the client and an expired one makes the request fail instead of falling back."""
+        import datetime as _dt
+        import boto3 as _b3
+        import botocore.session as _bs
+        from botocore.credentials import RefreshableCredentials
+        def fetch():
+            row = _qa_scoped_cached(kind)
+            return {"access_key": row["access"], "secret_key": row["secret"], "token": row["token"],
+                    "expiry_time": _dt.datetime.fromtimestamp(row["exp"], _dt.timezone.utc).isoformat()}
+        session = _bs.get_session()
+        session._credentials = RefreshableCredentials.create_from_metadata(
+            metadata=fetch(), refresh_using=fetch, method="qa-scoped-session")
+        return _b3.Session(botocore_session=session).client(
+            "s3", endpoint_url="https://" + _qa_scoped_cached(kind)["account"] + ".r2.cloudflarestorage.com",
+            region_name="auto", config=config)
+
+    _qa_boto3_client_orig = _qa_boto3.client
+
+    def _qa_exact_boto3_client(service_name, *args, **kwargs):
+        # Only clients built INSIDE R2FixtureStore._ensure_client (flagged below) are scoped; the app-data runtimes keep their binding.
+        kind = getattr(_QA_EXACT_CTX, "kind", None)
+        if kind and service_name == "s3":
+            return _qa_scoped_boto_client(kind, kwargs.get("config"))
+        return _qa_boto3_client_orig(service_name, *args, **kwargs)
+
+    _qa_boto3.client = _qa_exact_boto3_client
+    if "R2FixtureStore" not in globals() or not hasattr(R2FixtureStore, "_ensure_client"):
+        raise RuntimeError("QA_EXACT_FIXTURE_CLIENT_UNPATCHABLE: refusing to run exact mode with an unscoped fixture client")
+    _qa_exact_orig_ensure = R2FixtureStore._ensure_client
+
+    def _qa_exact_ensure(self, *, for_write=False):
+        _QA_EXACT_CTX.kind = "write" if for_write else "read"
+        try:
+            return _qa_exact_orig_ensure(self, for_write=for_write)
+        finally:
+            _QA_EXACT_CTX.kind = None
+
+    R2FixtureStore._ensure_client = _qa_exact_ensure
+
+    def _r2_bucket():
+        return _QA_SCOPED_BUCKET
+
+    def _qa_r2_client():
+        return _qa_scoped_boto_client("write", None)
+
+    def _qa_exact_confirm_miss(key):
+        """AUTHORITATIVE replay miss with the scoped read session: True only for a real NoSuchKey/404. An existing object, a 403,
+        a timeout or any other lookup failure is NEVER a miss (the stock proxy treats a failed replay read as one) and so never
+        reaches pricing, a reservation or the provider."""
+        client = _qa_scoped_boto_client("read", None)
+        try:
+            client.get_object(Bucket=_QA_SCOPED_BUCKET, Key=key)
+        except Exception as error:
+            if getattr(error, "response", {}).get("Error", {}).get("Code") in ("NoSuchKey", "404", "NotFound"):
+                return True
+            raise
+        return False
+
+    def _qa_exact_note_dispatch(ticket, upstream_resp, raw):
+        """Join evidence only, never payload text: upstream status, provider response id(s) and safe request-id headers.
+        Recorded on the durable claim BEFORE settlement, so a settle failure still leaves the dispatch identity."""
+        import re as _re
+        ids = []
+        for found in _re.finditer(rb'"responseId"\s*:\s*"([A-Za-z0-9_-]{6,80})"', raw or b""):
+            value = found.group(1).decode()
+            if value not in ids:
+                ids.append(value)
+            if len(ids) >= 8:
+                break
+        headers = {}
+        for name in ("x-request-id", "request-id", "x-goog-request-id", "x-vertex-ai-request-id"):
+            value = upstream_resp.headers.get(name) if upstream_resp is not None else None
+            if value:
+                headers[name] = str(value)[:120]
+        def note(state):
+            row = (state.get("attempts") or {}).get(ticket)
+            if row is not None:
+                row["dispatch"] = {"upstream_status": int(upstream_resp.status_code), "provider_response_ids": ids,
+                                   "upstream_request_headers": headers, "at": int(time.time())}
+        try:
+            _qa_update(note, keys=[_QA_ONMISS_ATTEMPT_KEY])
+        except Exception:
+            print("QA_ONMISS_JOIN_NOTE_FAILED ticket=" + str(ticket)[:8])
 '''
 
 
@@ -1364,11 +1718,15 @@ def _qa_update(mutator, keys=None):
     results = [_qa_update_one(key, mutator) for key in (keys or _QA_LEDGER_KEYS)]
     return False if any(r is False for r in results) else results[0]
 
-def _qa_ledger_read(key):
+def _qa_r2_client():
+    # Seam: stock = the application R2 env signer; exact mode (QA_ONMISS_SOURCE) replaces it with the armed scoped session.
     import boto3
-    client = boto3.client('s3', endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
+    return boto3.client('s3', endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
                           aws_access_key_id=os.environ['R2_ACCESS_KEY_ID'],
                           aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY'], region_name='auto')
+
+def _qa_ledger_read(key):
+    client = _qa_r2_client()
     try:
         return json.loads(client.get_object(Bucket=_r2_bucket(), Key=key)["Body"].read())
     except Exception as error:
@@ -1379,10 +1737,7 @@ def _qa_ledger_read(key):
 def _qa_update_one(ledger_key, mutator):
     # Dedicated client: conditional headers cannot leak into concurrent fixture PUTs.
     # boto3 1.35.99 lacks modeled IfMatch; inject the real R2 conditional header.
-    import boto3
-    client = boto3.client('s3', endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
-                          aws_access_key_id=os.environ['R2_ACCESS_KEY_ID'],
-                          aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY'], region_name='auto')
+    client = _qa_r2_client()
     condition = {}
     def conditional(request, **kwargs):
         for key, value in condition.items(): request.headers[key] = value
@@ -1764,9 +2119,12 @@ def provision_extra_secrets(names, convex_helper, convex_root, run=subprocess.ru
 
 
 def prepare(box, root, config_path, capture=False, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmiss=False,
-            extra_secrets=(), convex_helper=None, convex_root=None):
+            extra_secrets=(), convex_helper=None, convex_root=None, exact=None):
     extra_names = parse_extra_secrets(extra_secrets, convex_helper, convex_root)  # fail closed before any write
-    onmiss = bool(onmiss_effective(root, box, onmiss))
+    if exact and not onmiss:
+        raise ValueError('--exact-manifest requires --on-miss')
+    exact_ids = onmiss_effective(root, box, onmiss, exact)  # an invalid exact manifest refuses here, before any write
+    onmiss = bool(exact_ids)
     policy = tool_policy(allow_billable_tools, tool_spend_cap_usd)
     (config_path.parent/'billable-tools.json').write_text(json.dumps(policy, indent=2)+'\n')
     print('QA_BILLABLE_TOOL_POLICY=' + json.dumps(policy, sort_keys=True))
@@ -1800,6 +2158,8 @@ def prepare(box, root, config_path, capture=False, allow_billable_tools=False, t
     if onmiss:
         print('LLM_MODE=capture-on-miss strict_fixtures=true cap_usd=' + str(ONMISS_CAP_USD)
               + ' scope=box-lifetime+attempt payloads=box-local')
+        if exact_ids and exact_ids.get('exact'):
+            print('QA_ONMISS_EXACT_PREPARED digest=' + exact_ids['exact']['digest'] + ' approved=' + str(len(exact_ids['exact']['entries'])))
     if capture:
         updates['STRICT_FIXTURES'] = 'false'
         print('CAPTURE_MODE=on run_id=remote-qa-'+box_id+' cap_usd=3 synthetic_data_only=true')
@@ -2046,8 +2406,12 @@ def qa_scope_canary(s3, bucket, publisher, nonce):
             'out_of_scope_get': 'HTTP 403 AccessDenied', 'canary_objects_removed': len(owned)}
 
 
-def mint_scoped_canary_session(nonce):
-    """Trusted host only; scoped to the three synthetic canary paths, with no standing token creation."""
+SCOPED_SESSION_ACTIONS_CANARY = ['ListObjectsV2', 'GetObject', 'PutObject', 'DeleteObject']
+
+
+def _mint_session(paths, actions, ttl_s):
+    """Trusted host only; a prefix-scoped session derived from the verified Run 9 parent, with no standing token creation.
+    Returns (QA_FIXTURE_R2_* values, expiry epoch)."""
     import base64, hmac, runpy
     if os.environ.get('REMOTE_BOX') == '1':
         raise RuntimeError('QA_SCOPED_R2_REFUSED: mint only on trusted host')
@@ -2056,12 +2420,10 @@ def mint_scoped_canary_session(nonce):
     if hashlib.sha256(access.encode()).hexdigest()[:16] != '9b8c9f309b38da1f':
         raise RuntimeError('QA_SCOPED_R2_REFUSED: signer does not match the verified Run 9 parent')
     register_secret(secret)
-    run, canonical, _, ledger = scoped_canary_keys(nonce)
     now = int(time.time())
     claims = {'iss': access, 'sub': account, 'aud': account + '.r2.cloudflarestorage.com',
-              'iat': now, 'exp': now + 900, 'bucket': SCOPED_FIXTURE_BUCKET,
-              'actions': ['ListObjectsV2', 'GetObject', 'PutObject', 'DeleteObject'],
-              'paths': {'prefixPaths': [canonical.rsplit('/', 1)[0] + '/', 'staging/llm-capture/' + run + '/', ledger]}}
+              'iat': now, 'exp': now + ttl_s, 'bucket': SCOPED_FIXTURE_BUCKET,
+              'actions': list(actions), 'paths': {'prefixPaths': list(paths)}}
     b64 = lambda raw: base64.urlsafe_b64encode(raw).rstrip(b'=')
     unsigned = b64(b'{"alg":"HS256","typ":"JWT"}') + b'.' + b64(json.dumps(claims, separators=(',', ':')).encode())
     jwt = unsigned + b'.' + b64(hmac.digest(secret.encode(), unsigned, 'sha256'))
@@ -2069,7 +2431,104 @@ def mint_scoped_canary_session(nonce):
               base64.b64encode(b'jwt/' + jwt).decode())
     for value in values[2:]:
         register_secret(value)
-    return dict(zip(SCOPED_FIXTURE_R2_ENV, values))
+    return dict(zip(SCOPED_FIXTURE_R2_ENV, values)), now + ttl_s
+
+
+def mint_scoped_canary_session(nonce):
+    """Scoped to the three synthetic canary paths (unchanged behaviour: 900 s)."""
+    run, canonical, _, ledger = scoped_canary_keys(nonce)
+    paths = [canonical.rsplit('/', 1)[0] + '/', 'staging/llm-capture/' + run + '/', ledger]
+    return _mint_session(paths, SCOPED_SESSION_ACTIONS_CANARY, 900)[0]
+
+
+def mint_exact_sessions(kind, ids, manifest):
+    """Prefix-scoped five-minute sessions for ONE exact run. proxy = fixture reads (read-only over the fixture store and this run's
+    staging prefix) plus staging/ledger writes (this run's staging prefix and its two ledger objects only); report = the staging
+    prefix, the approved canonical keys and the two ledger objects. Nothing else in the bucket is reachable."""
+    stage = 'staging/llm-capture/' + ids['stage_run'] + '/'
+    ledgers = [ids['box_key'], ids['attempt_key']]
+    if kind == 'proxy':
+        specs = {'read': (['fixtures/llm/v2/', stage], ['GetObject']),
+                 'write': ([stage] + ledgers, ['GetObject', 'PutObject'])}
+    elif kind == 'report':
+        specs = {'report': ([stage] + sorted(manifest['entries']) + ledgers, ['ListObjectsV2', 'GetObject', 'PutObject'])}
+    else:
+        raise ValueError('unknown session kind')
+    rows = {}
+    for name, (paths, actions) in specs.items():
+        env, exp = _mint_session(paths, actions, EXACT_SESSION_TTL_S)
+        bucket, account, access, secret, token = (env[n] for n in SCOPED_FIXTURE_R2_ENV)
+        rows[name] = {'kind': name, 'bucket': bucket, 'account': account, 'access': access, 'secret': secret, 'token': token,
+                      'exp': exp, 'manifest_digest': manifest['digest'], 'lease': ids['lease']}
+    return rows
+
+
+def arm_exact_sessions(box, manifest_path):
+    """Box side: put the controller's freshly minted proxy sessions in THIS box's Modal Dict (deleted by stop()). Input is JSON on
+    stdin (never argv or disk); every row must be for this manifest and this lease and unexpired."""
+    manifest = load_exact_manifest(manifest_path)
+    payload = json.loads(sys.stdin.read(65536))
+    now = time.time()
+    if not isinstance(payload, dict) or set(payload) != {'read', 'write'}:
+        raise ValueError('QA_SCOPED_ARM_INVALID')
+    for name, row in payload.items():
+        if (not isinstance(row, dict) or row.get('kind') != name or row.get('bucket') != SCOPED_FIXTURE_BUCKET
+                or row.get('manifest_digest') != manifest['digest'] or row.get('lease') != identity(box)
+                or not re.fullmatch(r'[0-9a-f]{32}', str(row.get('account', '')))
+                or any(not isinstance(row.get(f), str) or not row[f] for f in ('access', 'secret', 'token'))
+                or not isinstance(row.get('exp'), int) or not now + 30 < row['exp'] <= now + EXACT_SESSION_TTL_S + 30):
+            raise ValueError('QA_SCOPED_ARM_INVALID')
+        register_secret(row['secret'])
+        register_secret(row['token'])
+    os.environ.pop('MODAL_PROFILE', None)
+    os.environ.update(modal_env(True))
+    import modal
+    store = modal.Dict.from_name(onmiss_dict_name(box), create_if_missing=True)
+    for name, row in payload.items():
+        store.put('scoped-session/' + name, row)
+    print('QA_SCOPED_ARM kinds=read,write expires_in_s=' + str(min(int(r['exp'] - now) for r in payload.values())))
+
+
+def load_report_session(path, ids):
+    """Controller-piped report session (JSON, mode 600 on the box): validated against THIS run, exported for the scoped report
+    container only, then deleted. Missing, expired or another run's session refuses; there is no fallback."""
+    p = Path(path)
+    if p.is_symlink() or not p.is_file() or p.stat().st_size > 16384:
+        raise RuntimeError('QA_SCOPED_R2_UNAVAILABLE: report session missing')
+    try:
+        row = json.loads(p.read_text())
+    finally:
+        try:
+            p.unlink()
+        except OSError:
+            pass
+    if (not isinstance(row, dict) or row.get('kind') != 'report' or row.get('bucket') != SCOPED_FIXTURE_BUCKET
+            or row.get('manifest_digest') != ids['exact']['digest'] or row.get('lease') != ids['lease']
+            or not isinstance(row.get('exp'), int) or row['exp'] <= time.time() + 20
+            or not re.fullmatch(r'[0-9a-f]{32}', str(row.get('account', '')))
+            or any(not isinstance(row.get(f), str) or not row[f] for f in ('access', 'secret', 'token'))):
+        raise RuntimeError('QA_SCOPED_R2_UNAVAILABLE: report session invalid, expired or for another run')
+    register_secret(row['secret'])
+    register_secret(row['token'])
+    return dict(zip(SCOPED_FIXTURE_R2_ENV, (row['bucket'], row['account'], row['access'], row['secret'], row['token'])))
+
+
+def check_canary_receipt(path):
+    """Arming prerequisite: a PASSED publish/readback canary produced by THIS controller file, not older than 48 hours."""
+    p = Path(path)
+    if p.is_symlink() or not p.is_file() or p.stat().st_size > 65536:
+        raise ValueError('QA_SCOPED_CANARY_RECEIPT_INVALID: unreadable')
+    r = json.loads(p.read_text())
+    ok = (isinstance(r, dict) and r.get('bucket') == SCOPED_FIXTURE_BUCKET and r.get('list_and_read') is True
+          and r.get('first_conditional_put') == 'created' and r.get('second_conditional_put') == 'precondition_failed'
+          and isinstance(r.get('before'), dict) and r.get('before') == r.get('after')
+          and 'HTTP 403' in str(r.get('out_of_scope_get', '')) and (r.get('canary_objects_removed') or 0) >= 3
+          and str(r.get('modal_teardown', '')).startswith('verified')
+          and r.get('report_secret_mount') == 'ephemeral scoped session only'
+          and r.get('tooling_sha256') == hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+          and isinstance(r.get('at'), int) and 0 <= time.time() - r['at'] <= CANARY_MAX_AGE_S)
+    if not ok:
+        raise ValueError('QA_SCOPED_CANARY_RECEIPT_INVALID: not a passed canary of this controller, or older than 48 hours')
 
 
 def run_capture_report(root, app_name, run_id, capture, ids, scoped_env=None, canary=None):
@@ -2116,15 +2575,25 @@ def scoped_report_canary(root, output):
             time.sleep(3)
     report['modal_teardown'] = 'verified no active canary app'
     report['report_secret_mount'] = 'ephemeral scoped session only'
+    report['tooling_sha256'] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    report['at'] = int(time.time())
     output.write_text(json.dumps(report, indent=2) + '\n')
     print('QA_SCOPED_CANARY=PASS')
 
 
 def capture_report(box, root, output, capture=False, allow_billable_tools=False, tool_spend_cap_usd=2.0,
-                   onmiss=False, scoped=False):
+                   onmiss=False, scoped=False, exact=None, session_file=None):
     os.environ.update(modal_env(True))
     run_id = 'remote-qa-' + identity(box)
-    ids = onmiss_effective(root, box, onmiss)
+    if exact and not onmiss:
+        raise RuntimeError('--exact-manifest requires --on-miss')
+    ids = onmiss_effective(root, box, onmiss, exact)
+    if exact:
+        # Exact mode: the report container gets ONLY the controller-piped prefix-scoped session (no shared secret, no fallback).
+        scoped = True
+        if capture or not ids or not session_file:
+            raise RuntimeError('QA_SCOPED_R2_REFUSED: exact report requires a bound lease and an armed report session')
+        os.environ.update(load_report_session(session_file, ids))
     if scoped and (capture or not ids):
         raise RuntimeError('QA_SCOPED_R2_REFUSED: scoped report requires a bound on-miss lease')
     report = run_capture_report(root, 'heydonna-qa-ledger-' + identity(box), run_id, capture, ids,
@@ -2144,6 +2613,14 @@ def emit_report(report, run_id):
         print('QA_CAPTURE_FIXTURE='+key)
     if report.get('mode') == 'capture-on-miss':
         print('QA_ONMISS_REPORT ' + json.dumps(report['onmiss'], sort_keys=True))
+        if report.get('exact'):
+            exact = report['exact']
+            print('QA_ONMISS_EXACT approved=%d captured=%d readback_match=%d digest=%s' % (
+                len(exact['approved']), len(exact['captured']), exact['readback_match'], exact['digest']))
+            for row in report.get('readback') or []:
+                print('QA_ONMISS_READBACK ' + json.dumps(row, sort_keys=True))
+            for row in report.get('join') or []:
+                print('QA_ONMISS_JOIN ' + json.dumps(row, sort_keys=True))
         if report.get('terminal_reason'):
             print('QA_ONMISS_TERMINAL reason=' + report['terminal_reason'])
             raise RuntimeError('QA_ONMISS_TERMINAL ' + report['terminal_reason'] + ': capture-on-miss refused, capped or uncertain; not a PASS')
@@ -2216,7 +2693,8 @@ def ready():
 
 def main():
     parser=argparse.ArgumentParser()
-    parser.add_argument('command',choices=['register','credentials','check-credentials','finish','stop','reap','overlay','prepare','resolve','ready','provider-ready','capture-report','scoped-report-canary','tool-policy','route-check'])
+    parser.add_argument('command',choices=['register','credentials','check-credentials','finish','stop','reap','overlay','prepare','resolve','ready','provider-ready','capture-report','scoped-report-canary','tool-policy','route-check',
+                                            'check-exact-manifest','check-canary-receipt','mint-session','arm-session'])
     parser.add_argument('--box')
     parser.add_argument('--ttl',type=int,default=2700)
     parser.add_argument('--root',type=Path)
@@ -2236,6 +2714,14 @@ def main():
                              'per-box Modal secret. NAME must be allowlisted ('+', '.join(EXTRA_SECRET_ALLOWLIST)+'); the value is never printed')
     parser.add_argument('--convex-helper',type=Path,help='prepare --extra-secret: remote-qa-convex.py copy on the box')
     parser.add_argument('--convex-root',type=Path,help='prepare --extra-secret: dir with the controller ownership.json receipt')
+    parser.add_argument('--exact-manifest',type=Path,help='M15 scoped exact-hash capture (needs --on-miss): per-run approval manifest; only '
+                        'its full hashes may dispatch live, every other miss is a typed refusal with zero provider I/O')
+    parser.add_argument('--ids-out',type=Path,help='overlay --exact-manifest: write the non-secret run identities here')
+    parser.add_argument('--ids',type=Path,help='mint-session: the non-secret run identities file')
+    parser.add_argument('--kind',choices=['proxy','report','check'],help='mint-session')
+    parser.add_argument('--session-file',type=Path,help='capture-report --exact-manifest: controller-piped report session (deleted after use)')
+    parser.add_argument('--receipt',type=Path,help='check-canary-receipt')
+    parser.add_argument('--head',help='check-exact-manifest: required checkout head')
     a=parser.parse_args()
     tool_policy(a.allow_billable_tools, a.tool_spend_cap_usd)
     if a.extra_secret and a.command!='prepare':
@@ -2244,11 +2730,17 @@ def main():
         parser.error('--allow-billable-tools requires --capture (synthetic data only)')
     if a.on_miss and a.capture:
         parser.error('--on-miss and --capture are exclusive')
+    if a.exact_manifest and a.command in ('register','overlay','prepare','capture-report') and not a.on_miss:
+        parser.error('--exact-manifest requires --on-miss')
+    if a.exact_manifest and a.command not in ('register','overlay','prepare','capture-report','check-exact-manifest','mint-session','arm-session'):
+        parser.error('--exact-manifest is not valid for this command')
     if a.command in ('register','credentials','finish','stop','prepare'):
         identity(a.box or '')
     if a.command=='route-check': route_check(a.capture); raise SystemExit(0)
     if a.command=='tool-policy': print(json.dumps(tool_policy(a.allow_billable_tools, a.tool_spend_cap_usd), sort_keys=True))
-    elif a.command=='register': register(a.box,a.ttl,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss)
+    elif a.command=='register':
+        register(a.box,a.ttl,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss,
+                 load_exact_manifest(a.exact_manifest)['digest'] if a.exact_manifest else None)
     elif a.command=='check-credentials':
         token_env()
         print('QA_MODAL_AUTOMATION_CREDENTIALS=present')
@@ -2257,10 +2749,34 @@ def main():
     elif a.command=='finish': finish(a.box)
     elif a.command=='stop': stop(a.box,a.remote)
     elif a.command=='reap': reap()
-    elif a.command=='overlay': overlay(a.root,a.box,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss)
+    elif a.command=='overlay': overlay(a.root,a.box,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss,a.exact_manifest,a.ids_out)
     elif a.command=='prepare': prepare(a.box,a.root,a.config,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss,
-                                       a.extra_secret,a.convex_helper,a.convex_root)
-    elif a.command=='capture-report': capture_report(a.box,a.root,a.output,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss)
+                                       a.extra_secret,a.convex_helper,a.convex_root,a.exact_manifest)
+    elif a.command=='capture-report': capture_report(a.box,a.root,a.output,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss,
+                                                     False,a.exact_manifest,a.session_file)
+    elif a.command=='check-exact-manifest':
+        if not a.exact_manifest:
+            parser.error('check-exact-manifest requires --exact-manifest')
+        manifest = load_exact_manifest(a.exact_manifest, a.head)
+        print('QA_EXACT_MANIFEST ok digest=' + manifest['digest'] + ' head=' + manifest['head'] + ' hashes=' + str(len(manifest['entries']))
+              + ' approval_ref=' + manifest['approval_ref'])
+    elif a.command=='check-canary-receipt':
+        if not a.receipt:
+            parser.error('check-canary-receipt requires --receipt')
+        check_canary_receipt(a.receipt)
+        print('QA_SCOPED_CANARY_RECEIPT ok')
+    elif a.command=='mint-session':
+        if a.kind=='check':
+            _mint_session(['fixtures/llm/v2/'], ['GetObject'], 60)
+            print('QA_SCOPED_MINT=ok')
+        elif a.kind in ('proxy','report') and a.ids and a.exact_manifest:
+            print(json.dumps(mint_exact_sessions(a.kind, load_exact_ids(a.ids), load_exact_manifest(a.exact_manifest))))
+        else:
+            parser.error('mint-session needs --kind check, or --kind proxy|report with --ids and --exact-manifest')
+    elif a.command=='arm-session':
+        if not a.exact_manifest or not a.box:
+            parser.error('arm-session requires --box and --exact-manifest')
+        arm_exact_sessions(a.box, a.exact_manifest)
     elif a.command=='scoped-report-canary':
         if not a.root or not a.output or a.on_miss or a.capture:
             parser.error('scoped-report-canary requires --root and --output, with no capture or provider dispatch flags')

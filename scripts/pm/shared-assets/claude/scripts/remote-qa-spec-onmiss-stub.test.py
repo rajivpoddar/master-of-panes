@@ -31,7 +31,7 @@ h40 = 'a' * 40
 def dry(*extra):
     r = subprocess.run(['bash', str(SCRIPTS / 'remote-qa-spec.sh'), '--slot', '8', '--branch', 'b', '--head', h40,
                         '--spec', 'tests/e2e/specs/qa-tests/x.spec.ts', '--out', tempfile.mkdtemp(), '--allow-seed-replace', *extra],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=dict(os.environ, QA_MODAL_HELPER=str(SCRIPTS / 'remote-qa-modal.py')))
     return r.returncode, (r.stdout + r.stderr).strip()
 rc, o = dry('--disposable-convex', '--dry-run')
 check('spec default (no flag) resolves llm_mode=strict', rc == 0 and o.endswith('llm_mode=strict'), o[-40:])
@@ -42,9 +42,45 @@ check('--on-miss without --disposable-convex refused (synthetic-only bound)', rc
 pf = Path(tempfile.mkdtemp()) / 'm.patch'; pf.write_text('diff --git a/tests/e2e/a.ts b/tests/e2e/a.ts\n--- a/tests/e2e/a.ts\n+++ b/tests/e2e/a.ts\n')
 rc, o = dry('--disposable-convex', '--on-miss', '--mutate-patch', str(pf), '--dry-run')
 check('--on-miss refuses RED/mutation legs (RED stays strict)', rc == 2 and 'GREEN-only' in o, o)
-check('llm_onmiss starts empty and is set ONLY by the --on-miss flag',
-      "llm_onmiss='' pre_write_check=''" in SPEC_SH and len(re.findall(r'llm_onmiss=--on-miss', SPEC_SH)) == 1
-      and '--on-miss) llm_onmiss=--on-miss; shift;;' in SPEC_SH)
+# M15 scoped exact-hash mode: opt-in only, replaces stock --on-miss, never without a passed canary receipt.
+HX = 'f3dcdecd3e7f1a8b3ccd790d2c9688af6c4febc811c71ada80e3a2b3608c4a80'
+KX = 'fixtures/llm/v2/gemini_vertex/aiplatform.googleapis.com/gemini-3.1-flash-lite.stream/' + HX + '.bin'
+def manifest(**over):
+    doc = {'version': 1, 'head': h40, 'approval_ref': 'C0ALZJHGE49/1795301055.769519',
+           'hashes': [{'hash': HX, 'provider': 'gemini_vertex', 'model': 'gemini-3.1-flash-lite', 'operation': 'stream', 'canonical_key': KX}]}
+    doc.update(over)
+    p = Path(tempfile.mkdtemp()) / 'exact.json'
+    p.write_text(json.dumps(doc))
+    return str(p)
+good = manifest()
+rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--dry-run')
+check('spec --on-miss-exact resolves llm_mode=capture-on-miss-exact', rc == 0 and o.endswith('llm_mode=capture-on-miss-exact'), o[-60:])
+rc, o = dry('--disposable-convex', '--on-miss', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--dry-run')
+check('--on-miss-exact replaces stock --on-miss (never both)', rc == 2 and 'replaces --on-miss' in o, o[-80:])
+rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--dry-run')
+check('--on-miss-exact refused without --canary-receipt', rc == 2 and 'requires --canary-receipt' in o, o[-80:])
+rc, o = dry('--disposable-convex', '--canary-receipt', '/nonexistent', '--dry-run')
+check('--canary-receipt alone is refused', rc == 2 and 'only valid with --on-miss-exact' in o, o[-80:])
+rc, o = dry('--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--dry-run')
+check('--on-miss-exact without --disposable-convex refused (synthetic-only bound)', rc == 2 and 'requires --disposable-convex' in o, o[-80:])
+for why, bad in (('a 12-char hash prefix', manifest(hashes=[{'hash': HX[:12], 'provider': 'gemini_vertex', 'model': 'gemini-3.1-flash-lite', 'operation': 'stream', 'canonical_key': KX}])),
+                 ('a manifest for another head', manifest(head='b' * 40))):
+    rc, o = dry('--disposable-convex', '--on-miss-exact', bad, '--canary-receipt', '/nonexistent', '--dry-run')
+    check('--on-miss-exact refuses ' + why, rc == 2 and 'QA_EXACT_MANIFEST_REFUSED' in o, o[-80:])
+rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--mutate-patch', str(pf), '--dry-run')
+check('--on-miss-exact is GREEN-only like stock on-miss', rc == 2 and 'GREEN-only' in o, o[-80:])
+check('llm_onmiss starts empty and is set ONLY by the --on-miss / --on-miss-exact flags',
+      "llm_onmiss='' stripe_test_env='' pre_write_check=''" in SPEC_SH
+      and len(re.findall(r'^\s+--on-miss[a-z-]*\) .*llm_onmiss=--on-miss', SPEC_SH, re.M)) == 2
+      and '--on-miss) llm_onmiss=--on-miss; onmiss_stock=1; shift;;' in SPEC_SH)
+si = {name: SPEC_SH.find(name) for name in ('QA_ONMISS_EXACT_BOUND', 'scoped_arm_loop & arm_pid=$!', 'mint-session --kind report', 'qa_spec_fetch >>"$out/fetch.log"')}
+cs, ce = SPEC_SH.index('cleanup() {'), SPEC_SH.index('trap cleanup EXIT')
+check('exact wiring: sessions armed only after prepare bound the manifest digest, report session minted in cleanup (after the leg), no shared secret anywhere',
+      all(v > 0 for v in si.values()) and si['QA_ONMISS_EXACT_BOUND'] < si['scoped_arm_loop & arm_pid=$!'] and cs < si['mint-session --kind report'] < ce
+      and 'heydonna-r2-credentials' not in SPEC_SH and 'LLM_FIXTURE_R2' not in SPEC_SH and 'R2_SECRET' not in SPEC_SH, str(si))
+check('exact wiring: the manifest and canary receipt are validated before any lease, box or spend',
+      SPEC_SH.index('check-exact-manifest') < SPEC_SH.index('rtb" up --owner') and SPEC_SH.index('check-canary-receipt') < SPEC_SH.index('rtb" up --owner')
+      and SPEC_SH.index('mint-session --kind check') < SPEC_SH.index('rtb" up --owner'))
 for cmd in ('register --box "$box" --ttl "$ttl_seconds" $llm_onmiss',
             "modal-lane.py overlay --root '$remote' --box '$box' $llm_onmiss",
             "modal-lane.py prepare --box '$box' --root '$remote' --config /root/qa/config.json $llm_onmiss",
@@ -151,7 +187,9 @@ check('new lease, same box+head: UNKNOWN still blocks (no blind resend, no reset
 check('S161: on-miss stages replies (with .request sidecars) and never writes canonical directly', not [k for k in canon() if k.startswith('fixtures/')] and all(k.startswith('staging/llm-capture/remote-qa-') for k in canon()) and any(k.endswith('.request') for k in canon()), str(canon()[:3]))
 
 # ---- C. controller report + verdict labelling (spec controller's own onmiss_label) ----
-boom = lambda *a, **k: (_ for _ in ()).throw(AssertionError('canonical publisher called'))
+# S161 (2026-11-19): on-miss qa_finish DOES run the guarded publisher over this run's own staging prefix. These report checks use an
+# empty staging set, so nothing is published; the S161 publication behaviour itself is proven in remote-qa-onmiss-stub.test.py.
+boom = {'collect_plan': lambda s3, bucket, run_id: ([], 0), 'publish_plan': lambda s3, bucket, plan, replace_allowlist=None: (0, 0, 0)}
 fn = SPEC_SH[SPEC_SH.index('# ONMISS_LABEL_BEGIN'):SPEC_SH.index('# ONMISS_LABEL_END')]
 def label(summary, terminal_txt=None, report=True):
     d = Path(tempfile.mkdtemp()); (d / 'out').mkdir()
@@ -162,8 +200,8 @@ def label(summary, terminal_txt=None, report=True):
     o = subprocess.run(['bash', '-c', fn + '\nonmiss_label "$1" 0; echo "$ONMISS_VERDICT|$ONMISS_LABEL|$ONMISS_RC|$ONMISS_REASON|$ONMISS_CAPTURES"', '_', str(d)],
                        capture_output=True, text=True).stdout.strip()
     return o
-s_spec = H.qa_finish(FakeS3(), 'b', 'x', False, {'collect_plan': boom, 'publish_plan': boom}, dict(IDS_SPEC, lease=H.identity(SPEC_BOX)))
-check('controller report (spec lease) sees its live capture(s), publisher never called',
+s_spec = H.qa_finish(FakeS3(), 'b', 'x', False, boom, dict(IDS_SPEC, lease=H.identity(SPEC_BOX)))
+check('controller report (spec lease) sees its live capture(s), nothing staged so nothing published',
       len(s_spec['attempts']) >= 1 and s_spec['canonical_fixture_keys'] == [] and s_spec['fixtures_written'] == [], str(len(s_spec['attempts'])))
 clean = dict(s_spec, terminal_reason=None)
 o = label(clean)
@@ -172,12 +210,27 @@ o = label(dict(clean, attempts={}))
 check('on-miss run with zero live calls is lane-ok-onmiss-replay-only', o.startswith('lane-ok-onmiss-replay-only|ON_MISS_REPLAY_ONLY|0'), o)
 o = label(clean, 'QA_ONMISS_TERMINAL reason=QA_ONMISS_NO_RESEND\n')
 check('typed QA_ONMISS_* terminal -> lane-fail reason carried', o.startswith('lane-fail|ON_MISS_TERMINAL|1|QA_ONMISS_NO_RESEND'), o)
+def label_exact(summary, join, match):
+    d = Path(tempfile.mkdtemp()); (d / 'out').mkdir()
+    (d / 'out/llm-ledger.json').write_text(json.dumps(dict(summary, exact={'readback_match': match})))
+    (d / 'llm-join.txt').write_text('QA_ONMISS_JOIN_RESULT status=%s dispatches=1\n' % join)
+    return subprocess.run(['bash', '-c', 'exact_manifest=m.json\n' + fn + '\nonmiss_label "$1" 0; echo "$ONMISS_VERDICT|$ONMISS_LABEL|$ONMISS_RC|$ONMISS_REASON"', '_', str(d)],
+                          capture_output=True, text=True).stdout.strip()
+o = label_exact(clean, 'COMPLETE', 1)
+check('exact: live capture with canonical readback MATCH and a COMPLETE join is ON_MISS_CAPTURED', o.startswith('ON_MISS_CAPTURED|ON_MISS_CAPTURED|0|'), o)
+o = label_exact(clean, 'COMPLETE', 0)
+check('exact: a live call without a matching canonical readback is lane-fail QA_ONMISS_CAPTURE_UNPROVEN', o == 'lane-fail|ON_MISS_TERMINAL|1|QA_ONMISS_CAPTURE_UNPROVEN', o)
+o = label_exact(clean, 'LANGSMITH_UNJOINED', 1)
+check('exact: no LangSmith join is lane-fail QA_ONMISS_JOIN_UNPROVEN (capture stays published)', o == 'lane-fail|ON_MISS_TERMINAL|1|QA_ONMISS_JOIN_UNPROVEN', o)
+o = label_exact(dict(clean, attempts={}), 'NO_DISPATCH', 0)
+check('exact: zero live calls stays lane-ok-onmiss-replay-only (an empty publication plan is not capture proof)', o.startswith('lane-ok-onmiss-replay-only|ON_MISS_REPLAY_ONLY|0'), o)
 o = label(clean, report=False)
 check('missing controller report fails closed', o.startswith('lane-fail|ON_MISS_UNVERIFIED|1|QA_ONMISS_REPORT_MISSING'), o)
-o = label(dict(clean, canonical_fixture_keys=['fixtures/x']))
-check('report claiming a canonical write fails closed', o.startswith('lane-fail|ON_MISS_UNVERIFIED'), o)
+o = label(dict(clean, canonical_fixture_keys=['fixtures/x'], fixtures_written=['fixtures/x']))
+check('S161: a report with guarded canonical publication is still ON_MISS_CAPTURED (the pre-S161 zero-canonical-write pin is retired)',
+      o.startswith('ON_MISS_CAPTURED|ON_MISS_CAPTURED|0|'), o)
 try:
-    H.emit_report(H.qa_finish(FakeS3(), 'b', 'x', False, {'collect_plan': boom, 'publish_plan': boom}, dict(IDS_U, lease=H.identity('rtbl-d000000000000000-303030'))), 'x')
+    H.emit_report(H.qa_finish(FakeS3(), 'b', 'x', False, boom, dict(IDS_U, lease=H.identity('rtbl-d000000000000000-303030'))), 'x')
     check('UNKNOWN lease report raises typed terminal', False)
 except RuntimeError as e:
     check('UNKNOWN lease report raises typed terminal (never PASS)', 'QA_ONMISS_TERMINAL QA_ONMISS_NO_RESEND' in str(e), str(e)[:80])
