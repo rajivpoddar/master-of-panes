@@ -8,16 +8,23 @@ Trust model (CTO BLOCK on 38bd1682 and REVISE on fb6de68d6a35, C0ALZJHGE49 threa
 WHERE bytes may come from or WHERE they may go. Roots, origins, models, the Claude binary, the state dir and HOME are module constants
 (HOME is taken from the account database, never from $HOME). The environment can only tighten: disable the helpers, or lower a cap or a
 timeout. Tests replace the module constants through a test-only harness (scripts/pm/tests); no deployed entrypoint has a seam.
+- LAUNCH (CTO REVISE on 4184d7c0a643, ts 1795293836.257189): the sandbox-exempt command is the absolute lane launcher scripts/bulk-read-lane, whose
+  shebang is the fixed Apple interpreter with -IS (isolated, no site: PYTHON* variables, sitecustomize, user site and PATH cannot change the
+  interpreter or what it imports first). A launcher scrubs the environment to a short allowlist and BINDS the route: bulk-read-lane means the
+  router (inkling-2-mini, gpt-6-luna), bulk-read means direct Claude; no environment variable selects between them.
 - DISABLED: the marker file (in STATE_DIR) or MOP_BULK_READ_GUARD=0 makes bulk-read and code-write refuse at entry, before any file is opened.
-- SOURCE: every input is realpath-resolved and checked BEFORE it is opened. Approved: the fixed operator checkouts (REPO_NAMES), the
+- SOURCE: every input is realpath-resolved and checked BEFORE it is opened. Approved roots: the fixed operator checkouts (REPO_NAMES), the
   worktrees those repos themselves register in their own .git/worktrees (with a back-link check), and the MoP releases. A git config or
-  .git file in a writable directory such as /tmp grants nothing. Restricted data classes are denied even inside approved roots. Anything
-  else sends zero bytes and the native Read stands.
+  .git file in a writable directory such as /tmp grants nothing. A FILE is approved only when it is source: tracked in the index AND present in
+  HEAD of that repo (git run by this module against the repo's own git dir, never a /tmp one), or listed in the release manifest. Untracked
+  artifacts that a lane wrote into a registered worktree, and hardlink aliases (st_nlink > 1), are not source. Restricted data classes are
+  denied on the FULL resolved path. Anything else sends zero bytes and the native Read stands.
 - EGRESS: bytes go only to ROUTER_ORIGIN (127.0.0.1:8317) with the models inkling-2-mini and gpt-6-luna, or to the nested claude binary at a
   fixed, owner-checked install path with a scrubbed environment and no caller-selected config dir. No env proxy, no redirect.
 - RESOURCE: each input is stat-checked and the total capped before any read; reads stream through a descriptor under the cap.
 State (events log, health cache, circuit breaker, bypass tokens) lives under STATE_DIR. Logs hold paths, line counts and latencies only.
 """
+import collections
 import fcntl
 import hashlib
 import json
@@ -58,6 +65,14 @@ LUNA_MODEL = "gpt-6-luna"
 CLAUDE_CANDIDATES = ("/opt/homebrew/bin/claude", os.path.join(HOME_DIR, ".local/opt/claude-code/claude"),
                      os.path.join(HOME_DIR, ".local/bin/claude"), "/usr/local/bin/claude")
 CLAUDE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+# The launchers' fixed interpreter (their shebang) and the git binary used for source membership. Real Apple binaries, not the /usr/bin
+# shims (a shim picks its target from DEVELOPER_DIR).
+MANAGED_PYTHON = "/Library/Developer/CommandLineTools/usr/bin/python3"
+GIT_CANDIDATES = ("/Library/Developer/CommandLineTools/usr/bin/git", "/Applications/Xcode.app/Contents/Developer/usr/bin/git")
+LANE_LAUNCHER = os.path.join(HOME_DIR, ".local/share/master-of-panes/current/scripts/bulk-read-lane")
+BOUND_ROUTE = None  # set by a launcher, never by the environment: "lane" (bulk-read-lane) or "claude" (bulk-read)
+ENV_KEEP = ("PROXY_AGENT_NAME", "PROXY_AGENT_RUN", "MOP_BULK_READ_GUARD", "BULK_READ_MAX_CHARS", "BULK_READ_TIMEOUT_S",
+            "BULK_READ_INKLING_TIMEOUT_S", "CODE_WRITE_MAX_CHARS", "CODE_WRITE_TIMEOUT_S", "BULK_READ_CLAUDE_MODEL")
 
 
 class InkError(Exception):
@@ -76,6 +91,13 @@ class Refusal(Exception):
     def __init__(self, reason):
         super().__init__(reason)
         self.reason = reason
+
+
+def scrub_environment():
+    """A launcher calls this first: only the short allowlist survives (disable switch, caps that can only lower, log label, Haiku or Sonnet)."""
+    for key in list(os.environ):
+        if key not in ENV_KEEP:
+            del os.environ[key]
 
 
 def cap_env(name, default, floor=1):
@@ -214,14 +236,17 @@ def router_up(now=None):
 
 
 def route(env=None):
-    """'lane' for a proxy lane (Inkling, then luna); 'claude' for every other session (PM pane: Haiku/Sonnet on direct Claude)."""
+    """The launcher's bound route when there is one ('lane' or 'claude'). Only the hook, which is not a launcher, falls back to the session
+    environment to pick the message and the availability gate; nothing that sends bytes ever does."""
+    if BOUND_ROUTE:
+        return BOUND_ROUTE
     value = (os.environ if env is None else env).get("PROXY_AGENT_RUN", "").strip().lower()
     return "claude" if not value or value in OFF_VALUES else "lane"
 
 
-def claude_bin():
-    """The managed nested direct-Claude binary: a fixed install path whose real file is mine or root's and not group/world writable."""
-    for candidate in CLAUDE_CANDIDATES:
+def safe_executable(candidates):
+    """The first fixed install path whose real file is regular, executable, mine or root's, and not group/world writable."""
+    for candidate in candidates:
         try:
             real = os.path.realpath(candidate)
             meta = os.stat(real)
@@ -232,8 +257,24 @@ def claude_bin():
     return ""
 
 
+def claude_bin():
+    """The managed nested direct-Claude binary."""
+    return safe_executable(CLAUDE_CANDIDATES)
+
+
+def git_bin():
+    return safe_executable(GIT_CANDIDATES)
+
+
+def launcher_ok():
+    """The launchers' fixed interpreter exists and is safe; without it a redirect to bulk-read could never run."""
+    return bool(safe_executable((MANAGED_PYTHON,)))
+
+
 def backend_available(route_name, now=None):
     """(ok, reason): is any backend for this route worth blocking for? Lanes: Inkling healthy, else the router (luna)."""
+    if not launcher_ok():
+        return False, "launcher_missing"
     if route_name == "claude":
         return (True, "claude") if claude_bin() else (False, "claude_missing")
     try:
@@ -341,14 +382,34 @@ def _expand(path):
     return path
 
 
+SourceRoot = collections.namedtuple("SourceRoot", "path gitdir kind")  # kind: "git" (checkout or registered worktree) or "release"
+
+
+def _gitdir_of(top):
+    """The git dir of a fixed operator checkout: its .git directory, or the gitdir a worktree-style .git file names. Only ever used for the
+    fixed checkouts under PROJECTS_DIR, an operator directory."""
+    marker = os.path.join(top, ".git")
+    if os.path.isdir(marker):
+        return os.path.realpath(marker)
+    try:
+        with open(marker, "rb") as handle:
+            match = re.match(r"gitdir:\s*(.+)", handle.read(512).decode("utf-8", "replace"))
+    except OSError:
+        return None
+    return os.path.realpath(os.path.join(top, match.group(1).strip())) if match else None
+
+
 def fixed_roots():
     """Operator-approved checkouts (a fixed name list under ~/Downloads/projects) and the MoP releases, realpath'd."""
     roots = []
     for name in REPO_NAMES:
         path = os.path.join(PROJECTS_DIR, name)
         if os.path.isdir(path):
-            roots.append(os.path.realpath(path))
-    roots.append(os.path.realpath(RELEASES_ROOT))
+            top = os.path.realpath(path)
+            gitdir = _gitdir_of(top)
+            if gitdir:
+                roots.append(SourceRoot(top, gitdir, "git"))
+    roots.append(SourceRoot(os.path.realpath(RELEASES_ROOT), None, "release"))
     return roots
 
 
@@ -356,8 +417,10 @@ def registered_worktrees():
     """Worktrees the approved repos register in their OWN .git/worktrees. The registration holds the worktree path; the worktree's
     .git file must point back at that registration. A directory that merely looks like a clone (a /tmp .git or config) is not here."""
     found = []
-    for root in fixed_roots()[:-1]:
-        admin_root = os.path.join(root, ".git", "worktrees")
+    for root in fixed_roots():
+        if root.kind != "git":
+            continue
+        admin_root = os.path.join(root.gitdir, "worktrees")
         try:
             names = os.listdir(admin_root)
         except OSError:
@@ -372,7 +435,7 @@ def registered_worktrees():
             except OSError:
                 continue
             if back and os.path.realpath(back.group(1).strip()) == os.path.realpath(admin):
-                found.append(os.path.dirname(worktree_git))
+                found.append(SourceRoot(os.path.dirname(worktree_git), os.path.realpath(admin), "git"))
     return found
 
 
@@ -382,17 +445,74 @@ def source_roots():
 
 def approved_root(real):
     """The approved root that contains this resolved path (longest match), else None."""
-    matches = [root for root in source_roots() if real.startswith(root + os.sep)]
-    return max(matches, key=len) if matches else None
+    matches = [root for root in source_roots() if real.startswith(root.path + os.sep)]
+    return max(matches, key=lambda root: len(root.path)) if matches else None
 
 
 def input_refusal(real, given=None):
-    """Reason string when this resolved path may not be sent to a model, else None. Looks at the path only; opens nothing."""
+    """Path-only reason this resolved path may not be sent to a model, else None. Opens nothing. Restricted classes look at the FULL path."""
+    if not approved_root(real):
+        return "outside_approved_roots"
+    if _restricted_in(real.split(os.sep)) or (given and restricted_component(os.path.basename(given.rstrip("/")))):
+        return "restricted_data_class"
+    return None
+
+
+def _git(root, args):
+    """Run the managed git against the repo's OWN git dir and work tree (never a .git in the worktree), with a fixed environment and no
+    config, hooks or fsmonitor beyond the repo's objects and index. Returns the exit code; Refusal when git cannot run."""
+    binary = git_bin()
+    if not binary:
+        raise Refusal("git_unavailable")
+    command = [binary, "--literal-pathspecs", "--git-dir", root.gitdir, "--work-tree", root.path, "-c", "core.fsmonitor=false",
+               "-c", "core.hooksPath=/dev/null", "-c", "core.untrackedCache=false", "-c", "safe.directory=*"] + args
+    env = {"PATH": CLAUDE_PATH, "HOME": HOME_DIR, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_OPTIONAL_LOCKS": "0",
+           "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"}
+    try:
+        return subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, env=env, cwd="/", timeout=5).returncode
+    except (OSError, subprocess.SubprocessError):
+        raise Refusal("git_unavailable")
+
+
+def _release_membership(root, rel):
+    """A MoP release file is source when its RELEASE_MANIFEST.json lists it; dependencies and build output are not source."""
+    parts = rel.split(os.sep)
+    if len(parts) < 2 or parts[1] in ("node_modules", "dist"):
+        return "not_source"
+    try:
+        with open(os.path.join(root.path, parts[0], "RELEASE_MANIFEST.json"), "rb") as handle:
+            data = json.loads(handle.read(8 * 1024 * 1024))
+    except (OSError, ValueError):
+        return "not_source"
+    listed = {rec.get("path") for rec in data.get("files", []) if isinstance(rec, dict) and rec.get("kind") == "file"}
+    return None if "/".join(parts[1:]) in listed else "not_source"
+
+
+def membership_refusal(real):
+    """Reason this file under an approved root is not SOURCE, else None. A git file must be tracked in the repo's index AND in its HEAD
+    (an untracked artifact in a registered worktree, or a file a lane merely staged, is not source); a hardlink alias is not source.
+    Reads no file content."""
     root = approved_root(real)
     if not root:
         return "outside_approved_roots"
-    if _restricted_in(real[len(root):].split(os.sep)) or (given and restricted_component(os.path.basename(given.rstrip("/")))):
-        return "restricted_data_class"
+    try:
+        meta = os.lstat(real)
+    except OSError:
+        return "not_found"
+    if not stat.S_ISREG(meta.st_mode):
+        return "not_a_regular_file"
+    if meta.st_nlink > 1:
+        return "hardlink_alias"
+    rel = real[len(root.path) + 1:]
+    if root.kind == "release":
+        return _release_membership(root, rel)
+    try:
+        if _git(root, ["ls-files", "--error-unmatch", "--", rel]) != 0:
+            return "untracked"
+        if _git(root, ["cat-file", "-e", "HEAD:" + rel]) != 0:
+            return "not_at_head"
+    except Refusal as exc:
+        return exc.reason
     return None
 
 
@@ -419,6 +539,9 @@ def approve_inputs(paths, cap_total):
             raise Refusal("not_found")
         if not stat.S_ISREG(meta.st_mode):
             raise Refusal("not_a_regular_file")
+        reason = membership_refusal(real)  # source, not a local artifact or an alias; still nothing opened
+        if reason:
+            raise Refusal(reason)
         total += meta.st_size
         items.append((real, meta))
     if total > cap_total:
@@ -437,6 +560,8 @@ def read_approved(real, meta, cap):
         now = os.fstat(fd)
         if not stat.S_ISREG(now.st_mode) or (now.st_dev, now.st_ino) != (meta.st_dev, meta.st_ino):
             raise Refusal("changed_during_check")
+        if now.st_nlink > 1:
+            raise Refusal("hardlink_alias")
         if now.st_size > cap:
             raise Refusal("too_large")
         chunks, total = [], 0

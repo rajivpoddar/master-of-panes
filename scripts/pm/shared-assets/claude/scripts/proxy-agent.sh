@@ -2409,11 +2409,11 @@ excluded_commands = [
     "~/.claude/scripts/remote-qa-spec.sh *",
     "/Users/rajiv/.claude/scripts/remote-qa-spec.sh *",
     # bulk-read cannot run inside the fence (live probe 22 Nov 01:40 IST: the loopback CLIProxyAPI router is "Operation not permitted" and
-    # ~/.local/share/master-of-panes/bulk-read is not writable). It is excluded only because bulk-read itself enforces the input boundary BEFORE
-    # opening anything (CTO BLOCK C0ALZJHGE49 ts 1795291197.575539): realpath, approved source roots, restricted data classes, size caps, a loopback-only
-    # destination, the DISABLED marker at entry and one hard deadline. code-write is NOT excluded: it writes arbitrary targets.
-    "bulk-read *",
-    "/Users/rajiv/.local/bin/bulk-read *",
+    # ~/.local/share/master-of-panes/bulk-read is not writable). Exempt: ONLY this absolute launcher in the release directory (CTO REVISE
+    # C0ALZJHGE49 ts 1795293836.257189), never the bare command or a link. Its shebang is the fixed Apple python3 with -IS, it scrubs the environment,
+    # binds the router route itself, and enforces the input boundary BEFORE opening anything (tracked source in an approved checkout or registered
+    # worktree, restricted classes, size caps, pinned destinations, the DISABLED marker at entry, one hard deadline). code-write is NOT excluded.
+    "/Users/rajiv/.local/share/master-of-panes/current/scripts/bulk-read-lane *",
     # Rajiv D0AMF0XE6TS ts 1795017876.764629: exempt ssh; ssh back to this Mac is denied by the permission rules below.
     "ssh *",
 ]

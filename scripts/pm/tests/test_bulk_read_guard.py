@@ -7,8 +7,6 @@ bulk_read_lib through a TEST-ONLY harness (monkeypatch in process; scripts/pm/te
 is a local stub or a fake claude binary; nothing here submits to a live model.
 """
 import builtins
-import importlib.machinery
-import importlib.util
 import json
 import os
 import re
@@ -30,6 +28,7 @@ import bulk_read_guard as guard  # noqa: E402
 import bulk_read_lib as lib  # noqa: E402
 
 DEFAULT_HEALTH_URL = lib.INKLING_HEALTH_URL  # the managed value, captured before any test patches it
+DEFAULT_MANAGED_PYTHON = lib.MANAGED_PYTHON
 HARNESS = Path(__file__).parent / "bulk_read_harness.py"
 PROXY_AGENT = (Path(__file__).parents[1] / "shared-assets/claude/scripts/proxy-agent.sh").read_text()
 LANE = {"PROXY_AGENT_RUN": "1", "PROXY_AGENT_TYPE": "hd-builder"}
@@ -40,16 +39,8 @@ FENCE = chr(96) * 3
 KEY = "managed-router-key-7"
 
 
-def load_tool(name):
-    loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), str(SCRIPTS / name))
-    spec = importlib.util.spec_from_loader(loader.name, loader)
-    module = importlib.util.module_from_spec(spec)
-    loader.exec_module(module)
-    return module
-
-
-bulk_read = load_tool("bulk-read")
-code_write = load_tool("code-write")
+import bulk_read_cli as bulk_read  # noqa: E402  (logic; the launchers bind the route and call main())
+import code_write_cli as code_write  # noqa: E402
 
 STUB = {}  # the approved transport stub (the managed router origin in these tests)
 OVERRIDE = []  # every request that reached the server a CALLER tried to point the helpers at
@@ -131,6 +122,30 @@ def make_fake_claude(path):
     (path.parent / (path.name + ".mode")).write_text("{}")
 
 
+def git(cwd, *args):
+    """Real git for the fixtures: a repo is what makes a file SOURCE."""
+    environment = {"PATH": os.environ["PATH"], "HOME": str(cwd), "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
+                   "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    return subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True, env=environment).stdout
+
+
+REPO = {"root": None}
+
+
+def track(*paths):
+    """Commit these files into the fixture checkout (they are then tracked source at HEAD)."""
+    git(REPO["root"], "add", "-f", "--", *[str(p) for p in paths])
+    git(REPO["root"], "commit", "-q", "--allow-empty", "-m", "t")
+
+
+def put(path, text):
+    """Write a file and, when it sits in the fixture checkout, track it. Files elsewhere stay plain."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    if REPO["root"] and str(path).startswith(str(REPO["root"]) + os.sep):
+        track(path)
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     server, base = serve(Handler)
@@ -139,17 +154,24 @@ def env(tmp_path, monkeypatch):
     OVERRIDE.clear()
     home = tmp_path / "home"
     projects = home / "Downloads" / "projects"
-    src = projects / "heydonna-app"  # an operator-approved checkout of the (patched) managed home
+    src = projects / "heydonna-app"  # an operator-approved checkout of the (patched) managed home, a real git repo
     src.mkdir(parents=True)
+    git(src, "init", "-q")
+    (src / "app.ts").write_text("export const x = 1;\n")
+    git(src, "add", "app.ts")
+    git(src, "commit", "-q", "-m", "init")
+    REPO["root"] = os.path.realpath(src)
     key_file = tmp_path / "client.env"
     key_file.write_text("export CLIPROXY_API_KEY=%s\n" % KEY)
     claude = tmp_path / "bin" / "claude"
     make_fake_claude(claude)
     patches = {"HOME_DIR": str(home), "PROJECTS_DIR": str(projects), "STATE_DIR": str(tmp_path / "state"),
                "RELEASES_ROOT": str(home / ".local/share/master-of-panes/releases"), "ROUTER_ORIGIN": base,
-               "ROUTER_KEY_FILE": str(key_file), "INKLING_HEALTH_URL": base + "/health", "CLAUDE_CANDIDATES": [str(claude)]}
+               "ROUTER_KEY_FILE": str(key_file), "INKLING_HEALTH_URL": base + "/health", "CLAUDE_CANDIDATES": [str(claude)],
+               "GIT_CANDIDATES": [shutil.which("git")], "MANAGED_PYTHON": sys.executable}
     for key, value in patches.items():
-        monkeypatch.setattr(lib, key, tuple(value) if key == "CLAUDE_CANDIDATES" else value)
+        monkeypatch.setattr(lib, key, tuple(value) if key in ("CLAUDE_CANDIDATES", "GIT_CANDIDATES") else value)
+    monkeypatch.setattr(lib, "BOUND_ROUTE", "claude")  # the PM launcher's route; lane() rebinds it for the lane launcher
     for key in list(os.environ):
         if key.startswith(SCRUBBED):
             monkeypatch.delenv(key)
@@ -157,6 +179,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("BULK_READ_INKLING_TIMEOUT_S", "1")
     yield {"state": tmp_path / "state", "tmp": tmp_path, "dir": src, "home": home, "claude": claude, "base": base, "other": other_base,
            "patches": patches}
+    REPO["root"] = None
     server.shutdown()
     other.shutdown()
 
@@ -170,20 +193,20 @@ def set_claude_mode(env, mode, name="claude"):
 
 
 def make(path, lines, terminate=True):
-    path.write_text("".join("line %d\n" % n for n in range(1, lines + 1)) if terminate
-                    else "\n".join("line %d" % n for n in range(1, lines + 1)))
+    put(path, "".join("line %d\n" % n for n in range(1, lines + 1)) if terminate
+        else "\n".join("line %d" % n for n in range(1, lines + 1)))
     return str(path)
 
 
-def run_entry(env, entry, args, stdin="", cfg=None, **session):
-    """Run a REAL deployed entrypoint in a subprocess through the test-only harness."""
+def run_entry(env, entry, args, stdin="", cfg=None, python=None, **session):
+    """Run a REAL deployed entrypoint in a subprocess through the test-only harness. python: the interpreter command (default this one, -I)."""
     config = env["tmp"] / "harness.json"
     config.write_text(json.dumps({**env["patches"], **(cfg or {})}))
     environment = {k: v for k, v in os.environ.items() if not k.startswith(SCRUBBED)}
     environment.update({"BULK_READ_HARNESS_CONFIG": str(config), "BULK_READ_TIMEOUT_S": "4", "BULK_READ_INKLING_TIMEOUT_S": "1"})
     environment.update(session)
-    return subprocess.run([sys.executable, "-I", str(HARNESS), entry, *args], input=stdin, capture_output=True, text=True, env=environment,
-                          timeout=60)
+    return subprocess.run([*(python or [sys.executable, "-I"]), str(HARNESS), entry, *args], input=stdin, capture_output=True, text=True,
+                          env=environment, timeout=60)
 
 
 def run_guard(env, payload, cfg=None, **session):
@@ -206,19 +229,23 @@ def events(env):
 
 
 def lane(monkeypatch):
-    monkeypatch.setenv("PROXY_AGENT_RUN", "1")
+    """Bind the lane route the way bulk-read-lane does (the environment plays no part)."""
+    monkeypatch.setattr(lib, "BOUND_ROUTE", "lane")
 
 
 class Spy:
     """Records every path opened through os.open or builtins.open, and the bytes read through os.read."""
 
     def __init__(self, monkeypatch):
-        self.opened, self.read_bytes = [], 0
+        self.opened, self.read_bytes, self.fds = [], 0, set()
         real_os_open, real_open, real_read = os.open, builtins.open, os.read
 
         def os_open(path, *args, **kwargs):
             self.opened.append(os.fspath(path))
-            return real_os_open(path, *args, **kwargs)
+            fd = real_os_open(path, *args, **kwargs)
+            if os.fspath(path) != os.devnull:
+                self.fds.add(fd)
+            return fd
 
         def b_open(file, *args, **kwargs):
             if isinstance(file, (str, os.PathLike)):
@@ -227,7 +254,8 @@ class Spy:
 
         def os_read(fd, n):
             data = real_read(fd, n)
-            self.read_bytes += len(data)
+            if fd in self.fds:  # bytes read from files the helpers opened, not from subprocess pipes
+                self.read_bytes += len(data)
             return data
 
         monkeypatch.setattr(os, "open", os_open)
@@ -245,7 +273,7 @@ def test_routine_lane_big_read_is_blocked_with_the_exact_redirect(env):
     big = make(env["dir"] / "big.txt", 450)
     reason = run_guard(env, read(env, big), **LANE)
     assert "has 450 lines (limit 400)" in reason
-    assert 'bulk-read --paths <files> --question "<q>"' in reason
+    assert lib.LANE_LAUNCHER + ' --paths <files> --question "<q>"' in reason  # a lane is told the absolute lane launcher, the only exempt command
     assert "Read with offset/limit (200 lines or fewer)" in reason
     assert "BULK_READ_ALLOW" not in reason  # the evidence hatch is spelled out for the PM session only
     logged = events(env)[-1]
@@ -279,7 +307,8 @@ def test_binary_files_and_missing_files_and_own_helpers_are_carved_out(env):
     binary.write_bytes(b"\0abc\n" * 900)
     assert run_guard(env, read(env, str(binary)), **LANE) is None
     assert run_guard(env, read(env, str(env["dir"] / "absent.txt")), **LANE) is None
-    for helper in ("bulk_read_guard.py", "bulk_read_lib.py", "bulk-read", "code-write"):
+    for helper in ("bulk_read_guard.py", "bulk_read_lib.py", "bulk_read_cli.py", "code_write_cli.py", "bulk-read", "bulk-read-lane", "code-write",
+                   "code-write-lane"):
         assert run_guard(env, read(env, str(SCRIPTS / helper)), **LANE) is None
     state_file = env["state"] / "events.jsonl"
     state_file.parent.mkdir(parents=True, exist_ok=True)
@@ -520,7 +549,7 @@ def test_bulk_read_usage_errors_and_size_cap(env, monkeypatch):
 
 def test_default_size_cap_is_smaller_in_a_lane_than_for_the_pm(env, monkeypatch, capsys):
     path = env["dir"] / "mid.txt"
-    path.write_text("x" * 60 + "\n" * 1 + "".join("line %d with some padding text\n" % n for n in range(1500)))  # about 50k chars
+    put(path, "x" * 60 + "\n" * 1 + "".join("line %d with some padding text\n" % n for n in range(1500)))  # about 50k chars
     assert bulk_read.main(["--paths", str(path), "--question", "q"]) == 0  # the PM route takes it (cap 80000)
     lane(monkeypatch)
     assert bulk_read.main(["--paths", str(path), "--question", "q"]) == 4  # a lane refuses without waiting 30 s (cap 36000)
@@ -582,7 +611,7 @@ def test_pm_claude_failure_fails_open_for_the_guard(env, capsys):
 def test_code_write_strips_fences_and_prints_path_and_line_count(env, monkeypatch, capsys):
     lane(monkeypatch)
     ref, target = env["dir"] / "ref.py", env["dir"] / "out" / "new.py"
-    ref.write_text("print(1)\n")
+    put(ref, "print(1)\n")
     STUB["content"] = FENCE + "python\nimport os\nprint(os.name)\n" + FENCE
     assert code_write.main(["write a script", str(ref), str(target)]) == 0
     assert target.read_text() == "import os\nprint(os.name)\n"
@@ -594,7 +623,7 @@ def test_code_write_strips_fences_and_prints_path_and_line_count(env, monkeypatc
 
 def test_code_write_lane_uses_luna_when_inkling_is_down_and_pm_uses_claude(env, monkeypatch):
     ref = env["dir"] / "ref.py"
-    ref.write_text("x\n")
+    put(ref, "x\n")
     set_claude_mode(env, {"result": "print('pm')"})
     assert code_write.main(["spec", str(ref), str(env["dir"] / "pm.py")]) == 0
     assert (env["dir"] / "pm.py").read_text() == "print('pm')\n" and "requests" not in STUB
@@ -608,7 +637,7 @@ def test_code_write_lane_uses_luna_when_inkling_is_down_and_pm_uses_claude(env, 
 def test_code_write_failures_write_nothing(env, monkeypatch):
     lane(monkeypatch)
     ref, target = env["dir"] / "ref.py", env["dir"] / "new.py"
-    ref.write_text("x\n")
+    put(ref, "x\n")
     STUB["content"] = "<think>nothing</think>"
     assert code_write.main(["spec", str(ref), str(target)]) == 3 and not target.exists()  # both backends answered empty
     monkeypatch.setattr(lib, "INKLING_HEALTH_URL", DEAD + "/health")
@@ -641,9 +670,8 @@ def test_restricted_data_classes_are_refused_even_inside_an_approved_root(env, m
 @pytest.mark.parametrize("relative", ALLOWED)
 def test_ordinary_source_paths_are_approved(env, relative):
     path = env["dir"] / relative
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("ok\n")
-    assert lib.input_refusal(os.path.realpath(path)) is None
+    put(path, "ok\n")
+    assert lib.input_refusal(os.path.realpath(path)) is None and lib.membership_refusal(os.path.realpath(path)) is None  # tracked source
 
 
 @pytest.mark.parametrize("outside", ["/etc/hosts", "~/.ssh/config", "~/.codex/auth.json", "~/.cli-proxy-api/x.yaml", "~/.claude/state/pm-ops.db",
@@ -674,8 +702,10 @@ def test_approved_roots_are_the_fixed_checkouts_and_the_worktrees_their_own_git_
     projects = env["home"] / "Downloads" / "projects"
     for name in ("heydonna-app-3003", "heydonna-app-proxy", "master-of-panes", "heydonna-app-3002-evidence", "heydonna-app-3004-artifacts",
                  "heydonna-app-3006-raw", "heydonna-app-2", "master-of-panes-capture-adapter", "heydonna-private-9828"):
-        (projects / name).mkdir()
-    roots = {os.path.basename(root) for root in lib.source_roots()}
+        (projects / name / ".git").mkdir(parents=True)  # a git checkout
+    (projects / "heydonna-app-3005").mkdir()  # a listed name that is not a git checkout is not a root
+    roots = {os.path.basename(root.path) for root in lib.source_roots()}
+    assert "heydonna-app-3005" not in roots
     assert {"heydonna-app", "heydonna-app-3003", "heydonna-app-proxy", "master-of-panes", "releases"} <= roots
     assert not roots & {"heydonna-app-3002-evidence", "heydonna-app-3004-artifacts", "heydonna-app-3006-raw", "heydonna-app-2",
                         "master-of-panes-capture-adapter", "heydonna-private-9828"}
@@ -683,11 +713,12 @@ def test_approved_roots_are_the_fixed_checkouts_and_the_worktrees_their_own_git_
     assert lib.input_refusal(os.path.realpath(good / "app.ts")) is None  # registered in the repo's own .git, back-linked
     assert lib.input_refusal(os.path.realpath(good / ".env")) == "restricted_data_class"
     evidence = worktree_fixture(env, "lane-evidence")
-    assert lib.input_refusal(os.path.realpath(evidence / "app.ts")) is None  # restricted classes look BELOW the root only...
-    nested = env["tmp"] / "lanes" / "lane-evidence" / "evidence"
+    assert lib.input_refusal(os.path.realpath(evidence / "app.ts")) == "restricted_data_class"  # restricted classes look at the FULL path
+    ok = worktree_fixture(env, "lane-ok")
+    nested = ok / "evidence"
     nested.mkdir()
     (nested / "log.txt").write_text("x\n")
-    assert lib.input_refusal(os.path.realpath(nested / "log.txt")) == "restricted_data_class"  # ...and an evidence dir inside is denied
+    assert lib.input_refusal(os.path.realpath(nested / "log.txt")) == "restricted_data_class"  # and an evidence dir inside is denied
 
 
 def test_a_tmp_clone_or_a_forged_git_pointer_grants_nothing(env):
@@ -717,7 +748,7 @@ def test_target_of_code_write_may_not_sit_in_a_restricted_place(env):
 def test_code_write_refuses_bad_references_and_targets_with_zero_bytes(env, monkeypatch, tmp_path_factory):
     lane(monkeypatch)
     ok = env["dir"] / "ref.py"
-    ok.write_text("x\n")
+    put(ok, "x\n")
     secret_ref = env["dir"] / ".env"
     secret_ref.write_text("SECRET-CANARY\n")
     outside = tmp_path_factory.mktemp("outside") / "ref.py"
@@ -786,7 +817,7 @@ def test_isolated_proof_trusted_source_pinned_egress(env, monkeypatch, tmp_path_
     (forged / ".git").write_text((registered / ".git").read_text())
     sources["forged"] = forged / "app.ts"
     approved = env["dir"] / "src.ts"
-    approved.write_text("export const answer = 'APPROVED-CANARY';\n" * 3)
+    put(approved, "export const answer = 'APPROVED-CANARY';\n" * 3)
     spy = Spy(monkeypatch)
     for label, source in sources.items():
         assert bulk_read.main(["--paths", str(source), "--question", "q"]) == 6, label
@@ -904,7 +935,7 @@ def swapping_complete(monkeypatch, env, out, other):
 def test_destination_swapped_after_validation_leaves_the_other_file_untouched(env, monkeypatch):
     lane(monkeypatch)
     ref = env["dir"] / "ref.py"
-    ref.write_text("x\n")
+    put(ref, "x\n")
     out, other = env["dir"] / "out", env["dir"] / "other"
     out.mkdir()
     other.mkdir()
@@ -921,7 +952,7 @@ def test_destination_swapped_after_validation_leaves_the_other_file_untouched(en
 def test_destination_swap_with_force_replaces_only_the_pinned_directorys_file(env, monkeypatch):
     lane(monkeypatch)
     ref = env["dir"] / "ref.py"
-    ref.write_text("x\n")
+    put(ref, "x\n")
     out, other = env["dir"] / "out", env["dir"] / "other"
     out.mkdir()
     other.mkdir()
@@ -937,7 +968,7 @@ def test_destination_swap_with_force_replaces_only_the_pinned_directorys_file(en
 def test_create_only_never_overwrites_a_file_that_appears_after_the_check(env, monkeypatch, capsys):
     lane(monkeypatch)
     ref = env["dir"] / "ref.py"
-    ref.write_text("x\n")
+    put(ref, "x\n")
     out = env["dir"] / "out"
     out.mkdir()
     real_complete = lib.complete
@@ -958,7 +989,7 @@ def test_create_only_never_overwrites_a_file_that_appears_after_the_check(env, m
 def test_a_symlink_at_the_target_name_is_replaced_not_followed(env, monkeypatch):
     lane(monkeypatch)
     ref = env["dir"] / "ref.py"
-    ref.write_text("x\n")
+    put(ref, "x\n")
     victim = env["dir"] / "victim.txt"
     victim.write_text("VICTIM\n")
     (env["dir"] / "link.py").symlink_to(victim)
@@ -973,7 +1004,7 @@ def test_a_symlink_at_the_target_name_is_replaced_not_followed(env, monkeypatch)
 def test_oversized_input_is_refused_before_any_read(env, monkeypatch):
     lane(monkeypatch)
     huge = env["dir"] / "huge.ts"
-    huge.write_text("x" * 300000)
+    put(huge, "x" * 300000)
     spy = Spy(monkeypatch)
     assert bulk_read.main(["--paths", str(huge), "--question", "q"]) == 4
     assert not spy.touched(huge) and spy.read_bytes == 0 and "requests" not in STUB
@@ -981,14 +1012,14 @@ def test_oversized_input_is_refused_before_any_read(env, monkeypatch):
 
 def test_oversized_input_stops_reading_at_the_cap_even_if_its_size_changes_after_the_check(env, monkeypatch):
     path = env["dir"] / "grows.ts"
-    path.write_text("y" * 50000)
+    put(path, "y" * 50000)
     ((real, meta),) = lib.approve_inputs([str(path)], 100000)
     spy = Spy(monkeypatch)
     real_fstat = os.fstat
 
     class Lie:  # the file is reported small, as if it grew after approval
         def __init__(self, st):
-            self.st_mode, self.st_dev, self.st_ino, self.st_size = st.st_mode, st.st_dev, st.st_ino, 0
+            self.st_mode, self.st_dev, self.st_ino, self.st_nlink, self.st_size = st.st_mode, st.st_dev, st.st_ino, st.st_nlink, 0
 
     monkeypatch.setattr(os, "fstat", lambda fd: Lie(real_fstat(fd)))
     with pytest.raises(lib.Refusal) as excinfo:
@@ -1001,8 +1032,8 @@ def test_disabled_refuses_at_entry_with_zero_bytes_and_no_file_opened(env, monke
     """CTO add-on ts 1795291271.444299: bulk-read and code-write check the DISABLED marker and MOP_BULK_READ_GUARD=0 themselves."""
     lane(monkeypatch)
     src, ref, target = env["dir"] / "src.ts", env["dir"] / "ref.py", env["dir"] / "out.py"
-    src.write_text("export const x = 1;\n")
-    ref.write_text("x\n")
+    put(src, "export const x = 1;\n")
+    put(ref, "x\n")
     if how == "marker":
         env["state"].mkdir(parents=True)
         (env["state"] / "DISABLED").write_text("")
@@ -1043,7 +1074,7 @@ def test_code_write_hard_deadline_closes_the_pinned_directory(env, monkeypatch, 
     lane(monkeypatch)
     monkeypatch.setenv("CODE_WRITE_TIMEOUT_S", "0.5")
     ref = env["dir"] / "ref.py"
-    ref.write_text("x\n")
+    put(ref, "x\n")
     monkeypatch.setattr(lib, "complete", lambda *a, **k: time.sleep(10))
     closed = []
     real_close = lib.Destination.close
@@ -1052,6 +1083,207 @@ def test_code_write_hard_deadline_closes_the_pinned_directory(env, monkeypatch, 
     assert code_write.main(["spec", str(ref), str(env["dir"] / "out" / "new.py")]) == 3
     assert time.time() - started < 4 and "hard deadline" in capsys.readouterr().err and len(closed) == 1
     assert not (env["dir"] / "out" / "new.py").exists()
+
+
+# ---- CTO REVISE on 4184d7c0a643 (ts 1795293836.257189): the real launch, and SOURCE files rather than writable worktrees -----------------
+
+LAUNCHERS = {"bulk-read": "claude", "bulk-read-lane": "lane", "code-write": "claude", "code-write-lane": "lane"}
+SHEBANG = "#!" + DEFAULT_MANAGED_PYTHON + " -IS"
+needs_managed_python = pytest.mark.skipif(not os.path.exists(DEFAULT_MANAGED_PYTHON), reason="the fixed Apple python3 is not installed")
+
+
+def real_worktree(env, name):
+    """A REAL worktree outside every approved root (like a /tmp lane worktree), registered by git itself in the checkout's own .git."""
+    top = env["tmp"] / "lanes" / name
+    git(env["dir"], "worktree", "add", "-q", "--detach", str(top), "HEAD")
+    return top
+
+
+def test_launchers_pin_the_interpreter_scrub_the_environment_and_bind_the_route():
+    assert DEFAULT_MANAGED_PYTHON == "/Library/Developer/CommandLineTools/usr/bin/python3"
+    for name, route in LAUNCHERS.items():
+        text = (SCRIPTS / name).read_text()
+        assert text.splitlines()[0] == SHEBANG, name  # the real Apple binary with -IS: isolated, no site; not /usr/bin/env, not the xcrun shim
+        assert os.access(SCRIPTS / name, os.X_OK), name
+        assert 'lib.BOUND_ROUTE = "%s"' % route in text and "lib.scrub_environment()" in text, name
+        assert text.index("lib.scrub_environment()") < text.index("lib.BOUND_ROUTE") < text.index("import bulk_read_cli" if "bulk" in name else "import code_write_cli")
+    for name in ("bulk_read_cli.py", "code_write_cli.py"):  # the logic modules are not entrypoints
+        text = (SCRIPTS / name).read_text()
+        assert not text.startswith("#!") and "__main__" not in text and not os.access(SCRIPTS / name, os.X_OK), name
+
+
+def test_route_is_bound_by_the_launcher_and_no_environment_variable_can_change_it(env, monkeypatch, capsys):
+    path = make(env["dir"] / "a.ts", 5)
+    lane(monkeypatch)
+    for value in (None, "", "0", "1"):  # the lane launcher means the router whatever PROXY_AGENT_RUN says
+        monkeypatch.delenv("PROXY_AGENT_RUN", raising=False)
+        if value is not None:
+            monkeypatch.setenv("PROXY_AGENT_RUN", value)
+        STUB.pop("requests", None)
+        assert bulk_read.main(["--paths", path, "--question", "q"]) == 0 and lib.route() == "lane"
+        assert [r["model"] for r in STUB["requests"]] == ["inkling-2-mini"]
+    assert not (env["claude"].parent / "claude.call.json").exists()  # direct Claude was never selected
+    monkeypatch.setattr(lib, "BOUND_ROUTE", "claude")  # the PM launcher inside a proxy lane session refuses
+    monkeypatch.setenv("PROXY_AGENT_RUN", "1")
+    STUB.clear()
+    assert bulk_read.main(["--paths", path, "--question", "q"]) == 8 and code_write.main(["spec", path, str(env["dir"] / "o.py")]) == 8
+    assert "requests" not in STUB and "bulk-read: a proxy lane uses" in capsys.readouterr().err
+    monkeypatch.setattr(lib, "BOUND_ROUTE", None)  # run without a launcher: refuses, whatever the environment says
+    assert bulk_read.main(["--paths", path, "--question", "q"]) == 8 and code_write.main(["spec", path, str(env["dir"] / "o.py")]) == 8
+    assert "requests" not in STUB and not (env["dir"] / "o.py").exists()
+
+
+def test_untracked_artifacts_and_staged_only_files_in_a_real_registered_worktree_are_not_source(env, monkeypatch):
+    lane(monkeypatch)
+    top = real_worktree(env, "lane-wt")
+    assert lib.registered_worktrees() and os.path.realpath(top) in [root.path for root in lib.registered_worktrees()]
+    tracked = top / "app.ts"
+    assert lib.membership_refusal(os.path.realpath(tracked)) is None  # tracked in the repo's index and HEAD
+    tracked.write_text("export const edited = true;\n")
+    assert lib.membership_refusal(os.path.realpath(tracked)) is None  # a work-in-progress edit of tracked source is still source
+    artifact = top / "notes.ts"  # an ordinary name a lane wrote
+    artifact.write_text("LOCAL-ARTIFACT-CANARY\n")
+    staged = top / "staged.ts"
+    staged.write_text("STAGED-CANARY\n")
+    git(top, "add", "staged.ts")  # staged by a lane, never committed
+    assert lib.membership_refusal(os.path.realpath(artifact)) == "untracked"
+    assert lib.membership_refusal(os.path.realpath(staged)) == "not_at_head"
+    spy = Spy(monkeypatch)
+    for victim in (artifact, staged):
+        assert bulk_read.main(["--paths", str(tracked), str(victim), "--question", "q"]) == 6
+    assert "requests" not in STUB and not any(spy.touched(p) for p in (artifact, staged, tracked))  # zero bytes, nothing opened
+    assert bulk_read.main(["--paths", str(tracked), "--question", "q"]) == 0 and "EDITED-OK" not in json.dumps(STUB["requests"])
+
+
+def test_hardlink_aliases_are_not_source_even_when_tracked_with_an_ordinary_name(env, monkeypatch, tmp_path_factory):
+    lane(monkeypatch)
+    restricted = env["dir"] / ".env.local"
+    restricted.write_text("RESTRICTED-CANARY\n")
+    alias = env["dir"] / "notes.ts"
+    os.link(restricted, alias)  # ordinary name, same inode as restricted data
+    track(alias)
+    outside = tmp_path_factory.mktemp("outside") / "leak.txt"
+    outside.write_text("OUTSIDE-CANARY\n")
+    alias2 = env["dir"] / "alias2.ts"
+    os.link(outside, alias2)
+    track(alias2)
+    assert os.stat(alias).st_nlink == 2
+    for name in (alias, alias2):
+        assert lib.membership_refusal(os.path.realpath(name)) == "hardlink_alias"
+        assert bulk_read.main(["--paths", str(name), "--question", "q"]) == 6
+    assert "requests" not in STUB
+    late = make(env["dir"] / "late.ts", 5)  # approved with one link, aliased before the read: the descriptor check refuses it
+    ((real, meta),) = lib.approve_inputs([late], 100000)
+    os.link(real, env["dir"] / "late-alias.ts")
+    with pytest.raises(lib.Refusal) as excinfo:
+        lib.read_approved(real, meta, 100000)
+    assert excinfo.value.reason == "hardlink_alias"
+
+
+def test_restricted_classes_apply_to_the_full_resolved_path(env):
+    for relative in ("evidence/x.ts", "customer-artifacts/x.ts", "sub/secrets/x.ts", ".ssh/x.ts"):
+        path = env["dir"] / relative
+        put(path, "x\n")
+        assert lib.input_refusal(os.path.realpath(path)) == "restricted_data_class", relative
+    top = real_worktree(env, "hd-evidence-run")  # an evidence-named worktree: the name is part of the resolved path
+    assert lib.input_refusal(os.path.realpath(top / "app.ts")) == "restricted_data_class"
+
+
+def test_release_files_are_source_only_when_the_release_manifest_lists_them(env):
+    release = env["home"] / ".local/share/master-of-panes/releases/abc123"
+    for relative in ("src/a.ts", "src/b.ts", "node_modules/m/index.js", "dist/a.js"):
+        (release / relative).parent.mkdir(parents=True, exist_ok=True)
+        (release / relative).write_text("x\n")
+    (release / "RELEASE_MANIFEST.json").write_text(json.dumps({"files": [{"kind": "file", "path": p} for p in ("src/a.ts", "node_modules/m/index.js", "dist/a.js")]}))
+    assert lib.membership_refusal(os.path.realpath(release / "src/a.ts")) is None
+    assert lib.membership_refusal(os.path.realpath(release / "src/b.ts")) == "not_source"  # not in the manifest
+    assert lib.membership_refusal(os.path.realpath(release / "node_modules/m/index.js")) == "not_source"
+    assert lib.membership_refusal(os.path.realpath(release / "dist/a.js")) == "not_source"
+
+
+def test_guard_leaves_untracked_big_files_and_hardlink_aliases_to_the_native_read(env):
+    tracked = make(env["dir"] / "big.ts", 900)
+    artifact = env["dir"] / "artifact.txt"  # an ordinary name, not source
+    artifact.write_text("".join("line %d\n" % n for n in range(900)))
+    alias = env["dir"] / "alias.ts"
+    os.link(tracked, alias)
+    track(alias)
+    assert run_guard(env, read(env, tracked), **LANE) is None  # its inode now has two names, so it is an alias too: native
+    solo = make(env["dir"] / "solo.ts", 900)
+    assert run_guard(env, read(env, solo), **LANE) is not None  # tracked source: still redirected
+    assert run_guard(env, read(env, str(artifact)), **LANE) is None  # untracked: native
+    assert run_guard(env, read(env, str(alias)), **LANE) is None  # hardlink alias: native
+    assert run_guard(env, read(env, str(artifact))) is None and run_guard(env, bash(env, "cat " + str(artifact))) is None  # the PM session too
+
+
+def test_guard_fails_open_when_the_launcher_interpreter_is_missing(env):
+    big = make(env["dir"] / "big.ts", 900)
+    assert run_guard(env, read(env, big), cfg={"MANAGED_PYTHON": "/nonexistent/python3"}, **LANE) is None
+    assert events(env)[-1]["event"] == "fail_open" and events(env)[-1]["reason"] == "launcher_missing"
+
+
+def hostile_startup(root):
+    """Everything a caller could plant to change the interpreter or run code before the guard: each one drops a canary when it runs."""
+    root.mkdir(parents=True, exist_ok=True)
+    canaries = {}
+    for name in ("sitecustomize", "usercustomize", "bulk_read_lib", "startup"):
+        canaries[name] = root / ("canary-" + name)
+        (root / (name + ".py")).write_text("open(%r, 'w').write('ran')\n" % str(canaries[name]))
+    for name in ("python3", "python", "git"):
+        canaries[name] = root / ("canary-bin-" + name)
+        (root / name).write_text("#!/bin/sh\necho ran > %s\n" % canaries[name])
+        (root / name).chmod(0o755)
+    environment = {"PYTHONPATH": str(root), "PYTHONSTARTUP": str(root / "startup.py"), "PYTHONHOME": "/nonexistent/python-home",
+                   "PYTHONUSERBASE": str(root), "PYTHONPYCACHEPREFIX": str(root / "pyc"), "PYTHONSAFEPATH": "", "PYTHONINSPECT": "1",
+                   "PATH": str(root) + ":/usr/bin:/bin", "PROXY_AGENT_RUN": "", "BULK_READ_CLAUDE_MODEL": "opus", "CLAUDE_CONFIG_DIR": str(root),
+                   "HOME": str(root), "TMPDIR": str(root)}
+    return environment, canaries
+
+
+@needs_managed_python
+def test_real_launcher_under_hostile_startup_settings(env, tmp_path_factory):
+    """THE launcher proof. The real bulk-read-lane launcher, run by the fixed Apple python3 -IS, with hostile startup settings:
+    an approved TRACKED source reaches the managed stub (as the router route, whatever PROXY_AGENT_RUN says); an untracked artifact in a
+    real registered worktree and a restricted hardlink alias send zero bytes; none of the planted startup code or binaries ever runs."""
+    hostile, canaries = hostile_startup(tmp_path_factory.mktemp("hostile"))
+    cfg = {"MANAGED_PYTHON": DEFAULT_MANAGED_PYTHON}
+    python = [DEFAULT_MANAGED_PYTHON, "-IS"]
+    approved = env["dir"] / "src.ts"
+    put(approved, "export const answer = 'APPROVED-CANARY';\n" * 3)
+    top = real_worktree(env, "lane-launch")
+    artifact = top / "notes.ts"
+    artifact.write_text("ARTIFACT-CANARY\n")
+    restricted = env["dir"] / ".env.local"
+    restricted.write_text("RESTRICTED-CANARY\n")
+    alias = env["dir"] / "alias.ts"
+    os.link(restricted, alias)
+    track(alias)
+    ok = run_entry(env, "bulk-read-lane", ["--paths", str(approved), "--question", "q"], cfg=cfg, python=python, **hostile)
+    assert ok.returncode == 0, ok.stderr
+    assert [r["model"] for r in STUB["requests"]] == ["inkling-2-mini"] and "APPROVED-CANARY" in json.dumps(STUB["requests"][0])
+    assert STUB["raw"][0][1]["Authorization"] == "Bearer " + KEY and not (env["claude"].parent / "claude.call.json").exists()
+    for victim in (artifact, alias, restricted):
+        refused = run_entry(env, "bulk-read-lane", ["--paths", str(victim), "--question", "q"], cfg=cfg, python=python, **hostile)
+        assert refused.returncode == 6, (victim, refused.stderr)
+    assert len(STUB["requests"]) == 1 and OVERRIDE == []  # zero bytes for the three
+    blob = json.dumps(STUB["requests"]) + json.dumps(STUB["raw"][0][1])
+    assert "ARTIFACT-CANARY" not in blob and "RESTRICTED-CANARY" not in blob
+    assert not [name for name, marker in canaries.items() if marker.exists()]  # no planted code, binary or startup file ran
+    pm = run_entry(env, "bulk-read", ["--paths", str(approved), "--question", "q"], cfg=cfg, python=python, **hostile)  # the PM launcher, router never
+    assert pm.returncode == 0 and len(STUB["requests"]) == 1 and (env["claude"].parent / "claude.call.json").exists()
+
+
+@needs_managed_python
+@pytest.mark.parametrize("launcher", ["bulk-read-lane", "bulk-read", "code-write-lane", "code-write"])
+def test_launcher_file_starts_under_its_own_shebang_with_hostile_startup_settings(tmp_path_factory, launcher):
+    """The kernel's exec of the real file, no harness: a non-isolated interpreter would die on the bogus PYTHONHOME. Real constants, but the
+    input is outside every approved root (or the real DISABLED marker answers first), so nothing can reach a transport either way."""
+    hostile, canaries = hostile_startup(tmp_path_factory.mktemp("hostile"))
+    args = ["--paths", "/etc/hosts", "--question", "q"] if launcher.startswith("bulk") else ["spec", "/etc/hosts", "/nonexistent-dir/out.py"]
+    done = subprocess.run([str(SCRIPTS / launcher), *args], capture_output=True, text=True, env={**hostile}, timeout=60)
+    assert done.returncode in (6, 7, 8), (done.returncode, done.stderr)  # 7 while the DISABLED marker exists, 6 outside the roots, 8 a lane refuses
+    assert launcher.split("-")[0] in done.stderr and "Traceback" not in done.stderr and "Fatal Python error" not in done.stderr
+    assert not [name for name, marker in canaries.items() if marker.exists()]
 
 
 # ---- wiring: proxy lanes, the PM checkout settings, links and proxy-agent.sh ----------------------------------------
@@ -1073,7 +1305,9 @@ def test_proxy_lanes_load_the_guard_for_read_and_bash_and_bulk_read_leaves_the_f
     assert all(g["hooks"][0]["timeout"] == 8 for g in guards)
     assert any("block-force-push-rebase" in json.dumps(g) for g in settings["hooks"]["PreToolUse"])  # existing hooks kept
     excluded = settings["sandbox"]["excludedCommands"]
-    assert "bulk-read *" in excluded and not any("code-write" in e for e in excluded)  # code-write writes arbitrary targets: stays fenced
+    lane_launcher = "/Users/rajiv/.local/share/master-of-panes/current/scripts/bulk-read-lane *"
+    assert lane_launcher in excluded  # the one absolute launcher, never the bare command or a link
+    assert not any(e.startswith("bulk-read") or "/.local/bin/" in e for e in excluded) and not any("code-write" in e for e in excluded)
 
 
 def test_lane_hook_command_exits_zero_when_the_script_is_missing_and_runs_when_present(tmp_path):

@@ -1,0 +1,18 @@
+#!/Library/Developer/CommandLineTools/usr/bin/python3 -IS
+"""Trusted launcher for code-write-lane: the managed router (inkling-2-mini, then gpt-6-luna). Not exempt from the lane sandbox, so it works only in unsandboxed ops lanes.
+
+The shebang is the fixed Apple interpreter with -IS (isolated and no site), so PYTHON* variables, sitecustomize, the user site and PATH cannot
+change the interpreter or what it imports. The environment is scrubbed to a short allowlist and the route is bound here, not read from the
+environment. The logic is code_write_cli.py. See bulk_read_lib.py for the trust model (CTO REVISE on 4184d7c0a643, ts 1795293836.257189).
+"""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import bulk_read_lib as lib  # noqa: E402
+
+lib.scrub_environment()
+lib.BOUND_ROUTE = "lane"
+import code_write_cli  # noqa: E402
+
+sys.exit(code_write_cli.main())

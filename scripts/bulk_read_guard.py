@@ -6,9 +6,10 @@ Rajiv D0AMF0XE6TS thread 1795287257.526309, ts 1795287629.063499 ("do it with mo
 or one lone cat/less/more/head/tail on a single path, and nothing else.
 
 BLOCKS (deny with the redirect message) a Read, or a lone Bash cat/less/more/head/tail of one path, of a text file over 400 lines when
-no offset/limit is given. The message names the alternatives: `bulk-read --paths <files> --question "<q>"` (understanding) or Read with
-offset/limit of at most 200 lines (editing). bulk-read answers with Inkling, then gpt-6-luna, in a proxy lane, and with Claude Haiku
-(Sonnet via BULK_READ_CLAUDE_MODEL) on direct Claude in the PM session.
+no offset/limit is given. The message names the alternatives: `bulk-read --paths <files> --question "<q>"` (understanding; in a proxy lane the
+absolute lane launcher <current release>/scripts/bulk-read-lane, the only command the lane sandbox lets out) or Read with offset/limit of at most
+200 lines (editing). bulk-read-lane answers with Inkling, then gpt-6-luna; bulk-read answers with Claude Haiku (Sonnet via BULK_READ_CLAUDE_MODEL)
+on direct Claude in the PM session. The route is bound by the launcher, never by the environment.
 
 LOADED BY: every proxy lane (proxy-agent.sh adds it to the generated --settings file) and the PM pane (install-relay-hooks.py adds it to the
 PM checkout settings next to the MoP relay hooks). The PM pane is NOT exempt.
@@ -24,8 +25,9 @@ EXEMPT (never blocked, no log line), checked in this order:
      proxy_agent_is_judgment_lane. Debugging and root-cause work stays on the main model (CLAUDE.md: never delegate it).
   5. Carve-outs: images, PDF and notebooks; binary files; files of 400 lines or fewer; Bash head/tail printing 400 lines or fewer;
      this hook's own helper files and state dir.
-  6. Inputs bulk-read would refuse (CTO BLOCK on 38bd1682, ts 1795291197.575539; REVISE on fb6de68d6a35, ts 1795292716.429489): a resolved
-     path outside the operator-approved checkouts and the worktrees their own .git registers (a /tmp clone grants nothing), or
+  6. Inputs bulk-read would refuse (CTO BLOCK on 38bd1682, ts 1795291197.575539; REVISE on fb6de68d6a35, ts 1795292716.429489; REVISE on
+     4184d7c0a643, ts 1795293836.257189): a resolved path outside the operator-approved checkouts and the worktrees their own .git registers (a
+     /tmp clone grants nothing), a file that is not tracked source there (untracked artifacts, staged-only files, hardlink aliases), or
      in a restricted data class (.env*, *secret*, *credential*, keys, ~/.ssh, ~/.codex, evidence dirs, ...) is never redirected;
      the native Read stands. See bulk_read_lib.py.
 
@@ -54,7 +56,8 @@ JUDGMENT_TYPES = ("ci-repair-agent", "e2e-failure-investigator", "hd-investigato
                   "pm-admission-reviewer", "hd-planner")
 SKIP_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".ico", ".heic", ".avif",
                    ".pdf", ".ipynb"}
-HELPER_FILES = {"bulk_read_guard.py", "bulk_read_lib.py", "bulk-read", "code-write", "install-bulk-read-guard.py"}
+HELPER_FILES = {"bulk_read_guard.py", "bulk_read_lib.py", "bulk_read_cli.py", "code_write_cli.py", "bulk-read", "bulk-read-lane", "code-write",
+                "code-write-lane", "install-bulk-read-guard.py"}
 WATCHDOG_S = 6
 SHELL_META = re.compile(r"[|;&<>`$\n\\]")
 
@@ -164,10 +167,11 @@ def is_own_helper(real):
 
 
 def deny_message(display, lines, what, route_name):
+    command = lib.LANE_LAUNCHER if route_name == "lane" else "bulk-read"  # a lane's only exempt command is the absolute lane launcher
     text = ("MoP bulk-read guard: %s has %d lines (limit %d) and %s has no offset/limit.\n"
-            "- To understand it: bulk-read --paths <files> --question \"<q>\" (a cheap model; prints bullets with file:line refs).\n"
+            "- To understand it: %s --paths <files> --question \"<q>\" (a cheap model; prints bullets with file:line refs).\n"
             "- To edit it: Read with offset/limit (200 lines or fewer) around the lines you need."
-            % (display, lines, lib.THRESHOLD_LINES, what))
+            % (display, lines, lib.THRESHOLD_LINES, what, command))
     if route_name == "claude":
         text += ("\n- Evidence read of the whole file: Read it with offset=1 and limit=%d, or prefix the Bash command with BULK_READ_ALLOW=1."
                  % lines)
@@ -211,6 +215,9 @@ def decide(data, env):
         return "allow", "carve_out_binary", info
     if lines <= lib.THRESHOLD_LINES or printed_lines(count, lines) <= lib.THRESHOLD_LINES:
         return "allow", "within_limit", info
+    membership = lib.membership_refusal(real)  # only now: git (tracked in the index and HEAD of the repo's own git dir), not an artifact or alias
+    if membership:
+        return "allow", "not_delegable_" + membership, info
     route_name = lib.route(env)
     if lib.bypass_active(real):
         return "fail_open", "bypass_token", info

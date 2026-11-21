@@ -1,143 +1,18 @@
-#!/usr/bin/env python3
-"""bulk-read: ask a question about files; a cheap model answers in bullets.
+#!/Library/Developer/CommandLineTools/usr/bin/python3 -IS
+"""Trusted launcher for bulk-read: direct Claude (Haiku or Sonnet), for the PM session. Refuses inside a proxy lane.
 
-  bulk-read --paths <f1> [<f2> ...] --question "<q>"
-
-Prints ONLY bullets, each ending with a file:line reference (lines are numbered for the model). Same flags as the
-retired ./scripts/codex-read.sh. Understanding only: edit work and debugging use Read with offset/limit (a small model
-finds surface facts and misses subtle bugs).
-
-Backend: in a proxy lane (PROXY_AGENT_RUN set) inkling-2-mini (3 s health gate), then gpt-6-luna, both through CLIProxyAPI on
-loopback; in any other session (the PM) Claude Haiku, or Sonnet with BULK_READ_CLAUDE_MODEL=sonnet, through a nested direct claude -p.
-
-Boundaries (CTO BLOCK on 38bd1682 ts 1795291197.575539 and ts 1795291271.444299; REVISE on fb6de68d6a35 ts 1795292716.429489):
-  - Nothing in the environment chooses where bytes come from or go to. Source roots, the router origin (127.0.0.1:8317), the model aliases
-    (inkling-2-mini, gpt-6-luna; Haiku or Sonnet for the PM), the Claude binary and its config, the state dir and HOME are fixed in
-    bulk_read_lib.py. The environment can only disable the helper or LOWER a cap or timeout.
-  - At entry, before any file is opened or any request made: refuses when the DISABLED marker exists or MOP_BULK_READ_GUARD=0.
-  - Every input is checked BEFORE it is opened (realpath, operator-approved checkouts and the worktrees their own .git registers,
-    restricted data classes, regular file, size, and the total across files). A clone or .git file in /tmp grants nothing. One refused input refuses the whole call and sends zero bytes. Reads stream under the cap.
-  - Egress is CLIProxyAPI on loopback or the nested claude binary only. One hard deadline (timeout plus a short slack) covers
-    reading and the model call together.
-Exit codes: 0 answered; 2 usage, missing path or binary file; 3 every backend unavailable (down, breaker open, 30 s timeout, error,
-hard deadline): the next plain Read of those files is then allowed for 10 minutes (fail open); 4 input over the size cap
-(BULK_READ_MAX_CHARS; default 36000 in a lane, 80000 for the PM): narrow --paths or use Read offset/limit; 6 input refused by the boundary
-(outside approved roots, restricted data class, not a regular file): nothing was sent, use Read with offset/limit; 7 disabled.
-Env (lowering only, except the model pick): BULK_READ_TIMEOUT_S (at most 30), BULK_READ_MAX_CHARS (at most the cap above),
-BULK_READ_INKLING_TIMEOUT_S (at most 15), BULK_READ_CLAUDE_MODEL (haiku or sonnet), MOP_BULK_READ_GUARD=0 (disable).
-Every run appends one line (paths count, lines, chars, backend, latency; no content) to the guard's events.jsonl.
+The shebang is the fixed Apple interpreter with -IS (isolated and no site), so PYTHON* variables, sitecustomize, the user site and PATH cannot
+change the interpreter or what it imports. The environment is scrubbed to a short allowlist and the route is bound here, not read from the
+environment. The logic is bulk_read_cli.py. See bulk_read_lib.py for the trust model (CTO REVISE on 4184d7c0a643, ts 1795293836.257189).
 """
-import argparse
 import os
-import re
-import signal
 import sys
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import bulk_read_lib as lib  # noqa: E402
 
-SYSTEM = ("You answer questions about source files. Output ONLY terse markdown bullets, one fact per bullet. Every bullet "
-          "ends with a reference like (path:line) or (path:start-end) using the line numbers shown in the corpus. "
-          "No preamble, no summary, no prose paragraphs, no code fences, at most %d bullets. If the files do not answer "
-          "the question, output the single bullet: - not found in the given files.")
-BULLET = re.compile(r"^\s*(?:[-*•]|\d+[.)])\s+(\S.*)$")
-REFUSAL_EXIT = {"too_large": 4, "too_many_files": 4, "not_found": 2, "binary_file": 2}
+lib.scrub_environment()
+lib.BOUND_ROUTE = "claude"
+import bulk_read_cli  # noqa: E402
 
-
-def to_bullets(text, limit):
-    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
-    bullets = [m.group(1).strip() for m in (BULLET.match(line) for line in lines) if m]
-    return ["- " + b for b in (bullets or [line.strip() for line in lines])][:limit]
-
-
-def refuse(args, exc, limit):
-    """Nothing was sent. Say why and keep the native read path open."""
-    lib.log_event("delegate_refused", reason=exc.reason, files=len(args.paths))
-    if exc.reason == "too_large":
-        print("bulk-read: input over the %d cap: narrow --paths, or use Read with offset/limit." % limit, file=sys.stderr)
-    else:
-        print("bulk-read: refused (%s); nothing was read past the check and nothing was sent. Use Read with offset/limit." % exc.reason,
-              file=sys.stderr)
-    return REFUSAL_EXIT.get(exc.reason, 6)
-
-
-def fail_open(args, reason, started, lines, chars, breaker):
-    if breaker:
-        lib.breaker_record(False, name=lib.route())
-    granted = lib.bypass_grant(args.paths)
-    lib.log_event("delegate_fail_open", reason=reason, files=len(args.paths), lines=lines, chars_in=chars,
-                  latency_ms=int((time.time() - started) * 1000))
-    print("bulk-read: no backend answered (%s). %s" % (reason, "A plain Read of these files is allowed for the next 10 minutes."
-                                                       if granted else "Use Read with offset/limit."), file=sys.stderr)
-    return 3
-
-
-def run(args, started, timeout):
-    limit = int(lib.cap_env("BULK_READ_MAX_CHARS", 36000 if lib.route() == "lane" else 80000))
-    try:
-        items = lib.approve_inputs(args.paths, limit)  # every input checked, nothing opened, before the first byte is read
-    except lib.Refusal as exc:
-        return refuse(args, exc, limit)
-    parts, total_lines = [], 0
-    try:
-        for real, meta in items:
-            text = lib.read_approved(real, meta, limit)
-            total_lines += text.count("\n") + (1 if text and not text.endswith("\n") else 0)
-            numbered = "\n".join("%5d| %s" % (n, line) for n, line in enumerate(text.split("\n"), 1))
-            parts.append('<file path="%s">\n%s\n</file>' % (real, numbered))
-    except lib.Refusal as exc:
-        return refuse(args, exc, limit)
-    user = "\n".join(parts) + "\n\nQuestion: " + args.question
-    if len(user) > limit + limit // 4:  # line numbers add about 12%
-        return refuse(args, lib.Refusal("too_large"), limit)
-    kind = lib.route()
-    if lib.breaker_open(name=kind):
-        return fail_open(args, "breaker_open", started, total_lines, len(user), False)
-    available, why = lib.backend_available(kind)
-    if not available:
-        return fail_open(args, why, started, total_lines, len(user), False)
-    try:
-        text, usage, backend = lib.complete(SYSTEM % args.max_bullets, user, 3000, timeout)
-    except lib.InkError as exc:
-        return fail_open(args, exc.reason, started, total_lines, len(user), True)
-    except Exception as exc:
-        return fail_open(args, "error_" + type(exc).__name__, started, total_lines, len(user), True)
-    out = "\n".join(to_bullets(text, args.max_bullets))
-    lib.breaker_record(True, name=kind)
-    lib.log_event("delegate", files=len(args.paths), lines=total_lines, chars_in=len(user), chars_out=len(out),
-                  latency_ms=int((time.time() - started) * 1000), backend=backend,
-                  prompt_tokens=usage.get("prompt_tokens"), completion_tokens=usage.get("completion_tokens"),
-                  cost_usd=usage.get("cost_usd"))
-    print(out)
-    return 0
-
-
-def main(argv=None):
-    parser = argparse.ArgumentParser(prog="bulk-read", description="Bullet answers about files from a cheap model.")
-    parser.add_argument("--paths", nargs="+", required=True)
-    parser.add_argument("--question", required=True)
-    parser.add_argument("--max-bullets", type=int, default=30)
-    args = parser.parse_args(argv)
-    off = lib.disabled_reason()
-    if off:  # first action after parsing: no file is opened, nothing is sent
-        print("bulk-read: disabled (%s); nothing was read or sent. Use Read with offset/limit." % off, file=sys.stderr)
-        return 7
-    started = time.time()
-    timeout = lib.cap_env("BULK_READ_TIMEOUT_S", 30.0, floor=0.1)
-
-    def on_alarm(signum, frame):
-        raise lib.Deadline()
-
-    signal.signal(signal.SIGALRM, on_alarm)
-    signal.setitimer(signal.ITIMER_REAL, timeout + min(5.0, timeout))  # one hard deadline over reading AND the model call
-    try:
-        return run(args, started, timeout)
-    except lib.Deadline:
-        return fail_open(args, "hard_deadline", started, 0, 0, True)
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+sys.exit(bulk_read_cli.main())
