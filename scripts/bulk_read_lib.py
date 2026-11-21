@@ -1,26 +1,29 @@
 """Shared helpers for the MoP bulk-read PreToolUse guard, bulk-read and code-write.
 
 Stdlib only. Every helper fails soft: the guard must never be the reason a tool call fails.
-Backends: proxy lanes (PROXY_AGENT_RUN set) ask inkling-2-mini, then gpt-6-luna, both through CLIProxyAPI on loopback; every other
-session (the PM pane and its subagents) asks Claude Haiku (default) or Sonnet through a nested direct claude -p on its own auth.
+Backends: proxy lanes (PROXY_AGENT_RUN set) ask inkling-2-mini, then gpt-6-luna, both through the managed CLIProxyAPI origin; every
+other session (the PM pane and its subagents) asks Claude Haiku (default) or Sonnet through a nested direct claude -p.
 
-Boundaries (CTO BLOCK on release 38bd1682, C0ALZJHGE49 ts 1795291197.575539 and ts 1795291271.444299):
-- DISABLED: the marker file or MOP_BULK_READ_GUARD=0 makes bulk-read and code-write refuse at entry, before any file is opened.
-- INPUT: every input is realpath-resolved and checked BEFORE it is opened. Only approved source roots (the heydonna-app checkouts, git
-  clones or worktrees of them under /tmp, the MoP repo and its releases) are allowed, and restricted data classes are denied even
-  inside them. A denied or outside-root input sends zero bytes.
-- EGRESS: bytes go only to CLIProxyAPI on loopback or to the nested claude binary at a fixed install path; no env proxy, no redirect.
+Trust model (CTO BLOCK on 38bd1682 and REVISE on fb6de68d6a35, C0ALZJHGE49 thread 1795291040.095359): nothing a caller can set decides
+WHERE bytes may come from or WHERE they may go. Roots, origins, models, the Claude binary, the state dir and HOME are module constants
+(HOME is taken from the account database, never from $HOME). The environment can only tighten: disable the helpers, or lower a cap or a
+timeout. Tests replace the module constants through a test-only harness (scripts/pm/tests); no deployed entrypoint has a seam.
+- DISABLED: the marker file (in STATE_DIR) or MOP_BULK_READ_GUARD=0 makes bulk-read and code-write refuse at entry, before any file is opened.
+- SOURCE: every input is realpath-resolved and checked BEFORE it is opened. Approved: the fixed operator checkouts (REPO_NAMES), the
+  worktrees those repos themselves register in their own .git/worktrees (with a back-link check), and the MoP releases. A git config or
+  .git file in a writable directory such as /tmp grants nothing. Restricted data classes are denied even inside approved roots. Anything
+  else sends zero bytes and the native Read stands.
+- EGRESS: bytes go only to ROUTER_ORIGIN (127.0.0.1:8317) with the models inkling-2-mini and gpt-6-luna, or to the nested claude binary at a
+  fixed, owner-checked install path with a scrubbed environment and no caller-selected config dir. No env proxy, no redirect.
 - RESOURCE: each input is stat-checked and the total capped before any read; reads stream through a descriptor under the cap.
-State (events log, health cache, circuit breaker, bypass tokens) lives under MOP_BULK_READ_STATE_DIR (default
-~/.local/share/master-of-panes/bulk-read). Logs hold paths, line counts and latencies only, never file content.
-Test seam: MOP_BULK_READ_TEST_MODE=1 additionally honors MOP_BULK_READ_EXTRA_ROOTS (colon-separated source roots; the restricted-class
-checks still apply) and BULK_READ_CLAUDE_BIN. Nothing else is relaxed.
+State (events log, health cache, circuit breaker, bypass tokens) lives under STATE_DIR. Logs hold paths, line counts and latencies only.
 """
+import fcntl
 import hashlib
 import json
 import os
+import pwd
 import re
-import shutil
 import stat
 import subprocess
 import tempfile
@@ -40,6 +43,22 @@ OFF_VALUES = {"0", "off", "false", "no", "disabled"}
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 INKLING_HOST = "192.168.68.113"
 
+# ---- managed constants. The harness in scripts/pm/tests replaces these; no environment variable does. ----------------------------
+ACCOUNT = pwd.getpwuid(os.getuid())
+HOME_DIR = ACCOUNT.pw_dir
+STATE_DIR = os.path.join(HOME_DIR, ".local/share/master-of-panes/bulk-read")
+RELEASES_ROOT = os.path.join(HOME_DIR, ".local/share/master-of-panes/releases")
+PROJECTS_DIR = os.path.join(HOME_DIR, "Downloads", "projects")
+REPO_NAMES = ("heydonna-app", "heydonna-app-proxy") + tuple("heydonna-app-300%d" % n for n in range(1, 9)) + ("master-of-panes",)
+ROUTER_ORIGIN = "http://127.0.0.1:8317"
+ROUTER_KEY_FILE = os.path.join(HOME_DIR, ".config/cliproxyapi/client.env")
+INKLING_HEALTH_URL = "http://%s:18120/v1/models" % INKLING_HOST  # same URL as proxy-agent.sh's Inkling gate
+INKLING_MODEL = "inkling-2-mini"
+LUNA_MODEL = "gpt-6-luna"
+CLAUDE_CANDIDATES = ("/opt/homebrew/bin/claude", os.path.join(HOME_DIR, ".local/opt/claude-code/claude"),
+                     os.path.join(HOME_DIR, ".local/bin/claude"), "/usr/local/bin/claude")
+CLAUDE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+
 
 class InkError(Exception):
     def __init__(self, reason):
@@ -52,28 +71,34 @@ class Deadline(BaseException):
 
 
 class Refusal(Exception):
-    """An input was refused before it was opened or before more of it was read. Nothing was sent."""
+    """An input or destination was refused before it was opened or before more of it was read. Nothing was sent."""
 
     def __init__(self, reason):
         super().__init__(reason)
         self.reason = reason
 
 
-def test_mode():
-    return os.environ.get("MOP_BULK_READ_TEST_MODE") == "1"
+def cap_env(name, default, floor=1):
+    """An env value may only LOWER a managed cap or timeout; anything unparsable or above the default is ignored."""
+    try:
+        value = float(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    if not value > 0 or value == float("inf"):  # zero, negative, NaN and infinity are ignored
+        return default
+    return min(max(value, floor), default)
 
 
 def state_dir():
-    return os.environ.get("MOP_BULK_READ_STATE_DIR") or os.path.expanduser("~/.local/share/master-of-panes/bulk-read")
+    return STATE_DIR
 
 
 def canonical_marker():
-    return os.path.join(os.path.expanduser("~/.local/share/master-of-panes/bulk-read"), "DISABLED")
+    return os.path.join(STATE_DIR, "DISABLED")
 
 
 def disabled_by_file():
-    """The DISABLED marker in the canonical state dir always counts, even when MOP_BULK_READ_STATE_DIR points elsewhere."""
-    return os.path.exists(canonical_marker()) or os.path.exists(os.path.join(state_dir(), "DISABLED"))
+    return os.path.exists(canonical_marker())
 
 
 def disabled_reason(env=None):
@@ -125,7 +150,7 @@ def _write_json(name, value):
         pass
 
 
-# ---- egress: loopback router, the Inkling host for its health probe, no proxy, no redirect -------------------------------
+# ---- egress: the managed loopback router, the Inkling host for its health probe, no proxy, no redirect -------------------------
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
@@ -143,17 +168,14 @@ def _split(raw, hosts):
 
 
 def router_base():
-    """CLIProxyAPI. Only a loopback http origin is accepted, so file bytes and the router key never go anywhere else."""
-    parts = _split(os.environ.get("CLIPROXY_BASE_URL") or "http://127.0.0.1:8317", LOOPBACK_HOSTS)
+    parts = _split(ROUTER_ORIGIN, LOOPBACK_HOSTS)
     host = "[%s]" % parts.hostname if ":" in parts.hostname else parts.hostname
     return "http://%s:%s" % (host, parts.port or 80)
 
 
 def health_url():
-    """Same default as proxy-agent.sh's Inkling gate. /v1/models answers in about 1 s under load; /health timed out at 3 s while lanes were busy."""
-    raw = os.environ.get("INKLING_HEALTH_URL") or "http://%s:18120/v1/models" % INKLING_HOST
-    _split(raw, LOOPBACK_HOSTS + (INKLING_HOST,))
-    return raw
+    _split(INKLING_HEALTH_URL, LOOPBACK_HOSTS + (INKLING_HOST,))
+    return INKLING_HEALTH_URL
 
 
 def _probe(name, fetch, now):
@@ -175,7 +197,7 @@ def _probe(name, fetch, now):
 
 
 def inkling_up(now=None):
-    """Inkling's health URL (vLLM /v1/models), 3 s gate."""
+    """Inkling's health URL (vLLM /v1/models), 3 s gate. A GET: no file bytes and no credential go with it."""
     def fetch():
         with OPENER.open(urllib.request.Request(health_url()), timeout=HEALTH_TIMEOUT_S) as response:
             return 200 <= response.status < 300
@@ -183,7 +205,7 @@ def inkling_up(now=None):
 
 
 def router_up(now=None):
-    """CLIProxyAPI answers /v1/models: the path to gpt-6-luna, used when Inkling is down. 3 s gate."""
+    """The managed CLIProxyAPI answers /v1/models: the path to gpt-6-luna, used when Inkling is down. 3 s gate."""
     def fetch():
         request = urllib.request.Request(router_base() + "/v1/models", headers={"Authorization": "Bearer " + router_key()})
         with OPENER.open(request, timeout=HEALTH_TIMEOUT_S) as response:
@@ -198,13 +220,14 @@ def route(env=None):
 
 
 def claude_bin():
-    """The nested direct-Claude binary. Fixed install paths only: an env or PATH override would be an egress hole."""
-    if test_mode() and os.environ.get("BULK_READ_CLAUDE_BIN"):
-        return os.environ["BULK_READ_CLAUDE_BIN"]
-    home = os.path.expanduser("~")
-    for candidate in ("/opt/homebrew/bin/claude", os.path.join(home, ".local/opt/claude-code/claude"),
-                      os.path.join(home, ".local/bin/claude"), "/usr/local/bin/claude"):
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+    """The managed nested direct-Claude binary: a fixed install path whose real file is mine or root's and not group/world writable."""
+    for candidate in CLAUDE_CANDIDATES:
+        try:
+            real = os.path.realpath(candidate)
+            meta = os.stat(real)
+        except OSError:
+            continue
+        if stat.S_ISREG(meta.st_mode) and os.access(real, os.X_OK) and meta.st_uid in (0, os.getuid()) and not meta.st_mode & 0o022:
             return candidate
     return ""
 
@@ -212,8 +235,7 @@ def claude_bin():
 def backend_available(route_name, now=None):
     """(ok, reason): is any backend for this route worth blocking for? Lanes: Inkling healthy, else the router (luna)."""
     if route_name == "claude":
-        found = claude_bin()
-        return (True, "claude") if found and os.access(found, os.X_OK) else (False, "claude_missing")
+        return (True, "claude") if claude_bin() else (False, "claude_missing")
     try:
         up, why = inkling_up(now)
     except InkError:
@@ -289,9 +311,8 @@ def line_count(path, max_bytes=64 * 1024 * 1024):
     return lines, False
 
 
-# ---- input boundary --------------------------------------------------------------------------------------------------
+# ---- source boundary --------------------------------------------------------------------------------------------------
 
-SOURCE_CHECKOUT = re.compile(r"^(heydonna-app(-(2|300[1-8]|proxy))?|master-of-panes)$")
 RESTRICTED_NAMES = {".ssh", ".codex", ".cli-proxy-api", ".gnupg", ".aws", ".git", ".netrc", ".npmrc", ".pypirc", ".git-credentials",
                     ".htpasswd", ".pgpass", "settings.local.json", "client.env", "auth.json"}
 RESTRICTED_SUFFIXES = (".env", ".pem", ".key", ".p12", ".pfx", ".keystore", ".jks", ".ppk", ".kdbx", ".db", ".sqlite", ".sqlite3",
@@ -313,74 +334,71 @@ def _restricted_in(parts):
     return any(a == ".claude" and b == "state" for a, b in zip(parts, parts[1:]))  # ~/.claude/state (pm-ops.db and friends)
 
 
-def source_roots():
-    """Realpath'd approved source roots: the heydonna-app checkouts, the MoP repo and its releases, plus test roots in test mode."""
-    home = os.path.expanduser("~")
-    projects = os.path.join(home, "Downloads", "projects")
+def _expand(path):
+    """~ means the account's home from the account database, not whatever $HOME says."""
+    if path == "~" or path.startswith("~/"):
+        return HOME_DIR + path[1:]
+    return path
+
+
+def fixed_roots():
+    """Operator-approved checkouts (a fixed name list under ~/Downloads/projects) and the MoP releases, realpath'd."""
     roots = []
-    try:
-        for name in sorted(os.listdir(projects)):
-            if SOURCE_CHECKOUT.match(name) and os.path.isdir(os.path.join(projects, name)):
-                roots.append(os.path.realpath(os.path.join(projects, name)))
-    except OSError:
-        pass
-    roots.append(os.path.realpath(os.path.join(home, ".local/share/master-of-panes/releases")))
-    if test_mode():
-        roots += [os.path.realpath(p) for p in os.environ.get("MOP_BULK_READ_EXTRA_ROOTS", "").split(":") if p]
+    for name in REPO_NAMES:
+        path = os.path.join(PROJECTS_DIR, name)
+        if os.path.isdir(path):
+            roots.append(os.path.realpath(path))
+    roots.append(os.path.realpath(RELEASES_ROOT))
     return roots
 
 
-def _approved_git_top(top):
-    """A /tmp clone of an approved repo: a worktree whose gitdir sits under an approved checkout, or a clone whose remote is one."""
-    marker = os.path.join(top, ".git")
-    try:
-        if os.path.isfile(marker):
-            with open(marker, "rb") as handle:
-                match = re.match(r"gitdir:\s*(.+)", handle.read(512).decode("utf-8", "replace"))
-            if not match:
-                return False
-            gitdir = os.path.realpath(os.path.join(top, match.group(1).strip()))
-            return any(gitdir.startswith(os.path.join(root, ".git", "worktrees") + os.sep) for root in source_roots())
-        if os.path.isdir(marker):
-            with open(os.path.join(marker, "config"), "rb") as handle:
-                urls = re.findall(r"url\s*=\s*(\S+)", handle.read(16384).decode("utf-8", "replace"))
-            return any(re.search(r"[/:](heydonna-app|Scribie)/heydonna-app(\.git)?/?$|[/:]rajivpoddar/master-of-panes(\.git)?/?$", url)
-                       for url in urls)
-    except OSError:
-        pass
-    return False
+def registered_worktrees():
+    """Worktrees the approved repos register in their OWN .git/worktrees. The registration holds the worktree path; the worktree's
+    .git file must point back at that registration. A directory that merely looks like a clone (a /tmp .git or config) is not here."""
+    found = []
+    for root in fixed_roots()[:-1]:
+        admin_root = os.path.join(root, ".git", "worktrees")
+        try:
+            names = os.listdir(admin_root)
+        except OSError:
+            continue
+        for name in names:
+            admin = os.path.join(admin_root, name)
+            try:
+                with open(os.path.join(admin, "gitdir"), "rb") as handle:
+                    worktree_git = os.path.realpath(handle.read(4096).decode("utf-8", "replace").strip())
+                with open(worktree_git, "rb") as handle:
+                    back = re.match(r"gitdir:\s*(.+)", handle.read(512).decode("utf-8", "replace"))
+            except OSError:
+                continue
+            if back and os.path.realpath(back.group(1).strip()) == os.path.realpath(admin):
+                found.append(os.path.dirname(worktree_git))
+    return found
+
+
+def source_roots():
+    return fixed_roots() + registered_worktrees()
 
 
 def approved_root(real):
-    """(root, deny_base) when the resolved path is inside an approved root, else None. deny_base is where restricted-name checks begin."""
-    for root in source_roots():
-        if real.startswith(root + os.sep):
-            return root, root
-    tmp = os.path.realpath("/tmp")
-    if real.startswith(tmp + os.sep):
-        parts = real[len(tmp) + 1:].split(os.sep)
-        for depth in (1, 2):
-            if len(parts) > depth:
-                top = os.path.join(tmp, *parts[:depth])
-                if _approved_git_top(top):
-                    return top, tmp
-    return None
+    """The approved root that contains this resolved path (longest match), else None."""
+    matches = [root for root in source_roots() if real.startswith(root + os.sep)]
+    return max(matches, key=len) if matches else None
 
 
 def input_refusal(real, given=None):
     """Reason string when this resolved path may not be sent to a model, else None. Looks at the path only; opens nothing."""
-    found = approved_root(real)
-    if not found:
+    root = approved_root(real)
+    if not root:
         return "outside_approved_roots"
-    root, base = found
-    if _restricted_in(real[len(base):].split(os.sep)) or (given and restricted_component(os.path.basename(given.rstrip("/")))):
+    if _restricted_in(real[len(root):].split(os.sep)) or (given and restricted_component(os.path.basename(given.rstrip("/")))):
         return "restricted_data_class"
     return None
 
 
 def target_refusal(target):
     """code-write output: never into a restricted place (.ssh, .env*, .git, ~/.claude/state, evidence dirs, ...)."""
-    real = os.path.realpath(os.path.expanduser(target))
+    real = os.path.realpath(_expand(target))
     return "restricted_data_class" if _restricted_in(real.split(os.sep)) else None
 
 
@@ -391,7 +409,7 @@ def approve_inputs(paths, cap_total):
         raise Refusal("too_many_files")
     items, total = [], 0
     for given in paths:
-        real = os.path.realpath(os.path.expanduser(given))
+        real = os.path.realpath(_expand(given))
         reason = input_refusal(real, given)
         if reason:
             raise Refusal(reason)
@@ -438,14 +456,75 @@ def read_approved(real, meta, cap):
     return data.decode("utf-8", "replace")
 
 
+# ---- code-write destination: pin the directory, publish by exclusive temp file plus atomic rename or link at that directory --------
+
+class Destination:
+    """A pinned output directory. Everything after pin_destination() goes through this open directory descriptor, so renaming or
+    re-pointing the path afterwards cannot move a write onto another file."""
+
+    def __init__(self, fd, parent, name):
+        self.fd, self.parent, self.name = fd, parent, name
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    def publish(self, text, force):
+        temp = ".%s.code-write.%d.%s" % (self.name, os.getpid(), os.urandom(4).hex())
+        out = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=self.fd)
+        try:
+            with os.fdopen(out, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if force:
+                os.rename(temp, self.name, src_dir_fd=self.fd, dst_dir_fd=self.fd)
+            else:
+                os.link(temp, self.name, src_dir_fd=self.fd, dst_dir_fd=self.fd, follow_symlinks=False)  # create-only: fails if present
+                os.unlink(temp, dir_fd=self.fd)
+        except FileExistsError:
+            os.unlink(temp, dir_fd=self.fd)
+            raise Refusal("target_exists")
+        except BaseException:
+            try:
+                os.unlink(temp, dir_fd=self.fd)
+            except OSError:
+                pass
+            raise
+
+
+def pin_destination(target):
+    """Resolve and check the target directory once, open it, and verify the descriptor is that directory. Returns a Destination."""
+    expanded = os.path.abspath(_expand(target))
+    name = os.path.basename(expanded)
+    if not name or name in (".", ".."):
+        raise Refusal("bad_target_name")
+    parent = os.path.realpath(os.path.dirname(expanded))
+    if _restricted_in(parent.split(os.sep) + [name]):
+        raise Refusal("restricted_data_class")
+    os.makedirs(parent, exist_ok=True)
+    try:
+        fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | os.O_NOFOLLOW)
+    except OSError:
+        raise Refusal("bad_destination")
+    try:
+        if hasattr(fcntl, "F_GETPATH"):  # macOS: the path the descriptor really is must still be the one that was checked
+            actual = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024).split(b"\0", 1)[0].decode("utf-8", "replace")
+            if os.path.realpath(actual) != parent:
+                raise Refusal("destination_changed")
+    except BaseException:
+        os.close(fd)
+        raise
+    return Destination(fd, parent, name)
+
+
 # ---- backends ---------------------------------------------------------------------------------------------------------
 
 def router_key():
-    key = os.environ.get("CLIPROXY_API_KEY", "")
-    if key:
-        return key
+    """The managed router key, from the managed file only (no env), sent only to ROUTER_ORIGIN."""
     try:
-        with open(os.path.expanduser("~/.config/cliproxyapi/client.env")) as handle:
+        with open(ROUTER_KEY_FILE) as handle:
             for line in handle:
                 line = line.strip()
                 if line.startswith("export "):
@@ -463,7 +542,10 @@ def strip_think(text):
 
 
 def chat(model, system, user, max_tokens, timeout):
-    """One chat completion through CLIProxyAPI. Returns (text, usage); raises InkError(reason). The destination is checked first."""
+    """One chat completion through the managed router with an approved model alias. Returns (text, usage); raises InkError(reason).
+    The destination and the alias are checked before anything is built."""
+    if model not in (INKLING_MODEL, LUNA_MODEL):
+        raise InkError("alias_denied")
     base = router_base()
     payload = {"model": model, "temperature": 0, "max_tokens": max_tokens, "reasoning_effort": "low",
                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
@@ -488,21 +570,23 @@ def chat(model, system, user, max_tokens, timeout):
     return text, body.get("usage") or {}
 
 
-CLAUDE_ENV_KEYS = ("HOME", "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN")
-
-
 def claude_model():
-    """Only Haiku (default) and Sonnet exist on direct Claude for the PM."""
+    """Only Haiku (default) and Sonnet exist on direct Claude for the PM; the env can pick between those two and nothing else."""
     return "sonnet" if os.environ.get("BULK_READ_CLAUDE_MODEL", "haiku").strip().lower() == "sonnet" else "haiku"
 
 
+def claude_env():
+    """A fixed environment for the nested claude: the account's home and name, a fixed PATH, no config dir, no tokens, no session ids."""
+    return {"HOME": HOME_DIR, "USER": ACCOUNT.pw_name, "LOGNAME": ACCOUNT.pw_name, "PATH": CLAUDE_PATH, "LANG": "en_US.UTF-8"}
+
+
 def claude_chat(system, user, max_tokens, timeout):
-    """One nested direct-Claude call on the caller's own auth. No hooks, no settings, no tools, no session file, a scrubbed env
-    (no CLAUDE_CODE_* session ids, no router credentials), run from the temp dir so no CLAUDE.md or project is loaded."""
+    """One nested direct-Claude call on the account's own auth. No hooks, no settings, no tools, no session file, run from a fixed
+    directory so no CLAUDE.md or project is loaded."""
     binary = claude_bin()
     if not binary:
         raise InkError("claude_missing")
-    env = {key: os.environ[key] for key in CLAUDE_ENV_KEYS if key in os.environ}
+    env = claude_env()
     env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(max_tokens)
     args = [binary, "-p", "--model", claude_model(), "--setting-sources", "", "--settings", '{"disableAllHooks": true}',
             "--no-session-persistence", "--tools", "", "--disable-slash-commands", "--strict-mcp-config",
@@ -534,23 +618,21 @@ def complete(system, user, max_tokens, timeout):
         text, usage = claude_chat(system, user, max_tokens, timeout)
         return text, usage, "claude-" + claude_model()
     started, failures = time.time(), []
-    inkling = os.environ.get("BULK_READ_MODEL", "inkling-2-mini")
-    luna = os.environ.get("BULK_READ_FALLBACK_MODEL", "gpt-6-luna")
     try:
         up, why = inkling_up()
     except InkError as exc:
         up, why = False, exc.reason
     if up:
         try:
-            text, usage = chat(inkling, system, user, max_tokens, min(timeout / 2.0, float(os.environ.get("BULK_READ_INKLING_TIMEOUT_S", "15"))))
-            return text, usage, inkling
+            text, usage = chat(INKLING_MODEL, system, user, max_tokens, min(timeout / 2.0, cap_env("BULK_READ_INKLING_TIMEOUT_S", 15, floor=0.1)))
+            return text, usage, INKLING_MODEL
         except InkError as exc:
             failures.append("inkling_" + exc.reason)
     else:
         failures.append("inkling_" + why)
     try:
-        text, usage = chat(luna, system, user, max_tokens, max(timeout - (time.time() - started), min(timeout, 5.0)))
-        return text, usage, luna
+        text, usage = chat(LUNA_MODEL, system, user, max_tokens, max(timeout - (time.time() - started), min(timeout, 5.0)))
+        return text, usage, LUNA_MODEL
     except InkError as exc:
         failures.append("luna_" + exc.reason)
     raise InkError(",".join(failures))

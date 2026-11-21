@@ -1,13 +1,14 @@
 """MoP bulk-read guard, bulk-read, code-write and their wiring (added to the repo; MoP changes need no local proof).
 
-Rajiv D0AMF0XE6TS thread 1795287257.526309, ts 1795287629.063499; PM amendments 22 Nov 00:42, 00:54 and 01:00 IST (Rajiv ts 1795289208.297109,
-1795289295.887739): proxy lanes load the guard; judgment lanes are exempt; the PM session is blocked too, with an escape hatch and fail-open;
-lanes answer with Inkling, then luna; the PM session answers with Haiku or Sonnet on direct Claude. Every test drives the real script or module
-against a local stub of the router and a fake claude binary; nothing here calls a live model.
+Rajiv D0AMF0XE6TS thread 1795287257.526309, ts 1795287629.063499; PM amendments of 22 Nov. CTO BLOCK on 38bd1682 (ts 1795291197.575539, add-on
+ts 1795291271.444299) and REVISE on fb6de68d6a35 (ts 1795292716.429489). The deployed entrypoints take nothing from the environment that chooses a
+source root, an origin, a model alias, the Claude binary or config, HOME or the state dir. These tests replace the managed constants of
+bulk_read_lib through a TEST-ONLY harness (monkeypatch in process; scripts/pm/tests/bulk_read_harness.py for subprocess runs). Every transport
+is a local stub or a fake claude binary; nothing here submits to a live model.
 """
+import builtins
 import importlib.machinery
 import importlib.util
-import builtins
 import json
 import os
 import re
@@ -28,11 +29,15 @@ sys.path.insert(0, str(SCRIPTS))
 import bulk_read_guard as guard  # noqa: E402
 import bulk_read_lib as lib  # noqa: E402
 
+DEFAULT_HEALTH_URL = lib.INKLING_HEALTH_URL  # the managed value, captured before any test patches it
+HARNESS = Path(__file__).parent / "bulk_read_harness.py"
 PROXY_AGENT = (Path(__file__).parents[1] / "shared-assets/claude/scripts/proxy-agent.sh").read_text()
 LANE = {"PROXY_AGENT_RUN": "1", "PROXY_AGENT_TYPE": "hd-builder"}
-SCRUBBED = ("PROXY_AGENT", "BULK_READ_EXEMPT", "MOP_BULK_READ_GUARD", "BULK_READ_CLAUDE_MODEL")
+SCRUBBED = ("PROXY_AGENT", "BULK_READ_EXEMPT", "MOP_BULK_READ", "BULK_READ_CLAUDE", "BULK_READ_MODEL", "BULK_READ_FALLBACK", "CLIPROXY", "INKLING",
+            "CLAUDE_", "ANTHROPIC_")
 DEAD = "http://127.0.0.1:9"
 FENCE = chr(96) * 3
+KEY = "managed-router-key-7"
 
 
 def load_tool(name):
@@ -46,7 +51,8 @@ def load_tool(name):
 bulk_read = load_tool("bulk-read")
 code_write = load_tool("code-write")
 
-STUB = {}
+STUB = {}  # the approved transport stub (the managed router origin in these tests)
+OVERRIDE = []  # every request that reached the server a CALLER tried to point the helpers at
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -54,13 +60,16 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        STUB.setdefault("gets", []).append((self.path, dict(self.headers)))
         self.send_response(STUB.get("health", 200) if self.path.startswith("/health") else STUB.get("router", 200))
         self.end_headers()
         self.wfile.write(b"ok")
 
     def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        raw = self.rfile.read(int(self.headers["Content-Length"]))
+        body = json.loads(raw)
         STUB.setdefault("requests", []).append(body)
+        STUB.setdefault("raw", []).append((raw, dict(self.headers)))
         cfg = STUB.get("models", {}).get(body["model"], {})
         if cfg.get("delay"):
             threading.Event().wait(cfg["delay"])
@@ -77,11 +86,29 @@ class Handler(BaseHTTPRequestHandler):
                                      "usage": {"prompt_tokens": 11, "completion_tokens": 7}}).encode())
 
 
+class OverrideHandler(BaseHTTPRequestHandler):
+    """Where a caller-set CLIPROXY_BASE_URL or INKLING_HEALTH_URL would send things. It answers everything, so any byte that reaches it shows up."""
+
+    def log_message(self, *args):
+        pass
+
+    def _record(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        OVERRIDE.append((self.command, self.path, dict(self.headers), self.rfile.read(length) if length else b""))
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"choices": [{"message": {"content": "- hijacked (x:1)"}}]}).encode())
+
+    do_GET = do_POST = _record
+
+
 FAKE_CLAUDE = "#!" + sys.executable + r'''
 import json, os, sys
 here = os.path.dirname(os.path.abspath(__file__))
-mode = json.load(open(os.path.join(here, "fake-claude.mode")))
-open(os.path.join(here, "fake-claude.call.json"), "w").write(json.dumps(
+name = os.path.basename(sys.argv[0])
+mode = json.load(open(os.path.join(here, name + ".mode")))
+open(os.path.join(here, name + ".call.json"), "w").write(json.dumps(
     {"argv": sys.argv[1:], "env": dict(os.environ), "cwd": os.getcwd(), "stdin": sys.stdin.read()}))
 if mode.get("exit"):
     sys.exit(mode["exit"])
@@ -91,34 +118,55 @@ print(json.dumps({"result": mode.get("result", "- ok (a:1)"), "is_error": mode.g
 '''
 
 
+def serve(handler):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, "http://127.0.0.1:%d" % server.server_port
+
+
+def make_fake_claude(path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(FAKE_CLAUDE)
+    path.chmod(0o755)
+    (path.parent / (path.name + ".mode")).write_text("{}")
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    server, base = serve(Handler)
+    other, other_base = serve(OverrideHandler)
     STUB.clear()
-    claude = tmp_path / "fake-claude"
-    claude.write_text(FAKE_CLAUDE)
-    claude.chmod(0o755)
-    (tmp_path / "fake-claude.mode").write_text("{}")
-    base = "http://127.0.0.1:%d" % server.server_port
-    home = tmp_path / "home"  # a fake HOME: the real DISABLED marker and the real checkouts must not leak into these tests
-    home.mkdir()
-    # tmp_path is the one approved source root (test mode); everything the tests send must sit under it
-    values = {"MOP_BULK_READ_STATE_DIR": str(tmp_path / "state"), "CLIPROXY_BASE_URL": base, "CLIPROXY_API_KEY": "test",
-              "INKLING_HEALTH_URL": base + "/health", "BULK_READ_TIMEOUT_S": "4", "BULK_READ_INKLING_TIMEOUT_S": "1",
-              "BULK_READ_CLAUDE_BIN": str(claude), "HOME": str(home), "MOP_BULK_READ_TEST_MODE": "1",
-              "MOP_BULK_READ_EXTRA_ROOTS": str(tmp_path)}
+    OVERRIDE.clear()
+    home = tmp_path / "home"
+    projects = home / "Downloads" / "projects"
+    src = projects / "heydonna-app"  # an operator-approved checkout of the (patched) managed home
+    src.mkdir(parents=True)
+    key_file = tmp_path / "client.env"
+    key_file.write_text("export CLIPROXY_API_KEY=%s\n" % KEY)
+    claude = tmp_path / "bin" / "claude"
+    make_fake_claude(claude)
+    patches = {"HOME_DIR": str(home), "PROJECTS_DIR": str(projects), "STATE_DIR": str(tmp_path / "state"),
+               "RELEASES_ROOT": str(home / ".local/share/master-of-panes/releases"), "ROUTER_ORIGIN": base,
+               "ROUTER_KEY_FILE": str(key_file), "INKLING_HEALTH_URL": base + "/health", "CLAUDE_CANDIDATES": [str(claude)]}
+    for key, value in patches.items():
+        monkeypatch.setattr(lib, key, tuple(value) if key == "CLAUDE_CANDIDATES" else value)
     for key in list(os.environ):
         if key.startswith(SCRUBBED):
             monkeypatch.delenv(key)
-    for key, value in values.items():
-        monkeypatch.setenv(key, value)
-    yield {"state": tmp_path / "state", "dir": tmp_path, "values": values, "claude": claude, "base": base}
+    monkeypatch.setenv("BULK_READ_TIMEOUT_S", "4")  # an env value can only lower a managed timeout
+    monkeypatch.setenv("BULK_READ_INKLING_TIMEOUT_S", "1")
+    yield {"state": tmp_path / "state", "tmp": tmp_path, "dir": src, "home": home, "claude": claude, "base": base, "other": other_base,
+           "patches": patches}
     server.shutdown()
+    other.shutdown()
 
 
-def claude_call(env):
-    return json.loads((env["dir"] / "fake-claude.call.json").read_text())
+def claude_call(env, name="claude"):
+    return json.loads((env["claude"].parent / (name + ".call.json")).read_text())
+
+
+def set_claude_mode(env, mode, name="claude"):
+    (env["claude"].parent / (name + ".mode")).write_text(json.dumps(mode))
 
 
 def make(path, lines, terminate=True):
@@ -127,12 +175,19 @@ def make(path, lines, terminate=True):
     return str(path)
 
 
-def run_guard(env, payload, **extra):
+def run_entry(env, entry, args, stdin="", cfg=None, **session):
+    """Run a REAL deployed entrypoint in a subprocess through the test-only harness."""
+    config = env["tmp"] / "harness.json"
+    config.write_text(json.dumps({**env["patches"], **(cfg or {})}))
     environment = {k: v for k, v in os.environ.items() if not k.startswith(SCRUBBED)}
-    environment.update(env["values"])
-    environment.update(extra)
-    done = subprocess.run([sys.executable, "-I", str(SCRIPTS / "bulk_read_guard.py")], input=json.dumps(payload),
-                          capture_output=True, text=True, env=environment, timeout=30)
+    environment.update({"BULK_READ_HARNESS_CONFIG": str(config), "BULK_READ_TIMEOUT_S": "4", "BULK_READ_INKLING_TIMEOUT_S": "1"})
+    environment.update(session)
+    return subprocess.run([sys.executable, "-I", str(HARNESS), entry, *args], input=stdin, capture_output=True, text=True, env=environment,
+                          timeout=60)
+
+
+def run_guard(env, payload, cfg=None, **session):
+    done = run_entry(env, "bulk_read_guard.py", [], json.dumps(payload), cfg, **session)
     assert done.returncode == 0, done.stderr
     return json.loads(done.stdout)["hookSpecificOutput"]["permissionDecisionReason"] if done.stdout.strip() else None
 
@@ -152,6 +207,36 @@ def events(env):
 
 def lane(monkeypatch):
     monkeypatch.setenv("PROXY_AGENT_RUN", "1")
+
+
+class Spy:
+    """Records every path opened through os.open or builtins.open, and the bytes read through os.read."""
+
+    def __init__(self, monkeypatch):
+        self.opened, self.read_bytes = [], 0
+        real_os_open, real_open, real_read = os.open, builtins.open, os.read
+
+        def os_open(path, *args, **kwargs):
+            self.opened.append(os.fspath(path))
+            return real_os_open(path, *args, **kwargs)
+
+        def b_open(file, *args, **kwargs):
+            if isinstance(file, (str, os.PathLike)):
+                self.opened.append(os.fspath(file))
+            return real_open(file, *args, **kwargs)
+
+        def os_read(fd, n):
+            data = real_read(fd, n)
+            self.read_bytes += len(data)
+            return data
+
+        monkeypatch.setattr(os, "open", os_open)
+        monkeypatch.setattr(builtins, "open", b_open)
+        monkeypatch.setattr(os, "read", os_read)
+
+    def touched(self, path):
+        real = os.path.realpath(path)
+        return any(os.path.realpath(p) == real for p in self.opened)
 
 
 # ---- threshold and the redirect message -------------------------------------------------------------------------
@@ -224,17 +309,11 @@ def test_pm_escape_hatches_allow_the_original_read(env):
 
 def test_pm_session_never_waits_on_the_network_and_fails_open_without_claude(env):
     big = make(env["dir"] / "big.txt", 900)
-    dead = {"INKLING_HEALTH_URL": DEAD + "/health", "CLIPROXY_BASE_URL": DEAD}
-    assert run_guard(env, read(env, big), **dead) is not None  # the PM route has no network gate: a dead Spark and router change nothing
+    dead = {"INKLING_HEALTH_URL": DEAD + "/health", "ROUTER_ORIGIN": DEAD}
+    assert run_guard(env, read(env, big), cfg=dead) is not None  # the PM route has no network gate: a dead Spark and router change nothing
     assert not list((env["state"]).glob("health-*.json"))
-    assert run_guard(env, read(env, big), BULK_READ_CLAUDE_BIN="/nonexistent/claude", PATH="/nonexistent") is None
+    assert run_guard(env, read(env, big), cfg={"CLAUDE_CANDIDATES": ["/nonexistent/claude"]}) is None
     assert events(env)[-1]["event"] == "fail_open" and events(env)[-1]["reason"] == "claude_missing"
-
-
-def test_inkling_health_default_matches_the_proxy_launcher_gate(monkeypatch):
-    monkeypatch.delenv("INKLING_HEALTH_URL", raising=False)
-    assert lib.health_url() == "http://192.168.68.113:18120/v1/models"
-    assert "INKLING_HEALTH_URL:-http://192.168.68.113:18120/v1/models" in PROXY_AGENT  # one URL, two gates
 
 
 def test_pm_breaker_is_separate_from_the_lane_breaker(env):
@@ -243,6 +322,11 @@ def test_pm_breaker_is_separate_from_the_lane_breaker(env):
         lib.breaker_record(False, name="claude")
     assert run_guard(env, read(env, big)) is None and events(env)[-1]["reason"] == "breaker_open"
     assert run_guard(env, read(env, big), **LANE) is not None  # lanes are unaffected
+
+
+def test_inkling_health_default_matches_the_proxy_launcher_gate():
+    assert DEFAULT_HEALTH_URL == "http://192.168.68.113:18120/v1/models"
+    assert "INKLING_HEALTH_URL:-http://192.168.68.113:18120/v1/models" in PROXY_AGENT  # one URL, two gates
 
 
 # ---- who is exempt in a proxy lane (PM amendment 22 Nov 00:42 IST) -------------------------------------------------
@@ -271,7 +355,7 @@ def test_p0_override_and_explicit_exemption_and_opt_outs(env):
     for value in ("0", "off", "false", "disabled"):
         assert run_guard(env, read(env, big), MOP_BULK_READ_GUARD=value, **LANE) is None
         assert run_guard(env, read(env, big), MOP_BULK_READ_GUARD=value) is None
-    (env["state"]).mkdir(parents=True, exist_ok=True)
+    env["state"].mkdir(parents=True, exist_ok=True)
     (env["state"] / "DISABLED").write_text("")
     assert run_guard(env, read(env, big), **LANE) is None and run_guard(env, read(env, big)) is None
 
@@ -314,13 +398,14 @@ def test_bash_parser_and_line_math():
 
 def test_lane_with_inkling_down_still_blocks_because_luna_answers(env):
     big = make(env["dir"] / "big.txt", 450)
-    assert run_guard(env, read(env, big), INKLING_HEALTH_URL=DEAD + "/health", **LANE) is not None
+    assert run_guard(env, read(env, big), cfg={"INKLING_HEALTH_URL": DEAD + "/health"}, **LANE) is not None
     assert events(env)[-1]["event"] == "block" and events(env)[-1]["backend"] == "luna"
 
 
 def test_lane_fails_open_only_when_inkling_and_the_router_are_both_down(env):
     big = make(env["dir"] / "big.txt", 450)
-    assert run_guard(env, read(env, big), INKLING_HEALTH_URL=DEAD + "/health", CLIPROXY_BASE_URL=DEAD, **LANE) is None
+    dead = {"INKLING_HEALTH_URL": DEAD + "/health", "ROUTER_ORIGIN": DEAD}
+    assert run_guard(env, read(env, big), cfg=dead, **LANE) is None
     assert events(env)[-1]["event"] == "fail_open" and events(env)[-1]["reason"].startswith("no_backend")
 
 
@@ -332,16 +417,14 @@ def test_unhealthy_statuses_fail_open_for_a_lane(env):
 
 
 def test_hook_error_and_garbage_input_allow_the_call(env):
-    environment = {**os.environ, **env["values"], **LANE}
     for stdin in ("not json at all", "[]", '{"tool_name": "Read", "tool_input": "oops"}', ""):
-        done = subprocess.run([sys.executable, "-I", str(SCRIPTS / "bulk_read_guard.py")], input=stdin, capture_output=True,
-                              text=True, env=environment, timeout=30)
+        done = run_entry(env, "bulk_read_guard.py", [], stdin, **LANE)
         assert done.returncode == 0 and done.stdout.strip() == ""
 
 
 def test_allowed_reads_never_touch_the_network_or_the_log(env):
     small = make(env["dir"] / "small.txt", 10)
-    assert run_guard(env, read(env, small), INKLING_HEALTH_URL=DEAD + "/health", **LANE) is None
+    assert run_guard(env, read(env, small), cfg={"INKLING_HEALTH_URL": DEAD + "/health"}, **LANE) is None
     assert not list((env["state"]).glob("health-*.json")) and events(env) == []
 
 
@@ -374,7 +457,7 @@ def test_lane_asks_inkling_first_prints_only_bullets_and_sends_numbered_lines(en
 def test_lane_with_inkling_down_uses_luna(env, monkeypatch, capsys):
     """Rajiv ts 1795289295.887739: 'if inkling is down, proxies should use luna'."""
     lane(monkeypatch)
-    monkeypatch.setenv("INKLING_HEALTH_URL", DEAD + "/health")
+    monkeypatch.setattr(lib, "INKLING_HEALTH_URL", DEAD + "/health")
     path = make(env["dir"] / "a.txt", 5)
     STUB["content"] = "- luna fact (a.txt:4)"
     assert bulk_read.main(["--paths", path, "--question", "q"]) == 0
@@ -408,8 +491,8 @@ def test_lane_fails_open_to_the_original_read_only_when_both_fail(env, monkeypat
 
 def test_lane_with_no_backend_exits_3_without_calling_a_model(env, monkeypatch):
     lane(monkeypatch)
-    monkeypatch.setenv("INKLING_HEALTH_URL", DEAD + "/health")
-    monkeypatch.setenv("CLIPROXY_BASE_URL", DEAD)
+    monkeypatch.setattr(lib, "INKLING_HEALTH_URL", DEAD + "/health")
+    monkeypatch.setattr(lib, "ROUTER_ORIGIN", DEAD)
     big = make(env["dir"] / "big.txt", 450)
     assert bulk_read.main(["--paths", big, "--question", "q"]) == 3
     assert "requests" not in STUB and lib.bypass_active(big)
@@ -444,13 +527,24 @@ def test_default_size_cap_is_smaller_in_a_lane_than_for_the_pm(env, monkeypatch,
     assert "over the 36000 cap" in capsys.readouterr().err and "requests" not in STUB and not lib.bypass_active(str(path))
 
 
+@pytest.mark.parametrize("name", ["BULK_READ_MAX_CHARS", "BULK_READ_TIMEOUT_S", "BULK_READ_INKLING_TIMEOUT_S", "CODE_WRITE_MAX_CHARS", "CODE_WRITE_TIMEOUT_S"])
+def test_env_can_only_lower_a_cap_or_a_timeout(monkeypatch, name):
+    defaults = {"BULK_READ_MAX_CHARS": 36000, "BULK_READ_TIMEOUT_S": 30, "BULK_READ_INKLING_TIMEOUT_S": 15, "CODE_WRITE_MAX_CHARS": 80000,
+                "CODE_WRITE_TIMEOUT_S": 120}
+    monkeypatch.setenv(name, "99999999")
+    assert lib.cap_env(name, defaults[name]) == defaults[name]  # raising is ignored
+    monkeypatch.setenv(name, "5")
+    assert lib.cap_env(name, defaults[name]) == 5
+    for junk in ("", "abc", "-3", "0", "nan"):
+        monkeypatch.setenv(name, junk)
+        assert lib.cap_env(name, defaults[name]) == defaults[name]
+
+
 # ---- PM session backend: direct Claude Haiku or Sonnet -------------------------------------------------------------------
 
 def test_pm_session_answers_with_haiku_on_direct_claude_and_never_touches_the_router(env, monkeypatch, capsys):
-    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "router-secret")
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-session")
     path = make(env["dir"] / "a.txt", 5)
-    (env["dir"] / "fake-claude.mode").write_text(json.dumps({"result": "Intro\n- pm fact (a.txt:2)"}))
+    set_claude_mode(env, {"result": "Intro\n- pm fact (a.txt:2)"})
     assert bulk_read.main(["--paths", path, "--question", "what?"]) == 0
     assert capsys.readouterr().out.strip() == "- pm fact (a.txt:2)"
     assert "requests" not in STUB  # neither Inkling nor luna
@@ -460,7 +554,6 @@ def test_pm_session_answers_with_haiku_on_direct_claude_and_never_touches_the_ro
     assert json.loads(args[args.index("--settings") + 1]) == {"disableAllHooks": True}
     assert args[args.index("--tools") + 1] == "" and "--no-session-persistence" in args and "-p" in args
     assert "    1| line 1" in call["stdin"] and "Question: what?" in call["stdin"]
-    assert "ANTHROPIC_AUTH_TOKEN" not in call["env"] and "CLAUDE_CODE_SESSION_ID" not in call["env"] and "CLIPROXY_API_KEY" not in call["env"]
     assert Path(call["cwd"]).resolve() == Path(tempfile.gettempdir()).resolve()  # no project, no CLAUDE.md
     logged = events(env)[-1]
     assert logged["backend"] == "claude-haiku" and logged["prompt_tokens"] == 15 and logged["cost_usd"] == 0.0002
@@ -478,7 +571,7 @@ def test_pm_model_is_haiku_by_default_and_sonnet_on_request_nothing_else(env, mo
 def test_pm_claude_failure_fails_open_for_the_guard(env, capsys):
     big = make(env["dir"] / "big.txt", 450)
     assert run_guard(env, read(env, big)) is not None
-    (env["dir"] / "fake-claude.mode").write_text(json.dumps({"exit": 1}))
+    set_claude_mode(env, {"exit": 1})
     assert bulk_read.main(["--paths", big, "--question", "q"]) == 3
     assert "no backend answered" in capsys.readouterr().err
     assert run_guard(env, read(env, big)) is None and events(env)[-1]["reason"] == "bypass_token"
@@ -495,17 +588,18 @@ def test_code_write_strips_fences_and_prints_path_and_line_count(env, monkeypatc
     assert target.read_text() == "import os\nprint(os.name)\n"
     assert capsys.readouterr().out.strip() == "%s 2 lines" % target
     assert code_write.main(["again", str(ref), str(target)]) == 2  # refuses an existing target
+    assert target.read_text() == "import os\nprint(os.name)\n"  # and leaves it untouched
     assert code_write.main(["--force", "again", str(ref), str(target)]) == 0
 
 
 def test_code_write_lane_uses_luna_when_inkling_is_down_and_pm_uses_claude(env, monkeypatch):
     ref = env["dir"] / "ref.py"
     ref.write_text("x\n")
-    (env["dir"] / "fake-claude.mode").write_text(json.dumps({"result": "print('pm')"}))
+    set_claude_mode(env, {"result": "print('pm')"})
     assert code_write.main(["spec", str(ref), str(env["dir"] / "pm.py")]) == 0
     assert (env["dir"] / "pm.py").read_text() == "print('pm')\n" and "requests" not in STUB
     lane(monkeypatch)
-    monkeypatch.setenv("INKLING_HEALTH_URL", DEAD + "/health")
+    monkeypatch.setattr(lib, "INKLING_HEALTH_URL", DEAD + "/health")
     STUB["content"] = "print('luna')"
     assert code_write.main(["spec", str(ref), str(env["dir"] / "lane.py")]) == 0
     assert (env["dir"] / "lane.py").read_text() == "print('luna')\n" and [r["model"] for r in STUB["requests"]] == ["gpt-6-luna"]
@@ -517,89 +611,14 @@ def test_code_write_failures_write_nothing(env, monkeypatch):
     ref.write_text("x\n")
     STUB["content"] = "<think>nothing</think>"
     assert code_write.main(["spec", str(ref), str(target)]) == 3 and not target.exists()  # both backends answered empty
-    monkeypatch.setenv("INKLING_HEALTH_URL", DEAD + "/health")
-    monkeypatch.setenv("CLIPROXY_BASE_URL", DEAD)
+    monkeypatch.setattr(lib, "INKLING_HEALTH_URL", DEAD + "/health")
+    monkeypatch.setattr(lib, "ROUTER_ORIGIN", DEAD)
     for cached in env["state"].glob("health-*.json"):
         cached.unlink()
     assert code_write.main(["spec", str(ref), str(target)]) == 3 and not target.exists()
 
 
-# ---- CTO BLOCK on 38bd1682: input boundary, egress, resource bound, disabled switch, hard deadline -------------------------
-
-class Spy:
-    """Records every path opened through os.open or builtins.open, and the bytes read through os.read."""
-
-    def __init__(self, monkeypatch):
-        self.opened, self.read_bytes = [], 0
-        real_os_open, real_open, real_read = os.open, builtins.open, os.read
-
-        def os_open(path, *args, **kwargs):
-            self.opened.append(os.fspath(path))
-            return real_os_open(path, *args, **kwargs)
-
-        def b_open(file, *args, **kwargs):
-            if isinstance(file, (str, os.PathLike)):
-                self.opened.append(os.fspath(file))
-            return real_open(file, *args, **kwargs)
-
-        def os_read(fd, n):
-            data = real_read(fd, n)
-            self.read_bytes += len(data)
-            return data
-
-        monkeypatch.setattr(os, "open", os_open)
-        monkeypatch.setattr(builtins, "open", b_open)
-        monkeypatch.setattr(os, "read", os_read)
-
-    def touched(self, path):
-        real = os.path.realpath(path)
-        return any(os.path.realpath(p) == real for p in self.opened)
-
-
-def test_input_boundary_synthetic_proof(env, monkeypatch, tmp_path_factory):
-    """CTO proof: an approved source file reaches an approved backend; a restricted file and a resolved-outside-root symlink send zero
-    bytes (asserted at the transport stub) and are never opened; an oversized input refuses before it is read."""
-    lane(monkeypatch)
-    root = env["dir"]
-    approved = root / "src.ts"
-    approved.write_text("export const answer = 'APPROVED-CANARY';\n" * 5)
-    restricted = root / ".env.local"  # inside the approved root, restricted class
-    restricted.write_text("TOKEN=RESTRICTED-CANARY\n")
-    leak = tmp_path_factory.mktemp("outside") / "leak.txt"
-    leak.write_text("OUTSIDE-CANARY\n")
-    link = root / "notes.txt"  # looks like source, resolves outside the root
-    link.symlink_to(leak)
-    huge = root / "huge.ts"
-    huge.write_text("x" * 300000)  # well over the lane cap
-    assert bulk_read.main(["--paths", str(approved), "--question", "q"]) == 0
-    assert len(STUB["requests"]) == 1 and "APPROVED-CANARY" in json.dumps(STUB["requests"][0])
-    assert [r["model"] for r in STUB["requests"]] == ["inkling-2-mini"]
-    spy = Spy(monkeypatch)
-    for victim, code in ((restricted, 6), (link, 6), (huge, 4)):
-        assert bulk_read.main(["--paths", str(approved), str(victim), "--question", "q"]) == code  # one bad input refuses the whole call
-        assert len(STUB["requests"]) == 1, victim  # zero bytes at the transport stub
-    assert not any(spy.touched(p) for p in (restricted, link, leak, huge, approved))  # nothing was even opened
-    assert spy.read_bytes == 0
-    blob = json.dumps(STUB["requests"])
-    assert "RESTRICTED-CANARY" not in blob and "OUTSIDE-CANARY" not in blob
-
-
-def test_oversized_input_stops_reading_at_the_cap_even_if_its_size_changes_after_the_check(env, monkeypatch):
-    path = env["dir"] / "grows.ts"
-    path.write_text("y" * 50000)
-    ((real, meta),) = lib.approve_inputs([str(path)], 100000)
-    spy = Spy(monkeypatch)
-    real_fstat = os.fstat
-
-    class Lie:  # the file is reported small, as if it grew after approval
-        def __init__(self, st):
-            self.st_mode, self.st_dev, self.st_ino, self.st_size = st.st_mode, st.st_dev, st.st_ino, 0
-
-    monkeypatch.setattr(os, "fstat", lambda fd: Lie(real_fstat(fd)))
-    with pytest.raises(lib.Refusal) as excinfo:
-        lib.read_approved(real, meta, 1000)
-    assert excinfo.value.reason == "too_large" and spy.read_bytes <= 1001  # streamed under the cap, never the whole file
-
+# ---- source boundary --------------------------------------------------------------------------------------------------
 
 RESTRICTED = [".env", ".env.local", "app/.env.production", "config/secrets.yaml", "api_secret.txt", "my-credentials.json", "tls/server.pem",
               "tls/server.key", ".ssh/id_rsa", "id_ed25519", ".codex/auth.json", ".cli-proxy-api/config.yaml", ".claude/state/pm-ops.db",
@@ -635,47 +654,59 @@ def test_paths_outside_the_approved_roots_are_refused_and_send_nothing(env, monk
     assert "requests" not in STUB
 
 
-def test_approved_roots_are_the_source_checkouts_and_clones_of_them(env, monkeypatch):
-    projects = env["dir"] / "home" / "Downloads" / "projects"
-    names = ("heydonna-app", "heydonna-app-3003", "heydonna-app-proxy", "master-of-panes", "heydonna-app-3002-evidence",
-             "heydonna-app-3004-artifacts", "heydonna-app-3006-raw", "master-of-panes-capture-adapter", "heydonna-private-9828")
-    for name in names:
-        (projects / name).mkdir(parents=True)
-    monkeypatch.delenv("MOP_BULK_READ_EXTRA_ROOTS")
+def worktree_fixture(env, name, register=True, back_link=True):
+    """A worktree outside every approved root (like a /tmp lane clone), registered by the heydonna-app checkout's OWN .git."""
+    checkout = env["home"] / "Downloads" / "projects" / "heydonna-app"
+    admin = checkout / ".git" / "worktrees" / name
+    top = env["tmp"] / "lanes" / name
+    top.mkdir(parents=True)
+    (top / "app.ts").write_text("export const x = 1;\n")
+    (top / ".env").write_text("TOKEN=1\n")
+    if register:
+        admin.mkdir(parents=True)
+        (admin / "gitdir").write_text(str(top / ".git") + "\n")
+    if back_link:
+        (top / ".git").write_text("gitdir: %s\n" % admin)
+    return top
+
+
+def test_approved_roots_are_the_fixed_checkouts_and_the_worktrees_their_own_git_registers(env):
+    projects = env["home"] / "Downloads" / "projects"
+    for name in ("heydonna-app-3003", "heydonna-app-proxy", "master-of-panes", "heydonna-app-3002-evidence", "heydonna-app-3004-artifacts",
+                 "heydonna-app-3006-raw", "heydonna-app-2", "master-of-panes-capture-adapter", "heydonna-private-9828"):
+        (projects / name).mkdir()
     roots = {os.path.basename(root) for root in lib.source_roots()}
     assert {"heydonna-app", "heydonna-app-3003", "heydonna-app-proxy", "master-of-panes", "releases"} <= roots
-    assert not roots & {"heydonna-app-3002-evidence", "heydonna-app-3004-artifacts", "heydonna-app-3006-raw", "master-of-panes-capture-adapter",
-                        "heydonna-private-9828"}
-    base = tempfile.mkdtemp(prefix="bulkread-clone-", dir="/tmp")
-    try:
-        def make_clone(name, git):
-            top = os.path.join(base, name)
-            os.makedirs(top)
-            if git == "worktree":
-                open(os.path.join(top, ".git"), "w").write("gitdir: %s/heydonna-app/.git/worktrees/%s\n" % (projects, name))
-            elif git:
-                os.makedirs(os.path.join(top, ".git"))
-                open(os.path.join(top, ".git", "config"), "w").write('[remote "origin"]\n\turl = %s\n' % git)
-            open(os.path.join(top, "app.ts"), "w").write("x\n")
-            open(os.path.join(top, ".env"), "w").write("x\n")
-            return os.path.realpath(top)
+    assert not roots & {"heydonna-app-3002-evidence", "heydonna-app-3004-artifacts", "heydonna-app-3006-raw", "heydonna-app-2",
+                        "master-of-panes-capture-adapter", "heydonna-private-9828"}
+    good = worktree_fixture(env, "lane-good")
+    assert lib.input_refusal(os.path.realpath(good / "app.ts")) is None  # registered in the repo's own .git, back-linked
+    assert lib.input_refusal(os.path.realpath(good / ".env")) == "restricted_data_class"
+    evidence = worktree_fixture(env, "lane-evidence")
+    assert lib.input_refusal(os.path.realpath(evidence / "app.ts")) is None  # restricted classes look BELOW the root only...
+    nested = env["tmp"] / "lanes" / "lane-evidence" / "evidence"
+    nested.mkdir()
+    (nested / "log.txt").write_text("x\n")
+    assert lib.input_refusal(os.path.realpath(nested / "log.txt")) == "restricted_data_class"  # ...and an evidence dir inside is denied
 
-        wt = make_clone("lane-wt", "worktree")
-        clone = make_clone("lane-clone", "https://github.com/heydonna-app/heydonna-app.git")
-        mop = make_clone("lane-mop", "git@github.com:rajivpoddar/master-of-panes.git")
-        other = make_clone("other-repo", "https://github.com/someone/else.git")
-        plain = make_clone("plain-dir", None)
-        wrong_tree = make_clone("stray-wt", None)
-        open(os.path.join(wrong_tree, ".git"), "w").write("gitdir: /somewhere/else/.git/worktrees/x\n")
-        evidence = make_clone("lane-evidence", "worktree")
-        for top in (wt, clone, mop):
-            assert lib.input_refusal(os.path.join(top, "app.ts")) is None, top
-            assert lib.input_refusal(os.path.join(top, ".env")) == "restricted_data_class"
-        for top in (other, plain, wrong_tree):
-            assert lib.input_refusal(os.path.join(top, "app.ts")) == "outside_approved_roots", top
-        assert lib.input_refusal(os.path.join(evidence, "app.ts")) == "restricted_data_class"  # an evidence dir is never a source root
-    finally:
-        shutil.rmtree(base)
+
+def test_a_tmp_clone_or_a_forged_git_pointer_grants_nothing(env):
+    """CTO REVISE: writable /tmp git config must not grant approval. Only the repo's own .git/worktrees registration counts."""
+    clone = env["tmp"] / "lanes" / "clone"
+    (clone / ".git").mkdir(parents=True)
+    (clone / ".git" / "config").write_text('[remote "origin"]\n\turl = https://github.com/heydonna-app/heydonna-app.git\n')
+    (clone / "app.ts").write_text("x\n")
+    assert lib.input_refusal(os.path.realpath(clone / "app.ts")) == "outside_approved_roots"
+    registered = worktree_fixture(env, "lane-real")
+    forged = env["tmp"] / "lanes" / "forged"  # points at the real registration, but the registration names a different path
+    forged.mkdir()
+    (forged / "app.ts").write_text("x\n")
+    (forged / ".git").write_text((registered / ".git").read_text())
+    assert lib.input_refusal(os.path.realpath(forged / "app.ts")) == "outside_approved_roots"
+    unregistered = worktree_fixture(env, "lane-unregistered", register=False)  # a .git file alone is nothing
+    assert lib.input_refusal(os.path.realpath(unregistered / "app.ts")) == "outside_approved_roots"
+    no_back_link = worktree_fixture(env, "lane-nolink", back_link=False)  # registered, but the directory does not point back
+    assert lib.input_refusal(os.path.realpath(no_back_link / "app.ts")) == "outside_approved_roots"
 
 
 def test_target_of_code_write_may_not_sit_in_a_restricted_place(env):
@@ -696,7 +727,7 @@ def test_code_write_refuses_bad_references_and_targets_with_zero_bytes(env, monk
     assert code_write.main(["spec", str(outside), str(env["dir"] / "b.py")]) == 6
     assert code_write.main(["spec", str(ok), str(env["dir"] / ".ssh" / "keys")]) == 6
     assert "requests" not in STUB and not spy.touched(secret_ref) and not spy.touched(outside)
-    assert not (env["dir"] / "a.py").exists() and not (env["dir"] / "b.py").exists()
+    assert not (env["dir"] / "a.py").exists() and not (env["dir"] / "b.py").exists() and not (env["dir"] / ".ssh").exists()
 
 
 def test_guard_leaves_restricted_and_outside_root_files_to_the_native_read(env, tmp_path_factory):
@@ -710,10 +741,107 @@ def test_guard_leaves_restricted_and_outside_root_files_to_the_native_read(env, 
     assert run_guard(env, read(env, restricted)) is None and run_guard(env, read(env, outside)) is None  # the PM session too
 
 
-def test_egress_goes_only_to_the_loopback_router(env, monkeypatch):
+# ---- THE isolated proof (CTO REVISE on fb6de68d6a35, ts 1795292716.429489) ----------------------------------------------
+
+CALLER_OVERRIDES = ("MOP_BULK_READ_TEST_MODE", "MOP_BULK_READ_EXTRA_ROOTS", "MOP_BULK_READ_STATE_DIR", "CLIPROXY_BASE_URL", "CLIPROXY_API_KEY",
+                    "INKLING_HEALTH_URL", "BULK_READ_MODEL", "BULK_READ_FALLBACK_MODEL", "BULK_READ_CLAUDE_BIN", "CLAUDE_CONFIG_DIR",
+                    "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "HTTP_PROXY", "http_proxy", "ALL_PROXY")
+
+
+def set_caller_overrides(env, monkeypatch, untrusted_root):
+    """Everything a caller could set to widen the source or redirect the egress, aimed at the OVERRIDE server."""
+    values = {"MOP_BULK_READ_TEST_MODE": "1", "MOP_BULK_READ_EXTRA_ROOTS": str(untrusted_root), "MOP_BULK_READ_STATE_DIR": str(env["tmp"] / "evil-state"),
+              "CLIPROXY_BASE_URL": env["other"], "CLIPROXY_API_KEY": "caller-key-1", "INKLING_HEALTH_URL": env["other"] + "/health",
+              "BULK_READ_MODEL": "evil-model", "BULK_READ_FALLBACK_MODEL": "evil-fallback", "BULK_READ_CLAUDE_BIN": str(env["tmp"] / "evil-claude"),
+              "CLAUDE_CONFIG_DIR": str(env["tmp"] / "evil-config"), "CLAUDE_CODE_OAUTH_TOKEN": "caller-oauth-token",
+              "ANTHROPIC_BASE_URL": env["other"], "ANTHROPIC_AUTH_TOKEN": "caller-anthropic-token", "HTTP_PROXY": env["other"],
+              "http_proxy": env["other"], "ALL_PROXY": env["other"], "HOME": str(untrusted_root / "fake-home")}
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+
+
+def test_isolated_proof_trusted_source_pinned_egress(env, monkeypatch, tmp_path_factory):
+    """An approved source reaches the approved stub. With every caller override set and an untrusted source, zero content AND zero credential
+    bytes reach any transport, and nothing is even opened. The override server never hears from the helpers in any case."""
     lane(monkeypatch)
-    src = env["dir"] / "src.ts"
-    src.write_text("export const x = 1;\n")
+    untrusted = tmp_path_factory.mktemp("untrusted")
+    set_caller_overrides(env, monkeypatch, untrusted)
+    (untrusted / "fake-home" / "Downloads" / "projects" / "heydonna-app").mkdir(parents=True)  # a lookalike checkout under the caller's HOME
+    sources = {}
+    plain = untrusted / "plain.ts"  # (1) named by the EXTRA_ROOTS override
+    plain.write_text("UNTRUSTED-CANARY-1\n")
+    sources["plain"] = plain
+    lookalike = untrusted / "fake-home" / "Downloads" / "projects" / "heydonna-app" / "app.ts"  # (2) under the caller's $HOME
+    lookalike.write_text("UNTRUSTED-CANARY-2\n")
+    sources["lookalike-home"] = lookalike
+    clone = untrusted / "clone"  # (3) a /tmp-style clone whose git config names the real repo
+    (clone / ".git").mkdir(parents=True)
+    (clone / ".git" / "config").write_text('[remote "origin"]\n\turl = https://github.com/heydonna-app/heydonna-app.git\n')
+    (clone / "app.ts").write_text("UNTRUSTED-CANARY-3\n")
+    sources["clone"] = clone / "app.ts"
+    registered = worktree_fixture(env, "lane-proof")
+    forged = untrusted / "forged"  # (4) a forged pointer at a real registration
+    forged.mkdir()
+    (forged / "app.ts").write_text("UNTRUSTED-CANARY-4\n")
+    (forged / ".git").write_text((registered / ".git").read_text())
+    sources["forged"] = forged / "app.ts"
+    approved = env["dir"] / "src.ts"
+    approved.write_text("export const answer = 'APPROVED-CANARY';\n" * 3)
+    spy = Spy(monkeypatch)
+    for label, source in sources.items():
+        assert bulk_read.main(["--paths", str(source), "--question", "q"]) == 6, label
+        assert code_write.main(["spec", str(source), str(env["dir"] / ("out-%s.py" % label))]) == 6, label
+    assert "requests" not in STUB and "gets" not in STUB and OVERRIDE == []  # zero bytes of any kind, at either server
+    assert not any(spy.touched(s) for s in sources.values()) and spy.read_bytes == 0  # not even opened
+    assert not list(env["dir"].glob("out-*.py"))
+    assert bulk_read.main(["--paths", str(approved), "--question", "q"]) == 0  # the approved source goes to the approved stub only
+    assert [r["model"] for r in STUB["requests"]] == ["inkling-2-mini"] and "APPROVED-CANARY" in json.dumps(STUB["requests"][0])
+    raw, headers = STUB["raw"][0]
+    assert headers["Authorization"] == "Bearer " + KEY  # the managed key, to the managed origin
+    assert OVERRIDE == []  # and not one request, with or without a credential, reached the caller's server
+    blob = raw + b"".join(json.dumps(h).encode() for _, h in STUB["raw"]) + b"".join(json.dumps(h).encode() for _, h in STUB.get("gets", []))
+    for secret in (b"caller-key-1", b"caller-oauth-token", b"caller-anthropic-token", b"UNTRUSTED-CANARY"):
+        assert secret not in blob
+
+
+def test_pm_route_with_caller_overrides_uses_the_managed_claude_with_a_fixed_environment(env, monkeypatch, tmp_path_factory):
+    untrusted = tmp_path_factory.mktemp("untrusted")
+    set_caller_overrides(env, monkeypatch, untrusted)
+    evil = untrusted / "evil-claude"
+    make_fake_claude(evil)
+    monkeypatch.setenv("BULK_READ_CLAUDE_BIN", str(evil))
+    path = make(env["dir"] / "a.ts", 5)
+    assert bulk_read.main(["--paths", path, "--question", "q"]) == 0
+    assert not (evil.parent / "evil-claude.call.json").exists()  # the caller's binary never ran
+    call = claude_call(env)  # the managed one did
+    assert set(call["env"]) - {"__CF_USER_TEXT_ENCODING"} == {"HOME", "USER", "LOGNAME", "PATH", "LANG", "CLAUDE_CODE_MAX_OUTPUT_TOKENS"}  # macOS adds the CF key
+    assert call["env"]["HOME"] == lib.HOME_DIR and call["env"]["PATH"] == lib.CLAUDE_PATH
+    blob = json.dumps(call["env"])
+    assert "CLAUDE_CONFIG_DIR" not in call["env"] and OVERRIDE == [] and "requests" not in STUB
+    assert not any(s in blob for s in ("caller-oauth-token", "caller-anthropic-token", "evil-config", "evil-claude", "caller-key-1"))
+
+
+def test_managed_claude_binary_must_be_a_safe_fixed_path(env):
+    assert lib.claude_bin() == str(env["claude"])
+    env["claude"].chmod(0o775)  # group writable
+    assert lib.claude_bin() == ""
+    env["claude"].chmod(0o755)
+    assert lib.claude_bin() == str(env["claude"])
+    env["claude"].chmod(0o644)  # not executable
+    assert lib.claude_bin() == ""
+
+
+def test_home_comes_from_the_account_not_the_environment():
+    saved = os.environ.get("HOME")
+    os.environ["HOME"] = "/tmp/elsewhere"
+    try:
+        assert lib._expand("~/x") == lib.HOME_DIR + "/x" and "/tmp/elsewhere" not in lib.HOME_DIR
+    finally:
+        if saved is not None:
+            os.environ["HOME"] = saved
+
+
+def test_egress_is_pinned_to_the_managed_origin_and_the_approved_aliases(env, monkeypatch):
     sent = []
 
     def spy_open(request, timeout=None):
@@ -723,22 +851,22 @@ def test_egress_goes_only_to_the_loopback_router(env, monkeypatch):
     monkeypatch.setattr(lib.OPENER, "open", spy_open)
     for url in ("http://example.com:8317", "https://127.0.0.1:8317", "http://127.0.0.1.evil.example", "http://user:pw@127.0.0.1:8317",
                 "http://192.168.68.113:8317", "ftp://127.0.0.1"):
-        monkeypatch.setenv("CLIPROXY_BASE_URL", url)
+        monkeypatch.setattr(lib, "ROUTER_ORIGIN", url)
         with pytest.raises(lib.InkError) as excinfo:
-            lib.router_base()
+            lib.chat("inkling-2-mini", "s", "u", 10, 1)
         assert excinfo.value.reason == "egress_denied", url
-        assert bulk_read.main(["--paths", str(src), "--question", "q"]) == 3
-    assert [data for _, data in sent if data is not None] == []  # no request body went anywhere
-    assert not [url for url, _ in sent if "example" in url or "192.168.68.113:8317" in url]
-    for url in ("http://127.0.0.1:8317", "http://localhost:3000", "http://[::1]:8317"):
-        monkeypatch.setenv("CLIPROXY_BASE_URL", url)
-        assert lib.router_base().startswith("http://")
+    monkeypatch.setattr(lib, "ROUTER_ORIGIN", env["base"])
+    for alias in ("evil-model", "gpt-6.2-sol", "claude-opus-5-5", ""):
+        with pytest.raises(lib.InkError) as excinfo:
+            lib.chat(alias, "s", "u", 10, 1)
+        assert excinfo.value.reason == "alias_denied", alias
+    assert sent == []  # nothing was built or sent
     for url in ("http://example.com/v1/models", "https://192.168.68.113/v1/models"):
-        monkeypatch.setenv("INKLING_HEALTH_URL", url)
+        monkeypatch.setattr(lib, "INKLING_HEALTH_URL", url)
         with pytest.raises(lib.InkError):
             lib.health_url()
-    monkeypatch.setenv("INKLING_HEALTH_URL", "http://192.168.68.113:18120/v1/models")
-    assert lib.health_url().endswith("/v1/models")
+    assert lib.ROUTER_ORIGIN == env["base"]
+    assert DEFAULT_HEALTH_URL.startswith("http://192.168.68.113:18120/")
 
 
 def test_transport_ignores_env_proxies_and_never_follows_a_redirect(env, monkeypatch, capsys):
@@ -758,28 +886,127 @@ def test_transport_ignores_env_proxies_and_never_follows_a_redirect(env, monkeyp
     assert [r["model"] for r in STUB["requests"]] == ["inkling-2-mini", "gpt-6-luna"]  # one POST each, no follow-up request
 
 
-def test_nested_claude_binary_cannot_be_swapped_by_env_outside_test_mode(env, monkeypatch):
-    assert lib.claude_bin() == str(env["claude"])  # the test seam
-    monkeypatch.delenv("MOP_BULK_READ_TEST_MODE")
-    monkeypatch.setenv("PATH", str(env["dir"]) + os.pathsep + os.environ["PATH"])
-    assert lib.claude_bin() != str(env["claude"]) and "fake-claude" not in lib.claude_bin()
-    assert env["dir"] .as_posix() not in lib.source_roots()  # and the extra root is ignored too
+# ---- code-write destination binding ----------------------------------------------------------------------------------
+
+def swapping_complete(monkeypatch, env, out, other):
+    """The path is re-pointed AFTER validation and pinning, while the model call is in flight."""
+    real_complete = lib.complete
+
+    def swap(*args, **kwargs):
+        answer = real_complete(*args, **kwargs)
+        os.rename(out, env["dir"] / "out-moved")
+        os.symlink(other, out)
+        return answer
+
+    monkeypatch.setattr(lib, "complete", swap)
 
 
-@pytest.mark.parametrize("how", ["state_marker", "canonical_marker", "env_off"])
+def test_destination_swapped_after_validation_leaves_the_other_file_untouched(env, monkeypatch):
+    lane(monkeypatch)
+    ref = env["dir"] / "ref.py"
+    ref.write_text("x\n")
+    out, other = env["dir"] / "out", env["dir"] / "other"
+    out.mkdir()
+    other.mkdir()
+    (other / "new.py").write_text("OTHER-CONTENT\n")
+    STUB["content"] = "print('new')"
+    swapping_complete(monkeypatch, env, out, other)
+    assert code_write.main(["spec", str(ref), str(out / "new.py")]) == 0
+    assert (other / "new.py").read_text() == "OTHER-CONTENT\n"  # the other file is untouched
+    assert (env["dir"] / "out-moved" / "new.py").read_text() == "print('new')\n"  # the write went to the pinned directory
+    assert sorted(p.name for p in other.iterdir()) == ["new.py"]  # no stray temp file there either
+    assert sorted(p.name for p in (env["dir"] / "out-moved").iterdir()) == ["new.py"]
+
+
+def test_destination_swap_with_force_replaces_only_the_pinned_directorys_file(env, monkeypatch):
+    lane(monkeypatch)
+    ref = env["dir"] / "ref.py"
+    ref.write_text("x\n")
+    out, other = env["dir"] / "out", env["dir"] / "other"
+    out.mkdir()
+    other.mkdir()
+    (out / "new.py").write_text("OLD\n")
+    (other / "new.py").write_text("OTHER-CONTENT\n")
+    STUB["content"] = "print('forced')"
+    swapping_complete(monkeypatch, env, out, other)
+    assert code_write.main(["--force", "spec", str(ref), str(out / "new.py")]) == 0
+    assert (other / "new.py").read_text() == "OTHER-CONTENT\n"
+    assert (env["dir"] / "out-moved" / "new.py").read_text() == "print('forced')\n"
+
+
+def test_create_only_never_overwrites_a_file_that_appears_after_the_check(env, monkeypatch, capsys):
+    lane(monkeypatch)
+    ref = env["dir"] / "ref.py"
+    ref.write_text("x\n")
+    out = env["dir"] / "out"
+    out.mkdir()
+    real_complete = lib.complete
+
+    def race(*args, **kwargs):
+        answer = real_complete(*args, **kwargs)
+        (out / "new.py").write_text("RACE-WINNER\n")  # someone creates the target after the existence check
+        return answer
+
+    monkeypatch.setattr(lib, "complete", race)
+    STUB["content"] = "print('late')"
+    assert code_write.main(["spec", str(ref), str(out / "new.py")]) == 2
+    assert (out / "new.py").read_text() == "RACE-WINNER\n"  # create-only: the existing file is never touched
+    assert "target_exists" in capsys.readouterr().err
+    assert sorted(p.name for p in out.iterdir()) == ["new.py"]  # the exclusive temp file is gone
+
+
+def test_a_symlink_at_the_target_name_is_replaced_not_followed(env, monkeypatch):
+    lane(monkeypatch)
+    ref = env["dir"] / "ref.py"
+    ref.write_text("x\n")
+    victim = env["dir"] / "victim.txt"
+    victim.write_text("VICTIM\n")
+    (env["dir"] / "link.py").symlink_to(victim)
+    STUB["content"] = "print('forced')"
+    assert code_write.main(["spec", str(ref), str(env["dir"] / "link.py")]) == 2  # create-only: a symlink counts as existing
+    assert code_write.main(["--force", "spec", str(ref), str(env["dir"] / "link.py")]) == 0
+    assert victim.read_text() == "VICTIM\n" and not (env["dir"] / "link.py").is_symlink()
+
+
+# ---- resource bound, disabled switch, hard deadline --------------------------------------------------------------------
+
+def test_oversized_input_is_refused_before_any_read(env, monkeypatch):
+    lane(monkeypatch)
+    huge = env["dir"] / "huge.ts"
+    huge.write_text("x" * 300000)
+    spy = Spy(monkeypatch)
+    assert bulk_read.main(["--paths", str(huge), "--question", "q"]) == 4
+    assert not spy.touched(huge) and spy.read_bytes == 0 and "requests" not in STUB
+
+
+def test_oversized_input_stops_reading_at_the_cap_even_if_its_size_changes_after_the_check(env, monkeypatch):
+    path = env["dir"] / "grows.ts"
+    path.write_text("y" * 50000)
+    ((real, meta),) = lib.approve_inputs([str(path)], 100000)
+    spy = Spy(monkeypatch)
+    real_fstat = os.fstat
+
+    class Lie:  # the file is reported small, as if it grew after approval
+        def __init__(self, st):
+            self.st_mode, self.st_dev, self.st_ino, self.st_size = st.st_mode, st.st_dev, st.st_ino, 0
+
+    monkeypatch.setattr(os, "fstat", lambda fd: Lie(real_fstat(fd)))
+    with pytest.raises(lib.Refusal) as excinfo:
+        lib.read_approved(real, meta, 1000)
+    assert excinfo.value.reason == "too_large" and spy.read_bytes <= 1001  # streamed under the cap, never the whole file
+
+
+@pytest.mark.parametrize("how", ["marker", "env_off"])
 def test_disabled_refuses_at_entry_with_zero_bytes_and_no_file_opened(env, monkeypatch, capsys, how):
     """CTO add-on ts 1795291271.444299: bulk-read and code-write check the DISABLED marker and MOP_BULK_READ_GUARD=0 themselves."""
     lane(monkeypatch)
     src, ref, target = env["dir"] / "src.ts", env["dir"] / "ref.py", env["dir"] / "out.py"
     src.write_text("export const x = 1;\n")
     ref.write_text("x\n")
-    if how == "state_marker":
+    if how == "marker":
         env["state"].mkdir(parents=True)
         (env["state"] / "DISABLED").write_text("")
-    elif how == "canonical_marker":
-        monkeypatch.setenv("MOP_BULK_READ_STATE_DIR", str(env["dir"] / "elsewhere"))  # the canonical marker still counts
-        os.makedirs(os.path.dirname(lib.canonical_marker()))
-        open(lib.canonical_marker(), "w").close()
+        monkeypatch.setenv("MOP_BULK_READ_STATE_DIR", str(env["tmp"] / "elsewhere"))  # a caller cannot hide the marker
     else:
         monkeypatch.setenv("MOP_BULK_READ_GUARD", "0")
     spy = Spy(monkeypatch)
@@ -787,18 +1014,18 @@ def test_disabled_refuses_at_entry_with_zero_bytes_and_no_file_opened(env, monke
     assert code_write.main(["spec", str(ref), str(target)]) == 7
     err = capsys.readouterr().err
     assert "bulk-read: disabled" in err and "code-write: disabled" in err
-    assert "requests" not in STUB and not target.exists()
+    assert "requests" not in STUB and "gets" not in STUB and OVERRIDE == [] and not target.exists()
     assert not any(spy.touched(p) for p in (src, ref, target)) and spy.read_bytes == 0  # no file opened, nothing read
     assert not (env["state"] / "events.jsonl").exists()
 
 
-def test_guard_also_honors_the_canonical_marker_when_the_state_dir_is_elsewhere(env):
+def test_guard_honors_the_marker_even_when_a_caller_names_another_state_dir(env):
     big = make(env["dir"] / "big.ts", 900)
     assert run_guard(env, read(env, big), **LANE) is not None
-    marker = env["dir"] / "home" / ".local" / "share" / "master-of-panes" / "bulk-read" / "DISABLED"
-    marker.parent.mkdir(parents=True)
-    marker.write_text("")
-    assert run_guard(env, read(env, big), **LANE) is None and run_guard(env, read(env, big)) is None
+    env["state"].mkdir(parents=True, exist_ok=True)
+    (env["state"] / "DISABLED").write_text("")
+    assert run_guard(env, read(env, big), MOP_BULK_READ_STATE_DIR=str(env["tmp"] / "elsewhere"), **LANE) is None
+    assert run_guard(env, read(env, big), MOP_BULK_READ_STATE_DIR=str(env["tmp"] / "elsewhere")) is None
 
 
 def test_one_hard_deadline_covers_reading_and_the_model_call(env, monkeypatch, capsys):
@@ -810,6 +1037,21 @@ def test_one_hard_deadline_covers_reading_and_the_model_call(env, monkeypatch, c
     assert bulk_read.main(["--paths", path, "--question", "q"]) == 3
     assert time.time() - started < 4 and "hard_deadline" in capsys.readouterr().err
     assert "requests" not in STUB and events(env)[-1]["event"] == "delegate_fail_open"
+
+
+def test_code_write_hard_deadline_closes_the_pinned_directory(env, monkeypatch, capsys):
+    lane(monkeypatch)
+    monkeypatch.setenv("CODE_WRITE_TIMEOUT_S", "0.5")
+    ref = env["dir"] / "ref.py"
+    ref.write_text("x\n")
+    monkeypatch.setattr(lib, "complete", lambda *a, **k: time.sleep(10))
+    closed = []
+    real_close = lib.Destination.close
+    monkeypatch.setattr(lib.Destination, "close", lambda self: (closed.append(self.fd), real_close(self))[1])
+    started = time.time()
+    assert code_write.main(["spec", str(ref), str(env["dir"] / "out" / "new.py")]) == 3
+    assert time.time() - started < 4 and "hard deadline" in capsys.readouterr().err and len(closed) == 1
+    assert not (env["dir"] / "out" / "new.py").exists()
 
 
 # ---- wiring: proxy lanes, the PM checkout settings, links and proxy-agent.sh ----------------------------------------

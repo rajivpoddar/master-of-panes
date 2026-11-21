@@ -14,8 +14,8 @@ LOADED BY: every proxy lane (proxy-agent.sh adds it to the generated --settings 
 PM checkout settings next to the MoP relay hooks). The PM pane is NOT exempt.
 
 EXEMPT (never blocked, no log line), checked in this order:
-  1. MOP_BULK_READ_GUARD=0|off|false|no|disabled in the session env, or the DISABLED marker (global kill switch) in the canonical state dir
-     ~/.local/share/master-of-panes/bulk-read or in MOP_BULK_READ_STATE_DIR. bulk-read and code-write check both too, at entry.
+  1. MOP_BULK_READ_GUARD=0|off|false|no|disabled in the session env, or the DISABLED marker (global kill switch) in the managed state dir
+     ~/.local/share/master-of-panes/bulk-read. bulk-read and code-write check both too, at entry.
   2. BULK_READ_EXEMPT=1 (proxy-agent.sh exports it for judgment lanes).
   3. Per-read escape hatch for evidence reads: any Read with offset or limit (offset=1 and limit=<line count> returns the whole file),
      or a Bash command prefixed BULK_READ_ALLOW=1. The block message for the PM session spells this out.
@@ -24,7 +24,8 @@ EXEMPT (never blocked, no log line), checked in this order:
      proxy_agent_is_judgment_lane. Debugging and root-cause work stays on the main model (CLAUDE.md: never delegate it).
   5. Carve-outs: images, PDF and notebooks; binary files; files of 400 lines or fewer; Bash head/tail printing 400 lines or fewer;
      this hook's own helper files and state dir.
-  6. Inputs bulk-read would refuse (CTO BLOCK on 38bd1682, ts 1795291197.575539): a resolved path outside the approved source roots or
+  6. Inputs bulk-read would refuse (CTO BLOCK on 38bd1682, ts 1795291197.575539; REVISE on fb6de68d6a35, ts 1795292716.429489): a resolved
+     path outside the operator-approved checkouts and the worktrees their own .git registers (a /tmp clone grants nothing), or
      in a restricted data class (.env*, *secret*, *credential*, keys, ~/.ssh, ~/.codex, evidence dirs, ...) is never redirected;
      the native Read stands. See bulk_read_lib.py.
 
@@ -35,7 +36,8 @@ The PM session never waits on a network gate: its check is a local file test.
 
 LOGS one JSON line per block or fail-open to <state dir>/events.jsonl (path, lines, latency; never file content).
 Disable: MOP_BULK_READ_GUARD=0 for a session; touch <state dir>/DISABLED for everyone; remove the guard entries from the settings files above.
-State dir: MOP_BULK_READ_STATE_DIR, default ~/.local/share/master-of-panes/bulk-read.
+State dir: ~/.local/share/master-of-panes/bulk-read, fixed in bulk_read_lib.py. No environment variable chooses source roots, origins, models,
+the Claude binary or the state dir; the guard reads only session facts (PROXY_AGENT_*, BULK_READ_EXEMPT, MOP_BULK_READ_GUARD).
 """
 import json
 import os
@@ -150,7 +152,7 @@ def printed_lines(count, total):
 
 
 def resolve(path, cwd):
-    expanded = os.path.expanduser(path)
+    expanded = lib._expand(path)  # ~ is the account's home, not $HOME
     if not os.path.isabs(expanded):
         expanded = os.path.join(cwd or os.getcwd(), expanded)
     return os.path.realpath(expanded)
