@@ -416,6 +416,15 @@ def test_bulk_read_usage_errors_and_size_cap(env, monkeypatch):
     assert not lib.bypass_active(big) and "requests" not in STUB  # too large is not an outage
 
 
+def test_default_size_cap_is_smaller_in_a_lane_than_for_the_pm(env, monkeypatch, capsys):
+    path = env["dir"] / "mid.txt"
+    path.write_text("x" * 60 + "\n" * 1 + "".join("line %d with some padding text\n" % n for n in range(1500)))  # about 50k chars
+    assert bulk_read.main(["--paths", str(path), "--question", "q"]) == 0  # the PM route takes it (cap 80000)
+    lane(monkeypatch)
+    assert bulk_read.main(["--paths", str(path), "--question", "q"]) == 4  # a lane refuses without waiting 30 s (cap 36000)
+    assert "over the 36000 cap" in capsys.readouterr().err and "requests" not in STUB and not lib.bypass_active(str(path))
+
+
 # ---- PM session backend: direct Claude Haiku or Sonnet -------------------------------------------------------------------
 
 def test_pm_session_answers_with_haiku_on_direct_claude_and_never_touches_the_router(env, monkeypatch, capsys):
