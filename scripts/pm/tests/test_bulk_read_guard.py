@@ -7,13 +7,17 @@ against a local stub of the router and a fake claude binary; nothing here calls 
 """
 import importlib.machinery
 import importlib.util
+import builtins
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import threading
+import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -60,6 +64,11 @@ class Handler(BaseHTTPRequestHandler):
         cfg = STUB.get("models", {}).get(body["model"], {})
         if cfg.get("delay"):
             threading.Event().wait(cfg["delay"])
+        if cfg.get("redirect"):
+            self.send_response(307)
+            self.send_header("Location", "http://127.0.0.1:9/elsewhere")
+            self.end_headers()
+            return
         self.send_response(cfg.get("status", 200))
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -92,9 +101,13 @@ def env(tmp_path, monkeypatch):
     claude.chmod(0o755)
     (tmp_path / "fake-claude.mode").write_text("{}")
     base = "http://127.0.0.1:%d" % server.server_port
+    home = tmp_path / "home"  # a fake HOME: the real DISABLED marker and the real checkouts must not leak into these tests
+    home.mkdir()
+    # tmp_path is the one approved source root (test mode); everything the tests send must sit under it
     values = {"MOP_BULK_READ_STATE_DIR": str(tmp_path / "state"), "CLIPROXY_BASE_URL": base, "CLIPROXY_API_KEY": "test",
               "INKLING_HEALTH_URL": base + "/health", "BULK_READ_TIMEOUT_S": "4", "BULK_READ_INKLING_TIMEOUT_S": "1",
-              "BULK_READ_CLAUDE_BIN": str(claude)}
+              "BULK_READ_CLAUDE_BIN": str(claude), "HOME": str(home), "MOP_BULK_READ_TEST_MODE": "1",
+              "MOP_BULK_READ_EXTRA_ROOTS": str(tmp_path)}
     for key in list(os.environ):
         if key.startswith(SCRUBBED):
             monkeypatch.delenv(key)
@@ -509,6 +522,294 @@ def test_code_write_failures_write_nothing(env, monkeypatch):
     for cached in env["state"].glob("health-*.json"):
         cached.unlink()
     assert code_write.main(["spec", str(ref), str(target)]) == 3 and not target.exists()
+
+
+# ---- CTO BLOCK on 38bd1682: input boundary, egress, resource bound, disabled switch, hard deadline -------------------------
+
+class Spy:
+    """Records every path opened through os.open or builtins.open, and the bytes read through os.read."""
+
+    def __init__(self, monkeypatch):
+        self.opened, self.read_bytes = [], 0
+        real_os_open, real_open, real_read = os.open, builtins.open, os.read
+
+        def os_open(path, *args, **kwargs):
+            self.opened.append(os.fspath(path))
+            return real_os_open(path, *args, **kwargs)
+
+        def b_open(file, *args, **kwargs):
+            if isinstance(file, (str, os.PathLike)):
+                self.opened.append(os.fspath(file))
+            return real_open(file, *args, **kwargs)
+
+        def os_read(fd, n):
+            data = real_read(fd, n)
+            self.read_bytes += len(data)
+            return data
+
+        monkeypatch.setattr(os, "open", os_open)
+        monkeypatch.setattr(builtins, "open", b_open)
+        monkeypatch.setattr(os, "read", os_read)
+
+    def touched(self, path):
+        real = os.path.realpath(path)
+        return any(os.path.realpath(p) == real for p in self.opened)
+
+
+def test_input_boundary_synthetic_proof(env, monkeypatch, tmp_path_factory):
+    """CTO proof: an approved source file reaches an approved backend; a restricted file and a resolved-outside-root symlink send zero
+    bytes (asserted at the transport stub) and are never opened; an oversized input refuses before it is read."""
+    lane(monkeypatch)
+    root = env["dir"]
+    approved = root / "src.ts"
+    approved.write_text("export const answer = 'APPROVED-CANARY';\n" * 5)
+    restricted = root / ".env.local"  # inside the approved root, restricted class
+    restricted.write_text("TOKEN=RESTRICTED-CANARY\n")
+    leak = tmp_path_factory.mktemp("outside") / "leak.txt"
+    leak.write_text("OUTSIDE-CANARY\n")
+    link = root / "notes.txt"  # looks like source, resolves outside the root
+    link.symlink_to(leak)
+    huge = root / "huge.ts"
+    huge.write_text("x" * 300000)  # well over the lane cap
+    assert bulk_read.main(["--paths", str(approved), "--question", "q"]) == 0
+    assert len(STUB["requests"]) == 1 and "APPROVED-CANARY" in json.dumps(STUB["requests"][0])
+    assert [r["model"] for r in STUB["requests"]] == ["inkling-2-mini"]
+    spy = Spy(monkeypatch)
+    for victim, code in ((restricted, 6), (link, 6), (huge, 4)):
+        assert bulk_read.main(["--paths", str(approved), str(victim), "--question", "q"]) == code  # one bad input refuses the whole call
+        assert len(STUB["requests"]) == 1, victim  # zero bytes at the transport stub
+    assert not any(spy.touched(p) for p in (restricted, link, leak, huge, approved))  # nothing was even opened
+    assert spy.read_bytes == 0
+    blob = json.dumps(STUB["requests"])
+    assert "RESTRICTED-CANARY" not in blob and "OUTSIDE-CANARY" not in blob
+
+
+def test_oversized_input_stops_reading_at_the_cap_even_if_its_size_changes_after_the_check(env, monkeypatch):
+    path = env["dir"] / "grows.ts"
+    path.write_text("y" * 50000)
+    ((real, meta),) = lib.approve_inputs([str(path)], 100000)
+    spy = Spy(monkeypatch)
+    real_fstat = os.fstat
+
+    class Lie:  # the file is reported small, as if it grew after approval
+        def __init__(self, st):
+            self.st_mode, self.st_dev, self.st_ino, self.st_size = st.st_mode, st.st_dev, st.st_ino, 0
+
+    monkeypatch.setattr(os, "fstat", lambda fd: Lie(real_fstat(fd)))
+    with pytest.raises(lib.Refusal) as excinfo:
+        lib.read_approved(real, meta, 1000)
+    assert excinfo.value.reason == "too_large" and spy.read_bytes <= 1001  # streamed under the cap, never the whole file
+
+
+RESTRICTED = [".env", ".env.local", "app/.env.production", "config/secrets.yaml", "api_secret.txt", "my-credentials.json", "tls/server.pem",
+              "tls/server.key", ".ssh/id_rsa", "id_ed25519", ".codex/auth.json", ".cli-proxy-api/config.yaml", ".claude/state/pm-ops.db",
+              "customer-artifacts/a.txt", "evidence/log.txt", "notes-evidence.txt", "slack-images/a.png.txt", ".git/config",
+              ".claude/settings.local.json", "data.sqlite"]
+ALLOWED = ["src/app.ts", "docs/readme.md", ".claude/skills/x/SKILL.md", "scripts/slack-send.sh", "lib/token-usage.ts", ".github/workflows/ci.yml"]
+
+
+@pytest.mark.parametrize("relative", RESTRICTED)
+def test_restricted_data_classes_are_refused_even_inside_an_approved_root(env, monkeypatch, relative):
+    lane(monkeypatch)
+    path = env["dir"] / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("CLASSIFIED-CANARY\n")
+    assert lib.input_refusal(os.path.realpath(path)) == "restricted_data_class"
+    assert bulk_read.main(["--paths", str(path), "--question", "q"]) == 6
+    assert "requests" not in STUB
+
+
+@pytest.mark.parametrize("relative", ALLOWED)
+def test_ordinary_source_paths_are_approved(env, relative):
+    path = env["dir"] / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("ok\n")
+    assert lib.input_refusal(os.path.realpath(path)) is None
+
+
+@pytest.mark.parametrize("outside", ["/etc/hosts", "~/.ssh/config", "~/.codex/auth.json", "~/.cli-proxy-api/x.yaml", "~/.claude/state/pm-ops.db",
+                                     "/tmp/some-evidence-dir/log.txt", "~/.config/cliproxyapi/client.env"])
+def test_paths_outside_the_approved_roots_are_refused_and_send_nothing(env, monkeypatch, outside):
+    lane(monkeypatch)
+    assert bulk_read.main(["--paths", outside, "--question", "q"]) == 6
+    assert "requests" not in STUB
+
+
+def test_approved_roots_are_the_source_checkouts_and_clones_of_them(env, monkeypatch):
+    projects = env["dir"] / "home" / "Downloads" / "projects"
+    names = ("heydonna-app", "heydonna-app-3003", "heydonna-app-proxy", "master-of-panes", "heydonna-app-3002-evidence",
+             "heydonna-app-3004-artifacts", "heydonna-app-3006-raw", "master-of-panes-capture-adapter", "heydonna-private-9828")
+    for name in names:
+        (projects / name).mkdir(parents=True)
+    monkeypatch.delenv("MOP_BULK_READ_EXTRA_ROOTS")
+    roots = {os.path.basename(root) for root in lib.source_roots()}
+    assert {"heydonna-app", "heydonna-app-3003", "heydonna-app-proxy", "master-of-panes", "releases"} <= roots
+    assert not roots & {"heydonna-app-3002-evidence", "heydonna-app-3004-artifacts", "heydonna-app-3006-raw", "master-of-panes-capture-adapter",
+                        "heydonna-private-9828"}
+    base = tempfile.mkdtemp(prefix="bulkread-clone-", dir="/tmp")
+    try:
+        def make_clone(name, git):
+            top = os.path.join(base, name)
+            os.makedirs(top)
+            if git == "worktree":
+                open(os.path.join(top, ".git"), "w").write("gitdir: %s/heydonna-app/.git/worktrees/%s\n" % (projects, name))
+            elif git:
+                os.makedirs(os.path.join(top, ".git"))
+                open(os.path.join(top, ".git", "config"), "w").write('[remote "origin"]\n\turl = %s\n' % git)
+            open(os.path.join(top, "app.ts"), "w").write("x\n")
+            open(os.path.join(top, ".env"), "w").write("x\n")
+            return os.path.realpath(top)
+
+        wt = make_clone("lane-wt", "worktree")
+        clone = make_clone("lane-clone", "https://github.com/heydonna-app/heydonna-app.git")
+        mop = make_clone("lane-mop", "git@github.com:rajivpoddar/master-of-panes.git")
+        other = make_clone("other-repo", "https://github.com/someone/else.git")
+        plain = make_clone("plain-dir", None)
+        wrong_tree = make_clone("stray-wt", None)
+        open(os.path.join(wrong_tree, ".git"), "w").write("gitdir: /somewhere/else/.git/worktrees/x\n")
+        evidence = make_clone("lane-evidence", "worktree")
+        for top in (wt, clone, mop):
+            assert lib.input_refusal(os.path.join(top, "app.ts")) is None, top
+            assert lib.input_refusal(os.path.join(top, ".env")) == "restricted_data_class"
+        for top in (other, plain, wrong_tree):
+            assert lib.input_refusal(os.path.join(top, "app.ts")) == "outside_approved_roots", top
+        assert lib.input_refusal(os.path.join(evidence, "app.ts")) == "restricted_data_class"  # an evidence dir is never a source root
+    finally:
+        shutil.rmtree(base)
+
+
+def test_target_of_code_write_may_not_sit_in_a_restricted_place(env):
+    assert lib.target_refusal(str(env["dir"] / ".ssh" / "authorized_keys")) == "restricted_data_class"
+    assert lib.target_refusal(str(env["dir"] / "out" / "new.py")) is None
+
+
+def test_code_write_refuses_bad_references_and_targets_with_zero_bytes(env, monkeypatch, tmp_path_factory):
+    lane(monkeypatch)
+    ok = env["dir"] / "ref.py"
+    ok.write_text("x\n")
+    secret_ref = env["dir"] / ".env"
+    secret_ref.write_text("SECRET-CANARY\n")
+    outside = tmp_path_factory.mktemp("outside") / "ref.py"
+    outside.write_text("OUTSIDE-CANARY\n")
+    spy = Spy(monkeypatch)
+    assert code_write.main(["spec", str(secret_ref), str(env["dir"] / "a.py")]) == 6
+    assert code_write.main(["spec", str(outside), str(env["dir"] / "b.py")]) == 6
+    assert code_write.main(["spec", str(ok), str(env["dir"] / ".ssh" / "keys")]) == 6
+    assert "requests" not in STUB and not spy.touched(secret_ref) and not spy.touched(outside)
+    assert not (env["dir"] / "a.py").exists() and not (env["dir"] / "b.py").exists()
+
+
+def test_guard_leaves_restricted_and_outside_root_files_to_the_native_read(env, tmp_path_factory):
+    approved = make(env["dir"] / "big.ts", 900)
+    restricted = make(env["dir"] / ".env.big", 900)
+    outside = make(tmp_path_factory.mktemp("outside") / "big.txt", 900)
+    assert run_guard(env, read(env, approved), **LANE) is not None  # an approved big file is still redirected
+    assert run_guard(env, read(env, restricted), **LANE) is None  # bulk-read would refuse these, so the native Read stands
+    assert run_guard(env, read(env, outside), **LANE) is None
+    assert run_guard(env, bash(env, "cat " + restricted), **LANE) is None
+    assert run_guard(env, read(env, restricted)) is None and run_guard(env, read(env, outside)) is None  # the PM session too
+
+
+def test_egress_goes_only_to_the_loopback_router(env, monkeypatch):
+    lane(monkeypatch)
+    src = env["dir"] / "src.ts"
+    src.write_text("export const x = 1;\n")
+    sent = []
+
+    def spy_open(request, timeout=None):
+        sent.append((request.full_url, request.data))
+        raise OSError("blocked by test")
+
+    monkeypatch.setattr(lib.OPENER, "open", spy_open)
+    for url in ("http://example.com:8317", "https://127.0.0.1:8317", "http://127.0.0.1.evil.example", "http://user:pw@127.0.0.1:8317",
+                "http://192.168.68.113:8317", "ftp://127.0.0.1"):
+        monkeypatch.setenv("CLIPROXY_BASE_URL", url)
+        with pytest.raises(lib.InkError) as excinfo:
+            lib.router_base()
+        assert excinfo.value.reason == "egress_denied", url
+        assert bulk_read.main(["--paths", str(src), "--question", "q"]) == 3
+    assert [data for _, data in sent if data is not None] == []  # no request body went anywhere
+    assert not [url for url, _ in sent if "example" in url or "192.168.68.113:8317" in url]
+    for url in ("http://127.0.0.1:8317", "http://localhost:3000", "http://[::1]:8317"):
+        monkeypatch.setenv("CLIPROXY_BASE_URL", url)
+        assert lib.router_base().startswith("http://")
+    for url in ("http://example.com/v1/models", "https://192.168.68.113/v1/models"):
+        monkeypatch.setenv("INKLING_HEALTH_URL", url)
+        with pytest.raises(lib.InkError):
+            lib.health_url()
+    monkeypatch.setenv("INKLING_HEALTH_URL", "http://192.168.68.113:18120/v1/models")
+    assert lib.health_url().endswith("/v1/models")
+
+
+def test_transport_ignores_env_proxies_and_never_follows_a_redirect(env, monkeypatch, capsys):
+    assert not any(isinstance(h, urllib.request.ProxyHandler) for h in lib.OPENER.handlers)  # build_opener dropped the default one
+    for name in ("http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"):
+        monkeypatch.setenv(name, "http://127.0.0.1:9")  # a dead proxy: only a transport that honors it would fail
+    for name in ("no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    lane(monkeypatch)
+    path = make(env["dir"] / "ok.ts", 5)
+    assert bulk_read.main(["--paths", path, "--question", "q"]) == 0 and len(STUB["requests"]) == 1  # reached the stub directly
+    STUB.clear()
+    path = make(env["dir"] / "a.ts", 5)
+    STUB["models"] = {"inkling-2-mini": {"redirect": True}, "gpt-6-luna": {"redirect": True}}
+    assert bulk_read.main(["--paths", path, "--question", "q"]) == 3
+    assert "inkling_http_307,luna_http_307" in capsys.readouterr().err
+    assert [r["model"] for r in STUB["requests"]] == ["inkling-2-mini", "gpt-6-luna"]  # one POST each, no follow-up request
+
+
+def test_nested_claude_binary_cannot_be_swapped_by_env_outside_test_mode(env, monkeypatch):
+    assert lib.claude_bin() == str(env["claude"])  # the test seam
+    monkeypatch.delenv("MOP_BULK_READ_TEST_MODE")
+    monkeypatch.setenv("PATH", str(env["dir"]) + os.pathsep + os.environ["PATH"])
+    assert lib.claude_bin() != str(env["claude"]) and "fake-claude" not in lib.claude_bin()
+    assert env["dir"] .as_posix() not in lib.source_roots()  # and the extra root is ignored too
+
+
+@pytest.mark.parametrize("how", ["state_marker", "canonical_marker", "env_off"])
+def test_disabled_refuses_at_entry_with_zero_bytes_and_no_file_opened(env, monkeypatch, capsys, how):
+    """CTO add-on ts 1795291271.444299: bulk-read and code-write check the DISABLED marker and MOP_BULK_READ_GUARD=0 themselves."""
+    lane(monkeypatch)
+    src, ref, target = env["dir"] / "src.ts", env["dir"] / "ref.py", env["dir"] / "out.py"
+    src.write_text("export const x = 1;\n")
+    ref.write_text("x\n")
+    if how == "state_marker":
+        env["state"].mkdir(parents=True)
+        (env["state"] / "DISABLED").write_text("")
+    elif how == "canonical_marker":
+        monkeypatch.setenv("MOP_BULK_READ_STATE_DIR", str(env["dir"] / "elsewhere"))  # the canonical marker still counts
+        os.makedirs(os.path.dirname(lib.canonical_marker()))
+        open(lib.canonical_marker(), "w").close()
+    else:
+        monkeypatch.setenv("MOP_BULK_READ_GUARD", "0")
+    spy = Spy(monkeypatch)
+    assert bulk_read.main(["--paths", str(src), "--question", "q"]) == 7
+    assert code_write.main(["spec", str(ref), str(target)]) == 7
+    err = capsys.readouterr().err
+    assert "bulk-read: disabled" in err and "code-write: disabled" in err
+    assert "requests" not in STUB and not target.exists()
+    assert not any(spy.touched(p) for p in (src, ref, target)) and spy.read_bytes == 0  # no file opened, nothing read
+    assert not (env["state"] / "events.jsonl").exists()
+
+
+def test_guard_also_honors_the_canonical_marker_when_the_state_dir_is_elsewhere(env):
+    big = make(env["dir"] / "big.ts", 900)
+    assert run_guard(env, read(env, big), **LANE) is not None
+    marker = env["dir"] / "home" / ".local" / "share" / "master-of-panes" / "bulk-read" / "DISABLED"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("")
+    assert run_guard(env, read(env, big), **LANE) is None and run_guard(env, read(env, big)) is None
+
+
+def test_one_hard_deadline_covers_reading_and_the_model_call(env, monkeypatch, capsys):
+    lane(monkeypatch)
+    monkeypatch.setenv("BULK_READ_TIMEOUT_S", "0.5")
+    path = make(env["dir"] / "a.ts", 5)
+    monkeypatch.setattr(lib, "approve_inputs", lambda paths, cap: time.sleep(10))  # a stalled read: slow disk, FIFO, hung mount
+    started = time.time()
+    assert bulk_read.main(["--paths", path, "--question", "q"]) == 3
+    assert time.time() - started < 4 and "hard_deadline" in capsys.readouterr().err
+    assert "requests" not in STUB and events(env)[-1]["event"] == "delegate_fail_open"
 
 
 # ---- wiring: proxy lanes, the PM checkout settings, links and proxy-agent.sh ----------------------------------------

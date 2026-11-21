@@ -7,10 +7,17 @@ Wraps the retired ./scripts/codex-write.sh contract: boilerplate only (tests, co
 result before committing. Writes the raw file (code fences stripped), refuses an existing target without --force, and
 prints ONLY "<target> <N> lines".
 
-Backend: in a proxy lane inkling-2-mini then gpt-6-luna through CLIProxyAPI; in any other session (the PM) Claude Haiku, or Sonnet
-with BULK_READ_CLAUDE_MODEL=sonnet, through a nested direct `claude -p`.
-Exit codes: 0 written; 2 usage or unreadable input; 3 every backend unavailable or failed (nothing written: write the file
-yourself); 4 empty output (nothing written); 5 spec + reference over CODE_WRITE_MAX_CHARS (default 80000).
+Backend: in a proxy lane inkling-2-mini then gpt-6-luna through CLIProxyAPI on loopback; in any other session (the PM) Claude Haiku,
+or Sonnet with BULK_READ_CLAUDE_MODEL=sonnet, through a nested direct claude -p.
+
+Boundaries (CTO BLOCK on release 38bd1682, C0ALZJHGE49 ts 1795291197.575539 and ts 1795291271.444299):
+  - At entry, before any file is opened or any request made: refuses when the DISABLED marker exists or MOP_BULK_READ_GUARD=0.
+  - The reference file gets the same input check as bulk-read inputs (realpath, approved source roots, restricted data classes, regular
+    file, size) before it is opened; refused means zero bytes sent. The target may not sit in a restricted place.
+  - Egress is CLIProxyAPI on loopback or the nested claude binary only. One hard deadline covers reading, the model call and the write.
+Exit codes: 0 written; 2 usage or missing input; 3 every backend unavailable or failed (nothing written: write the file
+yourself); 4 empty output (nothing written); 5 spec + reference over CODE_WRITE_MAX_CHARS (default 80000); 6 input or target refused
+by the boundary (nothing sent); 7 disabled.
 Env: CODE_WRITE_TIMEOUT_S (120), CODE_WRITE_MAX_CHARS (80000), BULK_READ_MODEL, BULK_READ_FALLBACK_MODEL, BULK_READ_CLAUDE_MODEL, INKLING_HEALTH_URL.
 Each run appends one line (sizes, backend, latency; no content) to the guard's events.jsonl.
 """
@@ -26,62 +33,61 @@ import bulk_read_lib as lib  # noqa: E402
 
 SYSTEM = ("You write one file. Output ONLY the raw file contents that satisfy the spec, using the reference for context. "
           "No code fences, no explanation, no prose, no leading or trailing commentary.")
+FENCE_OPEN = re.compile(r"^" + chr(96) * 3 + r"[\w+-]*\s*$")
 
 
 def strip_fences(text):
     lines = text.strip("\n").split("\n")
-    if len(lines) >= 2 and re.match(r"^```[\w+-]*\s*$", lines[0]) and lines[-1].strip() == "```":
+    if len(lines) >= 2 and FENCE_OPEN.match(lines[0]) and lines[-1].strip() == chr(96) * 3:
         lines = lines[1:-1]
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(prog="code-write", description="Write a file from a spec with the local Inkling model.")
-    parser.add_argument("--force", action="store_true")
-    parser.add_argument("spec")
-    parser.add_argument("reference")
-    parser.add_argument("target")
-    args = parser.parse_args(argv)
-    started = time.time()
+def run(args, started, timeout):
+    cap = int(os.environ.get("CODE_WRITE_MAX_CHARS", "80000"))
     if not args.spec.strip():
         print("code-write: spec must not be empty", file=sys.stderr)
         return 2
-    if not os.path.isfile(args.reference):
-        print("code-write: reference file not found: %s" % args.reference, file=sys.stderr)
-        return 2
+    reason = lib.target_refusal(args.target)
+    if reason:
+        lib.log_event("code_write_refused", reason="target_" + reason)
+        print("code-write: refused the target (%s); nothing was sent." % reason, file=sys.stderr)
+        return 6
     if os.path.exists(args.target) and not args.force:
         print("code-write: target already exists: %s (use --force)" % args.target, file=sys.stderr)
         return 2
-    with open(args.reference, "r", encoding="utf-8", errors="replace") as handle:
-        reference = handle.read()
-    user = "<spec>\n%s\n</spec>\n\n<reference path=\"%s\">\n%s\n</reference>" % (args.spec, args.reference, reference)
-    if len(user) > int(os.environ.get("CODE_WRITE_MAX_CHARS", "80000")):
+    try:
+        (real, meta), = lib.approve_inputs([args.reference], cap)
+        reference = lib.read_approved(real, meta, cap)
+    except lib.Refusal as exc:
+        lib.log_event("code_write_refused", reason=exc.reason)
+        if exc.reason == "too_large":
+            print("code-write: spec + reference over the size cap; trim the reference.", file=sys.stderr)
+            return 5
+        if exc.reason in ("not_found", "binary_file"):
+            print("code-write: reference file not usable: %s (%s)" % (args.reference, exc.reason), file=sys.stderr)
+            return 2
+        print("code-write: refused the reference (%s); nothing was sent. Use Read with offset/limit." % exc.reason, file=sys.stderr)
+        return 6
+    user = "<spec>\n%s\n</spec>\n\n<reference path=\"%s\">\n%s\n</reference>" % (args.spec, real, reference)
+    if len(user) > cap:
         print("code-write: spec + reference over the size cap; trim the reference.", file=sys.stderr)
         return 5
 
-    def failed(reason, code):
-        lib.log_event("code_write_fail", reason=reason, chars_in=len(user), latency_ms=int((time.time() - started) * 1000))
-        print("code-write: no backend answered (%s); write the file directly." % reason, file=sys.stderr)
+    def failed(why, code):
+        lib.log_event("code_write_fail", reason=why, chars_in=len(user), latency_ms=int((time.time() - started) * 1000))
+        print("code-write: no backend answered (%s); write the file directly." % why, file=sys.stderr)
         return code
 
     available, why = lib.backend_available(lib.route())
     if not available:
         return failed(why, 3)
-    timeout = float(os.environ.get("CODE_WRITE_TIMEOUT_S", "120"))
-
-    def on_alarm(signum, frame):
-        raise lib.InkError("timeout")
-
     try:
-        signal.signal(signal.SIGALRM, on_alarm)
-        signal.setitimer(signal.ITIMER_REAL, timeout + 5)  # backstop; each backend call has its own shorter timeout
         text, usage, backend = lib.complete(SYSTEM, user, 12000, timeout)
     except lib.InkError as exc:
         return failed(exc.reason, 4 if exc.reason == "no_content" else 3)
     except Exception as exc:
         return failed("error_" + type(exc).__name__, 3)
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
     body = strip_fences(text)
     if not body.strip():
         return failed("no_content", 4)
@@ -96,6 +102,35 @@ def main(argv=None):
                   completion_tokens=usage.get("completion_tokens"), cost_usd=usage.get("cost_usd"))
     print("%s %d lines" % (args.target, count))
     return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="code-write", description="Write a file from a spec with a cheap model.")
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("spec")
+    parser.add_argument("reference")
+    parser.add_argument("target")
+    args = parser.parse_args(argv)
+    off = lib.disabled_reason()
+    if off:  # first action after parsing: no file is opened, nothing is sent
+        print("code-write: disabled (%s); nothing was read or sent. Write the file directly." % off, file=sys.stderr)
+        return 7
+    started = time.time()
+    timeout = float(os.environ.get("CODE_WRITE_TIMEOUT_S", "120"))
+
+    def on_alarm(signum, frame):
+        raise lib.Deadline()
+
+    signal.signal(signal.SIGALRM, on_alarm)
+    signal.setitimer(signal.ITIMER_REAL, timeout + min(5.0, timeout))  # one hard deadline over reading, the model call and the write
+    try:
+        return run(args, started, timeout)
+    except lib.Deadline:
+        lib.log_event("code_write_fail", reason="hard_deadline", latency_ms=int((time.time() - started) * 1000))
+        print("code-write: hard deadline passed; nothing written. Write the file directly.", file=sys.stderr)
+        return 3
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
 
 
 if __name__ == "__main__":

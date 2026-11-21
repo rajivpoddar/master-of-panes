@@ -2408,8 +2408,10 @@ excluded_commands = [
     # box scripts above. pq14072e/f BLOCKED 2026-11-19 04:32/04:40 IST (lease writes, Convex node probes) inside the fence.
     "~/.claude/scripts/remote-qa-spec.sh *",
     "/Users/rajiv/.claude/scripts/remote-qa-spec.sh *",
-    # bulk-read only READS the named files and asks a cheap model (local Inkling via the 127.0.0.1 router, LAN health URL, both outside the fence's
-    # network allowlist) and keeps its log/bypass state under ~/.local/share/master-of-panes/bulk-read. code-write is NOT excluded: it writes arbitrary targets.
+    # bulk-read cannot run inside the fence (live probe 22 Nov 01:40 IST: the loopback CLIProxyAPI router is "Operation not permitted" and
+    # ~/.local/share/master-of-panes/bulk-read is not writable). It is excluded only because bulk-read itself enforces the input boundary BEFORE
+    # opening anything (CTO BLOCK C0ALZJHGE49 ts 1795291197.575539): realpath, approved source roots, restricted data classes, size caps, a loopback-only
+    # destination, the DISABLED marker at entry and one hard deadline. code-write is NOT excluded: it writes arbitrary targets.
     "bulk-read *",
     "/Users/rajiv/.local/bin/bulk-read *",
     # Rajiv D0AMF0XE6TS ts 1795017876.764629: exempt ssh; ssh back to this Mac is denied by the permission rules below.

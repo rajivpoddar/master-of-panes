@@ -14,7 +14,8 @@ LOADED BY: every proxy lane (proxy-agent.sh adds it to the generated --settings 
 PM checkout settings next to the MoP relay hooks). The PM pane is NOT exempt.
 
 EXEMPT (never blocked, no log line), checked in this order:
-  1. MOP_BULK_READ_GUARD=0|off|false|no|disabled in the session env, or the file <state dir>/DISABLED (global kill switch).
+  1. MOP_BULK_READ_GUARD=0|off|false|no|disabled in the session env, or the DISABLED marker (global kill switch) in the canonical state dir
+     ~/.local/share/master-of-panes/bulk-read or in MOP_BULK_READ_STATE_DIR. bulk-read and code-write check both too, at entry.
   2. BULK_READ_EXEMPT=1 (proxy-agent.sh exports it for judgment lanes).
   3. Per-read escape hatch for evidence reads: any Read with offset or limit (offset=1 and limit=<line count> returns the whole file),
      or a Bash command prefixed BULK_READ_ALLOW=1. The block message for the PM session spells this out.
@@ -23,6 +24,9 @@ EXEMPT (never blocked, no log line), checked in this order:
      proxy_agent_is_judgment_lane. Debugging and root-cause work stays on the main model (CLAUDE.md: never delegate it).
   5. Carve-outs: images, PDF and notebooks; binary files; files of 400 lines or fewer; Bash head/tail printing 400 lines or fewer;
      this hook's own helper files and state dir.
+  6. Inputs bulk-read would refuse (CTO BLOCK on 38bd1682, ts 1795291197.575539): a resolved path outside the approved source roots or
+     in a restricted data class (.env*, *secret*, *credential*, keys, ~/.ssh, ~/.codex, evidence dirs, ...) is never redirected;
+     the native Read stands. See bulk_read_lib.py.
 
 FAILS OPEN (allows the original read, logs a fail_open line): any hook error or the 6 s watchdog; no backend (lane: Inkling health URL (vLLM
 /v1/models, as in proxy-agent.sh) not answering in 3 s AND the CLIProxyAPI router down; PM session: no claude binary); the circuit breaker (3 failed bulk-read runs in a row mean
@@ -196,6 +200,9 @@ def decide(data, env):
         return "allow", "carve_out_type", info
     if is_own_helper(real) or not os.path.isfile(real):
         return "allow", "own_helper_or_missing", info
+    refusal = lib.input_refusal(real, raw)  # path only, nothing opened: bulk-read would refuse this input, so leave the native Read alone
+    if refusal:
+        return "allow", "not_delegable_" + refusal, info
     lines, binary = lib.line_count(real)
     info["lines"] = lines
     if binary:
