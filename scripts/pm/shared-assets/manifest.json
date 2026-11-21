@@ -948,6 +948,24 @@
       "source_path": "claude/scripts/ready_pool_select.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/remote-qa-modal.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-qa-tooling",
+      "sha256": "432c5a9f70210ce4aabbb270f833966ecb3f6d0e12dbd7943210e6adb7f18dc2",
+      "source_path": "claude/scripts/remote-qa-modal.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/remote-qa-onmiss-stub.test.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-qa-tooling",
+      "sha256": "5c2f580a0d9347bf4b3550b7470340df00b0ea2a9333268375e5460efe438900",
+      "source_path": "claude/scripts/remote-qa-onmiss-stub.test.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/remote-qa-spec-fetch.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -955,6 +973,15 @@
       "ownership_class": "shared-claude-qa-tooling",
       "sha256": "cd9c9a577a3ac75a93c550a10ad8ad1f0c73ac20f0959381f9853f53cdad6686",
       "source_path": "claude/scripts/remote-qa-spec-fetch.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/remote-qa-spec-onmiss-stub.test.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-qa-tooling",
+      "sha256": "45cde5beae42413fcf8b1149f3aa01b7ba66d301e13cfb1acbb4132c53fd8bae",
+      "source_path": "claude/scripts/remote-qa-spec-onmiss-stub.test.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/remote-qa-spec.sh",
@@ -1995,7 +2022,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 218,
+    "selected_count": 221,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
