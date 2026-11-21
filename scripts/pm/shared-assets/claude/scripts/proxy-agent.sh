@@ -1611,9 +1611,9 @@ proxy_agent_tier_models() {
     # and hy4 first (ts 1795106112.425109; non-builder/prover types still skip hy4 via the free-model guard). gpt-6.1-terra stays in the tiers (ts 1794941131.743129).
     # OpenCode Go pool (Rajiv D0AMF0XE6TS thread 1794926930.078169, ts 1794930258.014469): hy4-flash-free joins LIGHT, deepseek-v4.1-flash joins MID.
     # Every tier ends with the emergency-only Muse Spark entry (see proxy_agent_is_emergency_muse). Grok stays in its existing slot.
-    LIGHT) models="inkling-2-mini gpt-6.1-terra gpt-6.2-sol hy4-flash-free claude-haiku-5-5 grok-4.7 gpt-6-luna muse-spark-1.3-contributor";;
+    LIGHT) models="inkling-2-mini gpt-6-luna gpt-6.1-terra gpt-6.2-sol hy4-flash-free claude-haiku-5-5 grok-4.7 muse-spark-1.3-contributor";;
     # glm-5.3 registered, explicit --model only until one test build passes, Rajiv condition ts 1794942421.644269 (PM steer 2026-11-18: not in any automatic tier list).
-    MID) models="inkling-2-mini gpt-6.1-terra gpt-6.2-sol hy4-flash-free claude-sonnet-5-5 deepseek-v4.1-flash grok-4.7 muse-spark-1.3-contributor";;
+    MID) models="inkling-2-mini gpt-6-luna gpt-6.1-terra gpt-6.2-sol hy4-flash-free claude-sonnet-5-5 deepseek-v4.1-flash grok-4.7 muse-spark-1.3-contributor";;
     TOP) models="gpt-6.1-terra gpt-6.2-sol claude-opus-5-5 grok-4.7 muse-spark-1.3-contributor";;
     # gpt-6.2-sol replaces gpt-6.1-sol (the "sol" alias); gpt-6.1-terra stays in the tiers (Rajiv D0AMF0XE6TS thread 1794939318.063889, ts 1794941131.743129: "6.1 terra should stay. 6.2 sol should replace 6.1 sol").
     # Per-role ladders (Rajiv D0AMF0XE6TS thread 1794624936.567599: ts 1794639918.387399 ladder, ts 1794640102.756179 hydrogen in the mid rungs).
@@ -1621,11 +1621,11 @@ proxy_agent_tier_models() {
     PLAN) models="gpt-6.1-terra gpt-6.2-sol grok-4.7 claude-opus-5-5 muse-spark-1.3-contributor";;
     # Grok before Codex in every rung: Codex must last to Thu (Rajiv ts 1794660714.234059 "only grok, claude, codex").
     # Dev ladder (Rajiv C0ALZJHGE49 thread 1794665799.784789, ts 1794665970.826379): haiku/luna → sonnet/terra → opus/sol. No Grok on dev rungs.
-    BUILD1) models="inkling-2-mini gpt-6.1-terra gpt-6.2-sol hy4-flash-free claude-haiku-5-5 deepseek-v4.1-flash gpt-6-luna muse-spark-1.3-contributor";;
+    BUILD1) models="inkling-2-mini gpt-6-luna gpt-6.1-terra gpt-6.2-sol hy4-flash-free claude-haiku-5-5 deepseek-v4.1-flash muse-spark-1.3-contributor";;
     BUILD2) models="gpt-6.1-terra gpt-6.2-sol claude-sonnet-5-5 muse-spark-1.3-contributor";;
     # S149 (Rajiv ts 1794941131.743129 "6.1 terra should stay. 6.2 sol should replace 6.1 sol"); sol now leads every rung (ts 1795158067.051479, header above).
     BUILD3) models="gpt-6.1-terra gpt-6.2-sol claude-opus-5-5 muse-spark-1.3-contributor";;
-    PROOF1) models="inkling-2-mini gpt-6.1-terra gpt-6.2-sol hy4-flash-free claude-sonnet-5-5 deepseek-v4.1-flash muse-spark-1.3-contributor";;
+    PROOF1) models="inkling-2-mini gpt-6-luna gpt-6.1-terra gpt-6.2-sol hy4-flash-free claude-sonnet-5-5 deepseek-v4.1-flash muse-spark-1.3-contributor";;
     PROOF2) models="gpt-6.1-terra gpt-6.2-sol claude-opus-5-5 muse-spark-1.3-contributor";;
     # 12b reviews: carbon -> fable -> astra (Rajiv D0AMF0XE6TS thread 1794624936.567599, ts 1794640502.657479 "the 12b reviewer ladder can be carbon/fable/astra").
     # Supersedes the earlier fable-first list (thread 1794573312.657559, ts 1794623641.572859). Reviews never skip claude-* at the cap (see below).
@@ -1692,7 +1692,8 @@ proxy_agent_pick_tier() {
   # Judgment-work guard (side-agent note 22 Nov 00:33 IST, PM ruling): P0 lanes and diagnosis/verdict roles never route to the small
   # local Inkling model. Their verdicts decide admin-merge asks and save-path fixes. Inkling stays first for routine build/proof/ops work.
   if [[ "${PROXY_AGENT_CAP_OVERRIDE:-}" == P0:* ]] || [[ " ci-repair-agent e2e-failure-investigator hd-investigator customer-artifact-investigator pm-admission-reviewer hd-planner " == *" ${TYPE:-} "* ]]; then
-    _kept=""; for _m in $models; do [[ "$_m" == inkling-2-mini ]] || _kept="${_kept:+$_kept }$_m"; done
+    # Also drop gpt-6-luna (Inkling's routine fallback, Rajiv ts 1795289410.866129) so judgment lanes start on terra/sol.
+    _kept=""; for _m in $models; do [[ "$_m" == inkling-2-mini || "$_m" == gpt-6-luna ]] || _kept="${_kept:+$_kept }$_m"; done
     models="$_kept"
   fi
   for id in $models; do
