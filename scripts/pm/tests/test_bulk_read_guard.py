@@ -218,6 +218,12 @@ def test_pm_session_never_waits_on_the_network_and_fails_open_without_claude(env
     assert events(env)[-1]["event"] == "fail_open" and events(env)[-1]["reason"] == "claude_missing"
 
 
+def test_inkling_health_default_matches_the_proxy_launcher_gate(monkeypatch):
+    monkeypatch.delenv("INKLING_HEALTH_URL", raising=False)
+    assert lib.health_url() == "http://192.168.68.113:18120/v1/models"
+    assert "INKLING_HEALTH_URL:-http://192.168.68.113:18120/v1/models" in PROXY_AGENT  # one URL, two gates
+
+
 def test_pm_breaker_is_separate_from_the_lane_breaker(env):
     big = make(env["dir"] / "big.txt", 900)
     for _ in range(3):

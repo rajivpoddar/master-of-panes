@@ -76,7 +76,8 @@ def _write_json(name, value):
 
 
 def health_url():
-    return os.environ.get("INKLING_HEALTH_URL") or "http://192.168.68.113:18120/health"
+    """Same default as proxy-agent.sh's Inkling gate. /v1/models answers in about 1 s under load; /health timed out at 3 s while lanes were busy."""
+    return os.environ.get("INKLING_HEALTH_URL") or "http://192.168.68.113:18120/v1/models"
 
 
 def router_base():
@@ -102,7 +103,7 @@ def _probe(name, fetch, now):
 
 
 def inkling_up(now=None):
-    """Inkling's own /health, 3 s gate."""
+    """Inkling's health URL (vLLM /v1/models), 3 s gate."""
     def fetch():
         with urllib.request.urlopen(health_url(), timeout=HEALTH_TIMEOUT_S) as response:
             return 200 <= response.status < 300

@@ -24,8 +24,8 @@ EXEMPT (never blocked, no log line), checked in this order:
   5. Carve-outs: images, PDF and notebooks; binary files; files of 400 lines or fewer; Bash head/tail printing 400 lines or fewer;
      this hook's own helper files and state dir.
 
-FAILS OPEN (allows the original read, logs a fail_open line): any hook error or the 6 s watchdog; no backend (lane: Inkling /health down
-within 3 s AND the CLIProxyAPI router down; PM session: no claude binary); the circuit breaker (3 failed bulk-read runs in a row mean
+FAILS OPEN (allows the original read, logs a fail_open line): any hook error or the 6 s watchdog; no backend (lane: Inkling health URL (vLLM
+/v1/models, as in proxy-agent.sh) not answering in 3 s AND the CLIProxyAPI router down; PM session: no claude binary); the circuit breaker (3 failed bulk-read runs in a row mean
 5 minutes of no blocking, per route); or a bypass token that bulk-read leaves for a file when every backend failed or timed out (30 s cap).
 The PM session never waits on a network gate: its check is a local file test.
 
