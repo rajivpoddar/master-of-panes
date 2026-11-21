@@ -1492,7 +1492,8 @@ def _live_slot_issue_ids() -> set[int]:
 
 
 def rework_mode(args: argparse.Namespace, prs: list[dict[str, Any]]) -> tuple[bool, int]:
-    """The 25-open-PR freeze counts drafts as open PRs too."""
+    """The 25-open-PR cap counts ALL open PRs, drafts included (Rajiv D0AMF0XE6TS thread 1795235199.211389,
+    ts 1795235284.771699: "Count drafts"; supersedes S76's non-draft wording)."""
     count = len(prs)
     return bool(args.rework_only or count > 25), count
 

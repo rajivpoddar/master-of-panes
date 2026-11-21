@@ -472,6 +472,40 @@ LJ=$(gh_get pr_labels labels_json gh pr view "$PR" --repo "$REPO" --json labels)
 for old in $(printf '%s' "$LJ" | jq -r '.labels[].name|select(startswith("ci-head:"))'); do
   [ "$old" != "$L" ] && gh_do remove_old_ci_head gh pr edit "$PR" --repo "$REPO" --remove-label "$old"
 done
+# Stale test-merge guard (2026-11-21): GitHub can leave refs/pull/N/merge built on an old main for
+# over an hour, so CI tests stale code (#14302/#14420/#14430/#14435/#14436 kept failing on a lint already fixed
+# on main). Refuse to admit until the PR's merge commit contains current main; close/reopen forces a rebuild.
+MAIN_SHA=$(gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha 2>/dev/null || echo "")
+MERGE_OK=unknown
+for _try in 1 2 3 4; do
+  MERGE_SHA=$(gh api "repos/$REPO/pulls/$PR" --jq '.merge_commit_sha // ""' 2>/dev/null || echo "")
+  if [ -n "$MAIN_SHA" ] && [ -n "$MERGE_SHA" ]; then
+    CMP=$(gh api "repos/$REPO/compare/$MAIN_SHA...$MERGE_SHA" --jq .status 2>/dev/null || echo "")
+    case "$CMP" in ahead|identical) MERGE_OK=yes; break ;; diverged|behind) MERGE_OK=no ;; esac
+  fi
+  sleep 5
+done
+if [ "$MERGE_OK" = no ]; then
+  overlap_finish
+  echo "REFUSE stale_merge_ref #$PR: test merge ${MERGE_SHA:-?} does not contain main $MAIN_SHA; run: gh pr close $PR && gh pr reopen $PR, then re-admit"
+  exit 3
+fi
+[ "$MERGE_OK" = unknown ] && echo "WARN stale-merge check unavailable for #$PR (API); continuing"
+# Same-head re-admission (2026-11-21, #14431): re-adding an existing label fires no "labeled"
+# event, so no new CI/E2E runs start. If runs for this head are still queued/in progress,
+# report that and stop. Otherwise remove the label first so the add below starts fresh runs.
+if printf '%s' "$LJ" | jq -e --arg l "$L" '.labels[].name|select(.==$l)' >/dev/null 2>&1; then
+  INFLIGHT=$(gh run list --repo "$REPO" --commit "$HEAD" --limit 30 --json databaseId,workflowName,status \
+    --jq '[.[]|select((.workflowName=="CI" or .workflowName=="E2E Smoke Tests") and (.status=="queued" or .status=="in_progress"))|"\(.workflowName):\(.databaseId)"]|join(",")' 2>/dev/null || echo "")
+  if [ -n "$INFLIGHT" ]; then
+    overlap_finish
+    echo "ALREADY_ADMITTED #$PR at $HEAD (runs in flight: $INFLIGHT); no new runs started"
+    exit 0
+  fi
+  gh_do rearm_same_ci_head gh pr edit "$PR" --repo "$REPO" --remove-label "$L"
+  echo "REARM: removed same-head label $L so the re-add starts fresh CI/E2E runs"
+fi
 gh_do add_ci_head_label gh pr edit "$PR" --repo "$REPO" --add-label "$L" --add-label pm-state:qa-passed-awaiting-ci
 overlap_finish
 echo "ADMITTED #$PR at $HEAD"
+echo "VERIFY: confirm new CI and E2E runs exist on $HEAD (gh run list --commit $HEAD) before treating #$PR as in CI"

@@ -287,6 +287,9 @@ Rule 43 item 24 (`~/.claude/rules/43-heydonna-ux-guidelines.md`; Rajiv C0ALZJHGE
 ## No in-memory downloads in the web tier (Mandatory; rule 63)
 Source: Rajiv, C0ALZJHGE49 thread 1795181725.229099, ts 1795188984.117549: "add a product rule. no in memory downloads. all downloads should be in modal backend.". BLOCK/REQUEST_CHANGES any plan or diff that downloads/streams external content (user/partner URLs, documents, audio, drafts) inside app/api/**, app/actions/**, middleware or a Cloudflare Worker. Required: the web tier validates shape and stores/forwards the URL or R2 key; Modal downloads (cap, no redirects, private IPs refused) → R2 → process; browser uploads go direct to R2. Test shape: route test proves no fetch of the supplied URL; Modal test enforces cap/redirect/private-IP refusal. See ~/.claude/rules/63-heydonna-downloads-in-modal.md.
 
+## No bespoke Modal→Convex auth Planning Gate (Rajiv product rule 2026-11-21, rule 64)
+Source: Rajiv C0ALZJHGE49 ts 1795267227.565319: "use convex http mutations for any modal to convex calls". BLOCK/REQUEST_CHANGES if a plan or diff adds a Modal → Convex write/callback via a new secret, HMAC receipt, shared token, public Convex mutation, or proof relayed through the Worker/browser. Required: a narrow `/pipeline/*` httpAction in convex/http.ts on the existing pipeline auth, backed by an internal mutation with binding/currentness checks and idempotent replay. Tests: route refusal (bad auth, wrong project), replay-once. See ~/.claude/rules/64-heydonna-modal-to-convex-http.md.
+
 ## Input
 
 You will receive:

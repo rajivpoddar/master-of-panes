@@ -580,6 +580,9 @@ Source: Rajiv C0ALZJHGE49 ts 1794900575.602869 ("avoid mixing frontend and backe
 - Both sides without a quoted Rajiv waiver (ts) → BLOCK / REQUEST_CHANGES; required pattern: backend issue+PR first, frontend child issue blocked-by it.
 - Tests/fixtures/inventories of one side don't count as mixing.
 
+## No bespoke Modal→Convex auth gate (Mandatory) (Rajiv product rule 2026-11-21, rule 64)
+Source: Rajiv C0ALZJHGE49 ts 1795267227.565319: "use convex http mutations for any modal to convex calls". BLOCK/REQUEST_CHANGES if a plan or diff adds a Modal → Convex write/callback via a new secret, HMAC receipt, shared token, public Convex mutation, or proof relayed through the Worker/browser. Required: a narrow `/pipeline/*` httpAction in convex/http.ts on the existing pipeline auth, backed by an internal mutation with binding/currentness checks and idempotent replay. Tests: route refusal (bad auth, wrong project), replay-once. See ~/.claude/rules/64-heydonna-modal-to-convex-http.md.
+
 ## No-disabled-button gate (Mandatory - Rajiv product rule 2026-09-26)
 
 UI RULE (Rajiv 2026-09-26): Do not gate actions with disabled buttons. Buttons stay enabled; on click, validate and render an error state on the offending control (checkbox/field error styling + inline message) and do not proceed. The only allowed disabled state is the action's own in-flight/double-submit guard. Plans and reviews must call out any new `disabled=` on a button that encodes a precondition and require the error-state pattern instead.
