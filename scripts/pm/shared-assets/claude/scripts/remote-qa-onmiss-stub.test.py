@@ -184,16 +184,15 @@ HEAD1 = subprocess.run(['git', '-C', str(APP), 'rev-parse', 'HEAD'], capture_out
 _n = [0]
 
 
-def ids_for(box, host, head=None):
+def ids_for(box, host, head=None, exact=False):
     real = socket.gethostname
     socket.gethostname = lambda: host
     try:
-        ids = H.onmiss_identity(APP, box)
+        ids = H.onmiss_identity(APP, box, exact)
     finally:
         socket.gethostname = real
     if head:  # a different QA attempt (head) on the same physical box
-        ids = dict(ids, head=head, stage_run='remote-qa-onmiss-' + H.identity(box) + '-' + head[:12],
-                   attempt_key='qa-capture-ledgers/onmiss/attempt-' + __import__('hashlib').sha256(('head:' + head).encode()).hexdigest()[:16] + '.json')
+        ids = dict(ids, **H.onmiss_keys(box, ids['spend_box'], head, exact))
     return ids
 
 
@@ -439,14 +438,14 @@ for index, (denial, expected) in enumerate(((Err('NoSuchKey', 404), 'DENIAL_UNPR
     else:
         check('scoped canary rejects ' + expected, False)
 
-scoped_env = dict(zip(H.SCOPED_FIXTURE_R2_ENV, ('heydonna-qa', 'a'*32, 'session-id', 'session-secret', 'session-token')))
+scoped_env = dict(zip(H.SCOPED_FIXTURE_R2_ENV, ('heydonna-fixtures', 'a'*32, 'session-id', 'session-secret', 'session-token')))
 kwargs = {}
 saved_client = boto3.client
 try:
     boto3.client = lambda *a, **kw: kwargs.update(kw) or scope_s3
     client, bucket = H.scoped_fixture_client(scoped_env)
     check('scoped report signs with session credentials and explicit QA bucket',
-          client is scope_s3 and bucket == 'heydonna-qa' and kwargs['aws_session_token'] == 'session-token'
+          client is scope_s3 and bucket == 'heydonna-fixtures' and kwargs['aws_session_token'] == 'session-token'
           and kwargs['aws_secret_access_key'] == 'session-secret')
     kwargs.clear()
     try:
@@ -532,10 +531,10 @@ for why, mutate in (('prefix hash', lambda x: x['hashes'][0].__setitem__('hash',
     except ValueError as error:
         check('exact manifest refuses ' + why, 'QA_EXACT_MANIFEST' in str(error), str(error)[:50])
 
-EX_IDS = dict(ids_for(EX_BOX, EX_HOST, head=EX_HEAD), exact=MAN)
-EX2_IDS = dict(ids_for(EX2_BOX, EX_HOST, head=EX_HEAD), exact=MAN)   # second lease, same physical box + head
-EX3_IDS = dict(ids_for(EX3_BOX, EX_HOST, head=EX_HEAD), exact=MAN)   # third lease: no reclaim of a completed earlier claim
-NS_IDS = dict(ids_for(NS_BOX, NS_HOST, head='c' * 40), exact=H.load_exact_manifest(manifest_for('c' * 40, [K_OK], 'ns.json'), 'c' * 40))
+EX_IDS = dict(ids_for(EX_BOX, EX_HOST, head=EX_HEAD, exact=True), exact=MAN)
+EX2_IDS = dict(ids_for(EX2_BOX, EX_HOST, head=EX_HEAD, exact=True), exact=MAN)   # second lease, same physical box + head
+EX3_IDS = dict(ids_for(EX3_BOX, EX_HOST, head=EX_HEAD, exact=True), exact=MAN)   # third lease: no reclaim of a completed earlier claim
+NS_IDS = dict(ids_for(NS_BOX, NS_HOST, head='c' * 40, exact=True), exact=H.load_exact_manifest(manifest_for('c' * 40, [K_OK], 'ns.json'), 'c' * 40))
 CREDS, ENV_CLIENTS = [], []
 LEGACY = {}  # legacy (heydonna-fixtures) ledger objects by key: bytes
 
@@ -560,6 +559,10 @@ def legacy_get(key):
     return (LEGACY[key], '"legacy"') if key in LEGACY else None
 
 
+# The one-time store-migration receipt every exact custody reconcile requires (see H._carry_view): present, complete, for the QA prefix.
+R2.objects[H.QA_STORE_CARRY_KEY] = (json.dumps({'schema': 'qa-store-carry/v1', 'complete': True, 'dest_prefix': H.QA_LEDGER_PREFIX, 'ledgers': [], 'at': 1}).encode(), '"carry"', {})
+
+
 def bind(ids, legacy=legacy_get):
     """The trusted-host custody reconcile, against the fake legacy store and the same fake QA store the proxies use."""
     return H.reconcile_custody(ids, ids['exact'], legacy, fake_qa_get, fake_qa_put)
@@ -582,7 +585,7 @@ class FakeSession:
 def arm(ids, kinds=('read', 'write'), exp=None, digest=None, lease=None):
     store = FakeDict.stores.setdefault(ids['dict'], {})
     for kind in kinds:
-        store['scoped-session/' + kind] = {'kind': kind, 'bucket': 'heydonna-qa', 'account': 'a' * 32, 'access': 'SESS-ACCESS-' + kind,
+        store['scoped-session/' + kind] = {'kind': kind, 'bucket': 'heydonna-fixtures', 'account': 'a' * 32, 'access': 'SESS-ACCESS-' + kind,
                                            'secret': 'SESS-SECRET', 'token': 'SESS-TOKEN', 'exp': exp or int(_time.time()) + 300,
                                            'manifest_digest': digest or ids['exact']['digest'], 'lease': lease or ids['lease']}
 
@@ -624,7 +627,7 @@ try:
           r.status_code == 503 and r.json().get('error') == 'QA_ONMISS_LOOKUP_UNCERTAIN' and n_calls('EXACT-LOOKUP') == 0
           and committed(EX_IDS['box_key']) == 0, str(r.status_code) + ' ' + r.text[:90])
     codes = [x['code'] for x in ledger(EX_IDS['box_key']).get('refused_calls', [])]
-    s_x = H.qa_finish(FakeS3(), 'heydonna-qa', 'x', False, publisher, EX_IDS)
+    s_x = H.qa_finish(FakeS3(), 'heydonna-fixtures', 'x', False, publisher, EX_IDS)
     check('exact: report carries the typed refusal reason and the refused full hash',
           'QA_ONMISS_NOT_APPROVED' in codes and 'QA_ONMISS_LOOKUP_UNCERTAIN' in codes and s_x['terminal_reason'] == 'QA_ONMISS_NOT_APPROVED'
           and H_NA in s_x['onmiss']['refused_hashes'] and s_x['fixtures_written'] == [], str(codes))
@@ -685,7 +688,7 @@ try:
     # g. report: unchanged guarded publisher, approved + settled only, readback, join; a conflicting older object is not proof
     R2.objects[K_TWIN] = (b'older different bytes', '"7"', {'response-status': '200'})
     rogue_key = 'fixtures/llm/v2/gemini_vertex/aiplatform.googleapis.com/rogue.generate/' + '9' * 64 + '.bin'
-    sx = H.qa_finish(FakeS3(), 'heydonna-qa', 'x', False, publisher, EX2_IDS)
+    sx = H.qa_finish(FakeS3(), 'heydonna-fixtures', 'x', False, publisher, EX2_IDS)
     ok_row = [x for x in sx['readback'] if x['key'] == K_OK]
     tw_row = [x for x in sx['readback'] if x['key'] == K_TWIN]
     check('exact report: approved settled capture published PUT-if-absent and read back MATCH (bytes, status, content type)',
@@ -698,7 +701,7 @@ try:
           jr and jr[0]['ingress_request_id'] == 'req-exact-1' and jr[0]['provider_dispatch']['provider_response_ids'] and jr[0]['settled'], json.dumps(jr)[:120])
     stage_key = [k for k in R2.objects if k.startswith('staging/llm-capture/' + EX2_IDS['stage_run'] + '/') and k.endswith(K_OK)][0]
     R2.objects[stage_key.replace(K_OK, rogue_key)] = (b'{"candidates":[{"finishReason":"STOP"}]}', '"9"', {'canonical-key': rogue_key, 'response-status': '200'})
-    sx2 = H.qa_finish(FakeS3(), 'heydonna-qa', 'x', False, publisher, EX2_IDS)
+    sx2 = H.qa_finish(FakeS3(), 'heydonna-fixtures', 'x', False, publisher, EX2_IDS)
     check('exact report: a staged object that is not an approved, settled claim is never published (typed STAGING_MISMATCH)',
           rogue_key not in R2.objects and rogue_key in sx2['unapproved_staged'] and sx2['terminal_reason'] == 'QA_ONMISS_STAGING_MISMATCH', str(sx2['terminal_reason']))
     try:
@@ -710,7 +713,7 @@ try:
     mint_calls = []
     saved_mint = H._mint_session
     H._mint_session = lambda paths, actions, ttl: (mint_calls.append((list(paths), list(actions), ttl)) or (
-        dict(zip(H.SCOPED_FIXTURE_R2_ENV, ('heydonna-qa', 'a' * 32, 'acc', 'sec', 'tok'))), int(_time.time()) + ttl))
+        dict(zip(H.SCOPED_FIXTURE_R2_ENV, ('heydonna-fixtures', 'a' * 32, 'acc', 'sec', 'tok'))), int(_time.time()) + ttl))
     try:
         stage = 'staging/llm-capture/' + EX2_IDS['stage_run'] + '/'
         proxy_rows = H.mint_exact_sessions('proxy', EX2_IDS, MAN)
@@ -725,12 +728,16 @@ try:
         report_file.write_text(json.dumps(report_rows))
         report_env = H.load_report_session(report_file, EX2_IDS)
         check('minted report envelope is accepted and consumed',
-              report_env[H.SCOPED_FIXTURE_R2_ENV[0]] == 'heydonna-qa' and not report_file.exists())
+              report_env[H.SCOPED_FIXTURE_R2_ENV[0]] == 'heydonna-fixtures' and not report_file.exists())
         check('mint report: staging + approved canonical keys + the two ledger objects; List/Get/Put; 5 minutes',
               mint_calls == [([stage] + sorted(MAN['entries']) + [EX2_IDS['box_key'], EX2_IDS['attempt_key']], ['ListObjectsV2', 'GetObject', 'PutObject'], 300)], str(mint_calls)[:100])
+        mint_calls.clear()
+        H.mint_exact_sessions('custody', EX2_IDS, MAN)
+        check('mint custody: the two QA ledger objects plus the store-carry marker only; Get/Put; 5 minutes',
+              mint_calls == [([EX2_IDS['box_key'], EX2_IDS['attempt_key'], H.QA_STORE_CARRY_KEY], ['GetObject', 'PutObject'], 300)], str(mint_calls)[:100])
     finally:
         H._mint_session = saved_mint
-    expired_payload = json.dumps({k: {'kind': k, 'bucket': 'heydonna-qa', 'account': 'a' * 32, 'access': 'x', 'secret': 'y', 'token': 'z',
+    expired_payload = json.dumps({k: {'kind': k, 'bucket': 'heydonna-fixtures', 'account': 'a' * 32, 'access': 'x', 'secret': 'y', 'token': 'z',
                                       'exp': int(_time.time()) - 5, 'manifest_digest': MAN['digest'], 'lease': H.identity(EX_BOX)} for k in ('read', 'write')})
     saved_stdin = sys.stdin
     sys.stdin = _io.StringIO(expired_payload)
@@ -747,7 +754,7 @@ try:
     try:
         head_manifest = manifest_for(HEAD1, [K_OK], 'head.json')
         for why, args, needle in (('no session file', (None, 'ci-parity'), 'QA_SCOPED_R2_REFUSED'),
-                                  ('missing session file', (str(MDIR / 'absent.json'), 'scoped'), 'QA_SCOPED_R2_UNAVAILABLE'),
+                                  ('missing session file', (str(MDIR / 'absent.json'), 'ci-parity'), 'QA_SCOPED_R2_UNAVAILABLE'),
                                   ('no explicit app-data mode', (str(MDIR / 'absent.json'), None), 'QA_APP_DATA_MODE_INVALID')):
             try:
                 H.capture_report(EX_BOX, APP, MDIR / 'rep.json', False, False, 2.0, True, False, str(head_manifest), *args)
@@ -755,7 +762,7 @@ try:
             except RuntimeError as error:
                 check('exact report container: ' + why + ' refuses (no shared-secret fallback)', needle in str(error), str(error)[:70])
         sess = MDIR / 'report-session.json'
-        sess.write_text(json.dumps({'kind': 'report', 'bucket': 'heydonna-qa', 'account': 'a' * 32, 'access': 'x', 'secret': 'y', 'token': 'z',
+        sess.write_text(json.dumps({'kind': 'report', 'bucket': 'heydonna-fixtures', 'account': 'a' * 32, 'access': 'x', 'secret': 'y', 'token': 'z',
                                     'exp': int(_time.time()) - 5, 'manifest_digest': MAN['digest'], 'lease': EX2_IDS['lease']}))
         try:
             H.load_report_session(sess, EX2_IDS)
@@ -769,24 +776,44 @@ try:
             check('--exact-manifest without --on-miss is refused', 'requires --on-miss' in str(error))
     finally:
         socket.gethostname = real_host
-    receipt = {'bucket': 'heydonna-qa', 'list_and_read': True, 'first_conditional_put': 'created', 'second_conditional_put': 'precondition_failed',
-               'before': {'sha256': 'a', 'etag': 'b'}, 'after': {'sha256': 'a', 'etag': 'b'}, 'out_of_scope_get': 'HTTP 403 AccessDenied',
-               'canary_objects_removed': 3, 'modal_teardown': 'verified no active canary app', 'report_secret_mount': 'ephemeral scoped session only',
-               'tooling_sha256': _hl.sha256(HELPER.read_bytes()).hexdigest(), 'at': int(_time.time())}
-    for why, mutate, expect in (('a passed canary of this controller', lambda x: None, True), ('another controller file', lambda x: x.__setitem__('tooling_sha256', '0' * 64), False),
-                                ('an older-than-48h canary', lambda x: x.__setitem__('at', int(_time.time()) - 49 * 3600), False),
-                                ('a canary without the denial proof', lambda x: x.__setitem__('out_of_scope_get', 'none'), False),
-                                ('a canary whose second PUT changed bytes', lambda x: x.__setitem__('after', {'sha256': 'c', 'etag': 'b'}), False)):
-        doc = dict(receipt)
-        mutate(doc)
-        rp = MDIR / 'receipt.json'
-        rp.write_text(json.dumps(doc))
+    # ---- store (rule 65): the sessions are DERIVED from the one shared R2 key on the canonical fixture store ----
+    import base64 as _b64
+    shared_env = MDIR / 'shared-r2.env'
+    shared_env.write_text('R2_ACCOUNT_ID=%s\nR2_ACCESS_KEY_ID=SHAREDKEY\nR2_SECRET_ACCESS_KEY=s3cret\nR2_BUCKET_NAME=heydonna-uploads\n' % ('c' * 32))
+    saved_env_path, saved_fp_pin = H.LEGACY_ENV_DEFAULT, H.SHARED_R2_FP
+    H.LEGACY_ENV_DEFAULT = str(shared_env)
+    try:
         try:
-            H.check_canary_receipt(rp)
-            ok = True
-        except ValueError:
-            ok = False
-        check('arming prerequisite: ' + ('accepts ' if expect else 'rejects ') + why, ok is expect)
+            H._mint_session(['fixtures/llm/v2/'], ['GetObject'], 60)
+            check('mint refuses a signer that is not the one shared R2 key', False)
+        except RuntimeError as error:
+            check('mint refuses a signer that is not the one shared R2 key', 'QA_SCOPED_R2_REFUSED' in str(error) and 'SHAREDKEY' not in str(error) and 's3cret' not in str(error))
+        H.SHARED_R2_FP = _hl.sha256(b'SHAREDKEY').hexdigest()[:16]
+        minted, minted_exp = H._mint_session(['fixtures/llm/v2/', 'qa-onmiss/ledgers/'], ['GetObject'], 60)
+        jwt_part = _b64.b64decode(minted['QA_FIXTURE_R2_SESSION_TOKEN'])[len(b'jwt/'):].split(b'.')[1]
+        claims = json.loads(_b64.urlsafe_b64decode(jwt_part + b'=' * (-len(jwt_part) % 4)))
+        check('mint: a prefix-scoped session DERIVED from the shared key on heydonna-fixtures (same signer, no second credential, secret never in the session)',
+              minted['QA_FIXTURE_R2_BUCKET'] == 'heydonna-fixtures' and minted['QA_FIXTURE_R2_ACCESS_KEY_ID'] == 'SHAREDKEY' and claims['bucket'] == 'heydonna-fixtures'
+              and claims['iss'] == 'SHAREDKEY' and claims['paths'] == {'prefixPaths': ['fixtures/llm/v2/', 'qa-onmiss/ledgers/']} and claims['actions'] == ['GetObject']
+              and 's3cret' not in json.dumps(minted) and minted_exp - claims['iat'] == 60, str(claims)[:120])
+        os.environ['REMOTE_BOX'] = '1'
+        try:
+            H._mint_session(['fixtures/llm/v2/'], ['GetObject'], 60)
+            check('mint refuses on a box (trusted host only)', False)
+        except RuntimeError as error:
+            check('mint refuses on a box (trusted host only)', 'QA_SCOPED_R2_REFUSED' in str(error))
+        finally:
+            os.environ.pop('REMOTE_BOX', None)
+    finally:
+        H.LEGACY_ENV_DEFAULT, H.SHARED_R2_FP = saved_env_path, saved_fp_pin
+    kx, ks = H.onmiss_keys(EX_BOX, EX_HOST, EX_HEAD, exact=True), H.onmiss_keys(EX_BOX, EX_HOST, EX_HEAD)
+    check('exact ledgers live under qa-onmiss/ledgers/ in the fixture store, never beside the legacy ones; stock keys are unchanged; legacy_* name the legacy objects',
+          all(kx[k].startswith(H.QA_LEDGER_PREFIX) for k in ('box_key', 'attempt_key', 'run_key'))
+          and all(ks[k].startswith('qa-capture-ledgers/') for k in ('box_key', 'attempt_key', 'run_key'))
+          and kx['legacy_box_key'] == ks['box_key'] and kx['legacy_attempt_key'] == ks['attempt_key']
+          and not any(kx[k] == ks[k] for k in ('box_key', 'attempt_key', 'run_key')) and kx['stage_run'] == ks['stage_run'] and kx['stage_run'].startswith('remote-qa-onmiss-'))
+    check('the exact session scopes name only qa-onmiss ledgers (never a legacy ledger object)',
+          all(k.startswith('qa-onmiss/ledgers/') for k in (EX_IDS['box_key'], EX_IDS['attempt_key'], EX_IDS['run_key'])) and EX_IDS['box_key'] != EX_IDS['legacy_box_key'])
     # ---- CTO REVISE 1795306033.832689 (pel-mwr051ua-91fb8062): 1 derivation/DENIED, 2 custody, dry-check, app-data, 3 verified join ----
     D = H.derive_exact_ids(EX_BOX, EX_HEAD, EX_HOST)
     check('trusted derivation equals the box-side identity (lease, physical box, ledger objects, staging prefix)',
@@ -794,10 +821,10 @@ try:
     claimed = dict(D, manifest_digest=MAN['digest'])
     check('box-supplied identities equal to the derivation are accepted', H.check_exact_ids(D, claimed, MAN) is True)
     for why, key, value in (('another lease staging prefix', 'stage_run', 'remote-qa-onmiss-aaaaaaaaaaaa-' + EX_HEAD[:12]),
-                            ('another box ledger object', 'box_key', 'qa-capture-ledgers/onmiss/box-0000000000000000.json'),
-                            ('another attempt ledger object', 'attempt_key', 'qa-capture-ledgers/onmiss/attempt-0000000000000000.json'),
+                            ('another box ledger object', 'box_key', H.QA_LEDGER_PREFIX + 'onmiss/box-0000000000000000.json'),
+                            ('another attempt ledger object', 'attempt_key', H.QA_LEDGER_PREFIX + 'onmiss/attempt-0000000000000000.json'),
                             ('another physical box', 'spend_box', 'rtb-pool-99-999999'), ('another head', 'head', 'f' * 40),
-                            ('another per-run replay ledger', 'run_key', 'qa-capture-ledgers/remote-qa-ffffffffffff.json'), ('another lease', 'lease', 'f' * 12), ('another Modal store', 'dict', 'heydonna-qa-onmiss-ffffffffffff'),
+                            ('another per-run replay ledger', 'run_key', H.QA_LEDGER_PREFIX + 'remote-qa-ffffffffffff.json'), ('another lease', 'lease', 'f' * 12), ('another Modal store', 'dict', 'heydonna-qa-onmiss-ffffffffffff'),
                             ('another manifest digest', 'manifest_digest', '0' * 64)):
         try:
             H.check_exact_ids(D, dict(claimed, **{key: value}), MAN)
@@ -812,14 +839,14 @@ try:
         except ValueError as error:
             check('derivation refuses ' + why, 'QA_SCOPED_MINT_DENIED' in str(error), str(error)[:60])
     foreign = MDIR / 'foreign-ids.json'
-    foreign.write_text(json.dumps(dict(claimed, stage_run='remote-qa-onmiss-bbbbbbbbbbbb-' + EX_HEAD[:12], box_key='qa-capture-ledgers/onmiss/box-1111111111111111.json')))
+    foreign.write_text(json.dumps(dict(claimed, stage_run='remote-qa-onmiss-bbbbbbbbbbbb-' + EX_HEAD[:12], box_key=H.QA_LEDGER_PREFIX + 'onmiss/box-1111111111111111.json')))
     proc = subprocess.run([sys.executable, '-I', str(HELPER), 'mint-session', '--kind', 'proxy', '--box', EX_BOX, '--head', EX_HEAD, '--spend-box', EX_HOST,
                            '--ids', str(foreign), '--exact-manifest', str(MAN_PATH)], capture_output=True, text=True, env={'HOME': str(MDIR), 'PATH': os.environ.get('PATH', '')})
     check('CLI: mint-session with a box-supplied foreign scope is DENIED (rc 1) and emits no credential material',
           proc.returncode == 1 and 'QA_SCOPED_MINT_DENIED' in proc.stderr and '"secret"' not in proc.stdout + proc.stderr and not proc.stdout.strip(), (proc.stderr or proc.stdout)[:120])
     # custody
     def fresh(box, host, head, name, max_reserve=1.1, key=None):
-        ids = dict(ids_for(box, host, head=head))
+        ids = dict(ids_for(box, host, head=head, exact=True))
         ids['exact'] = H.load_exact_manifest(manifest_for(head, [key or K_OK], name, max_reserve), head)
         return ids
     CU1 = fresh('rtbl-a1a1a1a1a1a1a1a1-919191', 'rtb-pool-15-161616', '91' * 20, 'cu1.json')
@@ -833,8 +860,8 @@ try:
     again = bind(CU1)
     check('custody bind is idempotent (no duplicate carry, still bound)', again['status'] == 'RECONCILED_BOUND' and json.loads(R2.objects[CU1['box_key']][0])['attempts'] == {})
     CU2 = fresh('rtbl-a2a2a2a2a2a2a2a2-929292', 'rtb-pool-16-171717', '92' * 20, 'cu2.json', key=K_CU)
-    LEGACY[CU2['box_key']] = led({'t1': {'charged_bound_usd': 0.975, 'settled': True}, 't2': {'charged_bound_usd': 0.7, 'settled': False}})
-    LEGACY[CU2['attempt_key']] = led({'t3': {'charged_bound_usd': 0.3, 'settled': True}})
+    LEGACY[CU2['legacy_box_key']] = led({'t1': {'charged_bound_usd': 0.975, 'settled': True}, 't2': {'charged_bound_usd': 0.7, 'settled': False}})
+    LEGACY[CU2['legacy_attempt_key']] = led({'t3': {'charged_bound_usd': 0.3, 'settled': True}})
     c2 = bind(CU2)
     check('custody: legacy exposure (including an UNSETTLED/UNKNOWN attempt at its bound) is carried into the QA ledgers; combined allowance computed',
           c2['status'] == 'RECONCILED_BOUND' and c2['scopes']['box']['legacy']['committed_usd'] == 1.675 and c2['scopes']['box']['legacy']['unsettled'] == 1
@@ -847,10 +874,11 @@ try:
     check('custody: the proxy counts the carried legacy exposure (1.675 + settled usage) against the same $3 cap and dispatches once',
           r.status_code == 200 and n_calls('EXACT-CUSTODY') == 1 and round(committed(CU2['box_key']), 6) == round(1.675 + 0.975, 6), '%s committed=%.6f' % (r.status_code, committed(CU2['box_key'])))
     CXN = []
-    for why, mutate, code in (('a combined allowance below the approved bound', lambda ids: LEGACY.__setitem__(ids['box_key'], led({'t': {'charged_bound_usd': 2.2, 'settled': True}})), 'QA_CUSTODY_ALLOWANCE'),
-                              ('a prior LEGACY claim for the approved hash', lambda ids: LEGACY.__setitem__(ids['attempt_key'], led(requests={K_OK: {'state': 'completed'}})), 'QA_CUSTODY_PRIOR_CLAIM'),
+    for why, mutate, code in (('a combined allowance below the approved bound', lambda ids: LEGACY.__setitem__(ids['legacy_box_key'], led({'t': {'charged_bound_usd': 2.2, 'settled': True}})), 'QA_CUSTODY_ALLOWANCE'),
+                              ('carried QA-ledger reservations and UNKNOWN exposure that leave less than the approved bound', lambda ids: R2.objects.__setitem__(ids['box_key'], (led({'t': {'charged_bound_usd': 2.2, 'settled': False}}), '"6"', {})), 'QA_CUSTODY_ALLOWANCE'),
+                              ('a prior LEGACY claim for the approved hash', lambda ids: LEGACY.__setitem__(ids['legacy_attempt_key'], led(requests={K_OK: {'state': 'completed'}})), 'QA_CUSTODY_PRIOR_CLAIM'),
                               ('a prior QA claim for the approved hash', lambda ids: R2.objects.__setitem__(ids['attempt_key'], (led(requests={K_OK: {'state': 'unknown'}}), '"5"', {})), 'QA_CUSTODY_PRIOR_CLAIM'),
-                              ('a halted legacy ledger', lambda ids: LEGACY.__setitem__(ids['box_key'], led(halted=True)), 'QA_CUSTODY_HALTED')):
+                              ('a halted legacy ledger', lambda ids: LEGACY.__setitem__(ids['legacy_box_key'], led(halted=True)), 'QA_CUSTODY_HALTED')):
         n_box = 20 + len(CXN)
         CXN.append(n_box)
         CX = fresh('rtbl-%016x-%06d' % (0xb0b0b0b0b0b0b0 + n_box, 930000 + n_box), 'rtb-pool-%02d-%06d' % (30 + n_box, 181818 + n_box), '%040x' % (0xabc000 + n_box), 'cx%d.json' % n_box)
@@ -867,6 +895,23 @@ try:
     except RuntimeError as error:
         check('custody: a legacy lookup failure (403/timeout) is neither absence nor balance: refused, nothing written',
               'QA_CUSTODY_UNCERTAIN' in str(error) and CU3['box_key'] not in R2.objects and CU3['attempt_key'] not in R2.objects)
+    # store carry (rule 65): custody refuses until the one-time migration marker is present, complete and for the QA ledger prefix, so a fresh
+    # ledger can never silently reset the box/attempt caps, prior reservations or UNKNOWN claims of the retired QA store
+    carry_good = R2.objects.pop(H.QA_STORE_CARRY_KEY)
+    try:
+        CM = fresh('rtbl-a7a7a7a7a7a7a7a7-939393', 'rtb-pool-23-242424', '97' * 20, 'cm.json')
+        for why, raw in (('absent', None), ('not complete', json.dumps(dict(json.loads(carry_good[0]), complete=False)).encode()),
+                         ('for another prefix', json.dumps(dict(json.loads(carry_good[0]), dest_prefix='other/')).encode()), ('not JSON', b'nope')):
+            if raw is None:
+                R2.objects.pop(H.QA_STORE_CARRY_KEY, None)
+            else:
+                R2.objects[H.QA_STORE_CARRY_KEY] = (raw, '"x"', {})
+            got = bind(CM)
+            check('custody refuses without a complete store-carry marker (' + why + '): typed, nothing bound',
+                  got['status'] == 'REFUSED' and 'QA_CUSTODY_STORE_NOT_MIGRATED' in {r['code'] for r in got['refusals']}
+                  and CM['box_key'] not in R2.objects and CM['attempt_key'] not in R2.objects, str([r['code'] for r in got['refusals']]))
+    finally:
+        R2.objects[H.QA_STORE_CARRY_KEY] = carry_good
     # proxy side of custody + bound + dry-check
     CU4 = fresh('rtbl-a4a4a4a4a4a4a4a4-959595', 'rtb-pool-18-202020', '94' * 20, 'cu4.json', key=K_CU)   # NOT reconciled
     UPSTREAM['keys'] = (CU4['box_key'], CU4['attempt_key'])
@@ -895,58 +940,9 @@ try:
           and CU6['box_key'] not in R2.objects and CU6['attempt_key'] not in R2.objects, str(r.status_code) + r.text[:90])
     r = call_x(c6, 'EXACT-NOT-APPROVED')
     check('dry-check: a nonmember is still refused NOT_APPROVED', r.status_code == 424 and r.json().get('error') == 'QA_ONMISS_NOT_APPROVED')
-    # app-data scoping, mount replacement, grant receipt
-    good_env = ('R2_ACCOUNT_ID=%s\nR2_ACCESS_KEY_ID=TESTACCESS\nR2_SECRET_ACCESS_KEY=s3cret\nR2_BUCKET_NAME=heydonna-qa\nR2_ENDPOINT_URL=https://%s.r2.cloudflarestorage.com\nR2_PUBLIC_URL=\n'
-                % ('a' * 32, 'a' * 32))
-    real_fp = H.RUN9_SIGNER_FP
-    H.RUN9_SIGNER_FP = _hl.sha256(b'TESTACCESS').hexdigest()[:16]
-    try:
-        vals, fp = H.app_data_values(good_env)
-        check('app-data: the verified scoped heydonna-qa identity (bucket, signer fingerprint, account endpoint, no public host) is accepted', fp == H.RUN9_SIGNER_FP and vals['R2_BUCKET_NAME'] == 'heydonna-qa')
-        for why, text in (('the production-parity uploads bucket', good_env.replace('heydonna-qa', 'heydonna-uploads')), ('a public R2 host', good_env.replace('R2_PUBLIC_URL=', 'R2_PUBLIC_URL=https://pub-x.r2.dev')),
-                          ('a foreign endpoint', good_env.replace('.r2.cloudflarestorage.com', '.r2.example.com')), ('a missing secret', good_env.replace('R2_SECRET_ACCESS_KEY=s3cret\n', ''))):
-            try:
-                H.app_data_values(text)
-                check('app-data refuses ' + why, False)
-            except ValueError as error:
-                check('app-data refuses ' + why, 'QA_APP_DATA_UNSCOPED' in str(error))
-    finally:
-        H.RUN9_SIGNER_FP = real_fp
-    try:
-        H.app_data_values(good_env)
-        check('app-data refuses a signer that is not the verified Run 9 grant', False)
-    except ValueError as error:
-        check('app-data refuses a signer that is not the verified Run 9 grant', 'QA_APP_DATA_UNSCOPED' in str(error))
-    tree = MDIR / 'modal-tree'
-    for rel, body in (('modal/audio/processor.py', 'a = modal.Secret.from_name("heydonna-r2-credentials")\nb = [modal.Secret.from_name("heydonna-r2-credentials"), "x"]\n'),
-                      ('modal/shared/names.py', 'NAMES = ("openrouter", "heydonna-r2-credentials",)\n'),
-                      ('modal/audio/tests/test_p.py', 'assert "heydonna-r2-credentials" in names\n')):
-        (tree / rel).parent.mkdir(parents=True, exist_ok=True)
-        (tree / rel).write_text(body)
-    staged = {}
-    nfiles, nrep = H.overlay_app_data_mounts(tree, EX_BOX, staged)
-    for path, text in staged.items():
-        path.write_text(text)
-    check('app-data mounts: every non-test shared R2 mount becomes this lease-only QA secret; tests untouched; none remain',
-          (nfiles, nrep) == (2, 3) and H.shared_mounts_remaining(tree) == [] and ('"heydonna-qa-r2-' + H.identity(EX_BOX) + '"') in (tree / 'modal/audio/processor.py').read_text()
-          and 'heydonna-r2-credentials' in (tree / 'modal/audio/tests/test_p.py').read_text(), str((nfiles, nrep)))
-    (tree / 'modal/audio/leftover.py').write_text('s = modal.Secret.from_name("heydonna-r2-credentials")\n')
-    check('app-data mount readback names a leftover shared mount', H.shared_mounts_remaining(tree) == ['modal/audio/leftover.py'])
-    grant = {'signer_fingerprint': H.RUN9_SIGNER_FP, 'status': 'active', 'effect': 'allow', 'policy_count': 1, 'object_only': True,
-             'resources': {'com.cloudflare.edge.r2.bucket.acct_default_heydonna-qa': '*'},
-             'permission_groups': ['Workers R2 Storage Bucket Item Read', 'Workers R2 Storage Bucket Item Write']}
-    for why, mutate, expect in (('the verified Run 9 object-only grant', lambda g: None, True), ('a grant that also reaches another bucket', lambda g: g['resources'].update({'com.cloudflare.edge.r2.bucket.acct_default_heydonna-fixtures': '*'}), False),
-                                ('a grant with an admin permission group', lambda g: g['permission_groups'].append('Workers R2 Storage Bucket Admin'), False), ('another signer', lambda g: g.__setitem__('signer_fingerprint', '0' * 16), False)):
-        doc = json.loads(json.dumps(grant))
-        mutate(doc)
-        gp = MDIR / 'grant.json'
-        gp.write_text(json.dumps(doc))
-        try:
-            H.check_grant_receipt(gp)
-            ok = True
-        except ValueError:
-            ok = False
-        check('grant receipt: ' + ('accepts ' if expect else 'rejects ') + why, ok is expect)
+    # app-data: CI parity only (heydonna-uploads, the one shared key); the retired scoped mode, mount replacement and grant receipt no longer exist
+    check('the retired scoped app-data, mount-replacement, grant and canary-receipt helpers are gone',
+          not any(hasattr(H, name) for name in ('app_data_values', 'overlay_app_data_mounts', 'shared_mounts_remaining', 'check_grant_receipt', 'check_canary_receipt', 'RUN9_SIGNER_FP')) and H.APP_DATA_MODES == ('ci-parity',))
     # verified join
     jrep = {'join': [{'ingress_request_id': 'req-1', 'provider_dispatch': {'provider_response_ids': ['r1']}}]}
     jt = {'schema': 1, 'verified': True, 'completed': True, 'error': False, 'request_id': 'req-1/proofread', 'run_id': 'run-1', 'trace_id': 'trace-1',
@@ -975,17 +971,20 @@ try:
     # ---- Rajiv option A (C0ALZJHGE49 thread 1794677380.515009, ts 1795311474.240329): CI-parity app data is accepted, explicitly, and recorded ----
     ci_env = ('R2_ACCOUNT_ID=%s\nR2_ACCESS_KEY_ID=CIKEY\nR2_SECRET_ACCESS_KEY=s3cret\nR2_BUCKET_NAME=heydonna-uploads\nR2_ENDPOINT_URL=https://%s.r2.cloudflarestorage.com\nR2_PUBLIC_URL=https://cdn.example.com\n'
               % ('b' * 32, 'b' * 32))
+    saved_pin = H.SHARED_R2_FP
+    H.SHARED_R2_FP = _hl.sha256(b'CIKEY').hexdigest()[:16]   # the test env's key stands in for the one shared key
     rb = H.app_data_readback(ci_env, 'ci-parity')
-    check('ci-parity: heydonna-uploads with the base-env CI key is ACCEPTED (QA_APP_DATA_UNSCOPED no longer refuses it); fingerprint recorded, decision recorded',
+    check('ci-parity: heydonna-uploads with the one shared key is ACCEPTED; fingerprint recorded, decision recorded',
           rb['mode'] == 'ci-parity' and rb['bucket'] == 'heydonna-uploads' and rb['signer'] == _hl.sha256(b'CIKEY').hexdigest()[:16] and 'option a' in rb['decision'] and 'CIKEY' not in json.dumps(rb))
-    for why, text, mode in (('the scoped QA bucket under ci-parity', ci_env.replace('heydonna-uploads', 'heydonna-qa'), 'ci-parity'), ('a foreign endpoint', ci_env.replace('.r2.cloudflarestorage.com', '.r2.example.com'), 'ci-parity'),
-                            ('a missing key', ci_env.replace('R2_ACCESS_KEY_ID=CIKEY\n', ''), 'ci-parity'), ('the CI bucket under scoped mode', ci_env, 'scoped'), ('an unknown mode', ci_env, 'whatever')):
+    for why, text, mode in (('another bucket under ci-parity', ci_env.replace('heydonna-uploads', 'heydonna-fixtures'), 'ci-parity'), ('a foreign endpoint', ci_env.replace('.r2.cloudflarestorage.com', '.r2.example.com'), 'ci-parity'),
+                            ('a missing key', ci_env.replace('R2_ACCESS_KEY_ID=CIKEY\n', ''), 'ci-parity'), ('the retired scoped mode', ci_env, 'scoped'), ('an unknown mode', ci_env, 'whatever'), ('a signer that is not the one shared key', ci_env.replace('CIKEY', 'OTHERKEY'), 'ci-parity')):
         try:
-            H.app_data_readback(ci_env if why == 'the CI bucket under scoped mode' else text, mode)
+            H.app_data_readback(ci_env if why == 'the retired scoped mode' else text, mode)
             check('app-data readback refuses ' + why, False)
         except ValueError as error:
-            check('app-data readback refuses ' + why, any(c in str(error) for c in ('QA_APP_DATA_UNEXPECTED', 'QA_APP_DATA_UNSCOPED', 'QA_APP_DATA_MODE_INVALID')))
-    sxa = H.qa_finish(FakeS3(), 'heydonna-qa', 'x', False, publisher, dict(EX2_IDS, app_data='ci-parity'))
+            check('app-data readback refuses ' + why, any(c in str(error) for c in ('QA_APP_DATA_UNEXPECTED', 'QA_APP_DATA_MODE_INVALID')) and 'OTHERKEY' not in str(error))
+    H.SHARED_R2_FP = saved_pin
+    sxa = H.qa_finish(FakeS3(), 'heydonna-fixtures', 'x', False, publisher, dict(EX2_IDS, app_data='ci-parity'))
     check('the run receipt (report) records that app data is CI-parity by Rajiv decision', sxa['exact']['app_data'] == 'ci-parity' and 'option a' in sxa['exact']['app_data_decision'])
     for command, extra in (('overlay', ['--root', str(MDIR), '--box', EX_BOX]), ('prepare', ['--root', str(MDIR), '--box', EX_BOX, '--config', str(MDIR / 'c.json')]),
                            ('capture-report', ['--root', str(MDIR), '--box', EX_BOX, '--output', str(MDIR / 'o.json')])):
@@ -994,7 +993,7 @@ try:
     proc = subprocess.run([sys.executable, '-I', str(HELPER), 'check-app-data', '--env', str(MDIR / 'e.env')], capture_output=True, text=True, env={'HOME': str(MDIR), 'PATH': os.environ.get('PATH', '')})
     (MDIR / 'e.env').write_text(ci_env)
     proc = subprocess.run([sys.executable, '-I', str(HELPER), 'check-app-data', '--env', str(MDIR / 'e.env'), '--app-data', 'ci-parity'], capture_output=True, text=True, env={'HOME': str(MDIR), 'PATH': os.environ.get('PATH', '')})
-    check('CLI check-app-data --app-data ci-parity prints the readback with the decision and never the key', proc.returncode == 0 and 'mode=ci-parity bucket=heydonna-uploads' in proc.stdout and 'option a' in proc.stdout and 'CIKEY' not in proc.stdout, proc.stdout[:120])
+    check('CLI check-app-data --app-data ci-parity refuses a key that is not the one shared key and never prints it', proc.returncode == 1 and 'QA_APP_DATA_UNEXPECTED' in proc.stderr + proc.stdout and 'CIKEY' not in proc.stdout + proc.stderr, (proc.stdout + proc.stderr)[:140])
     # ---- CTO GO C0ALZJHGE49 thread 1795302375.270589 (ts 1795310865.915209): explicit proof PROFILES ----
     P14 = 'pr14414-headerless-capture'
     saved_pin = dict(H.EXACT_PROFILES[P14])
@@ -1041,7 +1040,7 @@ try:
         except ValueError as error:
             check('profile spec: another spec is refused', 'approved spec' in str(error))
         # capture on the scoped proxy path, then the profile verdict
-        PIDS = dict(ids_for('rtbl-b1b1b1b1b1b1b1b1-989898', 'rtb-pool-22-232323', head=PHEAD), exact=PM)
+        PIDS = dict(ids_for('rtbl-b1b1b1b1b1b1b1b1-989898', 'rtb-pool-22-232323', head=PHEAD, exact=True), exact=PM)
         UPSTREAM['keys'] = (PIDS['box_key'], PIDS['attempt_key'])
         pcus = bind(PIDS)
         arm(PIDS)
@@ -1049,7 +1048,7 @@ try:
         mp._QA_EXACT_SESSION_WAIT_S = 1
         r = call_x(cp, 'EXACT-PROFILE', rid='req-profile-1')
         check('profile: the one approved request is captured live (200), exactly one send', pcus['status'] == 'RECONCILED_BOUND' and r.status_code == 200 and n_calls('EXACT-PROFILE') == 1, str(r.status_code))
-        sx = H.qa_finish(FakeS3(), 'heydonna-qa', 'x', False, publisher, PIDS)
+        sx = H.qa_finish(FakeS3(), 'heydonna-fixtures', 'x', False, publisher, PIDS)
         rep0 = json.loads(json.dumps(sx))  # as read back from the fetched llm-ledger.json
         check('(a) profile: matching capture + ingress/provider identity + verified PUT-if-absent readback -> accepted, no LangSmith trace consulted',
               H.exact_completion_status(rep0, None, 'qa-spec-X', PM) == 'COMPLETE' and rep0['publication_counts'] == [1, 0, 0] and rep0['fixtures_written'] == [K_PF], json.dumps(rep0['publication_counts']))
@@ -1073,13 +1072,13 @@ try:
                 ('another manifest digest', mut(lambda d: d['exact'].__setitem__('digest', '0' * 64)), 'PROFILE_MANIFEST_MISMATCH'),
                 ('no report', None, 'NO_REPORT')):
             check('(b) profile REFUSES ' + why + ' -> ' + expect, H.exact_completion_status(report, None, 'qa-spec-X', PM) == expect)
-        again = json.loads(json.dumps(H.qa_finish(FakeS3(), 'heydonna-qa', 'x', False, publisher, PIDS)))
+        again = json.loads(json.dumps(H.qa_finish(FakeS3(), 'heydonna-fixtures', 'x', False, publisher, PIDS)))
         check('(b) profile: a SECOND finish finds the canonical already present (0,1,0) and refuses it as this run capture', again['publication_counts'] == [0, 1, 0]
               and H.exact_completion_status(again, None, 'qa-spec-X', PM) == 'PUT_IF_ABSENT_UNPROVEN', json.dumps(again['publication_counts']))
         r_wrong = call_x(cp, 'EXACT-PROFILE-WRONG')
         check('(b) profile: a request for any other hash is refused NOT_APPROVED with zero send and zero reservation', r_wrong.status_code == 424 and r_wrong.json().get('error') == 'QA_ONMISS_NOT_APPROVED'
               and n_calls('EXACT-PROFILE-WRONG') == 0 and len(ledger(PIDS['attempt_key'])['attempts']) == 1)
-        sx_wrong = json.loads(json.dumps(H.qa_finish(FakeS3(), 'heydonna-qa', 'x', False, publisher, PIDS)))
+        sx_wrong = json.loads(json.dumps(H.qa_finish(FakeS3(), 'heydonna-fixtures', 'x', False, publisher, PIDS)))
         check('(b) profile: once a wrong-hash request was refused the lane is terminal, so completion is refused (REPORT_TERMINAL), not accepted',
               H.exact_completion_status(sx_wrong, None, 'qa-spec-X', PM) == 'REPORT_TERMINAL' and sx_wrong['terminal_reason'] == 'QA_ONMISS_NOT_APPROVED')
         # (c) M15 keeps refusing completion without a verified join, while the capture profile never consults a trace

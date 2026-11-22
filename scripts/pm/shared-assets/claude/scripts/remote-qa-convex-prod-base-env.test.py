@@ -9,11 +9,11 @@ Everything here is SYNTHETIC: sentinel env files carry fake values ("SECRETVALUE
 API are a fake server on 127.0.0.1 (API/deployment_url/node_probe patched, HOME redirected to a temp dir with a fake token),
 and three independent spies (urlopen, request, deployment_request) count calls. Nothing reaches Convex, no real env file is read.
 CTO REVISE C0ALZJHGE49 ts 1795033518.676029 (round 2): create() must read the base env path EXACTLY ONCE, validate that text,
-and hand the same validated text to create_once() for storage selection, the scoped guard comparisons and rendering, across
-every retry. Sections 5-7 prove it: the file is replaced by a PROD sentinel right after validation and inside every unhealthy
-node probe (between retries); an exact read-count spy on the path must see one read; every request body the fake server
-receives is scanned for replacement bytes; scoped runs where the replacement REMOVES a forbidden storage host must still be
-refused (the guards compare against the snapshot). A prod snapshot still makes zero API calls.
+and hand the same validated text to create_once() for storage selection and rendering, across every retry. Sections 5-6
+prove it: the file is replaced by a PROD sentinel right after validation and inside every unhealthy node probe (between
+retries); an exact read-count spy on the path must see one read; every request body the fake server receives is scanned for
+replacement bytes. A prod snapshot still makes zero API calls. (Section 7, the retired scoped-storage guards, was removed with
+the separate QA bucket: rule 65, one R2 account, bucket and key.)
 Run:  python3 -I ~/.claude/scripts/remote-qa-convex-prod-base-env.test.py
 Red-on-revert (must FAIL, rc != 0), against the guard1 version that re-read the path in create_once():
       QA_CONVEX_HELPER=~/.claude/scripts/remote-qa-convex.py.bak-20261119-single-read-base-env python3 -I <this file>
@@ -92,7 +92,6 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 BASE = f'http://127.0.0.1:{server.server_address[1]}'
 TMP = Path(tempfile.mkdtemp(prefix='qa-convex-prod-base-env-test-'))
 os.environ['HOME'] = str(TMP / 'home')
-os.environ.pop('QA_R2_SCOPED', None)  # storage mode must come from each synthetic base env, never from the caller's shell
 (TMP / 'home/.convex').mkdir(parents=True)
 (TMP / 'home/.convex/config.json').write_text(json.dumps({'accessToken': MGMT}))
 
@@ -378,41 +377,7 @@ check('prod snapshot, file swapped to dev: ZERO API calls, nothing written under
       no_calls() and not any(root.iterdir()) and read_count(path) == 1)
 check('prod snapshot: no value in output', not any(s in out + err for s in SENTINELS))
 
-# 7. Single read, scoped storage (QA_R2_SCOPED=1): the guarded comparisons use the snapshot too. Each replacement REMOVES a
-# forbidden storage host that the validated snapshot names, so a re-read would silently drop the refusal. Everything is
-# synthetic: the private QA identity lives under the redirected HOME.
-SECRETS = TMP / 'home/.heydonna/secrets'
-SECRETS.mkdir(parents=True, mode=0o700)
-(SECRETS / 'qa-r2.env').write_text('\n'.join(['QA_R2_ACCOUNT_ID=qaacct', 'QA_R2_BUCKET_NAME=heydonna-qa',
-                                             'QA_R2_ACCESS_KEY_ID=qaKEYID123', 'QA_R2_SECRET_ACCESS_KEY=qaSECRET456',
-                                             'QA_R2_ENDPOINT_URL=https://qaacct.r2.cloudflarestorage.com']) + '\n')
-os.chmod(SECRETS / 'qa-r2.env', 0o600)
-(SECRETS / 'qa-r2-production-fingerprints.json').write_text(json.dumps({'access_key_sha256': ['0' * 64]}))
-SCOPED = [*DEV, 'QA_R2_SCOPED=1']
-REFUSED = 'reason=QA_R2_PRODUCTION_REFERENCE_REFUSED'
-
-# 7a. selection: the snapshot names `qakeyid123` as a public host, a substring of the QA key id, so selected() refuses it.
-HOSTILE = [*SCOPED, 'R2_PUBLIC_DOMAIN=qakeyid123']
-for tag, kwargs in (('scoped-select-control', {}), ('scoped-select-swap', {'after_validation': True})):
-    r = swap_run(tag, HOSTILE, SCOPED, **kwargs)
-    check(f'{tag}: refused QA_R2_PRODUCTION_REFERENCE_REFUSED, rc1, zero API calls, nothing written, one read',
-          r['rc'] == 1 and REFUSED in r['err'] and no_calls() and not any(r['root'].iterdir()) and r['reads'] == 1)
-r = swap_run('scoped-select-replacement-alone', SCOPED, SCOPED)
-check('scoped-select-replacement-alone: the replacement text by itself is accepted (so the refusal above is the snapshot)',
-      r['rc'] == 0 and 'QA_R2_CONVEX=PASS mode=scoped' in r['out'] and r['reads'] == 1)
-
-# 7b. readback: selection passes (the host is absent from every rendered value) but the deployment env already holds a value
-# naming it, so only guard_environment(readback, snapshot) can refuse. The replacement drops the host line.
-LEAKY = [*SCOPED, 'R2_PUBLIC_DOMAIN=leaked-host.test']
-SEED = {'UNRELATED_URL': 'https://leaked-host.test/x'}
-for tag, kwargs in (('scoped-readback-control', {}), ('scoped-readback-swap', {'after_validation': True}),
-                    ('scoped-readback-swap-retries', {'unhealthy_probes': 2})):
-    r = swap_run(tag, LEAKY, SCOPED, seed_env=SEED, **kwargs)
-    check(f'{tag}: refused at the readback guard (after the env update and list), rc1, one read',
-          r['rc'] == 1 and REFUSED in r['err'] and r['reads'] == 1
-          and CALLS['deployment_request'].count('/api/v1/list_environment_variables') == 1)
-r = swap_run('scoped-readback-replacement-alone', SCOPED, SCOPED, seed_env=SEED)
-check('scoped-readback-replacement-alone: the replacement text by itself passes the same readback (so the refusal is the snapshot)',
-      r['rc'] == 0 and 'QA_R2_CONVEX=PASS mode=scoped' in r['out'] and r['reads'] == 1)
+# 7. Retired: the scoped storage selection (a separate QA bucket with a private QA identity, and its guarded readback comparisons) no longer
+# exists (rule 65: one R2 account, bucket and key in every environment), so there is nothing to compare against the validated snapshot.
 
 print(f'OK {passed} checks (helper={HELPER.name})')

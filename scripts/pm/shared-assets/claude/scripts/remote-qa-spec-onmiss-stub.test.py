@@ -49,7 +49,7 @@ check('--on-miss without --disposable-convex refused (synthetic-only bound)', rc
 pf = Path(tempfile.mkdtemp()) / 'm.patch'; pf.write_text('diff --git a/tests/e2e/a.ts b/tests/e2e/a.ts\n--- a/tests/e2e/a.ts\n+++ b/tests/e2e/a.ts\n')
 rc, o = dry('--disposable-convex', '--on-miss', '--mutate-patch', str(pf), '--dry-run')
 check('--on-miss refuses RED/mutation legs (RED stays strict)', rc == 2 and 'GREEN-only' in o, o)
-# M15 scoped exact-hash mode: opt-in only, replaces stock --on-miss, never without a passed canary receipt.
+# M15 exact-hash mode: opt-in only, replaces stock --on-miss; no grant or canary receipt (rule 65).
 HX = 'f3dcdecd3e7f1a8b3ccd790d2c9688af6c4febc811c71ada80e3a2b3608c4a80'
 KX = 'fixtures/llm/v2/gemini_vertex/aiplatform.googleapis.com/gemini-3.1-flash-lite.stream/' + HX + '.bin'
 def manifest(**over):
@@ -62,32 +62,33 @@ def manifest(**over):
     p.write_text(json.dumps(doc))
     return str(p)
 good = manifest()
-rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
+rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--dry-run')
 check('spec --on-miss-exact resolves llm_mode=capture-on-miss-exact', rc == 0 and o.endswith('llm_mode=capture-on-miss-exact'), o[-60:])
-rc, o = dry('--disposable-convex', '--on-miss', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
+rc, o = dry('--disposable-convex', '--on-miss', '--on-miss-exact', good, '--dry-run')
 check('--on-miss-exact replaces stock --on-miss (never both)', rc == 2 and 'replaces --on-miss' in o, o[-80:])
 rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--dry-run')
-check('--on-miss-exact refused without --canary-receipt', rc == 2 and 'requires --canary-receipt' in o, o[-80:])
-rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--dry-run')
-check('--on-miss-exact refused without --grant-receipt (the Run 9 object-only grant)', rc == 2 and 'requires --grant-receipt' in o, o[-80:])
-rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--exact-dry-check', '--dry-run')
+check('--on-miss-exact needs no canary or grant receipt (rule 65): it resolves with the manifest alone', rc == 0 and o.endswith('llm_mode=capture-on-miss-exact'), o[-80:])
+for flag in ('--canary-receipt', '--grant-receipt'):
+    rc, o = dry('--disposable-convex', '--on-miss-exact', good, flag, '/nonexistent', '--dry-run')
+    check(flag + ' is retired and refused with a clear message (never silently ignored)', rc == 2 and 'retired (rule 65)' in o, o[-80:])
+rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--exact-dry-check', '--dry-run')
 check('--exact-dry-check resolves llm_mode=capture-on-miss-exact', rc == 0 and o.endswith('llm_mode=capture-on-miss-exact'), o[-60:])
 rc, o = dry('--disposable-convex', '--on-miss', '--exact-dry-check', '--dry-run')
 check('--exact-dry-check is only valid with --on-miss-exact', rc == 2 and 'only valid with --on-miss-exact' in o, o[-80:])
 bad_pin = manifest(product_pin='e' * 12)
-rc, o = dry('--disposable-convex', '--on-miss-exact', bad_pin, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
+rc, o = dry('--disposable-convex', '--on-miss-exact', bad_pin, '--dry-run')
 check('--on-miss-exact refuses a manifest without a full product pin', rc == 2 and 'QA_EXACT_MANIFEST_REFUSED' in o, o[-80:])
-rc, o = dry('--disposable-convex', '--on-miss-exact', manifest(max_reserve_usd=9), '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
+rc, o = dry('--disposable-convex', '--on-miss-exact', manifest(max_reserve_usd=9), '--dry-run')
 check('--on-miss-exact refuses a max_reserve_usd above the $3 cap', rc == 2 and 'QA_EXACT_MANIFEST_REFUSED' in o, o[-80:])
 rc, o = dry('--disposable-convex', '--canary-receipt', '/nonexistent', '--dry-run')
-check('--canary-receipt alone is refused', rc == 2 and 'only valid with --on-miss-exact' in o, o[-80:])
-rc, o = dry('--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
+check('--canary-receipt alone is refused (retired)', rc == 2 and 'retired (rule 65)' in o, o[-80:])
+rc, o = dry('--on-miss-exact', good, '--dry-run')
 check('--on-miss-exact without --disposable-convex refused (synthetic-only bound)', rc == 2 and '--disposable-convex' in o, o[-80:])
 for why, bad in (('a 12-char hash prefix', manifest(hashes=[{'hash': HX[:12], 'provider': 'gemini_vertex', 'model': 'gemini-3.1-flash-lite', 'operation': 'stream', 'canonical_key': KX}])),
                  ('a manifest for another head', manifest(head='b' * 40))):
-    rc, o = dry('--disposable-convex', '--on-miss-exact', bad, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
+    rc, o = dry('--disposable-convex', '--on-miss-exact', bad, '--dry-run')
     check('--on-miss-exact refuses ' + why, rc == 2 and 'QA_EXACT_MANIFEST_REFUSED' in o, o[-80:])
-rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--mutate-patch', str(pf), '--dry-run')
+rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--mutate-patch', str(pf), '--dry-run')
 check('--on-miss-exact is GREEN-only like stock on-miss', rc == 2 and 'GREEN-only' in o, o[-80:])
 # ---- explicit proof PROFILES (CTO GO C0ALZJHGE49 thread 1795302375.270589) ----
 def pmanifest(**over):
@@ -98,7 +99,7 @@ def pmanifest(**over):
     p = Path(tempfile.mkdtemp()) / 'profile.json'
     p.write_text(json.dumps(doc))
     return str(p)
-RECEIPTS = ('--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
+RECEIPTS = ('--dry-run',)  # rule 65: no grant or canary receipt exists any more
 rc, o = dry('--disposable-convex', '--on-miss-exact', pmanifest(), *RECEIPTS, head=P14HEAD, spec=P14SPEC)
 check('PR 14414 profile: the pinned head + pinned spec + approved hash resolve llm_mode=capture-on-miss-exact', rc == 0 and o.endswith('llm_mode=capture-on-miss-exact'), o[-80:])
 for why, kwargs, manifest_path in (('another spec', dict(head=P14HEAD, spec=M15SPEC), pmanifest()), ('another head', dict(head='b' * 40, spec=P14SPEC), pmanifest(head='b' * 40, product_pin='b' * 40)),
@@ -140,7 +141,7 @@ check('M15 stage flags are only valid with --on-miss-exact', rc == 2 and 'only v
 rc, o = dry('--disposable-convex', '--on-miss-exact', pmanifest(), *M15('draft.txt', 'observe.sh'), *RECEIPTS, head=P14HEAD, spec=P14SPEC)
 check('M15 stage flags are refused for any profile but m15-langsmith', rc == 2 and 'only valid with the m15-langsmith profile' in o, o[-80:])
 check('spec env: the controller records the app-data mode AND the bucket it selected from that mode, never echoed back from R2_BUCKET_NAME',
-      'app_data=scoped app_data_bucket=heydonna-qa' in SPEC_SH and 'app_data=ci-parity app_data_bucket=heydonna-uploads' in SPEC_SH
+      'app_data=scoped' not in SPEC_SH and 'app_data=ci-parity app_data_bucket=heydonna-uploads' in SPEC_SH
       and 'spec_env="QA_APP_DATA=$app_data QA_APP_DATA_BUCKET=$app_data_bucket"' in SPEC_SH and 'val R2_BUCKET_NAME' not in SPEC_SH)
 check('spec env: written to the .env.local.next copy BEFORE the install (the pool-reset byte-hash covers it) and must match the box readback',
       SPEC_SH.index('QA_APP_DATA_BUCKET=$app_data_bucket"') < SPEC_SH.index("mv '$remote/.env.local.next'")
@@ -163,15 +164,16 @@ check('exact wiring: sessions armed only after prepare bound the manifest digest
       all(v > 0 for v in si.values()) and si['QA_ONMISS_EXACT_BOUND'] < si['scoped_arm_loop & arm_pid=$!'] and cs < si['mint-session --kind report'] < ce
       and 'heydonna-r2-credentials' not in SPEC_SH and 'LLM_FIXTURE_R2' not in SPEC_SH and 'R2_SECRET' not in SPEC_SH, str(si))
 up_at = SPEC_SH.index('rtb" up --owner')
-chk = {name: SPEC_SH.index(name) for name in ('check-grant-receipt', 'app_data=ci-parity', 'check-app-data', 'check-exact-ids', 'check-app-mounts', 'reconcile-custody', 'scoped_arm_loop & arm_pid=$!')}
-check('REVISE 1 / option A: the app-data mode (scoped | CI-parity by Rajiv decision) is decided explicitly before any lease, box or spend; the grant receipt is still required',
-      chk['check-grant-receipt'] < up_at and chk['app_data=ci-parity'] < up_at and 'QA_R2_SCOPED' in SPEC_SH and 'QA_APP_DATA_SCOPE_REQUIRED' not in SPEC_SH
-      and 'option A' in SPEC_SH and '1795311474.240329' in SPEC_SH, str(chk))
-check('option A: CI-parity app data skips ONLY the mount replacement/readback; the readback is mode-aware and the mode is recorded in lane.txt',
-      '[ "$app_data" = scoped ]' in SPEC_SH and "--app-data '$app_data'" in SPEC_SH and 'QA_APP_MOUNTS mode=ci-parity' in SPEC_SH and 'by Rajiv decision' in SPEC_SH
+chk = {name: SPEC_SH.index(name) for name in ('app_data=ci-parity', 'check-app-data', 'check-exact-ids', 'reconcile-custody', 'scoped_arm_loop & arm_pid=$!')}
+check('rule 65 / option A: the app-data binding is CI-parity (heydonna-uploads, the one shared key), fixed before any lease, box or spend; no scoped switch, grant receipt or QA bucket remains',
+      chk['app_data=ci-parity'] < up_at and not any(s in SPEC_SH for s in ('QA_R2_SCOPED', 'check-grant-receipt', 'check-canary-receipt', 'app_data=scoped', 'heydonna-qa', 'check-app-mounts'))
+      and 'QA_APP_DATA_SCOPE_REQUIRED' not in SPEC_SH and 'option A' in SPEC_SH and '1795311474.240329' in SPEC_SH, str(chk))
+check('option A: the readback is checked against the recorded mode and the mode is recorded in lane.txt',
+      '[ "$app_data" = scoped ]' not in SPEC_SH and "--app-data '$app_data'" in SPEC_SH and 'QA_APP_MOUNTS mode=ci-parity' in SPEC_SH and 'by Rajiv decision' in SPEC_SH
       and 'exact_args="$exact_args --app-data $app_data"' in SPEC_SH)
-check('REVISE 1: box env readback, trusted-derivation check (DENIED), shared-mount readback and custody reconcile all precede the first session',
-      chk['check-app-data'] < chk['check-exact-ids'] < chk['check-app-mounts'] < chk['reconcile-custody'] < chk['scoped_arm_loop & arm_pid=$!'] and 'product-pin.log' in SPEC_SH, str(chk))
+check('REVISE 1: box env readback, trusted-derivation check (DENIED) and custody reconcile all precede the first session',
+      chk['check-app-data'] < chk['check-exact-ids'] < chk['reconcile-custody'] < chk['scoped_arm_loop & arm_pid=$!'] and 'product-pin.log' in SPEC_SH, str(chk))
+check('rule 65: custody refuses until the one-time store migration carried the prior QA-ledger exposure (documented in the launcher)', 'QA_CUSTODY_STORE_NOT_MIGRATED' in SPEC_SH)
 check('REVISE 1: every mint passes the trusted lease, physical box and head (never only a box-written file)',
       len(re.findall(r'mint-session --kind (?:proxy|report) --box "\$box" --head "\$head" --spend-box "\$exact_spend_box" --ids', SPEC_SH)) == 2
       and 'exact_spend_box="${pool_box:-$box}"' in SPEC_SH)
@@ -179,8 +181,8 @@ check('REVISE 2: custody reconcile runs on the trusted host (uv + boto3) and the
       'reconcile-custody --box "$box" --head "$head" --spend-box "$exact_spend_box"' in SPEC_SH and 'LEGACY_ENV' not in SPEC_SH and 'R2_SECRET' not in SPEC_SH)
 check('REVISE 3: the join is verified by the helper (project, transcript, aligned draft), not accepted from the spec file',
       'verify-join --report' in SPEC_SH and 'JOIN\n' not in SPEC_SH)
-check('exact wiring: the manifest and canary receipt are validated before any lease, box or spend',
-      SPEC_SH.index('check-exact-manifest') < SPEC_SH.index('rtb" up --owner') and SPEC_SH.index('check-canary-receipt') < SPEC_SH.index('rtb" up --owner')
+check('exact wiring: the manifest is validated and a trusted-host session mint works before any lease, box or spend (no canary receipt step)',
+      SPEC_SH.index('check-exact-manifest') < SPEC_SH.index('rtb" up --owner') and 'check-canary-receipt' not in SPEC_SH
       and SPEC_SH.index('mint-session --kind check') < SPEC_SH.index('rtb" up --owner'))
 for cmd in ('register --box "$box" --ttl "$ttl_seconds" $llm_onmiss',
             "modal-lane.py overlay --root '$remote' --box '$box' $llm_onmiss",

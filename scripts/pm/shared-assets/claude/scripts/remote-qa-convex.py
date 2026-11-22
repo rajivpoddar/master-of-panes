@@ -457,7 +457,7 @@ def create_once(root, base_text, project, attempt, extra=(), synth=()):
     # Load the deployed sibling explicitly under python -I; never import from a checkout.
     import runpy
     storage = runpy.run_path(str(Path(__file__).resolve().with_name('remote-qa-r2.py')))
-    original, qa_r2, scoped = storage['selected'](base_text)
+    original, qa_r2 = storage['selected'](base_text)
     reference = 'dev/qa-fullflow-' + uuid.uuid4().hex
     expiry = int((time.time() + 3 * 3600) * 1000)
     # Validate/render all local input before creating a deployment.
@@ -499,19 +499,14 @@ def create_once(root, base_text, project, attempt, extra=(), synth=()):
     # --stripe-test-env only: the pre-validated allowlisted Stripe entries ride in the SAME payload.
     changes = [{'name': 'COMMUNITY_SERVER_SECRET', 'value': community_secret}, *extra,
                *({'name': name, 'value': value} for name, value in qa_r2.items())]
-    if scoped:
-        storage['guard_environment']({entry['name']: entry['value'] for entry in changes},
-                                     storage['parse'](base_text))
     deployment_request(actual['deploymentUrl'], key, '/api/update_environment_variables', {'changes': changes})
     stored = json.loads(deployment_request(actual['deploymentUrl'], key, '/api/v1/list_environment_variables'))
     readback = stored.get('environmentVariables') if isinstance(stored, dict) else None
     if not isinstance(readback, dict):
         raise QaRefusal('QA_R2_READBACK_INVALID')
-    if scoped:
-        storage['guard_environment'](readback, storage['parse'](base_text))
     if any(readback.get(name) != value for name, value in qa_r2.items()):
         raise QaRefusal('QA_R2_READBACK_MISMATCH')
-    print('QA_R2_CONVEX=PASS mode=' + ('scoped' if scoped else 'base-env'))
+    print('QA_R2_CONVEX=PASS mode=base-env')
     if extra:
         env_receipt(actual['deploymentUrl'], key, [change['name'] for change in changes])
         print_derived(changes)
@@ -521,13 +516,7 @@ def create_once(root, base_text, project, attempt, extra=(), synth=()):
               'CONVEX_SITE_URL': f'https://{name}.convex.site',
               'NEXT_PUBLIC_CONVEX_SITE_URL': f'https://{name}.convex.site',
               'QA_CONVEX_DEPLOYMENT_EXPIRES_AT_MS': str(expiry)}
-    if scoped:
-        # /api/projects requires this name. Reuse the verified private QA account
-        # endpoint for the box app only; this does not enable public bucket access.
-        values['R2_PUBLIC_URL'] = qa_r2['R2_ENDPOINT_URL']
     save(root / 'dev.env', render_env(original, values))
-    if scoped:
-        print('QA_R2_APP_PUBLIC_URL=from_scoped_account_endpoint')
     print('QA_DISPOSABLE_CONVEX_CREATED=' + name)
     return True
 
