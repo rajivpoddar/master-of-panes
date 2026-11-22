@@ -816,7 +816,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "e7bf0b1006630db1271325821a5656014a83ba9b1ac8c7f23c5f92346ffaa8f4",
+      "sha256": "e2ab6636e1dac89565840bf9a6ab91129bd6ea561992674724f3cf251d2a9e23",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -906,7 +906,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "3fe3d75c74230ab2012a376bdfb12d56cfb81d6ebbee645e019e1470c072da8b",
+      "sha256": "fc316eccd60523933729cb02902aa12c3c136c5646f4980713f0b7987ca57e58",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -915,7 +915,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "43d3cc9bad9766a7ed9ef3d7b8bf63945cd180dce39b105d013a54f16b761a3f",
+      "sha256": "ada0d48d7f65c4bc9e0e2d9d0f7895c6eca02449a083c09b5c8cfe9108206ec0",
       "source_path": "claude/scripts/proxy-burn-shadow.py"
     },
     {
@@ -1502,7 +1502,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-skill",
-      "sha256": "13241ada74729c558149332ed38ae2e10d707d94d350a85142d51e92c5579e13",
+      "sha256": "fa37c6b7c9192effcd457661ff01241927c9f63f11e2907cbbaf0048fcd89674",
       "source_path": "claude/skills/proxy-agent/SKILL.md"
     },
     {

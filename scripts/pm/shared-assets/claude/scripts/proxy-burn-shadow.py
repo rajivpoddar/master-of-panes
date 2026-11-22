@@ -406,6 +406,12 @@ def shadow(model, role, override, config_path, snapshot_path, now):
     exemption = role not in ('hd-planner', 'hd-builder', 'hd-proof-qa', 'pm-hotfix', 'pm-proof-qa', 'hd-investigator', 'superproofer')
     override_ok = bool(re.fullmatch(r'(?:P0:[0-9]+|rajiv:[0-9]+\.[0-9]+)', override or ''))
     prefix = f'proxy-burn: mode=shadow pool={pool} model={model}'
+    if pool == 'claude':
+        # No burn/pace gate on the Claude pool (Rajiv C0ALZJHGE49 thread 1795369444.132999, ts 1795372352.279289, 23 Nov:
+        # "drop the P0 gate ... we don't have to track the burn rate for calude proxy accounts. just keep the cap to 4 and
+        # switch accounts whenever it maxxes out"). The cap (CLAUDE_PROXY_CAP=4) and cliproxy-claude-switch.py --auto govern it.
+        print(f'{prefix} decision=allow effective=claude_cap_only override={override if override_ok else "none"}')
+        return 'allow'
     try:
         pool, accounts = bindings(model, read_config(config_path))
         rows = read_latest(snapshot_path)

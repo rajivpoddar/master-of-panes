@@ -2720,6 +2720,15 @@ def composer_release_sha(current: Path | None = None, source: Path | None = None
 BURN_SCOPE_NOTE = "Claude and Codex only; Grok not metered"
 
 
+def _burn_mode(pool: str, allowed: bool) -> str:
+    """Route mode shown per family. The Claude pool has no burn/pace gate (Rajiv C0ALZJHGE49 thread 1795369444.132999,
+    ts 1795372352.279289, 23 Nov: "drop the P0 gate ... we don't have to track the burn rate for calude proxy accounts"):
+    its routes are always NORMAL; CLAUDE_PROXY_CAP=4 and cliproxy-claude-switch.py --auto govern it. Codex keeps its gate."""
+    if pool == "claude":
+        return "NORMAL"
+    return "NORMAL" if allowed else "P0-ONLY"
+
+
 def burn_action(denied: list[str]) -> str:
     """ACTIONS text naming only the denied route families (P0, scoped rajiv:<ts> overrides, CI/admin exemptions continue)."""
     routes = " and ".join(denied)
@@ -2887,9 +2896,10 @@ def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = 
     POOL burn exceeds its USABLE POOL budget (or the pool is exhausted/unmeasurable/has no usable account);
     an exhausted account contributes neither burn nor budget, and a Claude account whose session is capped, stale
     or unknown keeps its theoretical weekly row but adds nothing to the usable budget (CTO REVISE of 35df934,
-    ts 1794854782.620999). Failure of the check itself sets every family to P0-ONLY.
+    ts 1794854782.620999). Failure of the check itself sets every family except Claude to P0-ONLY; the Claude pool has no
+    burn gate (23 Nov, Rajiv ts 1795372352.279289) and is always NORMAL.
     """
-    fail_modes = {label: "P0-ONLY" for label, _, _ in BURN_MODELS}
+    fail_modes = {label: _burn_mode(pool, False) for label, pool, _ in BURN_MODELS}
     try:
         shadow = shadow or _burn_module()
         shadow.LOG = str(snapshot)
@@ -2918,14 +2928,14 @@ def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = 
             except Exception:
                 accounts = None
             if not accounts:
-                table.append([f"{label} pool", f"{UNKNOWN_DENY} · routes P0-ONLY", "—", "n/a", "n/a", "n/a", "—", "—",
+                modes[label] = _burn_mode(pool, False)
+                table.append([f"{label} pool", f"{UNKNOWN_DENY} · routes {modes[label]}", "—", "n/a", "n/a", "n/a", "—", "—",
                               "accounts UNKNOWN"])
-                modes[label] = "P0-ONLY"
                 continue
             status = shadow.pool_status(pool, accounts, rows, ts_now, horizons)
             names = shadow.account_labels(pool, conf)
             verdict = BURN_STATE.get(status["decision"], UNKNOWN_DENY)
-            modes[label] = "NORMAL" if status["decision"] == "allow" else "P0-ONLY"
+            modes[label] = _burn_mode(pool, status["decision"] == "allow")
             weekly = status.get("weekly_budget")
             if isinstance(weekly, (int, float)) and abs(weekly - status["budget"]) > 1e-9:
                 skipped = sum(1 for _, d in status["accounts"]
@@ -2963,7 +2973,7 @@ def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = 
                 f"mode is per pool ({BURN_SCOPE_NOTE})")
         return "\n".join([head, *_pipe_table(BURN_TABLE_HEADER, table)]), modes
     except Exception as exc:
-        routes = " | ".join(f"{label} routes: P0-ONLY" for label, _, _ in BURN_MODELS)
+        routes = " | ".join(f"{label} routes: {fail_modes[label]}" for label, _, _ in BURN_MODELS)
         return f"*Burn:* {UNKNOWN_DENY} ({type(exc).__name__}) → {routes} ({BURN_SCOPE_NOTE})", fail_modes
 
 

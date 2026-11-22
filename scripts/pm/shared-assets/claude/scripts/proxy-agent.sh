@@ -11,12 +11,12 @@
 #                 SDK built-ins such as general-purpose or claude work only if a matching
 #                 definition file exists; list those directories for currently valid types.
 #   <prompt-file> complete one-shot brief (native named-peer steering remains available)
-#   --model M     auto: gpt-6.2-sol FIRST in every tier, launched at effort xhigh (Rajiv ts 1795158067.051479), old ladders behind it: *-reviewer REVIEW; hd-planner / hd-investigator PLAN; hd-builder BUILD1-3; hd-proof-qa PROOF1-2; other roles MID
-#                 aliases: luna/haiku LIGHT (hd-builder BUILD1), terra/sonnet MID (hd-builder BUILD2, hd-proof-qa PROOF1), opus TOP (hd-builder BUILD3, hd-proof-qa PROOF2); sol = exact gpt-6.2-sol (S149, no tier picker); fable, astra exact
-#                 Escalate a stalled run with --rung N or --model; raw model ids pass through unchanged.
+#   --model M     auto: three levels, first usable id wins (type -> level in proxy_agent_type_level, unlisted = MID; Rajiv C0ALZJHGE49 thread 1795351517.305319): TOP grok-4.7 > sarvam-kimi-k3 (gated until Sarvam enables it) > claude-opus-5-5 > gpt-6.2-sol; MID ornith > OpenCode (deepseek, glm, hy4; rotating start) > Sarvam (glm, deepseek, 105b, gemma4; cap SARVAM_PROXY_CAP=4; rotating start) > claude-sonnet-5-5 > gpt-6.1-terra; LOW ornith > gpt-6-luna > claude-haiku-5-5
+#                 aliases: luna/haiku LOW, terra/sonnet MID, opus TOP; sol = exact gpt-6.2-sol (S149, no tier picker); fable, astra exact
+#                 Escalate a stalled run with --rung N or --model; a full level refuses rc 75 and never falls up to TOP; raw model ids pass through unchanged.
 #                 or any raw CLIProxyAPI model id (unknown ids get a 200k window + stderr warning)
-#   --rung N      hd-builder 1-3, hd-proof-qa 1-2 (auto only; Rajiv D0AMF0XE6TS thread 1794624936.567599, ts 1794639918.387399)
-#   pm-hotfix / pm-proof-qa are compat types: resolved to hd-planner|hd-builder (MODE: PLAN first line -> planner) / hd-proof-qa before selection. hd-investigator = stage 0, diagnose-only, PLAN tier, never auto-escalated.
+#   --rung N      auto only, 1-3: rung 1 = the type's level, each higher rung one level up, capped at TOP (hd-builder 1-3, hd-proof-qa 1-2 keep their escalation rungs; Rajiv D0AMF0XE6TS thread 1794624936.567599, ts 1794639918.387399)
+#   pm-hotfix / pm-proof-qa are compat types: resolved to hd-planner|hd-builder (MODE: PLAN first line -> planner) / hd-proof-qa before selection. hd-investigator = stage 0, diagnose-only, TOP level, never auto-escalated.
 # Launch from PM with Bash run_in_background:true; the final report lands in --out
 # (default: $PROXY_AGENT_OUT_DIR or /tmp/proxy-agent/<type>-<sanitized-name>-<pid>-<UTC>.md).
 # Prints PROXY_AGENT_DONE rc=<n> out=<path>. Same-second launches do not share that path.
@@ -35,7 +35,7 @@ MODEL_EXPLICIT=0
 CWD_EXPLICIT=0
 CWD="${PROXY_AGENT_CHECKOUT:-/Users/rajiv/Downloads/projects/heydonna-app-proxy}"
 MODEL="auto"  # Ordered tier selection below.
-RUNG=""       # hd-builder 1-3 / hd-proof-qa 1-2 escalation rung; empty = rung 1.
+RUNG=""       # escalation rung 1-3: rung 1 = the type's level, each step one level up, capped at TOP; empty = rung 1.
 OUT=""
 MAX_TURNS="200"
 # --data-scope / --qa-mode were the 9ea1b9b free-model scope declarations. They no longer grant anything (see "Free-model guard" below):
@@ -673,7 +673,7 @@ model = os.environ.get("PROXY_AGENT_CLAUDE_PROBE_MODEL", "")
 # Both local Spark aliases must be probe-able: without it an id that is not in this list returns "fail" and is
 # recorded as probe_failed, so the lane is cooled and falls through to a PAID model even though the Spark is healthy and the
 # gate above already proved the checkpoint is served. /v1/messages through CLIProxyAPI answers it 200 (verified 22 Nov).
-if model not in ("claude-opus-5-5-high", "claude-sonnet-5-5-high", "gemini-4-argon-high", "gemini-3.8-flash-high", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-high", "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "grok-4.7", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-sol(xhigh)", "gpt-6-astra", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-fable-5-2", "hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor", "inkling-2-mini", "ornith-1.5-35b-a3b", "qwen3.8-flash-next"):
+if model not in ("claude-opus-5-5-high", "claude-sonnet-5-5-high", "gemini-4-argon-high", "gemini-3.8-flash-high", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-high", "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "grok-4.7", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-sol(xhigh)", "gpt-6-astra", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-fable-5-2", "hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor", "inkling-2-mini", "ornith-1.5-35b-a3b", "qwen3.8-flash-next", "sarvam-glm-5.3", "sarvam-deepseek-v4.1-flash", "sarvam-105b", "sarvam-gemma4", "sarvam-kimi-k3"):
     finish("fail", 0)
 
 state_dir = os.environ.get("PROXY_AGENT_STATE_DIR") or os.path.expanduser("~/.cache/proxy-agent")
@@ -1502,12 +1502,33 @@ proxy_agent_resolve_opencode_cap() {
   printf '2'
 }
 
-# Daily dial (morning brief, proxy-burn-dial.py --apply) writes the caps here; explicit env still wins.
+# Sarvam Token Factory cap (Rajiv DM D0AMF0XE6TS ts 1795369553.133189 "Setup proxy agents to use it"): same resolution as the OpenCode cap
+# (explicit numeric env, else the first valid proxy-caps.env value, else 4). Declared into the generated continuation runner too.
+_SARVAM_CAP_EXPLICIT=""
+[[ "${SARVAM_PROXY_CAP:-}" =~ ^[0-9]+$ ]] && _SARVAM_CAP_EXPLICIT="$SARVAM_PROXY_CAP"
+proxy_agent_resolve_sarvam_cap() {
+  local explicit="${1-}" k v
+  if [[ "$explicit" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$explicit"
+    return 0
+  fi
+  if [[ -r "$HOME/.claude/state/proxy-caps.env" ]]; then
+    while IFS== read -r k v; do
+      if [[ "$k" == SARVAM_PROXY_CAP && "$v" =~ ^[0-9]+$ ]]; then
+        printf '%s' "$v"
+        return 0
+      fi
+    done < "$HOME/.claude/state/proxy-caps.env"
+  fi
+  printf '4'
+}
+
+# Daily dial (morning brief, proxy-burn-dial.py --apply) writes the caps here; explicit env still wins. SPARK_PROXY_CAP is read too (Rajiv C0ALZJHGE49 thread 1795355101.961449, ts 1795356430.728759: Spark pool 8): it used to be skipped, so the pool kept its default of 6.
 _PROXY_TOTAL_CAP_ENV="${PROXY_AGENT_TOTAL_CAP:-}"
 if [[ -r "$HOME/.claude/state/proxy-caps.env" ]]; then
   while IFS== read -r _k _v; do
     case "$_k" in
-      PROXY_AGENT_TOTAL_CAP|PROXY_AGENT_CLAUDE_CAP|PM_SUBAGENT_CAP|CODEX_PROXY_CAP|CLAUDE_PROXY_CAP|GROK_PROXY_CAP|OPENCODE_PROXY_CAP) [[ -z "${!_k:-}" && "$_v" =~ ^[0-9]+$ ]] && printf -v "$_k" %s "$_v";;
+      PROXY_AGENT_TOTAL_CAP|PROXY_AGENT_CLAUDE_CAP|PM_SUBAGENT_CAP|CODEX_PROXY_CAP|CLAUDE_PROXY_CAP|GROK_PROXY_CAP|OPENCODE_PROXY_CAP|SARVAM_PROXY_CAP|SPARK_PROXY_CAP) [[ -z "${!_k:-}" && "$_v" =~ ^[0-9]+$ ]] && printf -v "$_k" %s "$_v";;
       PROXY_BURN_GATE) [[ -z "${!_k:-}" && ( "$_v" == enforce || "$_v" == shadow ) ]] && printf -v "$_k" %s "$_v";;
     esac
   done < "$HOME/.claude/state/proxy-caps.env"
@@ -1515,6 +1536,7 @@ fi
 # Recompute after the shared loader so a non-numeric env cannot block the file, and so the
 # default is 2 when neither the env nor the file has a valid cap. Explicit numeric env still wins.
 OPENCODE_PROXY_CAP="$(proxy_agent_resolve_opencode_cap "$_OPENCODE_CAP_EXPLICIT")"
+SARVAM_PROXY_CAP="$(proxy_agent_resolve_sarvam_cap "$_SARVAM_CAP_EXPLICIT")"
 PROXY_BURN_GATE="${PROXY_BURN_GATE:-enforce}"
 if [[ "$PROXY_BURN_GATE" != enforce && "$PROXY_BURN_GATE" != shadow ]]; then
   printf 'proxy-burn: invalid mode=%s; using enforce\n' "$PROXY_BURN_GATE" >&2
@@ -1538,6 +1560,54 @@ proxy_agent_is_opencode_id() {
   id="$(proxy_agent_router_identity "$1")"
   # Local Spark ids share this unmetered-route guard, not the OpenCode Go pool cap.
   case "$id" in hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor|ornith-1.5-35b-a3b|qwen3.8-flash-next|inkling-2-mini) return 0;; *) return 1;; esac
+}
+# Sarvam Token Factory pool (CLIProxyAPI openai-compat provider "sarvam-tf"): the five aliases below share ONE cap (SARVAM_PROXY_CAP, default 4).
+# Paid credits, not a free/trial id: PROXY_AGENT_FREE_TRIAL_IDS is deliberately untouched, so the free-model guard never refuses them.
+# Membership is the router-equivalent identity, like the OpenCode pool.
+proxy_agent_is_sarvam_id() {
+  local id
+  id="$(proxy_agent_router_identity "$1")"
+  case "$id" in sarvam-glm-5.3|sarvam-deepseek-v4.1-flash|sarvam-105b|sarvam-gemma4|sarvam-kimi-k3) return 0;; *) return 1;; esac
+}
+# Kimi K3 is a Provisioned Throughput model at Sarvam: until Sarvam enables it for the organisation every request is HTTP 400 ("not enabled for your
+# organisation"), which proxy_agent_sub_usable reports as rc 2 (probe_failed). Left alone that would (a) burn a probe on every launch and (b) close the
+# emergency Muse gate for good (proxy_agent_route_exhausted reads rc 2 as "unknown"). So Kimi has an explicit gate:
+#   SARVAM_KIMI_ENABLED=0 (env or proxy-caps.env)  Kimi is off.
+#   SARVAM_KIMI_ENABLED=1                          Kimi is always tried (a 400 is still not_enabled, never probe_failed).
+#   unset / anything else (auto)                   Kimi is tried; a non-200/402/429 answer marks it unavailable for PROXY_AGENT_SARVAM_KIMI_RETRY_S
+#                                                  (default 300 s) in the state file, so it comes back on its own once Sarvam enables it.
+proxy_agent_sarvam_kimi_state_file() { printf '%s' "${PROXY_AGENT_SARVAM_KIMI_STATE_FILE:-$HOME/.claude/state/proxy-sarvam-kimi-unavailable}"; }
+proxy_agent_sarvam_kimi_flag() {
+  local k v
+  if [[ "${SARVAM_KIMI_ENABLED:-}" == 0 || "${SARVAM_KIMI_ENABLED:-}" == 1 ]]; then printf '%s' "$SARVAM_KIMI_ENABLED"; return 0; fi
+  if [[ -r "$HOME/.claude/state/proxy-caps.env" ]]; then
+    while IFS== read -r k v; do
+      if [[ "$k" == SARVAM_KIMI_ENABLED && ( "$v" == 0 || "$v" == 1 ) ]]; then printf '%s' "$v"; return 0; fi
+    done < "$HOME/.claude/state/proxy-caps.env"
+  fi
+  printf 'auto'
+}
+# 0 when Kimi is known unavailable right now (skip it), 1 when it may be tried.
+proxy_agent_sarvam_kimi_gated() {
+  local until="" now
+  [[ "$(proxy_agent_sarvam_kimi_flag)" != 0 ]] || return 0
+  [[ "$(proxy_agent_sarvam_kimi_flag)" != 1 ]] || return 1
+  if [[ -r "$(proxy_agent_sarvam_kimi_state_file)" ]]; then IFS= read -r until < "$(proxy_agent_sarvam_kimi_state_file)" || true; fi
+  case "$until" in ''|*[!0-9]*) return 1;; esac
+  now="$(date +%s 2>/dev/null || printf '0')"
+  [[ "$until" -gt "$now" ]]
+}
+# Records "Kimi answered something other than 200/402/429" for the retry window. No-op for dry runs and for a forced flag. Atomic; never fails the launch.
+proxy_agent_sarvam_kimi_mark_unavailable() {
+  [[ "${PROXY_AGENT_DRY_RUN:-}" != 1 ]] || return 0
+  [[ "$(proxy_agent_sarvam_kimi_flag)" == auto ]] || return 0
+  local f dir tmp retry="${PROXY_AGENT_SARVAM_KIMI_RETRY_S:-300}"
+  case "$retry" in ''|*[!0-9]*) retry=300;; esac
+  f="$(proxy_agent_sarvam_kimi_state_file)"; dir="$(dirname "$f")"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  tmp="$(mktemp "$dir/.sarvam-kimi.XXXXXX" 2>/dev/null)" || return 0
+  { printf '%s\n' "$(( $(date +%s) + retry ))" > "$tmp" && mv -f "$tmp" "$f"; } 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  return 0
 }
 # Judgment/diagnosis lanes (PM 22 Nov 00:33 and 00:42 IST: "NEVER delegate debugging/root cause"): P0 lanes and these roles never route to the
 # local Inkling model and are exempt from the MoP bulk-read Read guard (scripts/bulk_read_guard.py reads BULK_READ_EXEMPT and PROXY_AGENT_TYPE).
@@ -1608,44 +1678,34 @@ proxy_agent_free_guard_refuses() {
 proxy_agent_is_unresolved_auto() {
   [[ "$(proxy_agent_router_identity "$1")" == auto ]]
 }
-# Ordered tiers; escalation after a stall is LIGHT -> MID -> TOP. This is the single source of the tier lists: the picker and the
-# emergency eligibility check (proxy_agent_emergency_open) both read it. Prints the model ids, no-Codex flag applied.
+# Type -> level table: the ONE place a role gets its model level (Rajiv C0ALZJHGE49 thread 1795351517.305319: ts 1795354409.166279 levels and types, ts 1795355545.905379 final mapping;
+# principle ts 1795353913.416459: "stronger models should drive weaker ones. so planning should be on top tier, build/proover on mid/low"). Anything not listed is MID.
+# A role leaves its level only on an explicit escalation (--rung 2+, --model opus / sol), never by default and never because its own level is full.
+proxy_agent_type_level() {
+  case "$1" in
+    hd-planner|hd-investigator|pm-admission-reviewer|*-reviewer|explore-issue-agent|growth|donna-influencer|marketing-site-builder|blog-post-builder) printf '%s' TOP;;
+    cleanup-pr-runner) printf '%s' LOW;;
+    claude|pm-triage-agent|hd-builder|hd-proof-qa|remote-test-runner|remote-qa-runner|ci-repair-agent|customer-artifact-investigator|e2e-failure-investigator|mop-main-repair|autoscaler-main-repair|pm-ops-tooling|main-red-skip|superproofer) printf '%s' MID;;
+    *) printf '%s' MID;;
+  esac
+}
+# The three levels, escalation order LOW -> MID -> TOP. This is the single source of the level lists: the picker and the emergency eligibility check
+# (proxy_agent_emergency_open) both read it. Prints the model ids, no-Codex flag applied.
+# The first id not capped, cooled, burn-refused or health-gated wins; a level that has none REFUSES (rc 75, the PM queues the launch) and never borrows from the level above.
+# Order by pool (Rajiv C0ALZJHGE49 thread 1795311834.216809, ts 1795315175.684789: "spark -> opencode -> claude proxy -> codex proxy"):
+#   TOP  grok-4.7 -> sarvam-kimi-k3 -> claude-opus-5-5 -> claude-fable-5-2 -> gpt-6.2-sol (ts 1795355545.905379: "grok can be used for top whenever it's available"; Grok is balance-metered, a 402 cools it, GROK_PROXY_CAP=0 = off;
+#        Rajiv 23 Nov 00:19 "Kimi should be top tier": Sarvam Kimi K3 is second, behind its availability gate proxy_agent_sarvam_kimi_gated until Sarvam enables the Provisioned Throughput model)
+#   MID  ... after the OpenCode ids come the Sarvam serverless ids sarvam-glm-5.3 / sarvam-deepseek-v4.1-flash / sarvam-105b / sarvam-gemma4 (own cap SARVAM_PROXY_CAP, default 4; the start rotates per launch, proxy_agent_sarvam_rotate)
+#   MID  ornith-1.5-35b-a3b (Spark, free) -> OpenCode Go deepseek-v4.1-flash / glm-5.3 / hy4-flash-free (the start rotates per launch, proxy_agent_opencode_rotate; hy4 stays behind the
+#        free-model guard, so only hd-builder / hd-proof-qa take it; glm-5.3 per Rajiv D0AMF0XE6TS thread 1795327362.644159, ts 1795327535.503889) -> claude-sonnet-5-5 -> gpt-6.1-terra
+#   LOW  ornith-1.5-35b-a3b -> gpt-6-luna -> claude-haiku-5-5
+# Every level ends with the emergency-only Muse Spark entry (proxy_agent_is_emergency_muse). The old tier names (LIGHT, PLAN, BUILD1-3, PROOF1-2, REVIEW) are retired.
 proxy_agent_tier_models() {
   local models _m _kept=""
   case "$1" in
-    # SOL FIRST IN EVERY TIER (Rajiv C0ALZJHGE49 thread 1794677380.515009, ts 1795158067.051479: "put 6.2 sol xhigh agents on it. we have spare capacity on codex. move all agents to sol."):
-    # Ornith is the primary local Spark id (Rajiv ts 1795334067.773899). Keep Qwen and Inkling paths for compatibility, not tier picks.
-    # Order in those four lists, by POOL (Rajiv C0ALZJHGE49 thread 1795311834.216809, ts 1795315175.684789: "the order should be spark -> opencode -> claude proxy -> codex proxy";
-    # this supersedes the same thread's earlier ts 1795311834.216809 rate-maximising order; OpenCode cap lifted to 6 at ts 1795313825.118179):
-    # ornith-1.5-35b-a3b (Spark local, free) -> deepseek-v4.1-flash / hy4-flash-free (OpenCode Go; hy4 stays behind the free-model guard, so only
-    # builder/prover types take it) -> the tier's Claude id (claude proxy) -> the Codex ladder (luna -> terra -> sol) -> grok/muse last as before.
-    # Preserve the live glm-5.3 tier placements and the judgment-lane exclusion.
-    # Was: INKLING RE-ADDED 21 Nov 23:50 IST (healthy since 23:20 at util 0.65; Rajiv DM ts 1795285172.440479 "is any agent on inkling? it’s idle"); 3 s health gate skips it if down. History: PULLED FROM TIERS 21 Nov 23:07 IST: Spark unreachable (ssh timeouts, :18120 no reply); re-add after a health check. Was: INKLING FIRST (Rajiv D0AMF0XE6TS ts 1795280519.029359: "when it is available proxy use, we should maximise it"): inkling-2-mini heads LIGHT/MID/BUILD1/PROOF1.
-    # TERRA FIRST (Rajiv D0AMF0XE6TS ts 1795280170.905869 (21 Nov 22:26 IST): 'reduce the codex proxy cap to 10 ... rajiv@scribie ... has to last 7 days till renewal. we have to go back to using terra before trying sol on codex.'): gpt-6.1-terra now heads every list, gpt-6.2-sol second.
-    # gpt-6.2-sol heads every list and launches at reasoning effort xhigh (proxy_agent_launch_model_id). The previous entries stay behind it, in their old order, as the
-    # fallbacks (Codex pool cap, 402/429 cooldown, probe failure). Supersedes sol only on BUILD3/PROOF2 (S149, ts 1794941131.743129), sol dropped from TOP (ts 1794720589.429929)
-    # and hy4 first (ts 1795106112.425109; non-builder/prover types still skip hy4 via the free-model guard). gpt-6.1-terra stays in the tiers (ts 1794941131.743129).
-    # OpenCode Go pool (Rajiv D0AMF0XE6TS thread 1794926930.078169, ts 1794930258.014469): hy4-flash-free joins LIGHT, deepseek-v4.1-flash joins MID.
-    # Every tier ends with the emergency-only Muse Spark entry (see proxy_agent_is_emergency_muse). Grok stays in its existing slot.
-    LIGHT) models="ornith-1.5-35b-a3b deepseek-v4.1-flash hy4-flash-free claude-haiku-5-5 gpt-6-luna gpt-6.1-terra gpt-6.2-sol grok-4.7 muse-spark-1.3-contributor";;
-    # glm-5.3 joins MID/BUILD1/PROOF1 after its #14254 test build (Codex APPROVE, 9/9 RED→GREEN); Rajiv "yes" D0AMF0XE6TS thread 1795327362.644159, ts 1795327535.503889.
-    MID) models="ornith-1.5-35b-a3b deepseek-v4.1-flash glm-5.3 hy4-flash-free claude-sonnet-5-5 gpt-6-luna gpt-6.1-terra gpt-6.2-sol grok-4.7 muse-spark-1.3-contributor";;
-    TOP) models="gpt-6.1-terra gpt-6.2-sol claude-opus-5-5 grok-4.7 muse-spark-1.3-contributor";;
-    # gpt-6.2-sol replaces gpt-6.1-sol (the "sol" alias); gpt-6.1-terra stays in the tiers (Rajiv D0AMF0XE6TS thread 1794939318.063889, ts 1794941131.743129: "6.1 terra should stay. 6.2 sol should replace 6.1 sol").
-    # Per-role ladders (Rajiv D0AMF0XE6TS thread 1794624936.567599: ts 1794639918.387399 ladder, ts 1794640102.756179 hydrogen in the mid rungs).
-    # First id not in 429/402 cooldown wins within a rung; claude-* ids still skip at the cap (claude_cap), then the next id in the SAME rung is tried.
-    PLAN) models="gpt-6.1-terra gpt-6.2-sol grok-4.7 claude-opus-5-5 muse-spark-1.3-contributor";;
-    # Grok before Codex in every rung: Codex must last to Thu (Rajiv ts 1794660714.234059 "only grok, claude, codex").
-    # Dev ladder (Rajiv C0ALZJHGE49 thread 1794665799.784789, ts 1794665970.826379): haiku/luna → sonnet/terra → opus/sol. No Grok on dev rungs.
-    BUILD1) models="ornith-1.5-35b-a3b deepseek-v4.1-flash glm-5.3 hy4-flash-free claude-haiku-5-5 gpt-6-luna gpt-6.1-terra gpt-6.2-sol muse-spark-1.3-contributor";;
-    BUILD2) models="gpt-6.1-terra gpt-6.2-sol claude-sonnet-5-5 muse-spark-1.3-contributor";;
-    # S149 (Rajiv ts 1794941131.743129 "6.1 terra should stay. 6.2 sol should replace 6.1 sol"); sol now leads every rung (ts 1795158067.051479, header above).
-    BUILD3) models="gpt-6.1-terra gpt-6.2-sol claude-opus-5-5 muse-spark-1.3-contributor";;
-    PROOF1) models="ornith-1.5-35b-a3b deepseek-v4.1-flash glm-5.3 hy4-flash-free claude-sonnet-5-5 gpt-6-luna gpt-6.1-terra gpt-6.2-sol muse-spark-1.3-contributor";;
-    PROOF2) models="gpt-6.1-terra gpt-6.2-sol claude-opus-5-5 muse-spark-1.3-contributor";;
-    # 12b reviews: carbon -> fable -> astra (Rajiv D0AMF0XE6TS thread 1794624936.567599, ts 1794640502.657479 "the 12b reviewer ladder can be carbon/fable/astra").
-    # Supersedes the earlier fable-first list (thread 1794573312.657559, ts 1794623641.572859). Reviews never skip claude-* at the cap (see below).
-    REVIEW) models="gpt-6.1-terra gpt-6.2-sol claude-fable-5-2 gpt-6-astra muse-spark-1.3-contributor";;
+    LOW) models="inkling-2-mini gpt-6-luna claude-haiku-5-5 muse-spark-1.3-contributor";;
+    MID) models="inkling-2-mini deepseek-v4.1-flash glm-5.3 hy4-flash-free sarvam-glm-5.3 sarvam-deepseek-v4.1-flash sarvam-105b sarvam-gemma4 claude-sonnet-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
+    TOP) models="grok-4.7 sarvam-kimi-k3 claude-opus-5-5 claude-fable-5-2 gpt-6.2-sol muse-spark-1.3-contributor";;
     *) return 1;;
   esac
   # No Codex for proxies (Rajiv ts 1794834402.077499): drop gpt-* from every rung while the flag file exists.
@@ -1663,9 +1723,13 @@ proxy_agent_tier_models() {
 proxy_agent_route_exhausted() {
   local id="$1" rc
   [[ "${PROXY_AGENT_NO_SUBSCRIPTION:-0}" != 1 ]] || return 1
+  # Kimi gated off (Sarvam has not enabled it): known unavailable, so it must not hold the emergency Muse gate closed as an "unknown" route.
+  if [[ "$id" == sarvam-kimi-k3 ]] && proxy_agent_sarvam_kimi_gated; then return 0; fi
   if proxy_agent_burn_refused "$id"; then return 0; fi
   if proxy_agent_pool_blocked "$id"; then return 0; fi
   if proxy_agent_sub_usable "$id"; then return 1; else rc=$?; fi
+  # A Kimi answer other than 200/402/429 is the Provisioned Throughput 400: not enabled, i.e. known unavailable (not "unknown").
+  if [[ "$id" == sarvam-kimi-k3 && "$rc" == 2 ]]; then proxy_agent_sarvam_kimi_mark_unavailable; return 0; fi
   [[ "$rc" == 1 ]]
 }
 # 0 when Muse may be used: EVERY eligible non-emergency route in EVERY tier list (Claude, Grok, Codex and the other OpenCode ids,
@@ -1678,7 +1742,7 @@ proxy_agent_emergency_open() {
   if [[ -n "${PA_EMERGENCY_VERDICT:-}" ]]; then
     [[ "$PA_EMERGENCY_VERDICT" == open ]] && return 0 || return 1
   fi
-  for tier in LIGHT MID TOP PLAN BUILD1 BUILD2 BUILD3 PROOF1 PROOF2 REVIEW; do
+  for tier in LOW MID TOP; do
     for id in $(proxy_agent_tier_models "$tier"); do
       proxy_agent_is_emergency_muse "$id" && continue
       case "$seen" in *" $id "*) continue;; esac
@@ -1693,6 +1757,89 @@ proxy_agent_emergency_open() {
   PA_EMERGENCY_VERDICT=open
   return 0
 }
+# OpenCode Go round-robin (Rajiv C0ALZJHGE49 thread 1795351517.305319: "we should rotate the models each time"; PM relay 22 Nov 21:44 IST: "why OpenCode is still all DeepSeek").
+# The tier lists put deepseek-v4.1-flash first among the OpenCode ids, so every launch landed on DeepSeek and glm-5.3 / hy4-flash-free never ran.
+# The ring below is the canonical order. Each real (non-dry-run, non-nested) pick of a ring id records itself in the rotation file; the next pick starts on the
+# ring id AFTER it. The rotation only reorders which ring id sits in which of the ring-id SLOTS of the tier list: ornith, Claude and Codex ids keep their
+# places, and the pick loop still skips a cooled, pool-capped, burn-refused or free-model-guarded id, so a skipped id never stalls the ring. A dry run reads
+# the file but never writes it. Concurrent launches can read the same cursor (the write is atomic, the read-modify-write is not): at worst two launches share a start.
+PROXY_AGENT_OPENCODE_RING="deepseek-v4.1-flash glm-5.3 hy4-flash-free"
+proxy_agent_opencode_rotation_file() { printf '%s' "${PROXY_AGENT_OPENCODE_ROTATION_FILE:-$HOME/.claude/state/proxy-opencode-rotation}"; }
+# Prints $1 (space-separated tier models) with its ring ids rotated to start after the last recorded pick. Fewer than two ring ids present: unchanged.
+proxy_agent_opencode_rotate() {
+  local models="$1" f last="" _m _r start=0 i=0 n=0 ring_order="" out="" taken=0
+  local -a ring present
+  ring=($PROXY_AGENT_OPENCODE_RING)
+  f="$(proxy_agent_opencode_rotation_file)"
+  if [[ -r "$f" ]]; then IFS= read -r last < "$f" || true; fi
+  for _r in "${ring[@]}"; do
+    if [[ "$_r" == "$last" ]]; then start=$(( (i + 1) % ${#ring[@]} )); fi
+    i=$((i + 1))
+  done
+  for (( i = 0; i < ${#ring[@]}; i++ )); do ring_order="${ring_order:+$ring_order }${ring[$(( (start + i) % ${#ring[@]} ))]}"; done
+  present=()
+  for _r in $ring_order; do
+    case " $models " in *" $_r "*) present+=("$_r"); n=$((n + 1));; esac
+  done
+  if [[ "$n" -lt 2 ]]; then printf '%s\n' "$models"; return 0; fi
+  for _m in $models; do
+    case " $PROXY_AGENT_OPENCODE_RING " in
+      *" $_m "*) out="${out:+$out }${present[$taken]}"; taken=$((taken + 1));;
+      *) out="${out:+$out }$_m";;
+    esac
+  done
+  printf '%s\n' "$out"
+}
+# Records a picked ring id as the rotation cursor. No-op for non-ring ids and for dry runs. Atomic replace; never fails the launch.
+proxy_agent_opencode_record() {
+  [[ "${PROXY_AGENT_DRY_RUN:-}" != 1 ]] || return 0
+  case " $PROXY_AGENT_OPENCODE_RING " in *" $1 "*) ;; *) return 0;; esac
+  local f dir tmp
+  f="$(proxy_agent_opencode_rotation_file)"; dir="$(dirname "$f")"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  tmp="$(mktemp "$dir/.opencode-rotation.XXXXXX" 2>/dev/null)" || return 0
+  { printf '%s\n' "$1" > "$tmp" && mv -f "$tmp" "$f"; } 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  return 0
+}
+# Sarvam round-robin: same mechanism as the OpenCode ring above (own cursor file, own ring). The ring holds only the four serverless ids that sit in MID;
+# sarvam-kimi-k3 is pinned in TOP behind its availability gate and never rotates. $1 ring (space separated), $2 cursor file, $3 tier models.
+proxy_agent_ring_rotate() {
+  local ring_str="$1" f="$2" models="$3" last="" _m _r start=0 i=0 n=0 ring_order="" out="" taken=0
+  local -a ring present
+  ring=($ring_str)
+  if [[ -r "$f" ]]; then IFS= read -r last < "$f" || true; fi
+  for _r in "${ring[@]}"; do
+    if [[ "$_r" == "$last" ]]; then start=$(( (i + 1) % ${#ring[@]} )); fi
+    i=$((i + 1))
+  done
+  for (( i = 0; i < ${#ring[@]}; i++ )); do ring_order="${ring_order:+$ring_order }${ring[$(( (start + i) % ${#ring[@]} ))]}"; done
+  present=()
+  for _r in $ring_order; do
+    case " $models " in *" $_r "*) present+=("$_r"); n=$((n + 1));; esac
+  done
+  if [[ "$n" -lt 2 ]]; then printf '%s\n' "$models"; return 0; fi
+  for _m in $models; do
+    case " $ring_str " in
+      *" $_m "*) out="${out:+$out }${present[$taken]}"; taken=$((taken + 1));;
+      *) out="${out:+$out }$_m";;
+    esac
+  done
+  printf '%s\n' "$out"
+}
+PROXY_AGENT_SARVAM_RING="sarvam-glm-5.3 sarvam-deepseek-v4.1-flash sarvam-105b sarvam-gemma4"
+proxy_agent_sarvam_rotation_file() { printf '%s' "${PROXY_AGENT_SARVAM_ROTATION_FILE:-$HOME/.claude/state/proxy-sarvam-rotation}"; }
+proxy_agent_sarvam_rotate() { proxy_agent_ring_rotate "$PROXY_AGENT_SARVAM_RING" "$(proxy_agent_sarvam_rotation_file)" "$1"; }
+# Records a picked Sarvam ring id as the cursor. No-op for non-ring ids (Kimi included) and for dry runs.
+proxy_agent_sarvam_record() {
+  [[ "${PROXY_AGENT_DRY_RUN:-}" != 1 ]] || return 0
+  case " $PROXY_AGENT_SARVAM_RING " in *" $1 "*) ;; *) return 0;; esac
+  local f dir tmp
+  f="$(proxy_agent_sarvam_rotation_file)"; dir="$(dirname "$f")"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  tmp="$(mktemp "$dir/.sarvam-rotation.XXXXXX" 2>/dev/null)" || return 0
+  { printf '%s\n' "$1" > "$tmp" && mv -f "$tmp" "$f"; } 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  return 0
+}
 # Picks the first usable model of a tier into PICK_MODEL. Second argument "nested" is used for the Haiku/Sonnet/Opus alias picks:
 # those aliases are exported to the child, and an OpenCode id there would run uncounted by OPENCODE_PROXY_CAP (the live count sees
 # only the child's primary --model), so nested picks stay on the existing approved Claude/Grok/Codex routes and never use the pool.
@@ -1702,7 +1849,7 @@ proxy_agent_pick_tier() {
   if proxy_agent_is_capped "$TYPE"; then claude_live="$(proxy_agent_live_count claude)"; fi
   models="$(proxy_agent_tier_models "$tier")" || return 1
   if [[ "$nested" == nested ]]; then
-    for _m in $models; do proxy_agent_is_opencode_id "$_m" || _kept="${_kept:+$_kept }$_m"; done
+    for _m in $models; do proxy_agent_is_opencode_id "$_m" || proxy_agent_is_sarvam_id "$_m" || _kept="${_kept:+$_kept }$_m"; done
     models="$_kept"
   fi
   # Judgment-work guard (Rajiv C0ALZJHGE49 thread 1795311834.216809, ts 1795315628.438539: "move claude before codex. prefer claude or
@@ -1711,24 +1858,41 @@ proxy_agent_pick_tier() {
   # routine fallback). They start on Claude — claude-opus-5-5, then claude-sonnet-5-5 — then the Codex ladder (terra -> sol); every other
   # tier entry follows in its usual order. The local model stays first for routine build/proof/ops work; caps unchanged (Claude cap 4 from the dial).
   if proxy_agent_is_judgment_lane; then
-    # REORDER within the tier's own membership (never adds a model a tier does not list): the tier's Claude ids first in the
+    # REORDER within the tier's own membership (never adds a model a tier does not list): Grok first (it only appears in TOP, whose order is grok -> kimi -> opus -> fable -> sol), then the tier's Claude ids in the
     # opus -> sonnet preference order, then the Codex ladder (terra -> sol), then whatever else the tier carries. The local id,
     # inkling and gpt-6-luna are dropped.
     _kept=""
-    for _pref in claude-opus-5-5 claude-sonnet-5-5 gpt-6.1-terra gpt-6.2-sol; do
+    # Kimi K3 (Rajiv 23 Nov 00:19 "Kimi should be top tier") sits right after Grok, before Opus, still behind its availability gate below.
+    for _pref in grok-4.7 sarvam-kimi-k3 claude-opus-5-5 claude-fable-5-2 claude-sonnet-5-5 gpt-6.1-terra gpt-6.2-sol; do
       for _m in $models; do [[ "$_m" == "$_pref" ]] && _kept="${_kept:+$_kept }$_m"; done
     done
     for _m in $models; do
-      case "$_m" in ornith-1.5-35b-a3b|qwen3.8-flash-next|inkling-2-mini|gpt-6-luna|claude-opus-5-5|claude-sonnet-5-5|gpt-6.1-terra|gpt-6.2-sol) continue;; esac
+      case "$_m" in ornith-1.5-35b-a3b|qwen3.8-flash-next|inkling-2-mini|gpt-6-luna|grok-4.7|sarvam-kimi-k3|claude-opus-5-5|claude-fable-5-2|claude-sonnet-5-5|gpt-6.1-terra|gpt-6.2-sol) continue;; esac
       _kept="${_kept:+$_kept }$_m"
     done
     models="$_kept"
   fi
+  # OpenCode ids rotate per launch (see proxy_agent_opencode_rotate). Nested alias picks never contain them.
+  if [[ "$nested" != nested ]]; then models="$(proxy_agent_opencode_rotate "$models")"; models="$(proxy_agent_sarvam_rotate "$models")"; fi
   for id in $models; do
     # Free-model guard (unconditional): before the emergency gate and before `last` is set, so a refused id can never become the fallback pick.
     if proxy_agent_free_guard_refuses "$id"; then
       skipped="${skipped:+$skipped,}$id:free_model_guard"
       printf 'proxy-agent: REFUSED free-model guard model=%s type=%s (free/trial ids are unconditionally ineligible; trying the next tier model)\n' "$id" "${TYPE:-}" >&2
+      continue
+    fi
+    # Grok cap 0 = pool off, like the OpenCode pool (proxy_agent_pool_blocked): Grok now heads TOP (Rajiv ts 1795355545.905379), and the cap exemption of roles such as
+    # pm-admission-reviewer and growth would otherwise send them to a Grok pool the dial has switched off (GROK_PROXY_CAP=0). Runs before `last` is set: never the fallback pick either.
+    if [[ "$id" == grok-4.7 && "${GROK_PROXY_CAP:-}" =~ ^0+$ ]]; then
+      skipped="${skipped:+$skipped,}$id:pool_cap"
+      printf 'proxy-agent: pool_cap skip model=%s (GROK_PROXY_CAP=0, pool off)\n' "$id" >&2
+      continue
+    fi
+    # Kimi availability gate (see proxy_agent_sarvam_kimi_gated): before `last` is set, so a not-enabled Kimi is never the fallback pick, and it
+    # does not set emergency_ok=0 (a known-unavailable route is not an unknown one).
+    if [[ "$id" == sarvam-kimi-k3 ]] && proxy_agent_sarvam_kimi_gated; then
+      skipped="${skipped:+$skipped,}$id:not_enabled"
+      printf 'proxy-agent: not_enabled skip model=%s (Sarvam has not enabled Kimi K3 for the organisation, or SARVAM_KIMI_ENABLED=0)\n' "$id" >&2
       continue
     fi
     # Local Spark health gate: /metrics carries the served model's quoted name without the credentials required by /v1/models.
@@ -1787,10 +1951,15 @@ proxy_agent_pick_tier() {
       PICK_MODEL="$id"
       PICK_REASON="${skipped:+cooled:$skipped}"
       PICK_REASON="${PICK_REASON:-first_usable}"
+      if [[ "$nested" != nested ]]; then proxy_agent_opencode_record "$id"; proxy_agent_sarvam_record "$id"; fi
       return 0
     else
       rc=$?
-      if [[ "$rc" != 1 ]]; then
+      if [[ "$id" == sarvam-kimi-k3 && "$rc" == 2 ]]; then
+        # Provisioned Throughput 400 (not enabled): skip for the retry window; not an unknown route, so the emergency gate stays decidable.
+        proxy_agent_sarvam_kimi_mark_unavailable
+        skipped="${skipped:+$skipped,}$id:not_enabled"
+      elif [[ "$rc" != 1 ]]; then
         skipped="${skipped:+$skipped,}$id:probe_failed"
         emergency_ok=0
       else
@@ -1827,9 +1996,15 @@ proxy_agent_burn_refused() {
   # Grok has no %/h budget. GROK_PROXY_CAP and a 402 cooldown decide; a weekly "unknown" must not queue it.
   case "$1" in
     grok-4.7|grok) return 1;;
+    # Claude team accounts are governed by CLAUDE_PROXY_CAP + the account switch only, not by a %/h pace gate (Rajiv C0ALZJHGE49 thread 1795369444.132999,
+    # ts 1795371734.283449 "use opus and grok for top tier. calude team accounts have enough headroom" and ts 1795371948.713479 "we have to keep the nubmer of
+    # agents below the cap and use all modles. if we hit limits, switch to the next account which headroom. if everything is maxxed out, let me know.")
+    claude-*) return 1;;
   esac
   # OpenCode Go has no %/h budget meter: OPENCODE_PROXY_CAP and a 402/429 cooldown decide.
   if proxy_agent_is_opencode_id "$1"; then return 1; fi
+  # Sarvam Token Factory has no usage meter either (no balance API): SARVAM_PROXY_CAP and a 402/429 cooldown decide; spend is estimated in cost/sarvam-usage.py.
+  if proxy_agent_is_sarvam_id "$1"; then return 1; fi
   # proxy-burn-shadow.py resolves the pool from the EXACT model id (model_pool), so a reasoning-suffixed id (`gpt-6.2-sol(xhigh)`) was pool=unknown and
   # refused (coordinator report 2026-11-20). The router bills the base model: ask the gate about the router-equivalent identity.
   python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$(proxy_agent_router_identity "$1")" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >&2 && return 1
@@ -1883,7 +2058,7 @@ for line in out.splitlines():
     # Same cut as proxy_agent_router_identity: lowercase, drop the first '(' or '[' suffix, trim.
     # A decorated OpenCode primary must count toward OPENCODE_PROXY_CAP (CTO REVISE ts 1795010788.320629).
     model = re.split(r"[(\[]", raw.lower(), 1)[0].strip()
-    kind = "claude" if model.startswith("claude-") else "codex" if model.startswith("gpt-") else "grok" if model.startswith("grok") else "spark" if model in ("ornith-1.5-35b-a3b", "qwen3.8-flash-next") else "inkling" if model == "inkling-2-mini" else "opencode" if model in ("hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor") else ""
+    kind = "claude" if model.startswith("claude-") else "codex" if model.startswith("gpt-") else "grok" if model.startswith("grok") else "spark" if model in ("ornith-1.5-35b-a3b", "qwen3.8-flash-next") else "inkling" if model == "inkling-2-mini" else "opencode" if model in ("hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor") else "sarvam" if model in ("sarvam-glm-5.3", "sarvam-deepseek-v4.1-flash", "sarvam-105b", "sarvam-gemma4", "sarvam-kimi-k3") else ""
     if kind == pool:
         n += 1
 print(n)
@@ -1907,18 +2082,20 @@ proxy_agent_pool_blocked() {
     gpt-*) pool=codex; cap="${CODEX_PROXY_CAP:-8}";;
     grok-4.7|grok) pool=grok; cap="${GROK_PROXY_CAP:-8}";;
     hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor) pool=opencode; cap="${OPENCODE_PROXY_CAP:-2}";;
+    sarvam-glm-5.3|sarvam-deepseek-v4.1-flash|sarvam-105b|sarvam-gemma4|sarvam-kimi-k3) pool=sarvam; cap="${SARVAM_PROXY_CAP:-4}";;
     # Both names point at the same vLLM server. Spark proxy cap defaults to 6; keep the legacy env fallback while jobs roll over.
     ornith-1.5-35b-a3b|qwen3.8-flash-next) pool=spark; cap="${SPARK_PROXY_CAP:-${QWEN_PROXY_CAP:-6}}";;
     inkling-2-mini) pool=inkling; cap="${INKLING_PROXY_CAP:-8}";;  # cap 8 with vLLM --max-num-seqs 6 (Rajiv D0AMF0XE6TS ts 1795286725.047469 "go")
     *) return 1;;
   esac
-  if [[ "$pool" != opencode ]] && proxy_agent_cap_exempt "$TYPE"; then return 1; fi
+  # The Sarvam pool, like OpenCode, has no role exemption: paid credits with no meter, so the cap applies to cap-exempt roles and a P0 override too.
+  if [[ "$pool" != opencode && "$pool" != sarvam ]] && proxy_agent_cap_exempt "$TYPE"; then return 1; fi
   case "$cap" in ''|*[!0-9]*) return 1;; esac
-  # OpenCode cap 0 means the pool is off: blocked without counting, so an unreadable process list cannot let a launch through.
-  if [[ "$pool" == opencode && "$cap" =~ ^0+$ ]]; then return 0; fi
+  # OpenCode / Sarvam cap 0 means the pool is off: blocked without counting, so an unreadable process list cannot let a launch through.
+  if [[ ( "$pool" == opencode || "$pool" == sarvam ) && "$cap" =~ ^0+$ ]]; then return 0; fi
   if ! live="$(proxy_agent_pool_live "$pool")"; then
     printf 'proxy-agent: pool_cap UNAVAILABLE pool=%s\n' "$pool" >&2
-    if [[ "$pool" == opencode || "$pool" == spark || "$pool" == inkling ]]; then return 0; fi
+    if [[ "$pool" == opencode || "$pool" == sarvam || "$pool" == spark || "$pool" == inkling ]]; then return 0; fi
     return 1
   fi
   [[ "${live:-0}" -ge "$cap" ]]
@@ -1975,6 +2152,18 @@ proxy_agent_primary_pool_guard() {
       fi
       return 0;;
   esac
+  # Raw `--model sarvam-*` (and a --resume of one) skips the tier picker: re-check the Sarvam cap, and Kimi's availability gate, on the resolved primary.
+  if proxy_agent_is_sarvam_id "$_guard_id"; then
+    if proxy_agent_pool_blocked "$_guard_id"; then
+      printf 'proxy-agent: REFUSED primary %s (sarvam pool_cap)\n' "$_guard_id" >&2
+      return 75
+    fi
+    if [[ "$(proxy_agent_router_identity "$_guard_id")" == sarvam-kimi-k3 ]] && proxy_agent_sarvam_kimi_gated; then
+      printf 'proxy-agent: REFUSED primary %s (not_enabled: Sarvam has not enabled Kimi K3, or SARVAM_KIMI_ENABLED=0)\n' "$_guard_id" >&2
+      return 75
+    fi
+    return 0
+  fi
   proxy_agent_is_opencode_id "$_guard_id" || return 0
   if proxy_agent_pool_blocked "$_guard_id"; then
     printf 'proxy-agent: REFUSED primary %s (opencode pool_cap)\n' "$_guard_id" >&2
@@ -2001,6 +2190,8 @@ proxy_agent_primary_burn_check() {
   esac
   # OpenCode Go has no %/h budget meter (cap + cooldown only), same as Grok.
   if proxy_agent_is_opencode_id "$_burn_model"; then return 0; fi
+  # Sarvam Token Factory: no %/h meter (cap + cooldown only), same as OpenCode.
+  if proxy_agent_is_sarvam_id "$_burn_model"; then return 0; fi
   python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$_burn_model" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >&2 || _burn_rc=$?
   if [[ "$_burn_rc" -ne 0 ]]; then
     printf 'proxy-burn: mode=%s decision=would_refuse rc=%s\n' "$PROXY_BURN_GATE" "$_burn_rc" >&2
@@ -2028,33 +2219,37 @@ proxy_agent_resolve_type() {
 }
 
 proxy_agent_select() {
-  local requested="$MODEL" first_line="" tier="RAW" rung="${RUNG:-1}" max_rung=0
+  local requested="$MODEL" tier="RAW" rung="${RUNG:-1}" max_rung=0 base_level="" idx=1
+  local -a levels=(LOW MID TOP)
   case "$TYPE" in hd-builder) max_rung=3;; hd-proof-qa) max_rung=2;; esac
-  # An out-of-range rung climbs to the top rung of the role (proof-QA has two).
-  if [[ "$max_rung" -gt 0 && "$rung" -gt "$max_rung" ]]; then rung="$max_rung"; fi
   case "$requested" in
     auto)
-      [[ -r "$ROLE_BRIEF" ]] && { IFS= read -r first_line < "$ROLE_BRIEF" || true; }
-      if [[ "$TYPE" == *-reviewer ]]; then tier=REVIEW  # all reviewer agents: Rajiv ts 1794623867.575529 "use fable for reviews"
-      # Conveyor ladders (Rajiv ts 1794639918.387399): planner and investigator (stage 0, diagnose-only) PLAN, builder rung 1-3, proof-QA rung 1-2.
-      elif [[ "$TYPE" == hd-planner || "$TYPE" == hd-investigator ]]; then tier=PLAN
-      elif [[ "$TYPE" == hd-builder ]]; then tier="BUILD$rung"
-      elif [[ "$TYPE" == hd-proof-qa ]]; then tier="PROOF$rung"
-      elif [[ "$first_line" =~ ^MODE:[[:space:]]*PLAN($|[[:space:]]) ]]; then tier=TOP; else tier=MID; fi;;
-    # Explicit aliases are the S131 escalation levers: on the conveyor roles they land on that role's rung.
-    luna|haiku) case "$TYPE" in hd-builder) tier=BUILD1;; *) tier=LIGHT;; esac;;
-    terra|sonnet) case "$TYPE" in hd-builder) tier=BUILD2;; hd-proof-qa) tier=PROOF1;; *) tier=MID;; esac;;
-    opus) case "$TYPE" in hd-builder) tier=BUILD3;; hd-proof-qa) tier=PROOF2;; *) tier=TOP;; esac;;
+      # The type's level (proxy_agent_type_level; unlisted = MID). Rung 1 stays on it; each higher rung (--rung N, the S131 escalation lever) moves one level up, capped at TOP.
+      # A level that is full is never escalated here: the picker refuses (rc 75) and the PM queues the launch.
+      base_level="$(proxy_agent_type_level "$TYPE")"
+      case "$base_level" in LOW) idx=0;; TOP) idx=2;; *) idx=1;; esac
+      idx=$(( idx + rung - 1 ))
+      if [[ "$idx" -gt 2 ]]; then idx=2; fi
+      tier="${levels[$idx]}";;
+    # Explicit aliases are the other escalation levers: luna/haiku LOW, terra/sonnet MID, opus TOP.
+    luna|haiku) tier=LOW;;
+    terra|sonnet) tier=MID;;
+    opus) tier=TOP;;
     # S149: --model sol is the exact gpt-6.2-sol id (tier stays RAW, like astra). A tier here would let the picker return claude-opus-5-5 and override the alias.
     sol) ;;
   esac
-  if [[ -n "${RUNG:-}" && ( "$requested" != auto || "$max_rung" -eq 0 ) ]]; then
-    printf 'proxy-agent: --rung %s ignored (%s)\n' "$RUNG" "$([[ "$requested" != auto ]] && echo "explicit --model $requested" || echo "type $TYPE has no rungs")" >&2
+  if [[ -n "${RUNG:-}" && "$requested" != auto ]]; then
+    printf 'proxy-agent: --rung %s ignored (explicit --model %s)\n' "$RUNG" "$requested" >&2
+  elif [[ -n "${RUNG:-}" && "$RUNG" != 1 && "$base_level" == TOP ]]; then
+    printf 'proxy-agent: --rung %s ignored (type %s is already TOP)\n' "$RUNG" "$TYPE" >&2
   fi
-  SELECT_TIER="$tier"; SELECT_REASON=first_usable
-  # Effective rung for the run state (auto-escalation reads it back): BUILD1-3 / PROOF1-2 only; empty for raw models and other roles.
-  case "$tier" in BUILD[123]|PROOF[12]) SELECT_RUNG="${tier: -1}";; *) SELECT_RUNG="";; esac
-  # Exact sol on a conveyor role is that role's top rung (BUILD3 / PROOF2), so auto-escalation still reports top_rung instead of rung_unknown.
+  SELECT_TIER="$tier"; SELECT_REASON=first_usable; SELECT_RUNG=""
+  # Rung for the run state (proxy-escalate.py reads it back; it auto-escalates only hd-builder 1-3 and hd-proof-qa 1-2): LOW/MID = rung 1, TOP = the role's last rung, so a run that
+  # is already on TOP reports top_rung instead of being relaunched on the same level. Empty for raw models and every other role.
+  if [[ "$max_rung" -gt 0 ]]; then
+    case "$tier" in LOW|MID) SELECT_RUNG=1;; TOP) SELECT_RUNG="$max_rung";; esac
+  fi
+  # Exact sol on a conveyor role is that role's top rung, so auto-escalation still reports top_rung instead of rung_unknown.
   if [[ "$requested" == sol && "$max_rung" -gt 0 ]]; then SELECT_RUNG="$max_rung"; fi
   if [[ "$tier" != RAW ]]; then
     proxy_agent_pick_tier "$tier" || return 75
@@ -2066,7 +2261,7 @@ proxy_agent_select() {
   proxy_agent_primary_burn_check || return 75
   # Nested aliases get the same burn gate. A refused alias leaves PICK_MODEL empty; the export block below fails it closed.
   # They never use the OpenCode pool (uncounted by its cap): "nested" keeps them on the existing Claude/Grok/Codex routes.
-  proxy_agent_pick_tier LIGHT nested || true; HAIKU_MODEL="$PICK_MODEL"
+  proxy_agent_pick_tier LOW nested || true; HAIKU_MODEL="$PICK_MODEL"
   proxy_agent_pick_tier MID nested || true; SONNET_MODEL="$PICK_MODEL"
   proxy_agent_pick_tier TOP nested || true; OPUS_MODEL="$PICK_MODEL"
 }
@@ -2140,6 +2335,10 @@ resolve_model() {
     # (The OpenCode Go entry deepseek-v4.1-flash is a different id and a MID tier entry: see proxy_agent_pick_tier.)
     deepseek|deepseek-flash-4.1) echo "deepseek-flash-4.1 128000 8192";;
     inkling-2-mini) echo "inkling-2-mini 262144 32000";;  # vLLM max_model_len 262144 (served 21 Nov 22:53 IST)
+    # Sarvam Token Factory (CLIProxyAPI openai-compat "sarvam-tf"); context windows from the Sarvam /v2/models listing (23 Nov). Reasoning tokens bill as output.
+    sarvam-glm-5.3|sarvam-deepseek-v4.1-flash|sarvam-kimi-k3) echo "$1 1048576 32000";;
+    sarvam-105b)  echo "sarvam-105b 128000 16000";;
+    sarvam-gemma4) echo "sarvam-gemma4 262144 32000";;
     # Keep the local Spark proxy window on both aliases.
     ornith-1.5-35b-a3b|qwen3.8-flash-next) echo "$1 240000 16384";;
     gpt-6.2-sol)  echo "gpt-6.2-sol 1050000 128000";;  # Rajiv D0AMF0XE6TS ts 1794940288.370549; exact id only, not in any tier ladder
@@ -2300,6 +2499,7 @@ case "$MODEL" in
   inkling-2-mini) ;;  # local Inkling 2 Mini (DGX Spark vLLM via CLIProxyAPI openai-compat "inkling-spark"), 262144-token window
   ornith-1.5-35b-a3b|qwen3.8-flash-next) ;; # same local Spark vLLM service via CLIProxyAPI
   hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor) ;;  # OpenCode Go via CLIProxyAPI; conservative 200000/32000 window until a source is added
+  sarvam-glm-5.3|sarvam-deepseek-v4.1-flash|sarvam-105b|sarvam-gemma4|sarvam-kimi-k3) ;;  # Sarvam Token Factory via CLIProxyAPI openai-compat "sarvam-tf"; windows from resolve_model
   deepseek|deepseek-flash-4.1) ;;  # direct DeepSeek: the P0:<digits> gate (canonical identity, decorated forms included) runs before the dry-run return above
   *) echo "proxy-agent: model '$MODEL' not in alias table; using 200000-token window (warning)" >&2;;
 esac
@@ -2529,6 +2729,23 @@ if proxy_agent_is_capped "$TYPE"; then
     fi
   fi
 fi
+# P0 preemption (Rajiv C0ALZJHGE49 thread 1795369444.132999, ts 1795372352.279289, 23 Nov: "for P0's, preempt the lowest priority proxy agent").
+# A P0 launch is cap-exempt, so this never blocks it: when its pool (or the total) is full, proxy-preempt.py stops ONE lowest-priority live
+# lane (never a P0, 12b, or a lane mid remote-box lease/push), records a pm-ops relaunch obligation and logs to ~/.claude/state/proxy-preemptions.log.
+# Any helper failure, or nothing preemptible, still launches the P0. PROXY_AGENT_PREEMPT=0 turns it off; dry runs exit before this point.
+if [[ "${PROXY_AGENT_PREEMPT:-1}" != 0 ]]; then
+  _p0_launch=0; _p0_first=""
+  [[ "${PROXY_AGENT_CAP_OVERRIDE:-}" =~ ^P0:[0-9]+$ ]] && _p0_launch=1
+  if [[ "$_p0_launch" == 0 && -r "${ROLE_BRIEF:-}" ]]; then
+    IFS= read -r _p0_first < "$ROLE_BRIEF" || true
+    [[ "$_p0_first" =~ ^[[:space:]]*(PRIORITY|priority)[[:space:]]*:[[:space:]]*P0($|[[:space:]]) ]] && _p0_launch=1
+  fi
+  if [[ "$_p0_launch" == 1 ]]; then
+    python3 -I "${PROXY_AGENT_PREEMPT_HELPER:-$HOME/.claude/scripts/proxy-preempt.py}" --launch-name "${PROXY_AGENT_NAME:-proxy-$TYPE-$STAMP}" \
+      --model "$LAUNCH_MODEL" --override "${PROXY_AGENT_CAP_OVERRIDE:-}" --brief "${ROLE_BRIEF:-}" --total-cap "$PROXY_AGENT_TOTAL_CAP" >&2 \
+      || printf 'proxy-agent: P0 preemption rc=%s (launching the P0 anyway)\n' "$?" >&2
+  fi
+fi
 ARGS=(-p --name "${PROXY_AGENT_NAME:-proxy-$TYPE-$STAMP}" --model "$LAUNCH_MODEL" --max-turns "$MAX_TURNS" --output-format stream-json --verbose
       --dangerously-skip-permissions --setting-sources "$SETTING_SOURCES" --settings "$SAFETY_SETTINGS"
       --append-system-prompt "$BODY")
@@ -2723,6 +2940,8 @@ REVIEW_ROUND_TOKEN="$(proxy_agent_review_cap reserve)" || exit $?
   declare -f proxy_agent_pool_live
   declare -f proxy_agent_pool_blocked
   declare -f proxy_agent_resolve_opencode_cap
+  declare -f proxy_agent_is_sarvam_id
+  declare -f proxy_agent_resolve_sarvam_cap
   printf 'printf "Continue the task in your brief from exactly where you stopped. Do not end your turn until it is DONE, or BLOCKED with the exact external blocker (or HANDOFF). Do not send interim progress peer messages to PM; send ONE message only for a blocker that needs a PM decision, plus the final Stop.\\n" > %q\n' "$JOB_DIR/continue.md"
   # Also continue after an error_max_turns stop (rc!=0): 4 sol runs died that way on 2026-11-13 with work mid-flight (PM).
   printf 'pa_maxturns() { tail -c 6000 %q 2>/dev/null | grep -q "\\"subtype\\":\\"error_max_turns\\""; }\n' "$JSONL"
@@ -2741,6 +2960,17 @@ REVIEW_ROUND_TOKEN="$(proxy_agent_review_cap reserve)" || exit $?
   fi
   printf '    OPENCODE_PROXY_CAP="$(proxy_agent_resolve_opencode_cap "${OPENCODE_PROXY_CAP:-}")"\n'
   printf '    if proxy_agent_pool_blocked "$MODEL_ID"; then printf "[%%s] PROXY_AGENT_CONTINUE_REFUSED model=%%s cap=%%s reason=opencode_pool_cap capacity-stop\\n" "$(date -u +%%FT%%TZ)" "$MODEL_ID" "$OPENCODE_PROXY_CAP" >> %q; printf "PROXY_AGENT_CAPACITY_STOP rc=75 model=%%s cap=%%s reason=opencode_pool_cap\\n" "$MODEL_ID" "$OPENCODE_PROXY_CAP" >&2; rc=75; exit 75; fi\n' "$LOG"
+  printf '  fi\n'
+  # Same re-check for the Sarvam pool: a continuation is a new admission against SARVAM_PROXY_CAP (explicit launcher env wins, else the caps file, else 4).
+  # Kimi's availability gate is not re-applied: a lane that already holds a Kimi session keeps it; the gate only decides new picks.
+  printf '  if proxy_agent_is_sarvam_id "$MODEL_ID"; then\n'
+  if [[ -n "$_SARVAM_CAP_EXPLICIT" ]]; then
+    printf '    SARVAM_PROXY_CAP=%q\n' "$_SARVAM_CAP_EXPLICIT"
+  else
+    printf '    unset SARVAM_PROXY_CAP\n'
+  fi
+  printf '    SARVAM_PROXY_CAP="$(proxy_agent_resolve_sarvam_cap "${SARVAM_PROXY_CAP:-}")"\n'
+  printf '    if proxy_agent_pool_blocked "$MODEL_ID"; then printf "[%%s] PROXY_AGENT_CONTINUE_REFUSED model=%%s cap=%%s reason=sarvam_pool_cap capacity-stop\\n" "$(date -u +%%FT%%TZ)" "$MODEL_ID" "$SARVAM_PROXY_CAP" >> %q; printf "PROXY_AGENT_CAPACITY_STOP rc=75 model=%%s cap=%%s reason=sarvam_pool_cap\\n" "$MODEL_ID" "$SARVAM_PROXY_CAP" >&2; rc=75; exit 75; fi\n' "$LOG"
   printf '  fi\n'
   printf '  if [[ "$pa_claude_429" == 1 ]]; then pa_log_start=$(wc -c < "$PA_LOG"); fi\n'
   printf '  %q ' "$CLAUDE_BIN" "${ARGS[@]}"

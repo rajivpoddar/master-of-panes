@@ -11,6 +11,13 @@ Source: Rajiv, DM D0AMF0XE6TS thread 1794087326.732679:
 
 Buddhi rule: S120/S154: new work starts at `Skill(launch-agent)`, which reads env `PM_SUBAGENT_CAP` (the single source for the in-process cap; see that skill, the buddhi holds no number) and calls this skill whenever live in-process PM subagents are at or above it (every launch while the cap is 0, per Rajiv ts 1795182584.697179). Every due 12b comes here via proxy-agent.sh, never in-process (S147; launch-agent step 3).
 
+## [HIGH] Model routing = THREE levels (deployed 2026-11-22 22:30 IST; Rajiv C0ALZJHGE49 thread 1795351517.305319, ts 1795354409.166279 / 1795355545.905379; "grok can be used for top whenever it's available")
+Supersedes the PLAN/TOP/REVIEW/MID/LIGHT/BUILD1-3/PROOF1-2 lists below (kept for history).
+- TOP: grok-4.7 → claude-opus-5-5 → gpt-6.2-sol. Types: hd-planner, hd-investigator, pm-admission-reviewer (12b) and every *-reviewer, explore-issue-agent, growth, donna-influencer, marketing-site-builder, blog-post-builder.
+- MID (default for any unlisted type): ornith-1.5-35b-a3b → OpenCode (round-robin start over deepseek-v4.1-flash / glm-5.3 / hy4-flash-free) → claude-sonnet-5-5 → gpt-6.1-terra. Includes hd-builder, hd-proof-qa, claude (heartbeat/ops/drain), pm-triage-agent, ci-repair-agent, investigators, mop/autoscaler repair, pm-ops-tooling.
+- LOW: ornith → gpt-6-luna → claude-haiku-5-5. Types: cleanup-pr-runner.
+- A MID role reaches TOP only by explicit escalation (--rung ≥2, S131 stall, or exact --model); a full MID level REFUSES rc 75 (queue it), never silently falls to TOP. Exact --model override and the unfenced-model guard unchanged. SPARK_PROXY_CAP is read from proxy-caps.env.
+
 ## Why
 The PM runs on direct Claude because PM quality degrades behind cliproxy. In-process subagents always share the PM's endpoint, so they bill Claude. A proxy agent is a separate `claude -p` process pointed at CLIProxyAPI (127.0.0.1:8317), which routes to Claude, Codex, Grok and OpenCode Go accounts. Prompt caching works there because session-affinity was turned on 2026-11-08.
 
