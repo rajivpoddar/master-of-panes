@@ -1533,7 +1533,7 @@ proxy_agent_live_count() {
 proxy_agent_is_opencode_id() {
   local id
   id="$(proxy_agent_router_identity "$1")"
-  case "$id" in hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor|inkling-2-mini) return 0;; *) return 1;; esac  # inkling-2-mini: local Inkling on DGX Spark via CLIProxyAPI, unmetered, counted in OPENCODE_PROXY_CAP (Rajiv ts 1795280232.066559)
+  case "$id" in hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor|qwen3.8-flash-next|inkling-2-mini) return 0;; *) return 1;; esac  # qwen3.8-flash-next: local Qwen 3.8 Flash Next on DGX Spark via CLIProxyAPI, unmetered, collected with the other local Spark ids at the OpenCode-style gate; its own cap is QWEN_PROXY_CAP in proxy_agent_pool_blocked (Rajiv 22 Nov). inkling-2-mini kept so in-flight Inkling lanes still classify.
 }
 # Judgment/diagnosis lanes (PM 22 Nov 00:33 and 00:42 IST: "NEVER delegate debugging/root cause"): P0 lanes and these roles never route to the
 # local Inkling model and are exempt from the MoP bulk-read Read guard (scripts/bulk_read_guard.py reads BULK_READ_EXEMPT and PROXY_AGENT_TYPE).
@@ -1610,16 +1610,22 @@ proxy_agent_tier_models() {
   local models _m _kept=""
   case "$1" in
     # SOL FIRST IN EVERY TIER (Rajiv C0ALZJHGE49 thread 1794677380.515009, ts 1795158067.051479: "put 6.2 sol xhigh agents on it. we have spare capacity on codex. move all agents to sol."):
-    # INKLING RE-ADDED 21 Nov 23:50 IST (healthy since 23:20 at util 0.65; Rajiv DM ts 1795285172.440479 "is any agent on inkling? it’s idle"); 3 s health gate skips it if down. History: PULLED FROM TIERS 21 Nov 23:07 IST: Spark unreachable (ssh timeouts, :18120 no reply); re-add after a health check. Was: INKLING FIRST (Rajiv D0AMF0XE6TS ts 1795280519.029359: "when it is available proxy use, we should maximise it"): inkling-2-mini heads LIGHT/MID/BUILD1/PROOF1.
+    # QWEN 3.8 FLASH NEXT FIRST (Rajiv C0ALZJHGE49 thread 1795288756.340499, ts 1795312862.446869 "go. launch it on hy free"): the Spark now serves qwen3.8-flash-next in place of inkling-2-mini; it heads LIGHT/MID/BUILD1/PROOF1 like Inkling did. Inkling is REMOVED from every tier list (its code paths stay so it can be re-added) per the same directive. 3 s health gate skips it if the Spark is down.
+    # Order in those four lists, by POOL (Rajiv C0ALZJHGE49 thread 1795311834.216809, ts 1795315175.684789: "the order should be spark -> opencode -> claude proxy -> codex proxy";
+    # this supersedes the same thread's earlier ts 1795311834.216809 rate-maximising order; OpenCode cap lifted to 6 at ts 1795313825.118179):
+    # qwen3.8-flash-next (spark local, free) -> deepseek-v4.1-flash / hy4-flash-free (OpenCode Go; hy4 stays behind the free-model guard, so only
+    # builder/prover types take it) -> the tier's Claude id (claude proxy) -> the Codex ladder (luna -> terra -> sol) -> grok/muse last as before.
+    # glm-5.3 stays explicit --model only; caps, the free-model guard and the judgment-lane exclusion unchanged.
+    # Was: INKLING RE-ADDED 21 Nov 23:50 IST (healthy since 23:20 at util 0.65; Rajiv DM ts 1795285172.440479 "is any agent on inkling? it’s idle"); 3 s health gate skips it if down. History: PULLED FROM TIERS 21 Nov 23:07 IST: Spark unreachable (ssh timeouts, :18120 no reply); re-add after a health check. Was: INKLING FIRST (Rajiv D0AMF0XE6TS ts 1795280519.029359: "when it is available proxy use, we should maximise it"): inkling-2-mini heads LIGHT/MID/BUILD1/PROOF1.
     # TERRA FIRST (Rajiv D0AMF0XE6TS ts 1795280170.905869 (21 Nov 22:26 IST): 'reduce the codex proxy cap to 10 ... rajiv@scribie ... has to last 7 days till renewal. we have to go back to using terra before trying sol on codex.'): gpt-6.1-terra now heads every list, gpt-6.2-sol second.
     # gpt-6.2-sol heads every list and launches at reasoning effort xhigh (proxy_agent_launch_model_id). The previous entries stay behind it, in their old order, as the
     # fallbacks (Codex pool cap, 402/429 cooldown, probe failure). Supersedes sol only on BUILD3/PROOF2 (S149, ts 1794941131.743129), sol dropped from TOP (ts 1794720589.429929)
     # and hy4 first (ts 1795106112.425109; non-builder/prover types still skip hy4 via the free-model guard). gpt-6.1-terra stays in the tiers (ts 1794941131.743129).
     # OpenCode Go pool (Rajiv D0AMF0XE6TS thread 1794926930.078169, ts 1794930258.014469): hy4-flash-free joins LIGHT, deepseek-v4.1-flash joins MID.
     # Every tier ends with the emergency-only Muse Spark entry (see proxy_agent_is_emergency_muse). Grok stays in its existing slot.
-    LIGHT) models="inkling-2-mini gpt-6-luna gpt-6.1-terra gpt-6.2-sol hy4-flash-free claude-haiku-5-5 grok-4.7 muse-spark-1.3-contributor";;
+    LIGHT) models="qwen3.8-flash-next deepseek-v4.1-flash hy4-flash-free claude-haiku-5-5 gpt-6-luna gpt-6.1-terra gpt-6.2-sol grok-4.7 muse-spark-1.3-contributor";;
     # glm-5.3 registered, explicit --model only until one test build passes, Rajiv condition ts 1794942421.644269 (PM steer 2026-11-18: not in any automatic tier list).
-    MID) models="inkling-2-mini gpt-6-luna gpt-6.1-terra gpt-6.2-sol hy4-flash-free claude-sonnet-5-5 deepseek-v4.1-flash grok-4.7 muse-spark-1.3-contributor";;
+    MID) models="qwen3.8-flash-next deepseek-v4.1-flash hy4-flash-free claude-sonnet-5-5 gpt-6-luna gpt-6.1-terra gpt-6.2-sol grok-4.7 muse-spark-1.3-contributor";;
     TOP) models="gpt-6.1-terra gpt-6.2-sol claude-opus-5-5 grok-4.7 muse-spark-1.3-contributor";;
     # gpt-6.2-sol replaces gpt-6.1-sol (the "sol" alias); gpt-6.1-terra stays in the tiers (Rajiv D0AMF0XE6TS thread 1794939318.063889, ts 1794941131.743129: "6.1 terra should stay. 6.2 sol should replace 6.1 sol").
     # Per-role ladders (Rajiv D0AMF0XE6TS thread 1794624936.567599: ts 1794639918.387399 ladder, ts 1794640102.756179 hydrogen in the mid rungs).
@@ -1627,11 +1633,11 @@ proxy_agent_tier_models() {
     PLAN) models="gpt-6.1-terra gpt-6.2-sol grok-4.7 claude-opus-5-5 muse-spark-1.3-contributor";;
     # Grok before Codex in every rung: Codex must last to Thu (Rajiv ts 1794660714.234059 "only grok, claude, codex").
     # Dev ladder (Rajiv C0ALZJHGE49 thread 1794665799.784789, ts 1794665970.826379): haiku/luna → sonnet/terra → opus/sol. No Grok on dev rungs.
-    BUILD1) models="inkling-2-mini gpt-6-luna gpt-6.1-terra gpt-6.2-sol hy4-flash-free claude-haiku-5-5 deepseek-v4.1-flash muse-spark-1.3-contributor";;
+    BUILD1) models="qwen3.8-flash-next deepseek-v4.1-flash hy4-flash-free claude-haiku-5-5 gpt-6-luna gpt-6.1-terra gpt-6.2-sol muse-spark-1.3-contributor";;
     BUILD2) models="gpt-6.1-terra gpt-6.2-sol claude-sonnet-5-5 muse-spark-1.3-contributor";;
     # S149 (Rajiv ts 1794941131.743129 "6.1 terra should stay. 6.2 sol should replace 6.1 sol"); sol now leads every rung (ts 1795158067.051479, header above).
     BUILD3) models="gpt-6.1-terra gpt-6.2-sol claude-opus-5-5 muse-spark-1.3-contributor";;
-    PROOF1) models="inkling-2-mini gpt-6-luna gpt-6.1-terra gpt-6.2-sol hy4-flash-free claude-sonnet-5-5 deepseek-v4.1-flash muse-spark-1.3-contributor";;
+    PROOF1) models="qwen3.8-flash-next deepseek-v4.1-flash hy4-flash-free claude-sonnet-5-5 gpt-6-luna gpt-6.1-terra gpt-6.2-sol muse-spark-1.3-contributor";;
     PROOF2) models="gpt-6.1-terra gpt-6.2-sol claude-opus-5-5 muse-spark-1.3-contributor";;
     # 12b reviews: carbon -> fable -> astra (Rajiv D0AMF0XE6TS thread 1794624936.567599, ts 1794640502.657479 "the 12b reviewer ladder can be carbon/fable/astra").
     # Supersedes the earlier fable-first list (thread 1794573312.657559, ts 1794623641.572859). Reviews never skip claude-* at the cap (see below).
@@ -1695,11 +1701,23 @@ proxy_agent_pick_tier() {
     for _m in $models; do proxy_agent_is_opencode_id "$_m" || _kept="${_kept:+$_kept }$_m"; done
     models="$_kept"
   fi
-  # Judgment-work guard (side-agent note 22 Nov 00:33 IST, PM ruling): P0 lanes and diagnosis/verdict roles never route to the small
-  # local Inkling model. Their verdicts decide admin-merge asks and save-path fixes. Inkling stays first for routine build/proof/ops work.
+  # Judgment-work guard (Rajiv C0ALZJHGE49 thread 1795311834.216809, ts 1795315628.438539: "move claude before codex. prefer claude or
+  # judgement lane"): P0 lanes and diagnosis/verdict roles (12b/pm-admission-reviewer, QA verdicts, admin/merge-adjacent types) never route
+  # to the small local Spark model (qwen3.8-flash-next; Inkling kept in the exclusion for an in-flight lane) and never to gpt-6-luna (local's
+  # routine fallback). They start on Claude — claude-opus-5-5, then claude-sonnet-5-5 — then the Codex ladder (terra -> sol); every other
+  # tier entry follows in its usual order. The local model stays first for routine build/proof/ops work; caps unchanged (Claude cap 4 from the dial).
   if proxy_agent_is_judgment_lane; then
-    # Also drop gpt-6-luna (Inkling's routine fallback, Rajiv ts 1795289410.866129) so judgment lanes start on terra/sol.
-    _kept=""; for _m in $models; do [[ "$_m" == inkling-2-mini || "$_m" == gpt-6-luna ]] || _kept="${_kept:+$_kept }$_m"; done
+    # REORDER within the tier's own membership (never adds a model a tier does not list): the tier's Claude ids first in the
+    # opus -> sonnet preference order, then the Codex ladder (terra -> sol), then whatever else the tier carries. The local id,
+    # inkling and gpt-6-luna are dropped.
+    _kept=""
+    for _pref in claude-opus-5-5 claude-sonnet-5-5 gpt-6.1-terra gpt-6.2-sol; do
+      for _m in $models; do [[ "$_m" == "$_pref" ]] && _kept="${_kept:+$_kept }$_m"; done
+    done
+    for _m in $models; do
+      case "$_m" in qwen3.8-flash-next|inkling-2-mini|gpt-6-luna|claude-opus-5-5|claude-sonnet-5-5|gpt-6.1-terra|gpt-6.2-sol) continue;; esac
+      _kept="${_kept:+$_kept }$_m"
+    done
     models="$_kept"
   fi
   for id in $models; do
@@ -1709,11 +1727,13 @@ proxy_agent_pick_tier() {
       printf 'proxy-agent: REFUSED free-model guard model=%s type=%s (free/trial ids are unconditionally ineligible; trying the next tier model)\n' "$id" "${TYPE:-}" >&2
       continue
     fi
-    # Local Inkling health gate (side-agent note 21 Nov 23:07 IST: the picker skips rate-limited/over-budget models but not a dead host). A Spark that
-    # doesn't answer /v1/models within 3 s is skipped like a cooled model, before `last` is set, so it can never become the fallback pick.
-    if [[ "$id" == inkling-2-mini ]] && ! curl -s -o /dev/null -m 3 --fail "${INKLING_HEALTH_URL:-http://192.168.68.113:18120/v1/models}"; then
+    # Local Spark health gate (side-agent note 21 Nov 23:07 IST: the picker skips rate-limited/over-budget models but not a dead host). A Spark that
+    # doesn't answer /v1/models within 3 s is skipped like a cooled model, before `last` is set, so it can never become the fallback pick. Now
+    # applies to qwen3.8-flash-next and the legacy inkling-2-mini; both answer on the same :18120 vLLM (QWEN_HEALTH_URL overrides for the Qwen id).
+    if [[ "$id" == qwen3.8-flash-next || "$id" == inkling-2-mini ]] \
+       && ! curl -s -o /dev/null -m 3 --fail "$([[ "$id" == qwen3.8-flash-next ]] && echo "${QWEN_HEALTH_URL:-http://192.168.68.113:18120/v1/models}" || echo "${INKLING_HEALTH_URL:-http://192.168.68.113:18120/v1/models}")"; then
       skipped="${skipped:+$skipped,}$id:host_down"
-      printf 'proxy-agent: host_down skip model=%s (Inkling /v1/models did not answer in 3s)\n' "$id" >&2
+      printf 'proxy-agent: host_down skip model=%s (local Spark /v1/models did not answer in 3s)\n' "$id" >&2
       continue
     fi
     if proxy_agent_is_emergency_muse "$id"; then
@@ -1846,7 +1866,7 @@ for line in out.splitlines():
     # Same cut as proxy_agent_router_identity: lowercase, drop the first '(' or '[' suffix, trim.
     # A decorated OpenCode primary must count toward OPENCODE_PROXY_CAP (CTO REVISE ts 1795010788.320629).
     model = re.split(r"[(\[]", raw.lower(), 1)[0].strip()
-    kind = "claude" if model.startswith("claude-") else "codex" if model.startswith("gpt-") else "grok" if model.startswith("grok") else "inkling" if model == "inkling-2-mini" else "opencode" if model in ("hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor") else ""
+    kind = "claude" if model.startswith("claude-") else "codex" if model.startswith("gpt-") else "grok" if model.startswith("grok") else "qwen" if model == "qwen3.8-flash-next" else "inkling" if model == "inkling-2-mini" else "opencode" if model in ("hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor") else ""
     if kind == pool:
         n += 1
 print(n)
@@ -1870,7 +1890,10 @@ proxy_agent_pool_blocked() {
     gpt-*) pool=codex; cap="${CODEX_PROXY_CAP:-8}";;
     grok-4.7|grok) pool=grok; cap="${GROK_PROXY_CAP:-8}";;
     hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor) pool=opencode; cap="${OPENCODE_PROXY_CAP:-2}";;
-    # Inkling (local DGX Spark, unmetered) has its OWN cap, outside the OpenCode pool (Rajiv D0AMF0XE6TS ts 1795286017.407799: "yes, do b. set the cap to 4").
+    # Qwen 3.8 Flash Next (local DGX Spark, unmetered) replaced Inkling and has its OWN cap, outside the OpenCode pool. Default 4,
+    # matching the server's --max-num-seqs 4 (Rajiv C0ALZJHGE49 thread 1795288756.340499, ts 1795312862.446869: serve qwen3.8-flash-next
+    # at MAX_NUM_SEQS 4). Inkling keeps its own case so an in-flight Inkling lane still enforces its cap.
+    qwen3.8-flash-next) pool=qwen; cap="${QWEN_PROXY_CAP:-4}";;
     inkling-2-mini) pool=inkling; cap="${INKLING_PROXY_CAP:-8}";;  # cap 8 with vLLM --max-num-seqs 6 (Rajiv D0AMF0XE6TS ts 1795286725.047469 "go")
     *) return 1;;
   esac
@@ -1880,7 +1903,7 @@ proxy_agent_pool_blocked() {
   if [[ "$pool" == opencode && "$cap" =~ ^0+$ ]]; then return 0; fi
   if ! live="$(proxy_agent_pool_live "$pool")"; then
     printf 'proxy-agent: pool_cap UNAVAILABLE pool=%s\n' "$pool" >&2
-    if [[ "$pool" == opencode || "$pool" == inkling ]]; then return 0; fi
+    if [[ "$pool" == opencode || "$pool" == qwen || "$pool" == inkling ]]; then return 0; fi
     return 1
   fi
   [[ "${live:-0}" -ge "$cap" ]]
@@ -2102,6 +2125,9 @@ resolve_model() {
     # (The OpenCode Go entry deepseek-v4.1-flash is a different id and a MID tier entry: see proxy_agent_pick_tier.)
     deepseek|deepseek-flash-4.1) echo "deepseek-flash-4.1 128000 8192";;
     inkling-2-mini) echo "inkling-2-mini 262144 32000";;  # vLLM max_model_len 262144 (served 21 Nov 22:53 IST)
+    # Qwen 3.8 Flash Next served on the same Spark (MAX_MODEL_LEN 262144 server-side). Advertise the dev-slot profile's 240000/16384
+    # so the proxy lane matches the slots that ran qwen3.8-flash-next well (launch-dev-slot-claude.sh qwen38-next).
+    qwen3.8-flash-next) echo "qwen3.8-flash-next 240000 16384";;
     gpt-6.2-sol)  echo "gpt-6.2-sol 1050000 128000";;  # Rajiv D0AMF0XE6TS ts 1794940288.370549; exact id only, not in any tier ladder
     gpt-6-luna|gpt-6.1-terra|gpt-6.1-sol|gpt-6-astra|grok-4.7|gemini-4-argon-high|gemini-3.8-flash-high|gemini-4-hydrogen-xhigh|claude-opus-5-5-high|claude-sonnet-5-5-high|claude-haiku-5-5|claude-sonnet-5-5|claude-opus-5-5|claude-fable-5-2)
                   resolve_model "$(proxy_agent_alias_for_id "$1")";;
@@ -2258,6 +2284,7 @@ proxy_agent_log_emergency_muse opus "${OPUS_MODEL:-}"
 case "$MODEL" in
   ag-opus|ag-sonnet|luna|terra|sol|astra|grok|hydrogen|ernie|gemini-pro|gemini-flash|gpt-6-luna|gpt-6.1-terra|gpt-6.1-sol|gpt-6.2-sol|gpt-6.2-sol\(*\)|gpt-6-astra|grok-4.7|gemini-4-argon-high|gemini-3.8-flash-high|gemini-4-hydrogen-xhigh|claude-opus-5-5-high|claude-sonnet-5-5-high|haiku|sonnet|opus|fable|claude-haiku-5-5|claude-sonnet-5-5|claude-opus-5-5|claude-fable-5-2) ;;
   inkling-2-mini) ;;  # local Inkling 2 Mini (DGX Spark vLLM via CLIProxyAPI openai-compat "inkling-spark"), 262144-token window
+  qwen3.8-flash-next) ;;  # local Qwen 3.8 Flash Next on the same DGX Spark vLLM (:18120 "inkling-spark" openai-compat entry), 240000/16384 window
   hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor) ;;  # OpenCode Go via CLIProxyAPI; conservative 200000/32000 window until a source is added
   deepseek|deepseek-flash-4.1) ;;  # direct DeepSeek: the P0:<digits> gate (canonical identity, decorated forms included) runs before the dry-run return above
   *) echo "proxy-agent: model '$MODEL' not in alias table; using 200000-token window (warning)" >&2;;
@@ -2297,6 +2324,12 @@ export PROXY_AGENT=1
 export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$WINDOW"
 export CLAUDE_CODE_AUTO_COMPACT_WINDOW="$AUTO_COMPACT"
 export CLAUDE_CODE_MAX_OUTPUT_TOKENS="$MAX_OUT"
+# Per-lane thinking budget for the local Spark model. Qwen 3.8 Flash Next runs with MAX_THINKING_TOKENS 2048 on the dev slots
+# (launch-dev-slot-claude.sh qwen38-next, SPARK_MAX_THINKING_TOKENS=2048): its reasoning budget is small enough that a larger
+# default eats the 16384-token output window. Only ever a DEFAULT here, so a caller's explicit numeric env still wins.
+if [[ "$MODEL_ID" == qwen3.8-flash-next ]] && [[ -z "${MAX_THINKING_TOKENS:-}" ]]; then
+  export MAX_THINKING_TOKENS=2048
+fi
 # -p mode kills background subagents 10m after the last turn; proxy runs own their own bg work (13056 bisect lost 11-08).
 export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-0}"
 
@@ -2501,21 +2534,38 @@ if [[ "$PM_ROLE" == "1" ]]; then
 else
   SKILL_NOTE_DIRS="the main checkout .claude/skills or ~/.claude/skills"
 fi
-# Inkling lanes get a skill ALLOWLIST via skillOverrides, the same mechanism as the old Spark dev slots (Rajiv D0AMF0XE6TS
-# ts 1795287887.987329 "restrict the skills will leave more context for work"; ts 1795287991.318829 "recall skillOverrides. that was used
-# before on the spark slots."). ~1,400 discovered skills → ~26 "on" (~/.claude/scripts/inkling-skill-overrides.py), merged into this lane's
-# --settings file. Other skills can still be read directly as SKILL.md files. Failure to generate leaves the default (all skills), fail-open.
-if [[ "$MODEL_ID" == inkling-2-mini ]]; then
+# Local Spark lanes (qwen3.8-flash-next now, inkling-2-mini legacy) get a skill ALLOWLIST via skillOverrides, the same mechanism as the old
+# Spark dev slots (Rajiv D0AMF0XE6TS ts 1795287887.987329 "restrict the skills will leave more context for work"; ts 1795287991.318829 "recall
+# skillOverrides. that was used before on the spark slots."). ~1,400 discovered skills → ~26 "on" (~/.claude/scripts/inkling-skill-overrides.py),
+# merged into this lane's --settings file. Other skills can still be read directly as SKILL.md files. Failure to generate leaves the default
+# (all skills), fail-open. The merge is an ATOMIC temp-file + rename (CTO REVISE on 20ec646, ts 1795312540.092029): this file can carry the
+# sandbox and PreToolUse hooks, so it is never opened for writing in place; a failed write leaves the original byte-identical.
+if [[ "$MODEL_ID" == qwen3.8-flash-next || "$MODEL_ID" == inkling-2-mini ]]; then
   if _ovr="$(python3 /Users/rajiv/.claude/scripts/inkling-skill-overrides.py 2>/dev/null)" && [[ -n "$_ovr" ]]; then
-    OVR="$_ovr" python3 - "$SAFETY_SETTINGS" <<'PY' || echo "PROXY_AGENT_WARN reason=inkling_skill_overrides_merge_failed" >&2
-import json, os, sys
+    OVR="$_ovr" python3 - "$SAFETY_SETTINGS" <<'PY' || echo "PROXY_AGENT_WARN reason=local_model_skill_overrides_merge_failed" >&2
+import json, os, sys, tempfile
 p = sys.argv[1]
 d = json.load(open(p))
 d["skillOverrides"] = json.loads(os.environ["OVR"])
-json.dump(d, open(p, "w"))
+data = json.dumps(d)
+fd, tmp = tempfile.mkstemp(prefix=os.path.basename(p) + ".", suffix=".tmp", dir=os.path.dirname(os.path.abspath(p)))
+try:
+    with os.fdopen(fd, "w") as fh:
+        fh.write(data)
+        fh.flush()
+        if hasattr(os, "fsync"):
+            os.fsync(fh.fileno())
+    os.chmod(tmp, os.stat(p).st_mode & 0o7777)
+    os.replace(tmp, p)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
 PY
   else
-    echo "PROXY_AGENT_WARN reason=inkling_skill_overrides_unavailable" >&2
+    echo "PROXY_AGENT_WARN reason=local_model_skill_overrides_unavailable" >&2
   fi
 # Every other lane gets the same mechanism with the lane allowlist (Rajiv D0AMF0XE6TS thread 1795230917.966119, ts 1795310703.137599 "Yes, do it":
 # proxies list only the skills lanes use; the PM pane keeps its full list). ~/.claude/scripts/proxy-skill-overrides.py prints a settings fragment

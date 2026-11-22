@@ -66,9 +66,9 @@ def test_off_switch_and_description_cap_env(tmp_path):
 
 
 def test_launcher_merges_the_fragment_into_the_lane_settings_file_only_and_fails_open():
-    inkling = LAUNCHER.index("inkling_skill_overrides_unavailable")
+    local_model = LAUNCHER.index("local_model_skill_overrides_unavailable")
     branch = LAUNCHER.index('elif [[ "${PROXY_AGENT_SKILL_ALLOWLIST:-1}" != 0 ]]; then')
-    assert inkling < branch  # Inkling keeps its own allowlist; every other lane takes the elif branch
+    assert local_model < branch  # local Spark lanes keep their own allowlist; every other lane takes the elif branch
     block = LAUNCHER[branch:LAUNCHER.index("# Persist a private runner", branch)]
     assert "proxy-skill-overrides.py" in block and '"$SAFETY_SETTINGS"' in block
     assert 'PROXY_AGENT_WARN reason=skill_overrides_unavailable' in block

@@ -25,6 +25,8 @@ SRC = SCRIPT.read_text()
 HY4 = 'hy4-flash-free'
 DEEPSEEK = 'deepseek-v4.1-flash'
 MUSE = 'muse-spark-1.3-contributor'
+QWEN = 'qwen3.8-flash-next'
+INKLING = 'inkling-2-mini'
 POOL_IDS = (HY4, DEEPSEEK, MUSE)
 ALL_TIERS = ('LIGHT', 'MID', 'TOP', 'PLAN', 'BUILD1', 'BUILD2', 'BUILD3', 'PROOF1', 'PROOF2', 'REVIEW')
 
@@ -65,6 +67,10 @@ PROXY_AGENT_CLAUDE_CAP=5
 STUB_BLOCKED="${STUB_BLOCKED:-}"
 STUB_COOLED="${STUB_COOLED:-}"
 STUB_FAIL="${STUB_FAIL:-}"
+# The local Spark health gate (qwen3.8-flash-next / inkling-2-mini) curls /v1/models. Stub it healthy so a pick is decided by the
+# tier list, the cap and the cooldown only, never by whether this host can reach the Spark. The gate's own behaviour is asserted
+# statically in test_proxy_agent_qwen_routing.py.
+curl() { return 0; }
 proxy_agent_is_capped() { return 0; }
 proxy_agent_live_count() { echo 0; }
 proxy_agent_burn_enforced() { return 0; }
@@ -104,20 +110,29 @@ def _pick(tmp_path, tier, cooled='', fail='', blocked='', enforced=True, nested=
 
 def test_light_and_mid_order_with_opencode_models():
     tiers = _tier_models()
-    assert tiers['LIGHT'] == ['claude-haiku-5-5', HY4, 'grok-4.7', 'gpt-6-luna', MUSE]
-    assert tiers['MID'] == ['claude-sonnet-5-5', DEEPSEEK, 'grok-4.7', 'gpt-6.1-terra', MUSE]
-    # The requested order is preserved as a subsequence: haiku -> hy4 -> luna, sonnet -> deepseek -> terra.
-    light = tiers['LIGHT']
-    assert light.index('claude-haiku-5-5') < light.index(HY4) < light.index('gpt-6-luna')
-    mid = tiers['MID']
-    assert mid.index('claude-sonnet-5-5') < mid.index(DEEPSEEK) < mid.index('gpt-6.1-terra')
+    # Order by POOL (Rajiv C0ALZJHGE49 thread 1795311834.216809, ts 1795315175.684789 "spark -> opencode -> claude proxy -> codex proxy"):
+    # the local Spark id, then the OpenCode ids, then the tier's Claude id, then the Codex ladder. Asserted as relative order, not an
+    # exact-list pin (rule 60): a new correct entry anywhere must not fail this test.
+    for tier in ('LIGHT', 'MID', 'BUILD1', 'PROOF1'):
+        models = tiers[tier]
+        spark = models.index(QWEN)
+        opencode = min(models.index(m) for m in (DEEPSEEK, HY4) if m in models)
+        claude = min(models.index(m) for m in models if m.startswith('claude-'))
+        codex = min(models.index(m) for m in models if m.startswith('gpt-'))
+        assert spark < opencode < claude < codex, (tier, models)
+    # The Codex ladder keeps its luna -> terra -> sol order inside each local tier.
+    for tier in ('LIGHT', 'MID', 'BUILD1', 'PROOF1'):
+        ladder = [m for m in tiers[tier] if m in ('gpt-6-luna', 'gpt-6.1-terra', 'gpt-6.2-sol')]
+        assert ladder == ['gpt-6-luna', 'gpt-6.1-terra', 'gpt-6.2-sol'], tier
 
 
-def test_hy4_and_deepseek_only_in_their_tiers():
+def test_hy4_and_deepseek_stay_inside_the_tiers_that_listed_them():
     tiers = _tier_models()
-    for tier, models in tiers.items():
-        assert (HY4 in models) == (tier == 'LIGHT'), tier
-        assert (DEEPSEEK in models) == (tier == 'MID'), tier
+    # deepseek-v4.1-flash is a MID/BUILD1/PROOF1 route and hy4-flash-free rides every local tier behind the free-model
+    # guard; neither may leak into TOP/PLAN/BUILD2/BUILD3/PROOF2/REVIEW.
+    for tier in ('TOP', 'PLAN', 'BUILD2', 'BUILD3', 'PROOF2', 'REVIEW'):
+        assert HY4 not in tiers[tier], tier
+        assert DEEPSEEK not in tiers[tier], tier
 
 
 def test_muse_is_the_final_entry_of_every_tier_exactly_once():
@@ -130,10 +145,17 @@ def test_muse_is_the_final_entry_of_every_tier_exactly_once():
 
 def test_existing_claude_grok_codex_entries_are_kept():
     tiers = _tier_models()
-    assert tiers['TOP'][:3] == ['claude-opus-5-5', 'grok-4.7', 'gpt-6.1-terra']
-    assert tiers['PLAN'][:3] == ['grok-4.7', 'claude-opus-5-5', 'gpt-6.1-terra']
-    assert tiers['BUILD1'][:2] == ['claude-haiku-5-5', 'gpt-6-luna']
-    assert tiers['REVIEW'][:2] == ['claude-fable-5-2', 'gpt-6-astra']
+    # These entries must survive in their tiers; their exact positions are not pinned (rule 60). The 12b reviewer ladder keeps
+    # fable before astra, and REVIEW's Codex ids keep terra -> sol.
+    assert 'grok-4.7' in tiers['TOP'] and 'claude-opus-5-5' in tiers['TOP']
+    assert 'grok-4.7' in tiers['PLAN'] and 'claude-opus-5-5' in tiers['PLAN']
+    build1 = [m for m in tiers['BUILD1'] if m.startswith('gpt-')]
+    assert build1[:2] == ['gpt-6-luna', 'gpt-6.1-terra']
+    assert 'claude-haiku-5-5' in tiers['BUILD1']
+    review = tiers['REVIEW']
+    assert 'claude-fable-5-2' in review and 'gpt-6-astra' in review
+    assert review.index('claude-fable-5-2') < review.index('gpt-6-astra')
+    assert [m for m in review if m in ('gpt-6.1-terra', 'gpt-6.2-sol')] == ['gpt-6.1-terra', 'gpt-6.2-sol']
 
 
 # ---- one shared cap ---------------------------------------------------------------------------------------------
@@ -187,37 +209,52 @@ def test_opencode_cap_binds_exempt_roles_other_pools_stay_exempt(tmp_path):
 def test_exempt_mid_falls_through_when_opencode_is_at_cap(tmp_path):
     body = (
         'TYPE=ci-repair-agent\nROLE_BRIEF=\nPROXY_AGENT_CAP_OVERRIDE=\n'
+        'curl() { return 0; }\n'  # local Spark health gate: healthy, so the cap and cooldown decide
         'proxy_agent_burn_refused() { return 1; }\n'
+        'proxy_agent_is_capped() { return 0; }\n'
+        'proxy_agent_live_count() { echo 0; }\n'
+        'PROXY_AGENT_CLAUDE_CAP=5\n'
         'proxy_agent_sub_usable() { [[ "$1" == claude-sonnet-5-5 ]] && return 1; return 0; }\n'
         + CAPS + PICKER + FREE_GUARD_OFF
         + 'proxy_agent_pick_tier MID && rc=0 || rc=$?\n'
         + 'printf "rc=%s model=%s reason=%s\\n" "$rc" "${PICK_MODEL-}" "${PICK_REASON-}"\n'
     )
-    result = _bash(body, tmp_path, {'PROXY_AGENT_STUB_POOL_LIVE': '2', 'OPENCODE_PROXY_CAP': '2'})
+    result = _bash(body, tmp_path, {'PROXY_AGENT_STUB_POOL_LIVE': '6', 'OPENCODE_PROXY_CAP': '6', 'QWEN_PROXY_CAP': '8'})
     assert result.returncode == 0, result.stderr
-    assert 'pool_cap skip model=deepseek-v4.1-flash' in result.stderr
     fields = dict(part.split('=', 1) for part in result.stdout.strip().splitlines()[-1].split(' ', 2))
-    assert fields['rc'] == '0' and fields['model'] == 'grok-4.7', result.stderr
+    # ci-repair-agent is a judgment lane: the picker reorders to the tier's Claude ids (opus -> sonnet), then the Codex ladder,
+    # dropping the local Spark id, inkling and gpt-6-luna. Sonnet is cooled here, so the pick is the first surviving entry — never
+    # a capped pool id, never an id the tier does not list.
+    excluded = set(POOL_IDS) | {QWEN, INKLING, 'gpt-6-luna', 'claude-sonnet-5-5', MUSE}
+    judgment = [m for m in ('claude-opus-5-5', 'claude-sonnet-5-5') + tuple(_tier_models()['MID']) if m in _tier_models()['MID']]
+    expected = next(m for m in judgment if m not in excluded)
+    assert fields['model'] == expected, result.stderr
 
 
-def test_shared_cap_stops_a_pool_member_even_when_another_is_cooled(tmp_path):
-    # Pool full: hy4 (LIGHT) and muse are both pool_cap-skipped, so LIGHT falls through to grok, never to muse.
-    fields, _ = _pick(tmp_path, 'LIGHT', cooled='claude-haiku-5-5 gpt-6-luna', blocked=f'{HY4} {DEEPSEEK} {MUSE}')
-    assert fields['rc'] == '0' and fields['model'] == 'grok-4.7'
-    # Everything else cooled and the pool full: Muse is blocked by the shared cap, the pick is refused.
-    fields, stderr = _pick(tmp_path, 'MID', cooled='claude-sonnet-5-5 grok-4.7 gpt-6.1-terra', blocked=f'{HY4} {DEEPSEEK} {MUSE}')
+def test_a_pool_capped_route_is_skipped_and_the_pick_never_falls_to_muse(tmp_path):
+    # The shared cap skips a pool member; LIGHT still has a route ahead of it, so the pick is a real model, never Muse.
+    light = [m for m in _tier_models()['LIGHT'] if m != MUSE]
+    blocked = ' '.join(m for m in light if m in POOL_IDS)
+    cooled = ' '.join(m for m in light if m.startswith('claude-') or m.startswith('gpt-'))
+    fields, _ = _pick(tmp_path, 'LIGHT', cooled=cooled, blocked=f'{blocked} {MUSE}')
+    assert fields['rc'] == '0' and fields['model'] not in POOL_IDS + (MUSE,)
+    # Everything non-pool cooled and the pool full: Muse is blocked by the shared cap, the pick is refused.
+    mid = [m for m in _tier_models()['MID'] if m != MUSE]
+    fields, stderr = _pick(tmp_path, 'MID', cooled=' '.join(m for m in mid if m not in POOL_IDS),
+                           blocked=f'{" ".join(POOL_IDS)} {MUSE}')
     assert fields['rc'] == '75' and fields['model'] == ''
 
 
 # ---- emergency-only gate ----------------------------------------------------------------------------------------
 
-def test_muse_picked_only_after_every_earlier_entry_is_cooled(tmp_path):
+def test_the_pick_follows_the_tier_list_and_lands_on_muse_only_when_all_else_is_cooled(tmp_path):
+    order = [m for m in _tier_models()['LIGHT'] if m != MUSE]
     fields, _ = _pick(tmp_path, 'LIGHT')
-    assert fields['model'] == 'claude-haiku-5-5'
-    fields, _ = _pick(tmp_path, 'LIGHT', cooled='claude-haiku-5-5')
-    assert fields['model'] == HY4
-    fields, _ = _pick(tmp_path, 'LIGHT', cooled=f'claude-haiku-5-5 {HY4} grok-4.7')
-    assert fields['model'] == 'gpt-6-luna'
+    assert fields['model'] == order[0]
+    fields, _ = _pick(tmp_path, 'LIGHT', cooled=order[0])
+    assert fields['model'] == order[1]
+    fields, _ = _pick(tmp_path, 'LIGHT', cooled=' '.join(order[:4]))
+    assert fields['model'] == order[4]
     # Muse needs the whole eligible set exhausted, not just this rung: every tier's non-emergency route is cooled here.
     fields, _ = _pick(tmp_path, 'LIGHT', cooled=' '.join(_eligible()))
     assert fields['rc'] == '0' and fields['model'] == MUSE
@@ -233,14 +270,18 @@ def test_pool_capped_and_cooled_entries_open_the_emergency_gate_in_a_conveyor_ru
 
 
 def test_an_earlier_probe_failure_keeps_muse_gated(tmp_path):
-    fields, stderr = _pick(tmp_path, 'LIGHT', fail=HY4, cooled='claude-haiku-5-5 grok-4.7 gpt-6-luna')
+    order = [m for m in _tier_models()['LIGHT'] if m != MUSE]
+    rest = ' '.join(m for m in order if m != HY4)
+    fields, stderr = _pick(tmp_path, 'LIGHT', fail=HY4, cooled=rest)
     assert fields['rc'] == '75' and fields['model'] == ''
     assert f'{MUSE}:emergency_gate' in stderr
 
 
 def test_fallback_last_never_lands_on_muse(tmp_path):
-    fields, _ = _pick(tmp_path, 'LIGHT', cooled=f'claude-haiku-5-5 {HY4} grok-4.7 gpt-6-luna {MUSE}', enforced=False)
-    assert fields['model'] == 'gpt-6-luna'
+    order = [m for m in _tier_models()['LIGHT'] if m != MUSE]
+    # Every route cooled, Muse cooled too, gate not enforced: the fallback is the LAST non-Muse entry, never Muse.
+    fields, _ = _pick(tmp_path, 'LIGHT', cooled=' '.join(order) + f' {MUSE}', enforced=False)
+    assert fields['model'] == order[-1]
     assert fields['reason'] == 'fallback_last'
 
 
@@ -301,14 +342,15 @@ def test_eligible_set_covers_claude_grok_codex_and_the_other_pool_ids():
 
 
 def test_a_healthy_provider_outside_the_current_rung_blocks_muse(tmp_path):
-    # BUILD1 is haiku/luna only; both are cooled. Grok (not a BUILD1 entry) is healthy, so Muse stays gated.
-    fields, stderr = _pick(tmp_path, 'BUILD1', cooled='claude-haiku-5-5 gpt-6-luna')
+    # Every BUILD1 route is cooled; grok (not a BUILD1 entry) is healthy, so Muse stays gated.
+    build1 = ' '.join(m for m in _tier_models()['BUILD1'] if m != MUSE)
+    fields, stderr = _pick(tmp_path, 'BUILD1', cooled=build1)
     assert fields['rc'] == '75' and fields['model'] == ''
     assert f'{MUSE}:emergency_gate' in stderr
     assert 'emergency_gate skip' in stderr and 'blocker=' in stderr
     # Not enforced: the fallback_last pick still never lands on Muse.
-    fields, _ = _pick(tmp_path, 'BUILD1', cooled='claude-haiku-5-5 gpt-6-luna', enforced=False)
-    assert fields['model'] == 'gpt-6-luna' and fields['reason'] == 'fallback_last'
+    fields, _ = _pick(tmp_path, 'BUILD1', cooled=build1, enforced=False)
+    assert fields['model'] == _tier_models()['BUILD1'][-2] and fields['reason'] == 'fallback_last'
 
 
 @pytest.mark.parametrize('open_route', _eligible())
@@ -362,10 +404,14 @@ def test_nested_picks_never_use_the_opencode_pool(tmp_path, tier):
 
 
 def test_nested_light_skips_hy4_and_goes_to_the_next_approved_route(tmp_path):
-    fields, _ = _pick(tmp_path, 'LIGHT', nested=True, cooled='claude-haiku-5-5')
-    assert fields['model'] == 'grok-4.7'
-    fields, _ = _pick(tmp_path, 'MID', nested=True, cooled='claude-sonnet-5-5')
-    assert fields['model'] == 'grok-4.7'
+    # A nested alias drops every OpenCode-pool id, so cooling the tier head moves the pick to the first non-pool entry.
+    for tier in ('LIGHT', 'MID'):
+        order = _tier_models()[tier]
+        head = order[0]
+        non_pool = [m for m in order if m not in POOL_IDS + (MUSE,)]
+        expected = non_pool[1] if non_pool[0] == head else non_pool[0]
+        fields, _ = _pick(tmp_path, tier, nested=True, cooled=head)
+        assert fields['model'] == expected, tier
 
 
 def test_select_resolves_nested_aliases_with_nested_and_the_primary_without():
@@ -422,7 +468,9 @@ def test_raw_muse_at_the_pool_cap_is_refused_even_when_the_gate_is_open(tmp_path
 
 @pytest.mark.parametrize('model', ('claude-haiku-5-5', 'grok-4.7', 'gpt-6-luna', 'luna', 'deepseek-flash-4.1'))
 def test_guard_leaves_every_non_pool_primary_alone(tmp_path, model):
-    rc, stderr = _guard(tmp_path, model, blocked=' '.join(_eligible()))
+    # The guard refuses on the primary's OWN pool cap, so only the OpenCode pool may be blocked here: a non-pool primary must
+    # still be allowed with every OpenCode id at its cap.
+    rc, stderr = _guard(tmp_path, model, blocked=' '.join(POOL_IDS))
     assert rc == 'rc=0' and 'REFUSED' not in stderr
 
 
@@ -466,6 +514,7 @@ def test_decorated_opencode_id_uses_the_same_cap_as_the_canonical_id(tmp_path):
 def test_unavailable_opencode_count_falls_through_to_the_next_route(tmp_path):
     body = (
         'TYPE=hd-builder\nROLE_BRIEF=\nPROXY_AGENT_CAP_OVERRIDE=\n'
+        'curl() { return 0; }\n'  # local Spark health gate: healthy, so only the unreadable cap decides
         'proxy_agent_is_capped() { return 1; }\n'
         'proxy_agent_burn_refused() { return 1; }\n'
         'proxy_agent_sub_usable() { [[ "$1" == claude-sonnet-5-5 ]] && return 1; return 0; }\n'
@@ -479,7 +528,11 @@ def test_unavailable_opencode_count_falls_through_to_the_next_route(tmp_path):
     assert 'pool_cap UNAVAILABLE pool=opencode' in result.stderr
     assert 'pool_cap skip model=deepseek-v4.1-flash' in result.stderr
     fields = dict(part.split('=', 1) for part in result.stdout.strip().splitlines()[-1].split(' ', 2))
-    assert fields['rc'] == '0' and fields['model'] == 'grok-4.7', result.stderr
+    # Derived from the live MID list: an unreadable count blocks the OpenCode/locally-counted ids, so the pick is the first
+    # entry outside those pools that is not cooled (sonnet).
+    mid = _tier_models()['MID']
+    expected = next(m for m in mid if m not in set(POOL_IDS) | {QWEN, INKLING, 'claude-sonnet-5-5', MUSE})
+    assert fields['rc'] == '0' and fields['model'] == expected, result.stderr
 
 
 def test_live_counter_uses_the_same_router_cut_as_admission():
@@ -493,7 +546,7 @@ def test_live_counter_uses_the_same_router_cut_as_admission():
 
 def test_auto_continuation_rechecks_opencode_cap_before_the_fresh_spawn():
     gate = SRC.index('if proxy_agent_is_opencode_id "$MODEL_ID"')
-    spawn = SRC.index("printf '  %q ' \"$CLAUDE_BIN\" \"${ARGS[@]}\"'", gate)
+    spawn = SRC.index("printf '  %q ' \"$CLAUDE_BIN\" \"${ARGS[@]}\"", gate)
     between = SRC[gate:spawn]
     assert 'proxy_agent_pool_blocked "$MODEL_ID"' in between
     assert 'PROXY_AGENT_CONTINUE_REFUSED' in between
