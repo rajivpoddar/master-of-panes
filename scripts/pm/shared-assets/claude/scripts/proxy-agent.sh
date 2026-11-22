@@ -2733,7 +2733,8 @@ fi
 # A P0 launch is cap-exempt, so this never blocks it: when its pool (or the total) is full, proxy-preempt.py stops ONE lowest-priority live
 # lane (never a P0, 12b, or a lane mid remote-box lease/push), records a pm-ops relaunch obligation and logs to ~/.claude/state/proxy-preemptions.log.
 # Any helper failure, or nothing preemptible, still launches the P0. PROXY_AGENT_PREEMPT=0 turns it off; dry runs exit before this point.
-if [[ "${PROXY_AGENT_PREEMPT:-1}" != 0 ]]; then
+# PAUSED by PM 2026-11-23 03:44 IST per CTO REVISE (C0ALZJHGE49 thread 1795385404.941879, ts 1795385573.907659): default off until relaunch custody is persisted before SIGTERM.
+if [[ "${PROXY_AGENT_PREEMPT:-0}" != 0 ]]; then
   _p0_launch=0; _p0_first=""
   [[ "${PROXY_AGENT_CAP_OVERRIDE:-}" =~ ^P0:[0-9]+$ ]] && _p0_launch=1
   if [[ "$_p0_launch" == 0 && -r "${ROLE_BRIEF:-}" ]]; then
