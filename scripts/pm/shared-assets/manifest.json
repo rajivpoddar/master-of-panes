@@ -726,7 +726,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-runtime-closure",
-      "sha256": "19dcbe9c84134aac96a758082c8dee5d8d3efd112499458de850d1c8b95dbad8",
+      "sha256": "b33b53eff8497975d04aaa057b0acc3edaeaca227f5c9b0c1841b47835e061f4",
       "source_path": "claude/scripts/pm-hourly-post.sh"
     },
     {
@@ -1581,7 +1581,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slack-sender",
-      "sha256": "a7e924f255052bc2529a3c0e184e8d5c019f9149fd2bdf1c930666fc91ba62c5",
+      "sha256": "1d39524c1dcd38902cfc3bf25c53c803f8c249e3bbd1fdfde30ca34278166c12",
       "source_path": "claude/skills/slack-message/scripts/slack-send.sh"
     },
     {

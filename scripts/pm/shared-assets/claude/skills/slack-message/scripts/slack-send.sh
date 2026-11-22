@@ -1075,20 +1075,30 @@ if ! RESULT=$(curl -s -X POST "https://slack.com/api/chat.postMessage" \
 fi
 
 # Validate the response before routing or recording it as a delivered message.
+#
+# Two failure classes, told apart by the error= text (Rajiv C0ALZJHGE49 thread 1795351517.305319,
+# CTO REVISE ts 1795354634.420069): an EXPLICIT Slack rejection is a parsed JSON object with
+# ok:false and a non-empty string error code, so Slack did not post the message and the error is
+# printed as Slack sent it (for example invalid_blocks). ANYTHING ELSE that is not a clean ok:true
+# (empty body, non-JSON, a non-object, ok missing or not a boolean, ok:false without an error code,
+# or ok:true without a ts) is an UNREADABLE response: Slack may have accepted the post before the
+# reply became unreadable, so the line ends in delivery_uncertain and a caller must never re-send it.
 if ! python3 -c '
 import json, sys
 channel, thread = sys.argv[1:]
 try:
     result = json.load(sys.stdin)
-    if not isinstance(result, dict) or result.get("ok") is not True:
-        reason = result.get("error") or "non_ok_response" if isinstance(result, dict) else "invalid_response"
-        raise ValueError(str(reason))
-    if not isinstance(result.get("ts"), str) or not result["ts"].strip():
-        raise ValueError("missing_ts_delivery_uncertain")
-except (ValueError, TypeError) as exc:
-    reason = " ".join(str(exc).splitlines())
-    print(f"SLACK_SEND_FAILED channel={channel} thread={thread} error={reason}", file=sys.stderr)
-    sys.exit(1)
+except (ValueError, RecursionError):
+    result = None
+reason = "unreadable_response_delivery_uncertain"
+if isinstance(result, dict) and result.get("ok") is True:
+    if isinstance(result.get("ts"), str) and result["ts"].strip():
+        sys.exit(0)
+    reason = "missing_ts_delivery_uncertain"
+elif isinstance(result, dict) and result.get("ok") is False and isinstance(result.get("error"), str) and result["error"].strip():
+    reason = "_".join(result["error"].split())
+print(f"SLACK_SEND_FAILED channel={channel} thread={thread} error={reason}", file=sys.stderr)
+sys.exit(1)
 ' "$CHANNEL" "$THREAD_TS" <<< "$RESULT"; then
   exit 1
 fi

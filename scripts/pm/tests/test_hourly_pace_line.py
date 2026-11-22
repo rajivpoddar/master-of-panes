@@ -720,11 +720,13 @@ def test_poster_sends_each_table_reply_in_the_hourly_thread_and_falls_back_only_
     # The parent send takes the split body; a splitter problem leaves the full report to go out unsplit, as before.
     assert '-c C0ALZJHGE49 -f < "$PARENT_BODY"' in source and 'PARENT_BODY=/tmp/heartbeat-1h-post.txt\n' in source
     assert '|| N_TABLE_REPLIES=0' in source
-    # Plain-text fallback ONLY on a definitive SLACK_SEND_FAILED; an uncertain transport error is never re-sent (no duplicates).
+    # Plain-text fallback ONLY on Slack's explicit table rejection (exactly one SLACK_SEND_FAILED line, error=invalid_blocks or
+    # invalid_blocks_format). An unreadable response, transport error or any other error is never re-sent (CTO REVISE ts 1795354634.420069).
     fallback = source[source.index('_table_reply() {'):source.index('SEND_RC=0\nSEND_STARTED=1')]
     assert fallback.count('SLACK_TABLE_PLAIN=1') == 1
-    assert "grep -q '^SLACK_SEND_FAILED '" in fallback and "! grep -q 'delivery_uncertain'" in fallback
-    assert fallback.index("! grep -q 'delivery_uncertain'") < fallback.index('SLACK_TABLE_PLAIN=1')
+    gate = 'error=(invalid_blocks|invalid_blocks_format)$'
+    assert "grep -c '^SLACK_SEND_FAILED '" in fallback and gate in fallback
+    assert fallback.index(gate) < fallback.index('SLACK_TABLE_PLAIN=1')
     assert 'TABLE_REPLY_UNCERTAIN' in fallback and 'exit' not in fallback.replace('exit status', '')
     # A reply never touches the parent receipt file, so a failed reply cannot make the parent HOURLY_POST_UNCERTAIN.
     assert '"$CLAIM/receipt"' not in fallback
@@ -744,6 +746,102 @@ def test_sender_plain_table_env_sends_every_table_as_plain_sections_for_the_over
     assert any('| Item | Note |' in b['text']['text'] for b in blocks)
     native = _converter_blocks(body)                               # without the env var the table is still native
     assert [b['type'] for b in native].count('table') == 1
+
+
+_OFFLINE_OK = '{"ok":true,"channel":"C0ALZJHGE49","ts":"1795360000.000100"}'
+# Offline stand-in for curl: no network. Thread-check GETs (-G) answer "unknown"; every chat.postMessage POST is logged as native
+# (payload carries a table block) or plain, then answered per FAKE_MODE. A native post is rejected only in the reject_* modes.
+_FAKE_CURL = '''import json, os, sys
+args = sys.argv[1:]
+if '-G' in args:
+    sys.stdout.write('{"ok":false,"error":"missing_scope"}')
+    sys.exit(0)
+body = json.loads(args[args.index('-d') + 1])
+native = any(b.get('type') == 'table' for b in body.get('blocks', []))
+with open(os.environ['FAKE_LOG'], 'a') as log:
+    log.write('native\\n' if native else 'plain\\n')
+mode = os.environ['FAKE_MODE']
+ok = os.environ['FAKE_OK']
+out = {
+    'ok': ok,
+    'reject_table': '{"ok":false,"error":"invalid_blocks"}' if native else ok,
+    'reject_format': '{"ok":false,"error":"invalid_blocks_format"}' if native else ok,
+    'reject_both': '{"ok":false,"error":"invalid_blocks"}',
+    'other_error': '{"ok":false,"error":"ratelimited"}',
+    'empty': '',
+    'html': '<html>502 Bad Gateway</html>',
+    'array': '[]',
+    'no_ok': '{"error":"invalid_blocks"}',
+    'ok_false_no_error': '{"ok":false}',
+    'ok_no_ts': '{"ok":true}',
+}[mode]
+sys.stdout.write(out)
+'''
+
+
+def _table_reply_offline(tmp_path, mode):
+    """Run the REAL slack-send.sh (only its token file path is repointed at a fake env file) and the REAL _table_reply function
+    extracted from pm-hourly-post.sh, with curl faked on PATH. Nothing touches Slack or a real token."""
+    source = HOURLY_POST.read_text(encoding='utf-8')
+    func = source[source.index('_table_reply() {'):source.index('SEND_RC=0\nSEND_STARTED=1')]
+    real_sender = '/Users/rajiv/.claude/scripts/slack-send.sh'
+    assert func.count(real_sender) == 2                             # the native send and the one plain re-send
+    sender_src = SLACK_SEND.read_text(encoding='utf-8')
+    env_line = 'PM_ENV="/Users/rajiv/Downloads/projects/heydonna-app/.env.local"'
+    assert env_line in sender_src
+    # The sender runs under set -euo pipefail and greps both token names, so the fake env file carries both lines.
+    (tmp_path / 'fake.env').write_text('SLACK_BOT_TOKEN=offline-test-token\nSLACK_ALERTS_BOT_TOKEN=offline-test-token\n', encoding='utf-8')
+    sender = tmp_path / 'slack-send.sh'
+    sender.write_text(sender_src.replace(env_line, f'PM_ENV="{tmp_path}/fake.env"'), encoding='utf-8')
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    (bindir / 'curl').write_text(f'#!{sys.executable}\n{_FAKE_CURL}', encoding='utf-8')
+    (bindir / 'curl').chmod(0o755)
+    claim = tmp_path / 'claim'
+    claim.mkdir()
+    parent_receipt = 'OK ts=1795355101.961449 channel=C0ALZJHGE49\n'
+    (claim / 'receipt').write_text(parent_receipt, encoding='utf-8')
+    (claim / 'table-reply-1.txt').write_text('*Burn:* intro\n| A | B |\n|---|---|\n| 1 | 2 |\n', encoding='utf-8')
+    driver = tmp_path / 'driver.sh'
+    driver.write_text('set -uo pipefail\nCLAIM="$1"\nTS=1795355101.961449\n'
+                      "_OK_RE='^OK ts=[0-9]+\\.[0-9]+ channel=C0ALZJHGE49$'\n"
+                      + func.replace(real_sender, str(sender)) + '\n_table_reply 1\necho "RC=$?"\n', encoding='utf-8')
+    env = {'PATH': f'{bindir}:/usr/bin:/bin', 'HOME': str(tmp_path), 'FAKE_MODE': mode, 'FAKE_OK': _OFFLINE_OK,
+           'FAKE_LOG': str(tmp_path / 'posts.log')}
+    done = subprocess.run(['bash', str(driver), str(claim)], capture_output=True, text=True, timeout=120, env=env, cwd=tmp_path)
+    log = tmp_path / 'posts.log'
+    return {'stdout': done.stdout, 'stderr': done.stderr,
+            'posts': log.read_text(encoding='utf-8').split() if log.exists() else [],
+            'errors': (claim / 'table-reply-1.errors').read_text(encoding='utf-8'),
+            'parent_receipt_unchanged': (claim / 'receipt').read_text(encoding='utf-8') == parent_receipt}
+
+
+def test_table_reply_resends_plain_only_after_an_explicit_table_rejection_and_never_after_an_unreadable_response(tmp_path):
+    """CTO REVISE on ef00398 (C0ALZJHGE49 thread 1795351517.305319, ts 1795354634.420069): an explicit table rejection permits
+    exactly one plain reply; an empty, malformed or otherwise unreadable response permits zero (Slack may already have posted the
+    native reply); the confirmed parent receipt stays recorded and _table_reply still returns 0 in every case."""
+    cases = [  # mode, native/plain posts, result line, error= text the sender printed for the native post
+        ('ok', ['native'], 'TABLE_REPLY n=1 native OK ts=', None),
+        ('reject_table', ['native', 'plain'], 'TABLE_REPLY_FALLBACK n=1', 'error=invalid_blocks\n'),
+        ('reject_format', ['native', 'plain'], 'TABLE_REPLY_FALLBACK n=1', 'error=invalid_blocks_format\n'),
+        ('reject_both', ['native', 'plain'], 'TABLE_REPLY_FAILED n=1', 'error=invalid_blocks\n'),
+        ('empty', ['native'], 'TABLE_REPLY_UNCERTAIN n=1', 'error=unreadable_response_delivery_uncertain\n'),
+        ('html', ['native'], 'TABLE_REPLY_UNCERTAIN n=1', 'error=unreadable_response_delivery_uncertain\n'),
+        ('array', ['native'], 'TABLE_REPLY_UNCERTAIN n=1', 'error=unreadable_response_delivery_uncertain\n'),
+        ('no_ok', ['native'], 'TABLE_REPLY_UNCERTAIN n=1', 'error=unreadable_response_delivery_uncertain\n'),
+        ('ok_false_no_error', ['native'], 'TABLE_REPLY_UNCERTAIN n=1', 'error=unreadable_response_delivery_uncertain\n'),
+        ('ok_no_ts', ['native'], 'TABLE_REPLY_UNCERTAIN n=1', 'error=missing_ts_delivery_uncertain\n'),
+        ('other_error', ['native'], 'TABLE_REPLY_UNCERTAIN n=1', 'error=ratelimited\n'),
+    ]
+    for mode, posts, result_line, error_text in cases:
+        case_dir = tmp_path / mode
+        case_dir.mkdir()
+        got = _table_reply_offline(case_dir, mode)
+        assert got['posts'] == posts, (mode, got)
+        assert result_line in got['stdout'] and 'RC=0' in got['stdout'], (mode, got)
+        assert got['parent_receipt_unchanged'], mode
+        if error_text:
+            assert error_text in got['errors'], (mode, got['errors'])
 
 
 def test_pace_cell_neutralises_pipes_and_newlines_so_columns_cannot_shift():

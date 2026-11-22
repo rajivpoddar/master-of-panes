@@ -177,9 +177,11 @@ else
 fi
 _OK_RE='^OK ts=[0-9]+\.[0-9]+ channel=C0ALZJHGE49$'
 # One overflow-table reply. Best effort: it never writes the parent receipt file and never changes this script's exit status, so a
-# failed reply can never turn a delivered parent into HOURLY_POST_UNCERTAIN. Falls back to the old plain pipe text ONLY on a
-# definitive Slack rejection (SLACK_SEND_FAILED without delivery_uncertain): an uncertain transport error is never re-sent, so a
-# table can't be posted twice.
+# failed reply can never turn a delivered parent into HOURLY_POST_UNCERTAIN. Falls back to the old plain pipe text ONLY on Slack's
+# explicit rejection of the table block: the sender prints exactly one SLACK_SEND_FAILED line whose error= is invalid_blocks or
+# invalid_blocks_format (a parsed ok:false reply, so nothing was posted). An empty, malformed or otherwise unreadable response
+# (error=..._delivery_uncertain), a transport error, a timeout, any other Slack error or any unrecognised output is never re-sent,
+# so a native reply Slack accepted before the response became unreadable can't appear twice (CTO REVISE ts 1795354634.420069).
 _table_reply() {
   local n="$1" base="$CLAIM/table-reply-$1" rc=0
   SLACK_SEND_AS=alerts bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -t "$TS" -f < "$base.txt" \
@@ -187,7 +189,8 @@ _table_reply() {
   if [ "$rc" -eq 0 ] && [ "$(grep -Ec "$_OK_RE" "$base.receipt" || true)" -eq 1 ]; then
     echo "TABLE_REPLY n=$n native $(cat "$base.receipt")"; return 0
   fi
-  if grep -q '^SLACK_SEND_FAILED ' "$base.errors" && ! grep -q 'delivery_uncertain' "$base.errors"; then
+  if [ "$(grep -c '^SLACK_SEND_FAILED ' "$base.errors" || true)" -eq 1 ] \
+     && grep -Eq '^SLACK_SEND_FAILED channel=[A-Z0-9]+ thread=[0-9.]+ error=(invalid_blocks|invalid_blocks_format)$' "$base.errors"; then
     rc=0
     SLACK_TABLE_PLAIN=1 SLACK_SEND_AS=alerts bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -t "$TS" -f < "$base.txt" \
       > "$base.plain.receipt" 2> "$base.plain.errors" || rc=$?
