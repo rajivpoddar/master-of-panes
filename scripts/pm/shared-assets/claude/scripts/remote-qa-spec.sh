@@ -68,7 +68,9 @@
 #   CTO REVISE 1795306033.832689 (pel-mwr051ua-91fb8062): (1) the trusted host DERIVES every scoped path (lease, ledger objects, staging
 #   prefix) from its own box receipt, the physical-box identity (POOL_BOX, or the box itself) and --head before minting; the box-written
 #   ids file is only checked against it (DENIED on any difference). Exact mode also requires an EXPLICIT scoped app-data selection
-#   (QA_R2_SCOPED=1), --grant-receipt (the Run 9 object-only grant), and on the launch path: the box env readback (bucket heydonna-qa,
+#   (QA_R2_SCOPED=1 = Run 9 scoped heydonna-qa; QA_R2_SCOPED=0/unset = CI-parity heydonna-uploads with the CI key, Rajiv option A C0ALZJHGE49
+#   ts 1795311474.240329, recorded in lane.txt/the report; the mount replacement is then skipped), --grant-receipt (the Run 9 object-only grant,
+#   which backs the prefix-scoped sessions in BOTH modes), and on the launch path: the box env readback (scoped: bucket heydonna-qa,
 #   signer 9b8c9f309b38da1f), every shared R2 mount replaced by a lease-only QA secret, and the approved product pin (manifest
 #   product_pin; the launch head may differ from it only by the run-local spec). (2) Before any session exists the trusted host reconciles
 #   the LEGACY (heydonna-fixtures) and QA ledgers for the physical box AND the exact head (prior claims for the approved hash, halts, UNKNOWN
@@ -91,7 +93,7 @@ rtb="$HOME/.claude/scripts/remote-test-box.sh"
 source "$HOME/.claude/scripts/remote-qa-ownership.sh"   # qa_emit_ownership_receipt (shared with capture mode)
 llm_onmiss='' stripe_test_env='' pre_write_check='' extra_secrets=() extra_args_remote='' extra_box_env='' requires_modal='' run_id="qa-spec-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 exact_manifest='' canary_receipt='' exact_digest='' arm_pid='' exact_args='' exact_overlay_args='' onmiss_stock=''
-grant_receipt='' exact_dry='' product_pin='' exact_spend_box='' exact_profile='' spec_blob=''
+grant_receipt='' exact_dry='' product_pin='' exact_spend_box='' exact_profile='' spec_blob='' app_data=''
 # Label of the requested LLM mode (follows llm_onmiss, which the controller clears if it disables on-miss).
 llm_label() { if [ -z "$llm_onmiss" ]; then echo strict; elif [ -n "$exact_manifest" ]; then echo capture-on-miss-exact; else echo capture-on-miss; fi; }
 modal_helper="${QA_MODAL_HELPER:-$HOME/.claude/scripts/remote-qa-modal.py}"
@@ -219,9 +221,13 @@ env_file="${env_file:-$HOME/Downloads/projects/heydonna-app-3005/.env.local}"
 [ -r "$env_file" ] || { echo 'Env file unreadable' >&2; exit 2; }
 val() { grep -E "^$1=" "$env_file" | head -1 | cut -d= -f2- | tr -d "\"'" | awk '{print $1}'; }
 if [ -n "$exact_manifest" ]; then
-  # Explicit scoped app-data selection: the default QA storage is the CI-parity base env (production-parity bucket). An exact run never
-  # inherits it; the base env (or the caller) must select the Run 9 scoped heydonna-qa app-data storage on purpose.
-  [ "${QA_R2_SCOPED:-$(val QA_R2_SCOPED || true)}" = 1 ] || { echo 'QA_APP_DATA_SCOPE_REQUIRED: set QA_R2_SCOPED=1 (env or --env-file) to select the Run 9 scoped heydonna-qa app-data storage' >&2; exit 2; }
+  # App-data binding, explicit and recorded on every run. remote-qa-r2.py selects the Run 9 scoped heydonna-qa storage ONLY when QA_R2_SCOPED=1;
+  # any other value (0 or unset) is the CI-parity base env: heydonna-uploads with the CI key, like CI. Rajiv chose that (option A, C0ALZJHGE49
+  # thread 1794677380.515009 ts 1795311474.240329: "outcome takes precdence"). Either way the fixture, staging, ledger and report clients stay
+  # on prefix-scoped sessions; only the application's own data runtimes follow the selected binding.
+  if [ "${QA_R2_SCOPED:-$(val QA_R2_SCOPED || true)}" = 1 ]; then app_data=scoped; else app_data=ci-parity; fi
+  exact_args="$exact_args --app-data $app_data"; exact_overlay_args="$exact_overlay_args --app-data $app_data"
+  echo "QA_APP_DATA mode=$app_data" >&2
 fi
 disposable_cleanup() {
   [ -n "$managed_dir" ] || return 0
@@ -579,7 +585,8 @@ if [ -n "$exact_manifest" ]; then
     echo "QA_SPEC_BLOB ok spec=$spec blob=$spec_blob" | tee -a "$out/lane.txt"
   fi
   # Run 9 effective-storage readback on the exact launch path: the box/Next env must be the verified scoped heydonna-qa identity.
-  qa_rsh "python3 -I /root/qa/modal-lane.py check-app-data --env '$remote/.env.local'" >"$out/app-data-readback.log" 2>&1 || { echo 'QA_APP_DATA_UNSCOPED: box app-data storage is not the Run 9 scoped identity' | tee -a "$out/lane.txt" >&2; exit 1; }
+  qa_rsh "python3 -I /root/qa/modal-lane.py check-app-data --env '$remote/.env.local' --app-data '$app_data'" >"$out/app-data-readback.log" 2>&1 || { echo "QA_APP_DATA_UNEXPECTED: box app-data storage does not match the selected mode ($app_data)" | tee -a "$out/lane.txt" >&2; exit 1; }
+  echo "QA_APP_DATA mode=$app_data$([ "$app_data" = ci-parity ] && echo ' by Rajiv decision (option A, C0ALZJHGE49 1794677380.515009 ts 1795311474.240329): app data is CI-parity (heydonna-uploads, CI key); fixture/staging/ledger/report clients stay prefix-scoped')" | tee -a "$out/lane.txt"
   cat "$out/app-data-readback.log" | tee -a "$out/lane.txt"
   exact_spend_box="${pool_box:-$box}"
 fi
@@ -617,8 +624,12 @@ if [ -n "$llm_onmiss" ]; then
       # The box-written identities are only CHECKED against the trusted derivation (lease, physical box, exact head); DENIED on any difference.
       python3 -I "$modal_helper" check-exact-ids --box "$box" --head "$head" --spend-box "$exact_spend_box" --ids "$out/onmiss-ids.json" --exact-manifest "$exact_manifest" | tee -a "$out/lane.txt" || { echo 'QA_ONMISS_IDS_DENIED: box-written identities differ from the trusted derivation' | tee -a "$out/lane.txt" >&2; exit 1; }
       # Run 9 mount readback: no leased runtime may still mount the shared R2 secret.
-      qa_rsh "python3 -I /root/qa/modal-lane.py check-app-mounts --root '$remote'" 2>&1 | tee -a "$out/lane.txt"
-      [ "$(grep -c 'shared_mount_remaining=0' "$out/lane.txt")" -ge 1 ] || { echo 'QA_APP_MOUNTS_SHARED_REMAIN' | tee -a "$out/lane.txt" >&2; exit 1; }
+      if [ "$app_data" = scoped ]; then
+        qa_rsh "python3 -I /root/qa/modal-lane.py check-app-mounts --root '$remote'" 2>&1 | tee -a "$out/lane.txt"
+        [ "$(grep -c 'shared_mount_remaining=0' "$out/lane.txt")" -ge 1 ] || { echo 'QA_APP_MOUNTS_SHARED_REMAIN' | tee -a "$out/lane.txt" >&2; exit 1; }
+      else
+        echo 'QA_APP_MOUNTS mode=ci-parity shared_mount=kept (CI parity by Rajiv decision; the proxy fixture/staging/ledger clients never use it)' | tee -a "$out/lane.txt"
+      fi
       # Spend custody BEFORE any session exists: legacy (heydonna-fixtures) + QA (heydonna-qa) ledgers for the physical box AND the exact head,
       # prior claims for the approved hashes, halts and the combined allowance, bound into the QA ledgers (carry rows + custody marker) so the
       # proxy refuses every reservation without it. Trusted host only: the legacy read key never reaches a box.

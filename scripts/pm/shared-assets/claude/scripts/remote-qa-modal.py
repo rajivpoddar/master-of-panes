@@ -354,6 +354,38 @@ def app_data_values(env_text):
     return {k: values[k] for k in APP_DATA_R2_NAMES}, fp
 
 
+APP_DATA_MODES = ('scoped', 'ci-parity')
+CI_PARITY_BUCKET = 'heydonna-uploads'
+APP_DATA_DECISION = ('Rajiv C0ALZJHGE49 thread 1794677380.515009 ts 1795311474.240329 "option a. outcome takes precdence." '
+                     '(QA app data uses heydonna-uploads with the CI key, like CI)')
+
+
+def app_data_readback(env_text, mode):
+    """Launch-path readback of the APP-DATA runtimes' storage identity, by explicit mode. 'scoped' = the Run 9 heydonna-qa identity
+    (app_data_values). 'ci-parity' = Rajiv's decision (option A): the base env's heydonna-uploads bucket with the CI key, exactly like CI;
+    the fixture, staging, ledger and report clients stay on prefix-scoped sessions either way. The signer fingerprint is RECORDED, never printed in full."""
+    if mode == 'scoped':
+        _values, fingerprint = app_data_values(env_text)
+        return {'mode': 'scoped', 'bucket': SCOPED_FIXTURE_BUCKET, 'signer': fingerprint}
+    if mode != 'ci-parity':
+        raise ValueError('QA_APP_DATA_MODE_INVALID')
+    values = {}
+    for line in env_text.splitlines():
+        key, sep, value = line.removeprefix('export ').partition('=')
+        key = key.strip()
+        if sep and key in APP_DATA_R2_NAMES:
+            try:
+                parts = shlex.split(value, comments=True)
+            except ValueError:
+                raise ValueError('QA_APP_DATA_UNEXPECTED: ambiguous env entry') from None
+            values[key] = parts[0] if len(parts) == 1 else ''
+    if (any(not values.get(k) for k in APP_DATA_R2_NAMES) or values['R2_BUCKET_NAME'] != CI_PARITY_BUCKET
+            or values['R2_ENDPOINT_URL'] != 'https://' + values['R2_ACCOUNT_ID'] + '.r2.cloudflarestorage.com'):
+        raise ValueError('QA_APP_DATA_UNEXPECTED: app-data storage is not the CI-parity ' + CI_PARITY_BUCKET + ' identity')
+    return {'mode': 'ci-parity', 'bucket': CI_PARITY_BUCKET, 'signer': hashlib.sha256(values['R2_ACCESS_KEY_ID'].encode()).hexdigest()[:16],
+            'decision': APP_DATA_DECISION}
+
+
 def r2_lease_secret_name(box):
     return 'heydonna-qa-r2-' + identity(box)
 
@@ -716,6 +748,7 @@ def qa_finish_exact(s3, bucket, publisher, onmiss):
                    publication_counts=counts, publication_error=publication_error, readback=readback, join=join,
                    unapproved_staged=sorted(key for _, key in unmatched),
                    exact={'digest': exact['digest'], 'profile': exact.get('profile'), 'approval_ref': exact['approval_ref'], 'approved': sorted(approved),
+                          'app_data': onmiss.get('app_data'), 'app_data_decision': APP_DATA_DECISION if onmiss.get('app_data') == 'ci-parity' else None,
                           'captured': sorted(canonical_keys), 'readback_match': sum(r['status'] == 'MATCH' for r in readback)})
     if reason:
         summary.update(terminal_reason=reason, halted=True, halt_reason=summary.get('halt_reason') or reason)
@@ -960,7 +993,7 @@ def ledger_source(box, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmis
 
 
 def overlay(root, box=None, capture=False, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmiss=False, exact=None,
-            ids_out=None, dry=False):
+            ids_out=None, dry=False, app_data=None):
     if onmiss and capture:
         raise ValueError('--on-miss and --capture are exclusive')
     if exact and not onmiss:
@@ -1286,10 +1319,14 @@ echo "QA_MODAL_DEPLOY_SECONDS=$((SECONDS-qa_deploy_started)) parallel=true"
                 record['canonical_keys'] = sorted(ids['exact']['entries'])
                 Path(ids_out).write_text(json.dumps(record, indent=2) + '\n')
         changes[proxy] = overlay_proxy(proxy.read_text(), box, capture, allow_billable_tools, tool_spend_cap_usd, ids)
-    if exact and box:
-        # Exact mode: no leased runtime may mount the shared R2 secret; every mount becomes this lease's QA-only secret.
+    if exact and app_data not in APP_DATA_MODES:
+        raise ValueError('QA_APP_DATA_MODE_INVALID: exact mode needs an explicit --app-data scoped|ci-parity')
+    if exact and box and app_data == 'scoped':
+        # Run 9 binding: no leased runtime may mount the shared R2 secret; every mount becomes this lease's QA-only secret.
         mount_files, mount_count = overlay_app_data_mounts(root, box, changes)
-        print('QA_APP_DATA_MOUNTS replaced=' + str(mount_count) + ' files=' + str(mount_files) + ' lease_secret=' + r2_lease_secret_name(box))
+        print('QA_APP_DATA_MOUNTS mode=scoped replaced=' + str(mount_count) + ' files=' + str(mount_files) + ' lease_secret=' + r2_lease_secret_name(box))
+    elif exact and box:
+        print('QA_APP_DATA_MOUNTS mode=ci-parity shared_mount=kept (CI parity, ' + APP_DATA_DECISION + ')')
     # Check every anchor before replacing any file; validate shell syntax on staged copies.
     staged = []
     for p, text in changes.items():
@@ -2452,7 +2489,7 @@ def provision_extra_secrets(names, convex_helper, convex_root, run=subprocess.ru
 
 
 def prepare(box, root, config_path, capture=False, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmiss=False,
-            extra_secrets=(), convex_helper=None, convex_root=None, exact=None):
+            extra_secrets=(), convex_helper=None, convex_root=None, exact=None, app_data=None):
     extra_names = parse_extra_secrets(extra_secrets, convex_helper, convex_root)  # fail closed before any write
     if exact and not onmiss:
         raise ValueError('--exact-manifest requires --on-miss')
@@ -2542,7 +2579,11 @@ def prepare(box, root, config_path, capture=False, allow_billable_tools=False, t
     env = modal_env(True)
     cli(['secret','create','--from-dotenv',str(secret_env),updates['MODAL_API_KEY_SECRET_NAME']], env)
     print('QA_MODAL_SECRET=created name='+updates['MODAL_API_KEY_SECRET_NAME'])
-    if exact_ids and exact_ids.get('exact'):
+    if exact_ids and exact_ids.get('exact') and app_data not in APP_DATA_MODES:
+        raise ValueError('QA_APP_DATA_MODE_INVALID: exact mode needs an explicit --app-data scoped|ci-parity')
+    if exact_ids and exact_ids.get('exact') and app_data == 'ci-parity':
+        print('QA_APP_DATA_SECRET=not-created mode=ci-parity (the shared R2 mount is kept, like CI; ' + APP_DATA_DECISION + ')')
+    if exact_ids and exact_ids.get('exact') and app_data == 'scoped':
         # Exact mode: the lease-only QA R2 secret every leased runtime mounts instead of the shared one (Run 9 binding), built from the
         # scoped .env.local values after they are proven to be the verified heydonna-qa identity; removed at teardown by stop().
         r2_values, r2_fp = app_data_values(env_snapshot.decode())
@@ -3014,7 +3055,7 @@ def scoped_report_canary(root, output):
 
 
 def capture_report(box, root, output, capture=False, allow_billable_tools=False, tool_spend_cap_usd=2.0,
-                   onmiss=False, scoped=False, exact=None, session_file=None):
+                   onmiss=False, scoped=False, exact=None, session_file=None, app_data=None):
     os.environ.update(modal_env(True))
     run_id = 'remote-qa-' + identity(box)
     if exact and not onmiss:
@@ -3022,6 +3063,9 @@ def capture_report(box, root, output, capture=False, allow_billable_tools=False,
     ids = onmiss_effective(root, box, onmiss, exact)
     if exact:
         # Exact mode: the report container gets ONLY the controller-piped prefix-scoped session (no shared secret, no fallback).
+        if app_data not in APP_DATA_MODES:
+            raise RuntimeError('QA_APP_DATA_MODE_INVALID: exact report needs an explicit --app-data scoped|ci-parity')
+        ids['app_data'] = app_data
         scoped = True
         if capture or not ids or not session_file:
             raise RuntimeError('QA_SCOPED_R2_REFUSED: exact report requires a bound lease and an armed report session')
@@ -3164,6 +3208,7 @@ def main():
     parser.add_argument('--receipt',type=Path,help='check-canary-receipt')
     parser.add_argument('--head',help='check-exact-manifest: required checkout head')
     parser.add_argument('--spec',help='check-exact-manifest: the launch spec path, which must be the profile-approved spec')
+    parser.add_argument('--app-data',choices=list(APP_DATA_MODES),help='exact mode: app-data storage binding. scoped = Run 9 heydonna-qa identity; ci-parity = Rajiv option A (heydonna-uploads + CI key, like CI)')
     a=parser.parse_args()
     tool_policy(a.allow_billable_tools, a.tool_spend_cap_usd)
     if a.extra_secret and a.command!='prepare':
@@ -3177,6 +3222,8 @@ def main():
     if a.exact_manifest and a.command not in ('register','overlay','prepare','capture-report','check-exact-manifest','mint-session','arm-session',
                                               'check-exact-ids','reconcile-custody','verify-join'):
         parser.error('--exact-manifest is not valid for this command')
+    if a.exact_manifest and a.command in ('overlay','prepare','capture-report') and not a.app_data:
+        parser.error('--exact-manifest requires an explicit --app-data scoped|ci-parity')
     if a.dry_check and a.command != 'overlay':
         parser.error('--dry-check is only valid with overlay')
     if a.command in ('register','credentials','finish','stop','prepare'):
@@ -3194,11 +3241,11 @@ def main():
     elif a.command=='finish': finish(a.box)
     elif a.command=='stop': stop(a.box,a.remote)
     elif a.command=='reap': reap()
-    elif a.command=='overlay': overlay(a.root,a.box,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss,a.exact_manifest,a.ids_out,a.dry_check)
+    elif a.command=='overlay': overlay(a.root,a.box,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss,a.exact_manifest,a.ids_out,a.dry_check,a.app_data)
     elif a.command=='prepare': prepare(a.box,a.root,a.config,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss,
-                                       a.extra_secret,a.convex_helper,a.convex_root,a.exact_manifest)
+                                       a.extra_secret,a.convex_helper,a.convex_root,a.exact_manifest,a.app_data)
     elif a.command=='capture-report': capture_report(a.box,a.root,a.output,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss,
-                                                     False,a.exact_manifest,a.session_file)
+                                                     False,a.exact_manifest,a.session_file,a.app_data)
     elif a.command=='check-exact-manifest':
         if not a.exact_manifest:
             parser.error('check-exact-manifest requires --exact-manifest')
@@ -3246,8 +3293,11 @@ def main():
     elif a.command=='check-app-data':
         if not a.env:
             parser.error('check-app-data requires --env')
-        _values, fingerprint = app_data_values(a.env.read_text())
-        print('QA_APP_DATA_READBACK bucket=' + SCOPED_FIXTURE_BUCKET + ' signer=' + fingerprint + ' public_url=none ok')
+        if not a.app_data:
+            parser.error('check-app-data requires --app-data scoped|ci-parity')
+        readback = app_data_readback(a.env.read_text(), a.app_data)
+        print('QA_APP_DATA_READBACK mode=' + readback['mode'] + ' bucket=' + readback['bucket'] + ' signer=' + readback['signer'] + ' ok'
+              + (' decision="' + readback['decision'] + '"' if readback.get('decision') else ''))
     elif a.command=='check-app-mounts':
         if not a.root:
             parser.error('check-app-mounts requires --root')

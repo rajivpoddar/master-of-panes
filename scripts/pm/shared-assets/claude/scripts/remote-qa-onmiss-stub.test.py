@@ -741,8 +741,9 @@ try:
     socket.gethostname = lambda: EX_HOST
     try:
         head_manifest = manifest_for(HEAD1, [K_OK], 'head.json')
-        for why, args, needle in (('no session file', (None,), 'QA_SCOPED_R2_REFUSED'),
-                                  ('missing session file', (str(MDIR / 'absent.json'),), 'QA_SCOPED_R2_UNAVAILABLE')):
+        for why, args, needle in (('no session file', (None, 'ci-parity'), 'QA_SCOPED_R2_REFUSED'),
+                                  ('missing session file', (str(MDIR / 'absent.json'), 'scoped'), 'QA_SCOPED_R2_UNAVAILABLE'),
+                                  ('no explicit app-data mode', (str(MDIR / 'absent.json'), None), 'QA_APP_DATA_MODE_INVALID')):
             try:
                 H.capture_report(EX_BOX, APP, MDIR / 'rep.json', False, False, 2.0, True, False, str(head_manifest), *args)
                 check('exact report container: ' + why + ' refuses (no shared-secret fallback)', False)
@@ -966,6 +967,29 @@ try:
                           capture_output=True, text=True)
     check('CLI verify-join prints the status line and writes the verified join receipt', proc.returncode == 0 and 'QA_ONMISS_JOIN_RESULT status=COMPLETE dispatches=1' in proc.stdout
           and json.loads(jo.read_text())['expected']['project'] == 'qa-m15-qa-spec-X', (proc.stdout + proc.stderr)[:120])
+    # ---- Rajiv option A (C0ALZJHGE49 thread 1794677380.515009, ts 1795311474.240329): CI-parity app data is accepted, explicitly, and recorded ----
+    ci_env = ('R2_ACCOUNT_ID=%s\nR2_ACCESS_KEY_ID=CIKEY\nR2_SECRET_ACCESS_KEY=s3cret\nR2_BUCKET_NAME=heydonna-uploads\nR2_ENDPOINT_URL=https://%s.r2.cloudflarestorage.com\nR2_PUBLIC_URL=https://cdn.example.com\n'
+              % ('b' * 32, 'b' * 32))
+    rb = H.app_data_readback(ci_env, 'ci-parity')
+    check('ci-parity: heydonna-uploads with the base-env CI key is ACCEPTED (QA_APP_DATA_UNSCOPED no longer refuses it); fingerprint recorded, decision recorded',
+          rb['mode'] == 'ci-parity' and rb['bucket'] == 'heydonna-uploads' and rb['signer'] == _hl.sha256(b'CIKEY').hexdigest()[:16] and 'option a' in rb['decision'] and 'CIKEY' not in json.dumps(rb))
+    for why, text, mode in (('the scoped QA bucket under ci-parity', ci_env.replace('heydonna-uploads', 'heydonna-qa'), 'ci-parity'), ('a foreign endpoint', ci_env.replace('.r2.cloudflarestorage.com', '.r2.example.com'), 'ci-parity'),
+                            ('a missing key', ci_env.replace('R2_ACCESS_KEY_ID=CIKEY\n', ''), 'ci-parity'), ('the CI bucket under scoped mode', ci_env, 'scoped'), ('an unknown mode', ci_env, 'whatever')):
+        try:
+            H.app_data_readback(ci_env if why == 'the CI bucket under scoped mode' else text, mode)
+            check('app-data readback refuses ' + why, False)
+        except ValueError as error:
+            check('app-data readback refuses ' + why, any(c in str(error) for c in ('QA_APP_DATA_UNEXPECTED', 'QA_APP_DATA_UNSCOPED', 'QA_APP_DATA_MODE_INVALID')))
+    sxa = H.qa_finish(FakeS3(), 'heydonna-qa', 'x', False, publisher, dict(EX2_IDS, app_data='ci-parity'))
+    check('the run receipt (report) records that app data is CI-parity by Rajiv decision', sxa['exact']['app_data'] == 'ci-parity' and 'option a' in sxa['exact']['app_data_decision'])
+    for command, extra in (('overlay', ['--root', str(MDIR), '--box', EX_BOX]), ('prepare', ['--root', str(MDIR), '--box', EX_BOX, '--config', str(MDIR / 'c.json')]),
+                           ('capture-report', ['--root', str(MDIR), '--box', EX_BOX, '--output', str(MDIR / 'o.json')])):
+        proc = subprocess.run([sys.executable, '-I', str(HELPER), command, '--on-miss', '--exact-manifest', str(MAN_PATH), *extra], capture_output=True, text=True, env={'HOME': str(MDIR), 'PATH': os.environ.get('PATH', '')})
+        check('CLI ' + command + ': exact mode refuses to run without an explicit --app-data', proc.returncode == 2 and '--app-data' in proc.stderr, proc.stderr.strip()[-100:])
+    proc = subprocess.run([sys.executable, '-I', str(HELPER), 'check-app-data', '--env', str(MDIR / 'e.env')], capture_output=True, text=True, env={'HOME': str(MDIR), 'PATH': os.environ.get('PATH', '')})
+    (MDIR / 'e.env').write_text(ci_env)
+    proc = subprocess.run([sys.executable, '-I', str(HELPER), 'check-app-data', '--env', str(MDIR / 'e.env'), '--app-data', 'ci-parity'], capture_output=True, text=True, env={'HOME': str(MDIR), 'PATH': os.environ.get('PATH', '')})
+    check('CLI check-app-data --app-data ci-parity prints the readback with the decision and never the key', proc.returncode == 0 and 'mode=ci-parity bucket=heydonna-uploads' in proc.stdout and 'option a' in proc.stdout and 'CIKEY' not in proc.stdout, proc.stdout[:120])
     # ---- CTO GO C0ALZJHGE49 thread 1795302375.270589 (ts 1795310865.915209): explicit proof PROFILES ----
     P14 = 'pr14414-headerless-capture'
     saved_pin = dict(H.EXACT_PROFILES[P14])

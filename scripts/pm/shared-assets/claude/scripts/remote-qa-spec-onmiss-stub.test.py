@@ -124,9 +124,13 @@ check('exact wiring: sessions armed only after prepare bound the manifest digest
       all(v > 0 for v in si.values()) and si['QA_ONMISS_EXACT_BOUND'] < si['scoped_arm_loop & arm_pid=$!'] and cs < si['mint-session --kind report'] < ce
       and 'heydonna-r2-credentials' not in SPEC_SH and 'LLM_FIXTURE_R2' not in SPEC_SH and 'R2_SECRET' not in SPEC_SH, str(si))
 up_at = SPEC_SH.index('rtb" up --owner')
-chk = {name: SPEC_SH.index(name) for name in ('check-grant-receipt', 'QA_APP_DATA_SCOPE_REQUIRED', 'check-app-data', 'check-exact-ids', 'check-app-mounts', 'reconcile-custody', 'scoped_arm_loop & arm_pid=$!')}
-check('REVISE 1: explicit scoped app-data selection and the grant receipt are required before any lease, box or spend',
-      chk['check-grant-receipt'] < up_at and chk['QA_APP_DATA_SCOPE_REQUIRED'] < up_at and 'QA_R2_SCOPED' in SPEC_SH, str(chk))
+chk = {name: SPEC_SH.index(name) for name in ('check-grant-receipt', 'app_data=ci-parity', 'check-app-data', 'check-exact-ids', 'check-app-mounts', 'reconcile-custody', 'scoped_arm_loop & arm_pid=$!')}
+check('REVISE 1 / option A: the app-data mode (scoped | CI-parity by Rajiv decision) is decided explicitly before any lease, box or spend; the grant receipt is still required',
+      chk['check-grant-receipt'] < up_at and chk['app_data=ci-parity'] < up_at and 'QA_R2_SCOPED' in SPEC_SH and 'QA_APP_DATA_SCOPE_REQUIRED' not in SPEC_SH
+      and 'option A' in SPEC_SH and '1795311474.240329' in SPEC_SH, str(chk))
+check('option A: CI-parity app data skips ONLY the mount replacement/readback; the readback is mode-aware and the mode is recorded in lane.txt',
+      '[ "$app_data" = scoped ]' in SPEC_SH and "--app-data '$app_data'" in SPEC_SH and 'QA_APP_MOUNTS mode=ci-parity' in SPEC_SH and 'by Rajiv decision' in SPEC_SH
+      and 'exact_args="$exact_args --app-data $app_data"' in SPEC_SH)
 check('REVISE 1: box env readback, trusted-derivation check (DENIED), shared-mount readback and custody reconcile all precede the first session',
       chk['check-app-data'] < chk['check-exact-ids'] < chk['check-app-mounts'] < chk['reconcile-custody'] < chk['scoped_arm_loop & arm_pid=$!'] and 'product-pin.log' in SPEC_SH, str(chk))
 check('REVISE 1: every mint passes the trusted lease, physical box and head (never only a box-written file)',
