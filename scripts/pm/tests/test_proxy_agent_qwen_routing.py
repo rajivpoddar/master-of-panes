@@ -152,3 +152,18 @@ def test_skill_allowlist_branch_covers_qwen_and_writes_atomically():
     assert 'open(p, "w")' not in block
     assert "os.replace(tmp, p)" in block and "os.fsync" in block and "tempfile.mkstemp" in block
     assert 'PROXY_AGENT_WARN reason=local_model_skill_overrides_unavailable' in block
+
+
+def test_every_tier_model_is_probe_able():
+    # Measured 22 Nov: the usability probe (proxy_agent_probe_claude_messages) returns "fail" for any id outside its allowlist,
+    # and the caller records that as probe_failed, so the lane is cooled and falls through to a PAID model. A free local id that
+    # is missing from the allowlist is therefore silently as expensive as a dead host. Assert the property over DISCOVERED tier
+    # ids rather than checking one id by name, so a future tier addition cannot repeat this.
+    probe = SRC[SRC.index("PROXY_AGENT_CLAUDE_PROBE_MODEL"):]
+    allow_line = [l for l in probe.split("\n") if "if model not in (" in l][0]
+    allow = set(re.findall(r'"([^"]+)"', allow_line))
+    tier_ids = {i for models in _tier_models().values() for i in models}
+    missing = sorted(tier_ids - allow)
+    assert not missing, f"tier ids the probe cannot test -> cooled as probe_failed: {missing}"
+    # The Spark id specifically must be probe-able (it heads four tiers).
+    assert QWEN in allow
