@@ -78,6 +78,20 @@ def test_health_gate_covers_qwen_with_its_own_url_and_three_second_budget():
     assert '-m 3' in gate
 
 
+def test_health_gate_probes_a_credential_free_surface_not_the_authenticated_models_endpoint():
+    # Measured 22 Nov on the live Spark: the serving recipe passes --api-key, so vLLM answers an UNAUTHENTICATED /v1/models with 401.
+    # The gate curled that path with no credential and `--fail` turned the 401 into an empty body, i.e. host_down on a healthy host, which
+    # silently routes every qwen lane to a PAID model - the exact cost this tier exists to avoid. The probe must therefore be a surface the
+    # engine serves without a credential AND one that still names the served checkpoint, so model_not_served stays discriminating.
+    gate = SRC[SRC.index("Local Spark health gate"):SRC.index("if proxy_agent_is_emergency_muse \"$id\"; then")]
+    # Property, not a site list: no default URL in the gate may be the bearer-only /v1 surface.
+    defaults = re.findall(r"\{\w*HEALTH_URL:-([^}]+)\}", gate)
+    assert defaults, "health gate lost its default probe URLs"
+    assert all("/v1/models" not in d for d in defaults), defaults
+    # ...and every default still targets a surface that carries the served id (the quoted-token match below relies on it).
+    assert all(d.endswith("/metrics") for d in defaults), defaults
+
+
 def test_health_gate_requires_the_served_model_id_not_just_a_listening_port():
     # Peer 22 Nov 03:05: the Spark serves ONE checkpoint per port, so a host that answers but lists the other id would send a lane into a 404 probe
     # (a failed rung that also closes the emergency gate). An absent id must be a plain model_not_served skip.
@@ -87,6 +101,16 @@ def test_health_gate_requires_the_served_model_id_not_just_a_listening_port():
     assert "_spark_ids" in gate and "model_not_served" in gate
     # host_down (no answer) and model_not_served (answers, wrong checkpoint) are distinct skips.
     assert "host_down" in gate
+
+
+def test_gate_survives_the_live_spark_payload_and_rejects_the_other_checkpoint():
+    # Live payloads captured 22 Nov. /metrics is open and repeats model_name="<served id>"; the other checkpoint must NOT match, or a Spark
+    # mid-swap would route lanes to a model it is not serving.
+    qwen_metrics = 'vllm:num_requests_total{engine="0",model_name="qwen3.8-flash-next"} 1060.0\n'
+    inkling_metrics = 'vllm:num_requests_total{engine="0",model_name="inkling-2-mini"} 12.0\n'
+    assert f'"{QWEN}"' in qwen_metrics
+    assert f'"{QWEN}"' not in inkling_metrics
+    assert f'"{INKLING}"' in inkling_metrics
 
 
 def test_host_down_retries_once_before_routing_the_lane_to_a_paid_model():

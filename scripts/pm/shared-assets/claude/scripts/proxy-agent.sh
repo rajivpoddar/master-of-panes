@@ -1733,21 +1733,26 @@ proxy_agent_pick_tier() {
     # the URL). The check is the SERVED MODEL ID, not just a listening port (peer 22 Nov 03:05): the Spark serves one model at a time, so a host that
     # answers but lists only the other checkpoint would send this lane into a 404 probe - a failed rung that also closes the emergency gate - instead
     # of falling through to the next tier model. An id absent from /v1/models is model_not_served, a plain skip.
+    # The probe target is /metrics, NOT /v1/models (measured 22 Nov 04:5x on the live Spark): the recipe serves with
+    # `--api-key`, so vLLM answers an unauthenticated /v1/models with 401 and the gate's `--fail` read that as host_down on
+    # a perfectly healthy host - every qwen lane would have been routed to a PAID model, the exact cost this tier exists to
+    # avoid. /metrics needs no credential, answers 200, and carries the served checkpoint as `model_name="<id>"`, so the
+    # quoted-token test below still discriminates model_not_served instead of merely proving that some vLLM is listening.
     if [[ "$id" == qwen3.8-flash-next || "$id" == inkling-2-mini ]]; then
-      if [[ "$id" == qwen3.8-flash-next ]]; then _spark_url="${QWEN_HEALTH_URL:-http://192.168.68.113:18120/v1/models}"; else _spark_url="${INKLING_HEALTH_URL:-http://192.168.68.113:18120/v1/models}"; fi
+      if [[ "$id" == qwen3.8-flash-next ]]; then _spark_url="${QWEN_HEALTH_URL:-http://192.168.68.113:18120/metrics}"; else _spark_url="${INKLING_HEALTH_URL:-http://192.168.68.113:18120/metrics}"; fi
       # ONE retry before declaring the host down: the LAN occasionally drops a single probe under load (measured 4/20 then 0/80 on the same
       # endpoint minutes apart), and a spurious host_down silently routes the lane to a PAID model, which is the exact cost this tier exists to
       # avoid. Worst case is 2 x 3 s for a genuinely dead host, and a real outage still fails both attempts.
       _spark_ids="$(curl -s -m 3 --fail "$_spark_url" 2>/dev/null)" || { sleep 0.4; _spark_ids="$(curl -s -m 3 --fail "$_spark_url" 2>/dev/null)"; }
       if [[ -z "$_spark_ids" ]]; then
         skipped="${skipped:+$skipped,}$id:host_down"
-        printf 'proxy-agent: host_down skip model=%s (local Spark /v1/models did not answer in 3s, twice)\n' "$id" >&2
+        printf 'proxy-agent: host_down skip model=%s (local Spark /metrics did not answer in 3s, twice)\n' "$id" >&2
         continue
       fi
       # Match the quoted id token so qwen3.8-flash-next cannot match a longer alias that merely contains it.
       if [[ "$_spark_ids" != *"\"$id\""* ]]; then
         skipped="${skipped:+$skipped,}$id:model_not_served"
-        printf 'proxy-agent: model_not_served skip model=%s (local Spark /v1/models answered but does not list %s)\n' "$id" "$id" >&2
+        printf 'proxy-agent: model_not_served skip model=%s (local Spark /metrics answered but does not list %s)\n' "$id" "$id" >&2
         continue
       fi
       unset _spark_url _spark_ids
