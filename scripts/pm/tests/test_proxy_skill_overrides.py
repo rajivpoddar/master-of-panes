@@ -74,3 +74,60 @@ def test_launcher_merges_the_fragment_into_the_lane_settings_file_only_and_fails
     assert 'PROXY_AGENT_WARN reason=skill_overrides_unavailable' in block
     assert 'PROXY_AGENT_WARN reason=skill_overrides_merge_failed' in block
     assert ".claude/settings" not in block  # never touches the user or PM settings files
+
+
+def _run_launcher_block(tmp_path, settings, fault):
+    """Run the REAL skill-overrides block of proxy-agent.sh under /bin/bash (3.2 on this Mac) with set -euo pipefail."""
+    start = LAUNCHER.index('elif [[ "${PROXY_AGENT_SKILL_ALLOWLIST:-1}" != 0 ]]; then')
+    block = LAUNCHER[start:LAUNCHER.index("\nfi\n", start) + 4]
+    scripts = tmp_path / ".claude" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "proxy-skill-overrides.py").write_text(GEN.read_text())
+    for n in range(200):  # enough skills that the merged settings exceed the 4096-byte write limit used below
+        _skill(tmp_path, "unlisted-skill-%d" % n)
+    agent = tmp_path / "agent.md"
+    agent.write_text("x\n")
+    program = 'if [[ "${MODEL_ID:-}" == inkling-2-mini ]]; then :\n' + block
+    return subprocess.run(
+        ["/bin/bash", "-c", "set -euo pipefail\n" + ("ulimit -f 4\n" if fault else "") + 'eval "$PROG"; echo block-exit=0'],
+        env={**os.environ, "HOME": str(tmp_path), "PROG": program, "MODEL_ID": "gpt-6.1-terra", "PM_ROLE": "1",
+             "CWD": str(tmp_path), "AGENT_FILE": str(agent), "PROMPT_FILE": str(agent), "SAFETY_SETTINGS": str(settings)},
+        capture_output=True, text=True, check=False,
+    )
+
+
+def _safety_settings(path):
+    path.write_text(json.dumps({
+        "sandbox": {"enabled": True, "failIfUnavailable": True},
+        "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "x"}]}]},
+    }))
+    path.chmod(0o600)
+
+
+def test_settings_merge_is_atomic_a_partial_write_keeps_the_original_byte_identical(tmp_path):
+    """CTO REVISE on 20ec646 (C0ALZJHGE49 thread 1795312317.789329, ts 1795312540.092029). A real partial write (RLIMIT_FSIZE)."""
+    settings = tmp_path / "proxy-agent-safety.test"
+    _safety_settings(settings)
+    original = settings.read_bytes()
+    res = _run_launcher_block(tmp_path, settings, fault=True)
+    assert "block-exit=0" in res.stdout  # fail-open: the launch continues
+    assert "PROXY_AGENT_WARN reason=skill_overrides_merge_failed" in res.stderr
+    assert settings.read_bytes() == original
+    assert not list(tmp_path.glob("proxy-agent-safety.test.*.tmp"))  # the private temp file is removed
+
+
+def test_settings_merge_keeps_sandbox_and_hooks_and_adds_the_overrides(tmp_path):
+    settings = tmp_path / "proxy-agent-safety.test"
+    _safety_settings(settings)
+    before = json.loads(settings.read_text())
+    assert "block-exit=0" in _run_launcher_block(tmp_path, settings, fault=False).stdout
+    after = json.loads(settings.read_text())
+    assert {k: after[k] for k in before} == before
+    assert after["skillOverrides"] and after["skillListingMaxDescChars"] == 160
+    assert (settings.stat().st_mode & 0o777) == 0o600
+    assert not list(tmp_path.glob("proxy-agent-safety.test.*.tmp"))
+
+
+def test_launcher_never_opens_the_settings_file_for_writing_in_place():
+    block = LAUNCHER[LAUNCHER.index('elif [[ "${PROXY_AGENT_SKILL_ALLOWLIST:-1}" != 0 ]]; then'):LAUNCHER.index("# Persist a private runner")]
+    assert 'open(p, "w")' not in block and "os.replace(tmp, p)" in block and "os.fsync" in block

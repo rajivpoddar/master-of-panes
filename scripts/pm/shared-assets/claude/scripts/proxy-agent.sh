@@ -2521,16 +2521,34 @@ PY
 # proxies list only the skills lanes use; the PM pane keeps its full list). ~/.claude/scripts/proxy-skill-overrides.py prints a settings fragment
 # (skillOverrides "off" for every user/clone skill outside the allowlist, plus skillListingMaxDescChars) that is merged into THIS lane's --settings
 # file only. Plugin skills (the PM skills plugin) are not affected by skillOverrides. PM-role lanes run with user settings only, so the checkout's
-# project skills are not scanned for them. Fail-open: a generator or merge failure leaves the default listing. Off switch PROXY_AGENT_SKILL_ALLOWLIST=0.
+# project skills are not scanned for them. Fail-open: a generator or merge failure leaves the default listing and the settings file untouched (atomic write). Off switch PROXY_AGENT_SKILL_ALLOWLIST=0.
 elif [[ "${PROXY_AGENT_SKILL_ALLOWLIST:-1}" != 0 ]]; then
   _skill_cwd=(--cwd "$CWD"); [[ "$PM_ROLE" == "1" ]] && _skill_cwd=()
   if _frag="$(python3 -I "$HOME/.claude/scripts/proxy-skill-overrides.py" --agent-file "$AGENT_FILE" --brief "${PROXY_RESUME_ORIGINAL:-$PROMPT_FILE}" ${_skill_cwd[@]+"${_skill_cwd[@]}"} 2>/dev/null)" && [[ -n "$_frag" ]]; then
     FRAG="$_frag" python3 - "$SAFETY_SETTINGS" <<'PY' || echo "PROXY_AGENT_WARN reason=skill_overrides_merge_failed" >&2
-import json, os, sys
+import json, os, sys, tempfile
 p = sys.argv[1]
 d = json.load(open(p))
 d.update(json.loads(os.environ["FRAG"]))
-json.dump(d, open(p, "w"))
+data = json.dumps(d)
+# CTO REVISE on 20ec646 (C0ALZJHGE49 thread 1795312317.789329, ts 1795312540.092029): this file carries the sandbox and PreToolUse settings, so it is
+# never opened for writing in place. Serialize first, write a private temp file in the SAME directory, fsync it, and rename it over the settings file
+# only after the whole write succeeded. A failed or interrupted write leaves the original byte-identical (the temp file is removed).
+fd, tmp = tempfile.mkstemp(prefix=os.path.basename(p) + ".", suffix=".tmp", dir=os.path.dirname(os.path.abspath(p)))
+try:
+    with os.fdopen(fd, "w") as fh:
+        fh.write(data)
+        fh.flush()
+        if hasattr(os, "fsync"):
+            os.fsync(fh.fileno())
+    os.chmod(tmp, os.stat(p).st_mode & 0o7777)
+    os.replace(tmp, p)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
 PY
   else
     echo "PROXY_AGENT_WARN reason=skill_overrides_unavailable" >&2
