@@ -25,6 +25,7 @@ SRC = SCRIPT.read_text()
 HY4 = 'hy4-flash-free'
 DEEPSEEK = 'deepseek-v4.1-flash'
 MUSE = 'muse-spark-1.3-contributor'
+ORNITH = 'ornith-1.5-35b-a3b'
 QWEN = 'qwen3.8-flash-next'
 INKLING = 'inkling-2-mini'
 POOL_IDS = (HY4, DEEPSEEK, MUSE)
@@ -67,7 +68,7 @@ PROXY_AGENT_CLAUDE_CAP=5
 STUB_BLOCKED="${STUB_BLOCKED:-}"
 STUB_COOLED="${STUB_COOLED:-}"
 STUB_FAIL="${STUB_FAIL:-}"
-# The local Spark health gate (qwen3.8-flash-next / inkling-2-mini) curls /v1/models and now requires the SERVED MODEL ID in the body
+# The local Spark health gate curls /metrics and expects a quoted served ID in the body
 # (peer 22 Nov 03:05). Stub the body from the launcher's own tier lists, so every id the launcher can pick is "served" and a pick is
 # decided by the tier list, the cap and the cooldown only -- never by whether this host can reach the Spark, and never needing an edit
 # when a tier gains a correct entry (rule 60). The gate's own behaviour is asserted in test_proxy_agent_qwen_routing.py.
@@ -97,7 +98,7 @@ def _eligible():
 
 
 def _spark_body():
-    """A /v1/models body that lists every id in every tier list, so the launcher's own model-id health gate passes for any pick."""
+    """A probe body with every quoted tier ID, so the launcher's model-id health gate passes for any pick."""
     ids = sorted({m for models in _tier_models().values() for m in models})
     return '{"data":[' + ','.join('{"id":"%s"}' % m for m in ids) + ']}'
 
@@ -123,7 +124,7 @@ def test_light_and_mid_order_with_opencode_models():
     # exact-list pin (rule 60): a new correct entry anywhere must not fail this test.
     for tier in ('LIGHT', 'MID', 'BUILD1', 'PROOF1'):
         models = tiers[tier]
-        spark = models.index(QWEN)
+        spark = models.index(ORNITH)
         opencode = min(models.index(m) for m in (DEEPSEEK, HY4) if m in models)
         claude = min(models.index(m) for m in models if m.startswith('claude-'))
         codex = min(models.index(m) for m in models if m.startswith('gpt-'))
@@ -194,6 +195,23 @@ def test_cap_blocks_each_model_when_pool_is_full(tmp_path, model):
     assert raised.stdout.strip() == 'free', raised.stderr
 
 
+@pytest.mark.parametrize('reported,expected', [(ORNITH, ORNITH), (QWEN, ORNITH), (INKLING, DEEPSEEK)])
+def test_ornith_accepts_either_spark_metric_but_not_inkling(tmp_path, reported, expected):
+    metric = f'vllm:num_requests_total{{model_name="{reported}"}} 3\n'
+    fields, _ = _pick(tmp_path, 'LIGHT', env={'STUB_SPARK_BODY': metric})
+    assert fields['model'] == expected
+
+
+@pytest.mark.parametrize('model', [ORNITH, QWEN])
+def test_both_spark_aliases_obey_new_cap_default_and_legacy_override(tmp_path, model):
+    body = 'TYPE=hd-builder\nROLE_BRIEF=\n' + CAPS
+    body += f'proxy_agent_pool_blocked {model} && printf blocked || printf free\n'
+    for live, env, expected in [(5, {}, 'free'), (6, {}, 'blocked'), (6, {'QWEN_PROXY_CAP': '8'}, 'free'),
+                                (6, {'QWEN_PROXY_CAP': '8', 'SPARK_PROXY_CAP': '6'}, 'blocked')]:
+        result = _bash(body, tmp_path, {'PROXY_AGENT_STUB_POOL_LIVE': str(live), **env})
+        assert result.stdout == expected, result.stderr
+
+
 def test_opencode_cap_binds_exempt_roles_other_pools_stay_exempt(tmp_path):
     # 2026-11-18: ci-repair-agent and growth are cap-exempt, so pool_blocked returned before the
     # OpenCode count and cooled Claude fell through to deepseek with no pool_cap skip.
@@ -233,7 +251,7 @@ def test_exempt_mid_falls_through_when_opencode_is_at_cap(tmp_path):
     # ci-repair-agent is a judgment lane: the picker reorders to the tier's Claude ids (opus -> sonnet), then the Codex ladder,
     # dropping the local Spark id, inkling and gpt-6-luna. Sonnet is cooled here, so the pick is the first surviving entry — never
     # a capped pool id, never an id the tier does not list.
-    excluded = set(POOL_IDS) | {QWEN, INKLING, 'gpt-6-luna', 'claude-sonnet-5-5', MUSE}
+    excluded = set(POOL_IDS) | {ORNITH, QWEN, INKLING, 'gpt-6-luna', 'claude-sonnet-5-5', MUSE}
     judgment = [m for m in ('claude-opus-5-5', 'claude-sonnet-5-5') + tuple(_tier_models()['MID']) if m in _tier_models()['MID']]
     expected = next(m for m in judgment if m not in excluded)
     assert fields['model'] == expected, result.stderr
@@ -539,7 +557,7 @@ def test_unavailable_opencode_count_falls_through_to_the_next_route(tmp_path):
     # Derived from the live MID list: an unreadable count blocks the OpenCode/locally-counted ids, so the pick is the first
     # entry outside those pools that is not cooled (sonnet).
     mid = _tier_models()['MID']
-    expected = next(m for m in mid if m not in set(POOL_IDS) | {QWEN, INKLING, 'claude-sonnet-5-5', MUSE})
+    expected = next(m for m in mid if m not in set(POOL_IDS) | {ORNITH, QWEN, INKLING, 'claude-sonnet-5-5', MUSE})
     assert fields['rc'] == '0' and fields['model'] == expected, result.stderr
 
 

@@ -578,9 +578,11 @@ def test_pace_burn_and_opencode_tables_in_one_report_make_exactly_one_native_sla
     opencode = composer.opencode_line(_at(now), caps=tmp_path / 'caps', root=tmp_path / 'runs', log=tmp_path / 'muse.log',
                                       ps_text='    1     0 root /sbin/launchd\n', environ={},
                                       snapshot=tmp_path / 'no-usage-snapshots.jsonl')
-    report = composer.compose('1h', _at(now), None, {}, [], failures=[], pace=pace, burn=burn, opencode=opencode)
+    spark = composer.spark_cap_line({'QWEN_PROXY_CAP': '4', 'SPARK_PROXY_CAP': '6'})
+    report = composer.compose('1h', _at(now), None, {}, [], failures=[], pace=pace, burn=burn, opencode=opencode, spark=spark)
 
     blocks = _converter_blocks(report)
+    assert any('*Spark proxy cap:* 6' in b['text']['text'] for b in blocks if b['type'] == 'section')
     tables = [b for b in blocks if b['type'] == 'table']
     assert len(tables) == 1                                        # the Pace table; Slack would reject a second block
     assert [_cell_text(c) for c in tables[0]['rows'][0]] == PACE_HEADER

@@ -1,21 +1,16 @@
-"""Qwen 3.8 Flash Next routing contract for proxy-agent.sh (added to the repo; not run on the host, Rajiv ts 1793983042.752819).
-
-Rajiv C0ALZJHGE49 thread 1795288756.340499, ts 1795312862.446869 ("go. launch it on hy free"): the DGX Spark serves
-qwen3.8-flash-next in place of inkling-2-mini and proxy lanes route to it first. Order inside LIGHT/MID/BUILD1/PROOF1 is
-qwen (local, free) -> the OpenCode Go ids -> the Codex ladder -> the rest (thread 1795311834.216809 "how do we maximise the
-opencode usage?"). These are static traces of the launcher; nothing here ever launches a lane.
-"""
+"""Spark proxy routing: Ornith heads the local tiers, with Qwen retained as a compatible alias."""
 import re
 from pathlib import Path
 
 SCRIPT = Path(__file__).parents[1] / "shared-assets/claude/scripts/proxy-agent.sh"
 SRC = SCRIPT.read_text()
 
+ORNITH = "ornith-1.5-35b-a3b"
 QWEN = "qwen3.8-flash-next"
 INKLING = "inkling-2-mini"
 OPENCODE_IDS = ("deepseek-v4.1-flash", "hy4-flash-free")
 CODEX_LADDER = ("gpt-6-luna", "gpt-6.1-terra", "gpt-6.2-sol")
-QWEN_TIERS = ("LIGHT", "MID", "BUILD1", "PROOF1")
+SPARK_TIERS = ("LIGHT", "MID", "BUILD1", "PROOF1")
 
 
 def _tier_models():
@@ -25,22 +20,22 @@ def _tier_models():
     return tiers
 
 
-def test_qwen_heads_the_four_local_tiers_and_inkling_leaves_every_list():
+def test_ornith_heads_local_tiers_and_legacy_ids_stay_out_of_the_lists():
     tiers = _tier_models()
-    for tier in QWEN_TIERS:
-        assert tiers[tier][0] == QWEN, tier
-        assert tiers[tier].count(QWEN) == 1, tier
+    for tier in SPARK_TIERS:
+        assert tiers[tier][0] == ORNITH, tier
+        assert tiers[tier].count(ORNITH) == 1, tier
     for tier, models in tiers.items():
-        assert INKLING not in models, tier
+        assert all(legacy not in models for legacy in (QWEN, INKLING)), tier
 
 
 def test_opencode_ids_come_before_the_codex_ladder_in_the_local_tiers():
     tiers = _tier_models()
-    for tier in QWEN_TIERS:
+    for tier in SPARK_TIERS:
         models = tiers[tier]
-        assert QWEN in models
+        assert ORNITH in models
         first_opencode = min(models.index(m) for m in OPENCODE_IDS if m in models)
-        assert models.index(QWEN) < first_opencode, tier
+        assert models.index(ORNITH) < first_opencode, tier
         for codex in CODEX_LADDER:
             assert first_opencode < models.index(codex), tier
         # The ladder itself keeps its luna -> terra -> sol order.
@@ -48,14 +43,17 @@ def test_opencode_ids_come_before_the_codex_ladder_in_the_local_tiers():
         assert ladder == list(CODEX_LADDER), tier
 
 
-def test_glm_is_not_added_to_any_tier():
+def test_glm_keeps_the_livesynced_tier_positions():
     for tier, models in _tier_models().items():
-        assert "glm-5.3" not in models, tier
+        if tier in {"MID", "BUILD1", "PROOF1"}:
+            assert models.index("deepseek-v4.1-flash") < models.index("glm-5.3") < models.index("hy4-flash-free")
+        else:
+            assert "glm-5.3" not in models, tier
 
 
 def test_judgment_lanes_exclude_the_local_model():
     guard = SRC[SRC.index("if proxy_agent_is_judgment_lane; then"):SRC.index('for id in $models; do', SRC.index("if proxy_agent_is_judgment_lane; then"))]
-    assert QWEN in guard and INKLING in guard and "gpt-6-luna" in guard
+    assert all(model in guard for model in (ORNITH, QWEN, INKLING, "gpt-6-luna"))
 
 
 def test_judgment_lanes_lead_with_the_tiers_claude_then_the_codex_ladder():
@@ -71,9 +69,9 @@ def test_judgment_lanes_lead_with_the_tiers_claude_then_the_codex_ladder():
     assert "for _m in $models" in guard  # never emits an id that is not in the tier list
 
 
-def test_health_gate_covers_qwen_with_its_own_url_and_three_second_budget():
+def test_health_gate_covers_both_spark_aliases_with_three_second_budget():
     gate = SRC[SRC.index("Local Spark health gate"):SRC.index("if proxy_agent_is_emergency_muse \"$id\"; then")]
-    assert f'"$id" == {QWEN}' in gate and INKLING in gate
+    assert all(f'"$id" == {model}' in gate for model in (ORNITH, QWEN, INKLING))
     assert "QWEN_HEALTH_URL" in gate and "18120" in gate
     assert '-m 3' in gate
 
@@ -103,16 +101,6 @@ def test_health_gate_requires_the_served_model_id_not_just_a_listening_port():
     assert "host_down" in gate
 
 
-def test_gate_survives_the_live_spark_payload_and_rejects_the_other_checkpoint():
-    # Live payloads captured 22 Nov. /metrics is open and repeats model_name="<served id>"; the other checkpoint must NOT match, or a Spark
-    # mid-swap would route lanes to a model it is not serving.
-    qwen_metrics = 'vllm:num_requests_total{engine="0",model_name="qwen3.8-flash-next"} 1060.0\n'
-    inkling_metrics = 'vllm:num_requests_total{engine="0",model_name="inkling-2-mini"} 12.0\n'
-    assert f'"{QWEN}"' in qwen_metrics
-    assert f'"{QWEN}"' not in inkling_metrics
-    assert f'"{INKLING}"' in inkling_metrics
-
-
 def test_host_down_retries_once_before_routing_the_lane_to_a_paid_model():
     # A single dropped LAN probe must not demote the lane to a paid model. The fetch retries once; only two empty answers count as host_down,
     # and the empty check is on the BODY (a failed curl can leave `_spark_ids` set but empty under some sh semantics).
@@ -123,30 +111,29 @@ def test_host_down_retries_once_before_routing_the_lane_to_a_paid_model():
     assert "twice" in gate
 
 
-def test_qwen_has_its_own_pool_cap_outside_the_opencode_pool():
+def test_spark_aliases_share_a_cap_outside_the_opencode_pool():
     cap = SRC[SRC.index("proxy_agent_pool_blocked() {"):SRC.index("# Final-primary OpenCode guard")]
-    assert re.search(rf"^\s+{re.escape(QWEN)}\) pool=qwen; cap=\"\${{QWEN_PROXY_CAP:-4}}\";;$", cap, re.M)
-    assert '"$pool" == qwen' in cap  # an unreadable count fails open for the local pool, like opencode/inkling
-
-
-def test_qwen_is_counted_in_its_own_pool():
+    assert f'{ORNITH}|{QWEN}) pool=spark; cap="${{SPARK_PROXY_CAP:-${{QWEN_PROXY_CAP:-6}}}}";;' in cap
+    assert '"$pool" == spark' in cap  # still skip when the process count is unavailable
+    assert f'{INKLING}) pool=inkling;' in cap
     live = SRC[SRC.index("proxy_agent_pool_live() {"):SRC.index("proxy_agent_pool_blocked() {")]
-    assert f'model == "{QWEN}"' in live and '"qwen"' in live
+    assert f'"spark" if model in ("{ORNITH}", "{QWEN}")' in live
 
 
-def test_window_matches_the_dev_slot_profile():
-    assert f'{QWEN}) echo "{QWEN} 240000 16384"' in SRC
+def test_both_aliases_keep_the_local_window():
+    assert f'{ORNITH}|{QWEN}) echo "$1 240000 16384"' in SRC
 
 
-def test_thinking_budget_defaults_to_2048_for_qwen_only():
+def test_thinking_budget_defaults_to_2048_for_both_aliases():
     block = SRC[SRC.index("# Per-lane thinking budget for the local Spark model"):SRC.index("# -p mode kills background subagents")]
-    assert f'"$MODEL_ID" == {QWEN}' in block and "MAX_THINKING_TOKENS=2048" in block
-    # A caller's explicit numeric env must still win: the guard is on an unset variable.
+    assert all(f'"$MODEL_ID" == {model}' in block for model in (ORNITH, QWEN))
+    assert "MAX_THINKING_TOKENS=2048" in block
     assert '-z "${MAX_THINKING_TOKENS:-}"' in block
 
 
-def test_skill_allowlist_branch_covers_qwen_and_writes_atomically():
-    start = SRC.index(f'if [[ "$MODEL_ID" == {QWEN} || "$MODEL_ID" == {INKLING} ]]; then')
+def test_skill_allowlist_branch_covers_both_aliases_and_writes_atomically():
+    guard = f'if [[ "$MODEL_ID" == {ORNITH} || "$MODEL_ID" == {QWEN} || "$MODEL_ID" == {INKLING} ]]; then'
+    start = SRC.index(guard)
     block = SRC[start:SRC.index('elif [[ "${PROXY_AGENT_SKILL_ALLOWLIST:-1}" != 0 ]]; then')]
     assert "inkling-skill-overrides.py" in block
     assert 'open(p, "w")' not in block
@@ -166,4 +153,4 @@ def test_every_tier_model_is_probe_able():
     missing = sorted(tier_ids - allow)
     assert not missing, f"tier ids the probe cannot test -> cooled as probe_failed: {missing}"
     # The Spark id specifically must be probe-able (it heads four tiers).
-    assert QWEN in allow
+    assert {ORNITH, QWEN} <= allow

@@ -3437,6 +3437,13 @@ _UNDECODABLE = re.compile(r"[\udc80-\udcff]")
 _MUSE_ALIAS_ROLES = ("haiku", "sonnet", "opus")
 
 
+def spark_cap_line(environ: dict | None = None) -> str:
+    env = os.environ if environ is None else environ
+    raw = env.get("SPARK_PROXY_CAP") or env.get("QWEN_PROXY_CAP") or "6"
+    cap = raw if re.fullmatch(r"[0-9]+", raw) else "UNKNOWN (invalid setting)"
+    return f"*Spark proxy cap:* {cap} (Ornith and legacy Qwen alias share one pool)"
+
+
 def opencode_cap(path: Path = PROXY_CAPS_FILE, environ: dict | None = None) -> tuple[int | None, str]:
     """(effective cap or None, source label), following proxy-agent.sh exactly:
     1. a NONEMPTY inherited OPENCODE_PROXY_CAP wins over the file. If it is not all digits the launcher enforces no OpenCode cap
@@ -3801,6 +3808,7 @@ def compose(
     opencode: str | None = None,  # opencode_line(): OpenCode Go counts, rendered under the Burn block; 1h only
     ci_selection: str | None = None,  # ci_selection_line(): "*CI selection:*" under Remote boxes; 1h only
     expired_reminders: str | None = None,  # expired_reminders_line(): "*Expired reminders (48h):*" under CI selection; 1h only
+    spark: str | None = None,  # spark_cap_line(); 1h only
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -3868,7 +3876,8 @@ def compose(
     pace_lines = pace.splitlines() if (pace and mode == "1h") else []
     memory_lines = [memory] if (memory and mode == "1h") else []
     opencode_lines = opencode.splitlines() if (opencode and mode == "1h") else []
-    lines = [first, *pace_lines, *memory_lines, *(burn_line.splitlines() if burn_line else []), *opencode_lines, *body]
+    spark_lines = [spark] if (spark and mode == "1h") else []
+    lines = [first, *pace_lines, *memory_lines, *(burn_line.splitlines() if burn_line else []), *opencode_lines, *spark_lines, *body]
     # Keep the pipe tables intact for slack-send.sh: native Pace first, then monospace Burn and OpenCode Go.
     if asks:
         lines += ["", "*Asks:* " + " | ".join(asks)]
@@ -3890,7 +3899,7 @@ def compose(
     # The pace table is the same kind of multi-line block and gets the same allowance.
     pace_extra = len(pace_lines)
     memory_extra = len(memory_lines)
-    opencode_extra = len(opencode_lines)
+    opencode_extra = len(opencode_lines) + len(spark_lines)
     ci_extra = 1 if mode == "1h" else 0  # the CI selection line must never be folded away
     reminders_extra = 1 if mode == "1h" else 0  # nor the expired-reminders line
     if mode == "3h":
@@ -4546,6 +4555,7 @@ def main() -> int:
         pending_actions=(pending_obligations(PM_OPS_DB, now), hourly.get("pending-github") or {"error": "UNAVAILABLE (no recent successful probe)"}) if args.mode == "1h" else None,
         proxies=hourly.get("proxies") if args.mode == "1h" else None,
         burn=burn, pace=pace, memory=memory_line, opencode=opencode,
+        spark=spark_cap_line() if args.mode == "1h" else None,
         ci_selection=hourly.get("ci-selection") if args.mode == "1h" else None,
         expired_reminders=hourly.get("reminders") if args.mode == "1h" else None,
     )
