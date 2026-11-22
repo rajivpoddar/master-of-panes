@@ -28,9 +28,16 @@ canon = lambda: sorted(k for k in R2.objects if k.startswith(('fixtures/', 'stag
 
 # ---- A. controller wiring: opt-in only, SAME controller commands as the capture lane ----
 h40 = 'a' * 40
-def dry(*extra):
-    r = subprocess.run(['bash', str(SCRIPTS / 'remote-qa-spec.sh'), '--slot', '8', '--branch', 'b', '--head', h40,
-                        '--spec', 'tests/e2e/specs/qa-tests/x.spec.ts', '--out', tempfile.mkdtemp(), '--allow-seed-replace', *extra],
+M15SPEC = 'tests/e2e/specs/qa-tests/m15-asr-draft-langsmith.spec.ts'
+P14SPEC = 'tests/e2e/specs/qa-tests/14390-headerless-proceedings.spec.ts'
+P14HEAD, P14HASH = '6edba2fad7b450d60a1433b81e019464cf50e6be', 'e5c629a109c8cb064baa8d4c775bd8894104de6256d590809b8b9e48d9da3fdc'
+def dry(*extra, head=h40, spec=None):
+    if spec is None:  # exact runs use the approved M15 spec (which the launcher pairs with the box-generated receipt secret: --requires-modal)
+        spec = M15SPEC if '--on-miss-exact' in extra else 'tests/e2e/specs/qa-tests/x.spec.ts'
+    if spec == M15SPEC and '--requires-modal' not in extra:
+        extra = (*extra, '--requires-modal')
+    r = subprocess.run(['bash', str(SCRIPTS / 'remote-qa-spec.sh'), '--slot', '8', '--branch', 'b', '--head', head,
+                        '--spec', spec, '--out', tempfile.mkdtemp(), '--allow-seed-replace', *extra],
                        capture_output=True, text=True, env=dict(os.environ, QA_MODAL_HELPER=str(SCRIPTS / 'remote-qa-modal.py')))
     return r.returncode, (r.stdout + r.stderr).strip()
 rc, o = dry('--disposable-convex', '--dry-run')
@@ -46,7 +53,7 @@ check('--on-miss refuses RED/mutation legs (RED stays strict)', rc == 2 and 'GRE
 HX = 'f3dcdecd3e7f1a8b3ccd790d2c9688af6c4febc811c71ada80e3a2b3608c4a80'
 KX = 'fixtures/llm/v2/gemini_vertex/aiplatform.googleapis.com/gemini-3.1-flash-lite.stream/' + HX + '.bin'
 def manifest(**over):
-    doc = {'version': 1, 'head': h40, 'product_pin': 'e' * 40, 'approval_ref': 'C0ALZJHGE49/1795301055.769519', 'max_reserve_usd': 0.65,
+    doc = {'version': 1, 'profile': 'm15-langsmith', 'head': h40, 'product_pin': 'e' * 40, 'approval_ref': 'C0ALZJHGE49/1795301055.769519', 'max_reserve_usd': 0.65,
            'langsmith': {'draft_sha256': '04606bdb97e2616e0d9ed943e7c4860408c769c7344f6606082b0d5335d3ad29',
                          'aligned_slice_sha256': '3d5adf320e3e151cffd1a1b66d510ebdab7ccd098174c40be75cb61b2ed62a76'},
            'hashes': [{'hash': HX, 'provider': 'gemini_vertex', 'model': 'gemini-3.1-flash-lite', 'operation': 'stream', 'canonical_key': KX}]}
@@ -75,13 +82,38 @@ check('--on-miss-exact refuses a max_reserve_usd above the $3 cap', rc == 2 and 
 rc, o = dry('--disposable-convex', '--canary-receipt', '/nonexistent', '--dry-run')
 check('--canary-receipt alone is refused', rc == 2 and 'only valid with --on-miss-exact' in o, o[-80:])
 rc, o = dry('--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
-check('--on-miss-exact without --disposable-convex refused (synthetic-only bound)', rc == 2 and 'requires --disposable-convex' in o, o[-80:])
+check('--on-miss-exact without --disposable-convex refused (synthetic-only bound)', rc == 2 and '--disposable-convex' in o, o[-80:])
 for why, bad in (('a 12-char hash prefix', manifest(hashes=[{'hash': HX[:12], 'provider': 'gemini_vertex', 'model': 'gemini-3.1-flash-lite', 'operation': 'stream', 'canonical_key': KX}])),
                  ('a manifest for another head', manifest(head='b' * 40))):
     rc, o = dry('--disposable-convex', '--on-miss-exact', bad, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
     check('--on-miss-exact refuses ' + why, rc == 2 and 'QA_EXACT_MANIFEST_REFUSED' in o, o[-80:])
 rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--mutate-patch', str(pf), '--dry-run')
 check('--on-miss-exact is GREEN-only like stock on-miss', rc == 2 and 'GREEN-only' in o, o[-80:])
+# ---- explicit proof PROFILES (CTO GO C0ALZJHGE49 thread 1795302375.270589) ----
+def pmanifest(**over):
+    doc = {'version': 1, 'profile': 'pr14414-headerless-capture', 'head': P14HEAD, 'product_pin': P14HEAD, 'approval_ref': 'C0ALZJHGE49/1795302375.270589/1795310865.915209',
+           'max_reserve_usd': 0.65, 'hashes': [{'hash': P14HASH, 'provider': 'gemini_vertex', 'model': 'gemini-3.1-flash-lite', 'operation': 'stream',
+                                                   'canonical_key': 'fixtures/llm/v2/gemini_vertex/aiplatform.googleapis.com/gemini-3.1-flash-lite.stream/' + P14HASH + '.bin'}]}
+    doc.update(over)
+    p = Path(tempfile.mkdtemp()) / 'profile.json'
+    p.write_text(json.dumps(doc))
+    return str(p)
+RECEIPTS = ('--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
+rc, o = dry('--disposable-convex', '--on-miss-exact', pmanifest(), *RECEIPTS, head=P14HEAD, spec=P14SPEC)
+check('PR 14414 profile: the pinned head + pinned spec + approved hash resolve llm_mode=capture-on-miss-exact', rc == 0 and o.endswith('llm_mode=capture-on-miss-exact'), o[-80:])
+for why, kwargs, manifest_path in (('another spec', dict(head=P14HEAD, spec=M15SPEC), pmanifest()), ('another head', dict(head='b' * 40, spec=P14SPEC), pmanifest(head='b' * 40, product_pin='b' * 40)),
+                                   ('another hash', dict(head=P14HEAD, spec=P14SPEC), pmanifest(hashes=[{'hash': HX, 'provider': 'gemini_vertex', 'model': 'gemini-3.1-flash-lite', 'operation': 'stream', 'canonical_key': KX}])),
+                                   ('a langsmith block (no provenance toggle: the shape is fixed per profile)', dict(head=P14HEAD, spec=P14SPEC), pmanifest(langsmith={'draft_sha256': '1' * 64, 'aligned_slice_sha256': '2' * 64})),
+                                   ('a missing profile', dict(head=P14HEAD, spec=P14SPEC), pmanifest(profile=None)), ('an unknown profile', dict(head=P14HEAD, spec=P14SPEC), pmanifest(profile='pr9999-anything'))):
+    if 'a missing profile' == why:
+        doc = json.loads(Path(manifest_path).read_text()); doc.pop('profile'); Path(manifest_path).write_text(json.dumps(doc))
+    rc, o = dry('--disposable-convex', '--on-miss-exact', manifest_path, *RECEIPTS, **kwargs)
+    check('PR 14414 profile refuses ' + why, rc == 2 and 'QA_EXACT_MANIFEST_REFUSED' in o, o[-80:])
+rc, o = dry('--disposable-convex', '--on-miss-exact', good, *RECEIPTS, spec=P14SPEC)
+check('M15 profile refuses the PR 14414 spec', rc == 2 and 'QA_EXACT_MANIFEST_REFUSED' in o, o[-80:])
+check('exact wiring: the profile spec BLOB is verified on the box; capture is reported separate from the spec AC1 PASS',
+      'QA_SPEC_BLOB ok' in SPEC_SH and 'spec_ac_pass=NOT_ASSESSED' in SPEC_SH and 'EXACT_PROFILE name=' in SPEC_SH
+      and not any(s in SPEC_SH for s in ('--skip-provenance', '--no-langsmith', '--no-join', 'skip_provenance')))
 check('llm_onmiss starts empty and is set ONLY by the --on-miss / --on-miss-exact flags',
       "llm_onmiss='' stripe_test_env='' pre_write_check=''" in SPEC_SH
       and len(re.findall(r'^\s+--on-miss[a-z-]*\) .*llm_onmiss=--on-miss', SPEC_SH, re.M)) == 2

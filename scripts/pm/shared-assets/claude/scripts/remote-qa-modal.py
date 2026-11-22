@@ -114,6 +114,18 @@ EXACT_SESSION_REFRESH_S = 100    # the controller re-mints this often while a le
 EXACT_SESSION_WAIT_S = 60        # a proxy fixture client waits this long for its first armed session, then fails closed
 CANARY_MAX_AGE_S = 48 * 3600
 EXACT_ENTRY_KEYS = {'hash', 'provider', 'model', 'operation', 'canonical_key'}
+# Explicit proof PROFILES (CTO GO C0ALZJHGE49 thread 1795302375.270589, ts 1795310865.915209; ladder pel-mwr0n14v-a9f99e2f). Every exact manifest NAMES
+# one; a missing or unknown profile is refused. The M15 profile keeps the mandatory native-LangSmith join. The PR #14414 profile is for ONE
+# pinned spec blob, ONE head and ONE approved hash: its completion is a settled request with ingress + provider response identity and a
+# verified PUT-if-absent readback, and it never counts as that spec's AC1 PASS (AC1 needs its own full strict replay). There is NO generic
+# switch that turns provenance off; widening the approval means adding a reviewed profile here.
+EXACT_PROFILES = {
+    'm15-langsmith': {'spec': 'tests/e2e/specs/qa-tests/m15-asr-draft-langsmith.spec.ts', 'provenance': 'langsmith',
+                      'head': None, 'spec_blob': None, 'hash': None, 'stage': None},
+    'pr14414-headerless-capture': {'spec': 'tests/e2e/specs/qa-tests/14390-headerless-proceedings.spec.ts', 'provenance': 'capture-readback',
+                                   'head': '6edba2fad7b450d60a1433b81e019464cf50e6be', 'spec_blob': '6b562a1b2562b502510af1cb1cfb66694cc4697b',
+                                   'hash': 'e5c629a109c8cb064baa8d4c775bd8894104de6256d590809b8b9e48d9da3fdc', 'stage': 'proofread:stream_call'},
+}
 EXACT_TERMINAL_CODES = ('QA_ONMISS_NOT_APPROVED', 'QA_ONMISS_LOOKUP_UNCERTAIN', 'QA_ONMISS_FIXTURE_EXISTS',
                         'QA_ONMISS_CUSTODY_UNRECONCILED', 'QA_ONMISS_BOUND_EXCEEDS_APPROVAL')
 
@@ -132,15 +144,21 @@ def load_exact_manifest(path, head=None):
         data = json.loads(raw.decode('utf-8'))
     except ValueError:
         raise ValueError('QA_EXACT_MANIFEST_INVALID: not JSON') from None
-    if (not isinstance(data, dict) or set(data) != {'version', 'head', 'product_pin', 'approval_ref', 'max_reserve_usd', 'langsmith', 'hashes'}
+    profile = data.get('profile') if isinstance(data, dict) else None
+    if not isinstance(profile, str) or profile not in EXACT_PROFILES:
+        raise ValueError('QA_EXACT_MANIFEST_INVALID: profile missing or unknown')
+    pinned = EXACT_PROFILES[profile]
+    needs_langsmith = pinned['provenance'] == 'langsmith'
+    if (not isinstance(data, dict)
+            or set(data) != {'version', 'profile', 'head', 'product_pin', 'approval_ref', 'max_reserve_usd', 'hashes'} | ({'langsmith'} if needs_langsmith else set())
             or data['version'] != 1
             or not isinstance(data['head'], str) or not re.fullmatch(r'[0-9a-f]{40}', data['head'])
             or not isinstance(data['product_pin'], str) or not re.fullmatch(r'[0-9a-f]{40}', data['product_pin'])
             or not isinstance(data['approval_ref'], str) or not re.fullmatch(r'[A-Za-z0-9._:/@-]{8,200}', data['approval_ref'])
             or isinstance(data['max_reserve_usd'], bool) or not isinstance(data['max_reserve_usd'], (int, float))
             or not 0 < data['max_reserve_usd'] <= ONMISS_CAP_USD
-            or not isinstance(data['langsmith'], dict) or set(data['langsmith']) != {'draft_sha256', 'aligned_slice_sha256'}
-            or any(not isinstance(v, str) or not re.fullmatch(r'[0-9a-f]{64}', v) for v in data['langsmith'].values())
+            or (needs_langsmith and (not isinstance(data['langsmith'], dict) or set(data['langsmith']) != {'draft_sha256', 'aligned_slice_sha256'}
+                                     or any(not isinstance(v, str) or not re.fullmatch(r'[0-9a-f]{64}', v) for v in data['langsmith'].values())))
             or not isinstance(data['hashes'], list) or not 1 <= len(data['hashes']) <= EXACT_MANIFEST_MAX_HASHES):
         raise ValueError('QA_EXACT_MANIFEST_INVALID: shape')
     if head is not None and data['head'] != head:
@@ -158,9 +176,17 @@ def load_exact_manifest(path, head=None):
             raise ValueError('QA_EXACT_MANIFEST_INVALID: entry')
         seen.add(digest)
         entries[key] = {'hash': digest, 'provider': provider, 'model': model, 'operation': operation}
-    return {'digest': hashlib.sha256(raw).hexdigest(), 'head': data['head'], 'product_pin': data['product_pin'],
+    if pinned['hash'] is not None and (seen != {pinned['hash']} or data['head'] != pinned['head'] or data['product_pin'] != pinned['head']):
+        raise ValueError('QA_EXACT_MANIFEST_INVALID: not the one approved hash, head and product pin of this profile')
+    return {'digest': hashlib.sha256(raw).hexdigest(), 'profile': profile, 'head': data['head'], 'product_pin': data['product_pin'],
             'approval_ref': data['approval_ref'], 'max_reserve_usd': float(data['max_reserve_usd']),
-            'langsmith': dict(data['langsmith']), 'entries': entries}
+            'langsmith': dict(data['langsmith']) if needs_langsmith else None, 'entries': entries}
+
+
+def check_exact_profile_spec(manifest, spec):
+    """The profile's spec is pinned: any other spec path is refused (the launcher also verifies the spec blob on the box)."""
+    if spec != EXACT_PROFILES[manifest['profile']]['spec']:
+        raise ValueError('QA_EXACT_MANIFEST_INVALID: spec is not the approved spec of profile ' + manifest['profile'])
 
 
 def derive_exact_ids(box, head, spend_box):
@@ -355,6 +381,50 @@ def shared_mounts_remaining(root):
 
 def _same_request(a, b):
     return bool(a and b) and (a == b or a.startswith(b + '/') or b.startswith(a + '/'))
+
+
+def exact_capture_profile_status(report, manifest):
+    """Completion of a capture-readback profile (no LangSmith): exactly ONE settled request for the ONE approved hash, with ingress and
+    provider response identity, created by THIS run's PUT-if-absent and read back byte/status/content-type identical. Anything else is a
+    named refusal. It certifies the FIXTURE capture only; it is never that spec's AC1 PASS."""
+    if report is None:
+        return 'NO_REPORT'
+    pinned = EXACT_PROFILES[manifest['profile']]
+    key = next(iter(manifest['entries']))
+    if (report.get('exact') or {}).get('digest') != manifest['digest']:
+        return 'PROFILE_MANIFEST_MISMATCH'
+    if report.get('terminal_reason') or report.get('publication_error') or report.get('unapproved_staged'):
+        return 'REPORT_TERMINAL'
+    rows = [r for r in report.get('join') or [] if r.get('key') == key]
+    if not rows:
+        return 'NO_CLAIM'
+    if len(rows) != 1 or len(report.get('attempts') or {}) != 1:
+        return 'EXTRA_DISPATCH'
+    row = rows[0]
+    if row.get('hash') != manifest['entries'][key]['hash'] or row.get('hash') != pinned['hash']:
+        return 'WRONG_HASH'
+    if row.get('settled') is not True:
+        return 'CLAIM_UNSETTLED'
+    if not row.get('ingress_request_id'):
+        return 'INGRESS_ID_MISSING'
+    dispatch = row.get('provider_dispatch')
+    if not (isinstance(dispatch, dict) and dispatch.get('provider_response_ids') and isinstance(dispatch.get('upstream_status'), int)
+            and 200 <= dispatch['upstream_status'] < 300):
+        return 'PROVIDER_DISPATCH_ID_MISSING'
+    if list(report.get('fixtures_written') or []) != [key] or tuple(report.get('publication_counts') or ()) != (1, 0, 0):
+        return 'PUT_IF_ABSENT_UNPROVEN'
+    readback = [r for r in report.get('readback') or [] if r.get('key') == key]
+    if len(readback) != 1 or readback[0].get('status') != 'MATCH' or (report.get('exact') or {}).get('readback_match') != 1:
+        return 'READBACK_UNVERIFIED'
+    return 'COMPLETE'
+
+
+def exact_completion_status(report, trace, run_id, manifest):
+    """The ONE completion verdict, chosen by the manifest's explicit profile: M15 keeps the mandatory verified LangSmith join; a
+    capture-readback profile never consults a trace. There is no profile-less path and no switch to skip provenance."""
+    if EXACT_PROFILES[manifest['profile']]['provenance'] == 'langsmith':
+        return exact_join_status(report, trace, run_id, manifest)
+    return exact_capture_profile_status(report, manifest)
 
 
 def exact_join_status(report, trace, run_id, manifest):
@@ -645,7 +715,7 @@ def qa_finish_exact(s3, bucket, publisher, onmiss):
     summary.update(fixtures_written=sorted(set(written)), canonical_fixture_keys=sorted(canonical_keys),
                    publication_counts=counts, publication_error=publication_error, readback=readback, join=join,
                    unapproved_staged=sorted(key for _, key in unmatched),
-                   exact={'digest': exact['digest'], 'approval_ref': exact['approval_ref'], 'approved': sorted(approved),
+                   exact={'digest': exact['digest'], 'profile': exact.get('profile'), 'approval_ref': exact['approval_ref'], 'approved': sorted(approved),
                           'captured': sorted(canonical_keys), 'readback_match': sum(r['status'] == 'MATCH' for r in readback)})
     if reason:
         summary.update(terminal_reason=reason, halted=True, halt_reason=summary.get('halt_reason') or reason)
@@ -873,7 +943,7 @@ def ledger_source(box, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmis
     if exact is not None and (not isinstance(exact, dict) or not re.fullmatch(r'[0-9a-f]{64}', str(exact.get('digest', '')))
                               or not isinstance(exact.get('entries'), dict) or not exact['entries']):
         raise ValueError('Invalid exact-hash approval')
-    exact_source = None if exact is None else {'digest': exact['digest'], 'approval_ref': exact['approval_ref'],
+    exact_source = None if exact is None else {'digest': exact['digest'], 'approval_ref': exact['approval_ref'], 'profile': exact['profile'],
                                                'max_reserve_usd': float(exact['max_reserve_usd']),
                                                'dry': bool(onmiss.get('exact_dry')), 'entries': exact['entries']}
     return source + (QA_ONMISS_SOURCE.replace('__ONMISS_DICT__', repr(onmiss['dict']))
@@ -1583,7 +1653,7 @@ def _qa_onmiss_health():
     import re as _re
     return {"qa_onmiss": _qa_onmiss_active(), "qa_onmiss_cap_usd": _QA_ONMISS_CAP_USD,
             "overlay_baked": bool(_QA_ONMISS),
-            **({"qa_onmiss_exact": True, "qa_exact_digest": _QA_EXACT["digest"], "qa_exact_dry": bool(_QA_EXACT.get("dry"))} if _QA_EXACT else {}),
+            **({"qa_onmiss_exact": True, "qa_exact_digest": _QA_EXACT["digest"], "qa_exact_dry": bool(_QA_EXACT.get("dry")), "qa_exact_profile": _QA_EXACT.get("profile")} if _QA_EXACT else {}),
             "strict": bool(_strict_fixtures()), "capture": bool(_capture_mode()),
             "ci": os.environ.get("CI", "").lower() == "true",
             "suffix_ok": bool(_re.fullmatch(r"-qa-[0-9a-f]{12}", os.environ.get("MODAL_ENV_SUFFIX", "")))}
@@ -3093,6 +3163,7 @@ def main():
     parser.add_argument('--session-file',type=Path,help='capture-report --exact-manifest: controller-piped report session (deleted after use)')
     parser.add_argument('--receipt',type=Path,help='check-canary-receipt')
     parser.add_argument('--head',help='check-exact-manifest: required checkout head')
+    parser.add_argument('--spec',help='check-exact-manifest: the launch spec path, which must be the profile-approved spec')
     a=parser.parse_args()
     tool_policy(a.allow_billable_tools, a.tool_spend_cap_usd)
     if a.extra_secret and a.command!='prepare':
@@ -3132,7 +3203,10 @@ def main():
         if not a.exact_manifest:
             parser.error('check-exact-manifest requires --exact-manifest')
         manifest = load_exact_manifest(a.exact_manifest, a.head)
+        if a.spec is not None:
+            check_exact_profile_spec(manifest, a.spec)
         print('QA_EXACT_MANIFEST ok digest=' + manifest['digest'] + ' head=' + manifest['head'] + ' product_pin=' + manifest['product_pin']
+              + ' profile=' + manifest['profile'] + ' spec_blob=' + str(EXACT_PROFILES[manifest['profile']]['spec_blob'] or 'none')
               + ' max_reserve_usd=' + str(manifest['max_reserve_usd']) + ' hashes=' + str(len(manifest['entries']))
               + ' approval_ref=' + manifest['approval_ref'])
     elif a.command=='check-canary-receipt':
@@ -3191,12 +3265,16 @@ def main():
             except (OSError, ValueError):
                 return None
         report, trace = _load(a.report), _load(a.trace)
-        status = exact_join_status(report, trace, a.run_id, manifest)
+        status = exact_completion_status(report, trace, a.run_id, manifest)
         rows = (report or {}).get('join') or []
         keep = ('request_id', 'run_id', 'trace_id', 'project', 'project_session_id', 'transcript_id', 'created_transcript_id', 'draft_sha256', 'aligned_slice_sha256')
-        a.output.write_text(json.dumps({'status': status, 'proxy': rows, 'langsmith': {k: trace.get(k) for k in keep} if isinstance(trace, dict) else None,
-                                        'expected': {'project': 'qa-m15-' + a.run_id, **manifest['langsmith']}}, indent=2, sort_keys=True) + '\n')
-        print('QA_ONMISS_JOIN_RESULT status=' + status + ' dispatches=' + str(len(rows)))
+        langsmith = manifest['langsmith'] is not None
+        a.output.write_text(json.dumps({'status': status, 'profile': manifest['profile'], 'proxy': rows,
+                                        'langsmith': {k: trace.get(k) for k in keep} if langsmith and isinstance(trace, dict) else None,
+                                        'expected': ({'project': 'qa-m15-' + a.run_id, **manifest['langsmith']} if langsmith else
+                                                     {'approved_hash': next(iter(manifest['entries'].values()))['hash'], 'stage': EXACT_PROFILES[manifest['profile']]['stage']})},
+                                       indent=2, sort_keys=True) + '\n')
+        print('QA_ONMISS_JOIN_RESULT status=' + status + ' dispatches=' + str(len(rows)) + ' profile=' + manifest['profile'])
     elif a.command=='arm-session':
         if not a.exact_manifest or not a.box:
             parser.error('arm-session requires --box and --exact-manifest')

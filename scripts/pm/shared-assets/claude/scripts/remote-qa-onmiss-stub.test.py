@@ -485,6 +485,7 @@ def entry(key):
 
 K_OK, K_TWIN, K_LK, K_NA = learn('EXACT-OK'), learn('EXACT-TWIN SLOW'), learn('EXACT-LOOKUP'), learn('EXACT-NOT-APPROVED')
 K_CU, K_BD, K_DR = learn('EXACT-CUSTODY'), learn('EXACT-BOUND'), learn('EXACT-DRY')
+K_PF = learn('EXACT-PROFILE')
 H_NA = entry(K_NA)['hash']
 MDIR = Path(tempfile.mkdtemp())
 
@@ -495,7 +496,7 @@ DRAFT_SHA, ALIGNED_SHA = '04606bdb97e2616e0d9ed943e7c4860408c769c7344f6606082b0d
 
 def manifest_for(head, keys, name, max_reserve=1.1):
     p = MDIR / name
-    p.write_text(json.dumps({'version': 1, 'head': head, 'product_pin': PRODUCT_PIN, 'approval_ref': APPROVAL, 'max_reserve_usd': max_reserve,
+    p.write_text(json.dumps({'version': 1, 'profile': 'm15-langsmith', 'head': head, 'product_pin': PRODUCT_PIN, 'approval_ref': APPROVAL, 'max_reserve_usd': max_reserve,
                              'langsmith': {'draft_sha256': DRAFT_SHA, 'aligned_slice_sha256': ALIGNED_SHA}, 'hashes': [entry(k) for k in keys]}))
     return p
 
@@ -513,6 +514,10 @@ for why, mutate in (('prefix hash', lambda x: x['hashes'][0].__setitem__('hash',
                     ('zero max_reserve_usd', lambda x: x.__setitem__('max_reserve_usd', 0)),
                     ('max_reserve_usd above the $3 cap', lambda x: x.__setitem__('max_reserve_usd', 3.5)),
                     ('boolean max_reserve_usd', lambda x: x.__setitem__('max_reserve_usd', True)),
+                    ('a missing profile', lambda x: x.pop('profile')),
+                    ('an unknown profile', lambda x: x.__setitem__('profile', 'pr9999-anything')),
+                    ('the m15 profile without its LangSmith pins (provenance cannot be dropped)', lambda x: x.pop('langsmith')),
+                    ('the PR 14414 profile relabel (wrong hash/head, and a langsmith block)', lambda x: x.__setitem__('profile', 'pr14414-headerless-capture')),
                     ('missing product pin', lambda x: x.pop('product_pin')),
                     ('short product pin', lambda x: x.__setitem__('product_pin', 'e' * 12)),
                     ('langsmith pin missing the aligned slice', lambda x: x['langsmith'].pop('aligned_slice_sha256')),
@@ -961,6 +966,107 @@ try:
                           capture_output=True, text=True)
     check('CLI verify-join prints the status line and writes the verified join receipt', proc.returncode == 0 and 'QA_ONMISS_JOIN_RESULT status=COMPLETE dispatches=1' in proc.stdout
           and json.loads(jo.read_text())['expected']['project'] == 'qa-m15-qa-spec-X', (proc.stdout + proc.stderr)[:120])
+    # ---- CTO GO C0ALZJHGE49 thread 1795302375.270589 (ts 1795310865.915209): explicit proof PROFILES ----
+    P14 = 'pr14414-headerless-capture'
+    saved_pin = dict(H.EXACT_PROFILES[P14])
+    check('the PR 14414 profile pins ONE head, ONE spec blob and ONE approved hash',
+          saved_pin['head'] == '6edba2fad7b450d60a1433b81e019464cf50e6be' and saved_pin['hash'] == 'e5c629a109c8cb064baa8d4c775bd8894104de6256d590809b8b9e48d9da3fdc'
+          and saved_pin['spec'] == 'tests/e2e/specs/qa-tests/14390-headerless-proceedings.spec.ts' and len(saved_pin['spec_blob']) == 40 and saved_pin['provenance'] == 'capture-readback')
+    check('the M15 profile keeps the mandatory LangSmith provenance', H.EXACT_PROFILES['m15-langsmith']['provenance'] == 'langsmith')
+    helper_src = HELPER.read_text()
+    check('no flag or branch exists that disables provenance (only the two reviewed profiles)', set(H.EXACT_PROFILES) == {'m15-langsmith', P14}
+          and not any(s in helper_src for s in ('--skip-provenance', '--no-langsmith', '--no-join', 'skip_provenance')))
+
+    def prof_manifest(name, keys, head, **over):
+        doc = {'version': 1, 'profile': P14, 'head': head, 'product_pin': head, 'approval_ref': APPROVAL, 'max_reserve_usd': 1.1, 'hashes': [entry(k) for k in keys]}
+        doc.update(over)
+        pth = MDIR / name
+        pth.write_text(json.dumps(doc))
+        return pth
+    for why, keys, head in (('any hash but the one approved hash', [K_OK], saved_pin['head']), ('any head but the pinned PR head', [K_OK], 'ab' * 20)):
+        try:
+            H.load_exact_manifest(prof_manifest('p-real.json', keys, head), head)
+            check('profile pr14414 refuses ' + why, False)
+        except ValueError as error:
+            check('profile pr14414 refuses ' + why, 'QA_EXACT_MANIFEST_INVALID' in str(error))
+    PHEAD = '14' * 20
+    H.EXACT_PROFILES[P14].update(hash=entry(K_PF)['hash'], head=PHEAD)  # in-process stand-in for the pinned values; production constants are not touched
+    try:
+        PM = H.load_exact_manifest(prof_manifest('p-ok.json', [K_PF], PHEAD), PHEAD)
+        check('profile manifest: accepted only with its pinned hash, head and product pin, and with NO langsmith block', PM['profile'] == P14 and PM['langsmith'] is None)
+        for why, mutate in (('a second hash', lambda d: d['hashes'].append(entry(K_TWIN))), ('a langsmith block (the shape is fixed per profile)', lambda d: d.__setitem__('langsmith', {'draft_sha256': '1' * 64, 'aligned_slice_sha256': '2' * 64})),
+                            ('a product pin that is not the head', lambda d: d.__setitem__('product_pin', 'cd' * 20)), ('a different hash', lambda d: d.__setitem__('hashes', [entry(K_TWIN)])),
+                            ('the m15 profile name on this body', lambda d: d.__setitem__('profile', 'm15-langsmith'))):
+            doc = json.loads((MDIR / 'p-ok.json').read_text())
+            mutate(doc)
+            (MDIR / 'p-bad.json').write_text(json.dumps(doc))
+            try:
+                H.load_exact_manifest(MDIR / 'p-bad.json', PHEAD)
+                check('profile manifest refuses ' + why, False)
+            except ValueError as error:
+                check('profile manifest refuses ' + why, 'QA_EXACT_MANIFEST_INVALID' in str(error))
+        check('profile spec: only the pinned spec is accepted', H.check_exact_profile_spec(PM, saved_pin['spec']) is None)
+        try:
+            H.check_exact_profile_spec(PM, 'tests/e2e/specs/qa-tests/other.spec.ts')
+            check('profile spec: another spec is refused', False)
+        except ValueError as error:
+            check('profile spec: another spec is refused', 'approved spec' in str(error))
+        # capture on the scoped proxy path, then the profile verdict
+        PIDS = dict(ids_for('rtbl-b1b1b1b1b1b1b1b1-989898', 'rtb-pool-22-232323', head=PHEAD), exact=PM)
+        UPSTREAM['keys'] = (PIDS['box_key'], PIDS['attempt_key'])
+        pcus = bind(PIDS)
+        arm(PIDS)
+        mp, cp = boot(PIDS, box='rtbl-b1b1b1b1b1b1b1b1-989898')
+        mp._QA_EXACT_SESSION_WAIT_S = 1
+        r = call_x(cp, 'EXACT-PROFILE', rid='req-profile-1')
+        check('profile: the one approved request is captured live (200), exactly one send', pcus['status'] == 'RECONCILED_BOUND' and r.status_code == 200 and n_calls('EXACT-PROFILE') == 1, str(r.status_code))
+        sx = H.qa_finish(FakeS3(), 'heydonna-qa', 'x', False, publisher, PIDS)
+        rep0 = json.loads(json.dumps(sx))  # as read back from the fetched llm-ledger.json
+        check('(a) profile: matching capture + ingress/provider identity + verified PUT-if-absent readback -> accepted, no LangSmith trace consulted',
+              H.exact_completion_status(rep0, None, 'qa-spec-X', PM) == 'COMPLETE' and rep0['publication_counts'] == [1, 0, 0] and rep0['fixtures_written'] == [K_PF], json.dumps(rep0['publication_counts']))
+        def mut(fn):
+            d = json.loads(json.dumps(rep0))
+            fn(d)
+            return d
+        row0 = lambda d: d['join'][0]
+        for why, report, expect in (
+                ('a missing claim', mut(lambda d: d.__setitem__('join', [])), 'NO_CLAIM'),
+                ('a wrong claimed hash', mut(lambda d: row0(d).__setitem__('hash', '0' * 64)), 'WRONG_HASH'),
+                ('an unsettled claim', mut(lambda d: row0(d).__setitem__('settled', False)), 'CLAIM_UNSETTLED'),
+                ('no ingress identity', mut(lambda d: row0(d).__setitem__('ingress_request_id', '')), 'INGRESS_ID_MISSING'),
+                ('no provider response identity', mut(lambda d: row0(d)['provider_dispatch'].__setitem__('provider_response_ids', [])), 'PROVIDER_DISPATCH_ID_MISSING'),
+                ('a non-2xx upstream status', mut(lambda d: row0(d)['provider_dispatch'].__setitem__('upstream_status', 500)), 'PROVIDER_DISPATCH_ID_MISSING'),
+                ('no write by this run', mut(lambda d: d.__setitem__('fixtures_written', [])), 'PUT_IF_ABSENT_UNPROVEN'),
+                ('an already-present canonical (counts 0,1,0)', mut(lambda d: d.__setitem__('publication_counts', [0, 1, 0])), 'PUT_IF_ABSENT_UNPROVEN'),
+                ('a readback mismatch', mut(lambda d: d['readback'][0].__setitem__('status', 'MISMATCH')), 'READBACK_UNVERIFIED'),
+                ('a second dispatch', mut(lambda d: d['attempts'].__setitem__('extra', {'hash': '1' * 64})), 'EXTRA_DISPATCH'),
+                ('a typed terminal reason', mut(lambda d: d.__setitem__('terminal_reason', 'QA_ONMISS_NO_RESEND')), 'REPORT_TERMINAL'),
+                ('another manifest digest', mut(lambda d: d['exact'].__setitem__('digest', '0' * 64)), 'PROFILE_MANIFEST_MISMATCH'),
+                ('no report', None, 'NO_REPORT')):
+            check('(b) profile REFUSES ' + why + ' -> ' + expect, H.exact_completion_status(report, None, 'qa-spec-X', PM) == expect)
+        again = json.loads(json.dumps(H.qa_finish(FakeS3(), 'heydonna-qa', 'x', False, publisher, PIDS)))
+        check('(b) profile: a SECOND finish finds the canonical already present (0,1,0) and refuses it as this run capture', again['publication_counts'] == [0, 1, 0]
+              and H.exact_completion_status(again, None, 'qa-spec-X', PM) == 'PUT_IF_ABSENT_UNPROVEN', json.dumps(again['publication_counts']))
+        r_wrong = call_x(cp, 'EXACT-PROFILE-WRONG')
+        check('(b) profile: a request for any other hash is refused NOT_APPROVED with zero send and zero reservation', r_wrong.status_code == 424 and r_wrong.json().get('error') == 'QA_ONMISS_NOT_APPROVED'
+              and n_calls('EXACT-PROFILE-WRONG') == 0 and len(ledger(PIDS['attempt_key'])['attempts']) == 1)
+        sx_wrong = json.loads(json.dumps(H.qa_finish(FakeS3(), 'heydonna-qa', 'x', False, publisher, PIDS)))
+        check('(b) profile: once a wrong-hash request was refused the lane is terminal, so completion is refused (REPORT_TERMINAL), not accepted',
+              H.exact_completion_status(sx_wrong, None, 'qa-spec-X', PM) == 'REPORT_TERMINAL' and sx_wrong['terminal_reason'] == 'QA_ONMISS_NOT_APPROVED')
+        # (c) M15 keeps refusing completion without a verified join, while the capture profile never consults a trace
+        m15_report = {'join': [{'ingress_request_id': 'req-1', 'provider_dispatch': {'provider_response_ids': ['r1']}}]}
+        check('(c) M15 with a MISSING join/trace still refuses completion (LANGSMITH_UNJOINED); the same report under the profile is not the M15 verdict',
+              H.exact_completion_status(m15_report, None, 'qa-spec-X', MAN) == 'LANGSMITH_UNJOINED' and H.exact_completion_status(m15_report, None, 'qa-spec-X', PM) != 'COMPLETE')
+        check('(c) M15 with an unverified or wrong-project trace still refuses', H.exact_completion_status(m15_report, dict(jt, verified=False), 'qa-spec-X', MAN) == 'LANGSMITH_UNJOINED'
+              and H.exact_completion_status(m15_report, dict(jt, project='qa-m15-other'), 'qa-spec-X', MAN) == 'LANGSMITH_PROJECT_MISMATCH')
+        m15r = MDIR / 'm15r.json'
+        m15r.write_text(json.dumps(m15_report))
+        proc = subprocess.run([sys.executable, '-I', str(HELPER), 'verify-join', '--report', str(m15r), '--run-id', 'qa-spec-X', '--exact-manifest', str(MAN_PATH), '--output', str(MDIR / 'm15o.json')],
+                              capture_output=True, text=True)
+        check('(c) CLI verify-join for M15 without a trace refuses completion and names the profile', proc.returncode == 0 and 'status=LANGSMITH_UNJOINED' in proc.stdout and 'profile=m15-langsmith' in proc.stdout, proc.stdout[:100])
+    finally:
+        H.EXACT_PROFILES[P14].clear()
+        H.EXACT_PROFILES[P14].update(saved_pin)
 finally:
     boto3.Session, boto3.client = saved_session, saved_client_ex
 

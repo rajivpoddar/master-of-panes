@@ -76,6 +76,11 @@
 #   proxy refuses every reservation without it and any priced bound above max_reserve_usd. (3) The join verifies the native LangSmith
 #   project, transcript and aligned draft the approval pinned. --exact-dry-check bakes an authoritative-miss dry-check: the proxy proves
 #   the miss on the scoped path and never prices, claims, reserves or dispatches (custody reconcile is then read-only).
+#   PROFILES (CTO GO C0ALZJHGE49 thread 1795302375.270589, ts 1795310865.915209): every manifest names one explicit profile; a missing or
+#   unknown profile is refused. m15-langsmith keeps the mandatory verified LangSmith join. pr14414-headerless-capture is for ONE pinned spec
+#   (blob-pinned and verified on the box), head 6edba2fa... and approved hash e5c629a1... only; its completion is exactly one settled
+#   request with ingress + provider response identity and a verified PUT-if-absent readback. It certifies the fixture capture only and is
+#   never that spec's AC1 PASS (AC1 needs a full strict replay on the private template). There is no switch that disables provenance.
 # Never prod, never push: the mutation exists only in the box worktree and is reverse-applied + sha256-verified after RED.
 set -euo pipefail
 umask 077
@@ -86,7 +91,7 @@ rtb="$HOME/.claude/scripts/remote-test-box.sh"
 source "$HOME/.claude/scripts/remote-qa-ownership.sh"   # qa_emit_ownership_receipt (shared with capture mode)
 llm_onmiss='' stripe_test_env='' pre_write_check='' extra_secrets=() extra_args_remote='' extra_box_env='' requires_modal='' run_id="qa-spec-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 exact_manifest='' canary_receipt='' exact_digest='' arm_pid='' exact_args='' exact_overlay_args='' onmiss_stock=''
-grant_receipt='' exact_dry='' product_pin='' exact_spend_box=''
+grant_receipt='' exact_dry='' product_pin='' exact_spend_box='' exact_profile='' spec_blob=''
 # Label of the requested LLM mode (follows llm_onmiss, which the controller clears if it disables on-miss).
 llm_label() { if [ -z "$llm_onmiss" ]; then echo strict; elif [ -n "$exact_manifest" ]; then echo capture-on-miss-exact; else echo capture-on-miss; fi; }
 modal_helper="${QA_MODAL_HELPER:-$HOME/.claude/scripts/remote-qa-modal.py}"
@@ -163,7 +168,11 @@ if [ -n "$exact_manifest" ]; then
   [ -r "$exact_manifest" ] && [ ! -L "$exact_manifest" ] || { echo '--on-miss-exact manifest unreadable' >&2; exit 2; }
   [ -n "$canary_receipt" ] || { echo '--on-miss-exact requires --canary-receipt (passed scoped publish/readback canary of the deployed controller)' >&2; exit 2; }
   [ -n "$grant_receipt" ] || { echo '--on-miss-exact requires --grant-receipt (the verified Run 9 object-only grant on heydonna-qa)' >&2; exit 2; }
-  exact_line=$(python3 -I "$modal_helper" check-exact-manifest --exact-manifest "$exact_manifest" --head "$head") || { echo 'QA_EXACT_MANIFEST_REFUSED' >&2; exit 2; }
+  exact_line=$(python3 -I "$modal_helper" check-exact-manifest --exact-manifest "$exact_manifest" --head "$head" --spec "$spec") || { echo 'QA_EXACT_MANIFEST_REFUSED' >&2; exit 2; }
+  exact_profile=$(printf '%s' "$exact_line" | tr ' ' '\n' | sed -n 's/^profile=//p')
+  [[ "$exact_profile" =~ ^[a-z0-9-]+$ ]] || { echo 'QA_EXACT_MANIFEST_REFUSED (profile)' >&2; exit 2; }
+  spec_blob=$(printf '%s' "$exact_line" | tr ' ' '\n' | sed -n 's/^spec_blob=//p')
+  [[ "$spec_blob" =~ ^([0-9a-f]{40}|none)$ ]] || { echo 'QA_EXACT_MANIFEST_REFUSED (spec blob)' >&2; exit 2; }
   exact_digest=$(printf '%s' "$exact_line" | sed -n 's/^QA_EXACT_MANIFEST ok digest=\([0-9a-f]\{64\}\) .*/\1/p')
   [[ "$exact_digest" =~ ^[0-9a-f]{64}$ ]] || { echo 'QA_EXACT_MANIFEST_REFUSED (digest)' >&2; exit 2; }
   product_pin=$(printf '%s' "$exact_line" | sed -n 's/.* product_pin=\([0-9a-f]\{40\}\) .*/\1/p')
@@ -388,6 +397,10 @@ cleanup() {
         # the approval pinned. Anything missing or different is a named status, never a pass.
         python3 -I "$modal_helper" verify-join --report "$out/out/llm-ledger.json" --trace "$out/out/langsmith-trace.json" --run-id "$run_id" --exact-manifest "$exact_manifest" --output "$out/out/llm-join.json" >"$out/llm-join.txt" 2>&1
         cat "$out/llm-join.txt"
+        if [ "$exact_profile" != m15-langsmith ]; then
+          # Fixture capture is SEPARATE from the spec's own PASS: this verdict certifies the one approved capture only.
+          echo "EXACT_PROFILE name=$exact_profile fixture_capture=$(sed -n 's/^QA_ONMISS_JOIN_RESULT status=\([A-Z_]*\).*/\1/p' "$out/llm-join.txt" | head -1) spec_ac_pass=NOT_ASSESSED (the spec's AC1 needs its own full strict replay on the private template; a fixture capture is never an AC1 PASS)" | tee -a "$out/lane.txt"
+        fi
       fi
       # Preserve the Playwright lane.rc and any earlier failure; media-only incompleteness is rc 3.
       if [ "$fetch_rc" != 0 ] && [ "$rc" = 0 ]; then rc=$fetch_rc; fi
@@ -559,7 +572,12 @@ if [ -n "$exact_manifest" ]; then
   qa_put "$exact_manifest" /root/qa/exact-manifest.json; qa_rsh "chmod 444 /root/qa/exact-manifest.json"
   # The approved PRODUCT pin is preserved: the launch head may differ from it only by the run-local spec file.
   qa_rsh "set -e; cd '$remote'; git cat-file -e '$product_pin^{commit}'; git merge-base --is-ancestor '$product_pin' HEAD; [ -z \"\$(git diff --name-only '$product_pin' HEAD | grep -v -x -F '$spec' || true)\" ]" >"$out/product-pin.log" 2>&1 || { echo "QA_PRODUCT_PIN_REFUSED: head $head differs from product pin $product_pin by more than the run-local spec" | tee -a "$out/lane.txt" >&2; exit 1; }
-  echo "QA_PRODUCT_PIN ok product_pin=$product_pin head=$head spec_only=true" | tee -a "$out/lane.txt"
+  echo "QA_PRODUCT_PIN ok product_pin=$product_pin head=$head spec_only=true profile=$exact_profile" | tee -a "$out/lane.txt"
+  # A profile that pins its spec also pins the spec BLOB: the exact bytes approved, not just a path.
+  if [ "$spec_blob" != none ]; then
+    qa_rsh "set -e; cd '$remote'; [ \"\$(git rev-parse 'HEAD:$spec')\" = '$spec_blob' ]" >"$out/spec-blob.log" 2>&1 || { echo "QA_SPEC_BLOB_REFUSED: $spec is not the approved blob $spec_blob" | tee -a "$out/lane.txt" >&2; exit 1; }
+    echo "QA_SPEC_BLOB ok spec=$spec blob=$spec_blob" | tee -a "$out/lane.txt"
+  fi
   # Run 9 effective-storage readback on the exact launch path: the box/Next env must be the verified scoped heydonna-qa identity.
   qa_rsh "python3 -I /root/qa/modal-lane.py check-app-data --env '$remote/.env.local'" >"$out/app-data-readback.log" 2>&1 || { echo 'QA_APP_DATA_UNSCOPED: box app-data storage is not the Run 9 scoped identity' | tee -a "$out/lane.txt" >&2; exit 1; }
   cat "$out/app-data-readback.log" | tee -a "$out/lane.txt"
