@@ -2517,6 +2517,24 @@ PY
   else
     echo "PROXY_AGENT_WARN reason=inkling_skill_overrides_unavailable" >&2
   fi
+# Every other lane gets the same mechanism with the lane allowlist (Rajiv D0AMF0XE6TS thread 1795230917.966119, ts 1795310703.137599 "Yes, do it":
+# proxies list only the skills lanes use; the PM pane keeps its full list). ~/.claude/scripts/proxy-skill-overrides.py prints a settings fragment
+# (skillOverrides "off" for every user/clone skill outside the allowlist, plus skillListingMaxDescChars) that is merged into THIS lane's --settings
+# file only. Plugin skills (the PM skills plugin) are not affected by skillOverrides. PM-role lanes run with user settings only, so the checkout's
+# project skills are not scanned for them. Fail-open: a generator or merge failure leaves the default listing. Off switch PROXY_AGENT_SKILL_ALLOWLIST=0.
+elif [[ "${PROXY_AGENT_SKILL_ALLOWLIST:-1}" != 0 ]]; then
+  _skill_cwd=(--cwd "$CWD"); [[ "$PM_ROLE" == "1" ]] && _skill_cwd=()
+  if _frag="$(python3 -I "$HOME/.claude/scripts/proxy-skill-overrides.py" --agent-file "$AGENT_FILE" --brief "${PROXY_RESUME_ORIGINAL:-$PROMPT_FILE}" ${_skill_cwd[@]+"${_skill_cwd[@]}"} 2>/dev/null)" && [[ -n "$_frag" ]]; then
+    FRAG="$_frag" python3 - "$SAFETY_SETTINGS" <<'PY' || echo "PROXY_AGENT_WARN reason=skill_overrides_merge_failed" >&2
+import json, os, sys
+p = sys.argv[1]
+d = json.load(open(p))
+d.update(json.loads(os.environ["FRAG"]))
+json.dump(d, open(p, "w"))
+PY
+  else
+    echo "PROXY_AGENT_WARN reason=skill_overrides_unavailable" >&2
+  fi
 fi
 
 # Persist a private runner, not credentials in tmux's command line/global env.

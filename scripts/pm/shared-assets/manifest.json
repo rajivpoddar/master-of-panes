@@ -879,7 +879,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "4a944e7dd47c60fb45a42683f9685b0ace65ebc0e119a17a957ee4dff1a2b853",
+      "sha256": "609e71f717e6f1a538cb4c76dc9fd640a84f7202f3289c6f65b4847123b6be33",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -908,6 +908,15 @@
       "ownership_class": "shared-claude-proxy-launcher",
       "sha256": "6ec8e0d0d92e465a8ccaca7abce61131a27f95cebeee7b2b80522fd6134ae77d",
       "source_path": "claude/scripts/proxy-review-cap.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/proxy-skill-overrides.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "856c897d2fee12452937c6d04beda0224e88dbdd8c2c7751413ba4d8fb50df82",
+      "source_path": "claude/scripts/proxy-skill-overrides.py"
     },
     {
       "additional_targets": [
@@ -2022,7 +2031,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 221,
+    "selected_count": 222,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
