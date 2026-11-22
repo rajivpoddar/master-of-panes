@@ -48,9 +48,21 @@ emit() { # mode okvalue name
 }
 case "$args" in
   "api repos/"*"/comments"*)
-    if [ "${GATE_MODE:-same}" = none ]; then printf '[[]]\n'; else
+    if [ -n "${CAP_COMMENTS_JSON:-}" ]; then printf '%s\n' "$CAP_COMMENTS_JSON"
+    elif [ "${GATE_MODE:-same}" = none ]; then printf '[[]]\n'; else
       prefix=''; [ "${GATE_MODE:-same}" != heading ] || prefix='## '
       printf '[[{"body":"%sPM 12b: %s at %s"}]]\n' "$prefix" "${VERDICT:-PASS}" "${REVIEW_SHA:-$STUB_SHA}"; fi ;;
+  "api repos/"*"/issues/"*"/events"*)
+    [ "${CAP_EVENTS_MODE:-ok}" = fail ] && { echo "HTTP 502" >&2; exit 1; }
+    printf '%s\n' "${CAP_EVENTS_JSON:-[[]]}" ;;
+  "api repos/"*"/actions/runs?head_sha="*)
+    sha=${args#*head_sha=}; sha=${sha%%&*}
+    cat "${CAP_FIX:-/nonexistent}/runs.$sha" 2>/dev/null || printf '[{"workflow_runs":[]}]\n' ;;
+  "api repos/"*"/actions/runs/"*"/jobs"*)
+    printf '[{"jobs":[{"name":"typescript","conclusion":"failure","started_at":"2026-11-20T10:00:00Z","completed_at":"2026-11-20T10:20:00Z"}]}]\n' ;;
+  "api repos/"*"/compare/"*"--jq .status"*) printf 'ahead\n' ;;      # stale test-merge guard: current main is contained
+  "api repos/"*"/git/ref/heads/main"*) printf '%s\n' "$STUB_MAIN_SHA" ;;
+  "api repos/"*"/pulls/"*"merge_commit_sha"*) printf '%s\n' "$STUB_MERGED_SHA" ;;
   "api repos/"*"/compare/"*)
     changed='[]'; [ "${GATE_MODE:-same}" != changed ] || changed='[{"filename":"lib/a.ts"}]'
     printf '{"status":"ahead","total_commits":1,"commits":[{"sha":"%s","parents":[{},{}],"commit":{"message":"Merge branch '\''main'\'' into topic"}}],"files":%s}\n' "$STUB_SHA" "$changed" ;;
@@ -221,5 +233,82 @@ GATE_MODE=same VERDICT=PASS REVIEW_SHA=${SHA:0:7}; export GATE_MODE VERDICT REVI
 OUT=$(PATH="$T/bin:$PATH" HOME="$T/home" bash "$SCRIPT" --check-12b-only 11173 2>&1); RC=$?
 check 'check-only: accepts seven-hex PASS' '[ "$RC" = 0 ]'
 check 'check-only PASS: no effects' '! grep -qE "^git |pm-ops |pr edit|label create|update-branch" "$STUB_LOG"'
+
+# ---- Admission cap (ADMISSION_CAP_2) -----------------------------------------------------------------------
+# Rajiv C0ALZJHGE49 thread 1795324302.697259, ts 1795324706.834969. Fixtures are generated per case. The counting logic is covered
+# structurally in test_pm_admit_cap.py; these cases prove the wiring: refusal, exit codes, no writes, ordering, override, fail-closed.
+CAP_FIX="$T/capfix"; mkdir -p "$CAP_FIX"; export CAP_FIX
+CH1=1111111111111111111111111111111111111111; CH2=2222222222222222222222222222222222222222
+OVR=cto:1795324706.834969
+cap_events() { # <head>... -> one exact ci-head label event per head, oldest first
+  local out='[[' sep='' i=0 s
+  for s in "$@"; do i=$((i+1)); out="$out$sep{\"event\":\"labeled\",\"created_at\":\"2026-11-20T1$i:00:00Z\",\"label\":{\"name\":\"ci-head:$s\"}}"; sep=,; done
+  printf '%s]]' "$out"
+}
+cap_red() { # <head> <run id>: one real (30 min) red ci.yml pull_request run at that head
+  printf '[{"workflow_runs":[{"id":%s,"head_sha":"%s","event":"pull_request","path":".github/workflows/ci.yml","name":"CI","conclusion":"failure","run_attempt":1,"run_started_at":"2026-11-20T10:00:00Z","updated_at":"2026-11-20T10:30:00Z","pull_requests":[]}]}]\n' "$2" "$1" > "$CAP_FIX/runs.$1"
+}
+cap_verdict() { # <head> <run id> <classification> -> one ci-failure-investigation verdict comment object
+  printf '{"id":%s,"created_at":"2026-11-20T12:00:00Z","body":"## CI failure investigation verdict\\n<!-- ci-failure-investigation:run=%s attempt=1 head=%s -->\\n<!-- ci-verdict: {\\"classification\\":\\"%s\\",\\"run_id\\":%s} -->"}' "$2" "$2" "$1" "$3" "$2"
+}
+cap_red $CH1 101; cap_red $CH2 102
+GATE_MODE=none; export GATE_MODE
+
+echo "case: cap - one admitted head is under the cap and costs no run lookups"
+CAP_EVENTS_JSON=$(cap_events $CH1); export CAP_EVENTS_JSON
+run_case cap_under --no-12b-gate --reason 'cap test'
+check 'cap_under: ok line' 'grep -qx "ADMISSION_CAP: ok pr=11173 admitted_heads=1 pr_caused_red_heads=0 cap=2" <<<"$OUT"'
+check 'cap_under: admitted' '[ "$RC" = 0 ] && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT"'
+check 'cap_under: no run lookups below the cap' '! grep -q "actions/runs" "$STUB_LOG"'
+
+echo "case: cap - two PR-caused red heads refuse before the 12b gate, with the S131 handoff"
+CAP_EVENTS_JSON=$(cap_events $CH1 $CH2); export CAP_EVENTS_JSON
+run_case cap_hit
+check 'cap_hit: exit 10' '[ "$RC" = 10 ]'
+check 'cap_hit: detail names heads, runs and the unrecorded classification' 'grep -q "^ADMISSION_CAP_2: PR #11173 has 2 admitted heads" <<<"$OUT" && grep -q "head ${CH1:0:10} ci run 101 failure classification=unrecorded" <<<"$OUT" && grep -q "head ${CH2:0:10} ci run 102 failure" <<<"$OUT"'
+check 'cap_hit: REFUSE, S131 handoff and override hint' 'grep -qx "REFUSE: ADMISSION_CAP_2 #11173; nothing admitted" <<<"$OUT" && grep -q "^S131 handoff: " <<<"$OUT" && grep -q "PM_ADMIT_CAP_OVERRIDE=cto:" <<<"$OUT"'
+check 'cap_hit: refused before the 12b gate (no review needed first)' '! grep -q 12b_missing_or_stale <<<"$OUT"'
+check 'cap_hit: no admission writes' '! grep -qE "pr edit|label create|update-branch|workflow run" "$STUB_LOG" && ! grep -q ADMITTED <<<"$OUT"'
+
+echo "case: cap - reds recorded as infra / flaky do not count"
+CAP_COMMENTS_JSON="[[$(cap_verdict $CH1 101 infra),$(cap_verdict $CH2 102 FLAKY)]]"; export CAP_COMMENTS_JSON
+run_case cap_exempt --no-12b-gate --reason 'cap test'
+check 'cap_exempt: zero PR-caused heads, admitted' '[ "$RC" = 0 ] && grep -q "pr_caused_red_heads=0" <<<"$OUT" && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT"'
+unset CAP_COMMENTS_JSON
+
+echo "case: cap - a CTO-approved override re-admits and is audited; a dry run is not"
+PM_ADMIT_CAP_OVERRIDE=$OVR; export PM_ADMIT_CAP_OVERRIDE
+run_case cap_override --no-12b-gate --reason 'cap test'
+check 'cap_override: override line, admitted' '[ "$RC" = 0 ] && grep -q "^ADMISSION_CAP_OVERRIDE: $OVR pr=11173" <<<"$OUT" && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT"'
+check 'cap_override: audited in the skip log' 'grep -q "PR=11173 admission-cap-override=$OVR" "$T/home/.claude/logs/pm-admit-skip.log"'
+AUDITED=$(grep -c admission-cap-override "$T/home/.claude/logs/pm-admit-skip.log")
+run_case cap_override_dry --dry-run --no-12b-gate --reason 'cap test'
+check 'cap_override --dry-run: override line, nothing admitted, not audited' '[ "$RC" = 0 ] && grep -q "^ADMISSION_CAP_OVERRIDE: " <<<"$OUT" && grep -q "nothing admitted" <<<"$OUT" && [ "$(grep -c admission-cap-override "$T/home/.claude/logs/pm-admit-skip.log")" = "$AUDITED" ]'
+PM_ADMIT_CAP_OVERRIDE=yes; export PM_ADMIT_CAP_OVERRIDE
+run_case cap_override_bad --no-12b-gate --reason 'cap test'
+check 'cap_override_bad: a malformed override is refused (64) with no writes' '[ "$RC" = 64 ] && grep -q "must look like cto:<slack ts>" <<<"$OUT" && ! grep -qE "pr edit|label create" "$STUB_LOG"'
+unset PM_ADMIT_CAP_OVERRIDE
+
+echo "case: cap - an unreadable record is UNAVAILABLE and fails closed, never a guess"
+CAP_EVENTS_MODE=fail; export CAP_EVENTS_MODE
+run_case cap_unavailable --no-12b-gate --reason 'cap test'
+check 'cap_unavailable: reason and REFUSE github_api_error (7)' '[ "$RC" = 7 ] && grep -qx "ADMISSION_CAP: UNAVAILABLE reason=issues/11173/events: gh_rc_1" <<<"$OUT" && grep -qx "REFUSE: github_api_error admission_cap" <<<"$OUT"'
+check 'cap_unavailable: no admission writes' '! grep -qE "pr edit|label create" "$STUB_LOG"'
+PM_ADMIT_CAP_OVERRIDE=$OVR; export PM_ADMIT_CAP_OVERRIDE
+run_case cap_unavailable_override --no-12b-gate --reason 'cap test'
+check 'cap_unavailable: an explicit override may proceed' '[ "$RC" = 0 ] && grep -q "cap lookup unavailable" <<<"$OUT" && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT"'
+unset PM_ADMIT_CAP_OVERRIDE CAP_EVENTS_MODE
+
+echo "case: cap - a dry run reports the refusal; merge-only and check-only never consult the cap"
+CAP_EVENTS_JSON=$(cap_events $CH1 $CH2); export CAP_EVENTS_JSON
+run_case cap_dry --dry-run
+check 'cap_dry: exit 10, nothing admitted' '[ "$RC" = 10 ] && grep -q "ADMISSION_CAP_2 #11173; nothing admitted" <<<"$OUT"'
+S166_CASE=no_overlap run_script cap_merge_only --merge-only 11173
+check 'cap: --merge-only does not read the cap' '[ "$RC" = 0 ] && ! grep -q "/events" "$STUB_LOG" && ! grep -q ADMISSION_CAP <<<"$OUT"'
+: > "$STUB_LOG"
+GATE_MODE=same VERDICT=PASS REVIEW_SHA=${SHA:0:7}; export GATE_MODE VERDICT REVIEW_SHA
+OUT=$(PATH="$T/bin:$PATH" HOME="$T/home" bash "$SCRIPT" --check-12b-only 11173 2>&1); RC=$?
+check 'cap: --check-12b-only does not read the cap' '! grep -q "/events" "$STUB_LOG" && ! grep -q ADMISSION_CAP <<<"$OUT"'
+unset CAP_EVENTS_JSON
 
 finish

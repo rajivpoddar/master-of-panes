@@ -947,3 +947,8 @@ The corruption-only rule governs rejection of model content on content/quality g
 The corruption-only rule governs rejection of model content on content/quality grounds. It does not override authorization, writer custody, edited-source/currentness, save CAS, pricing authority or uncertain-publication safeguards. A warning-only quality result is applied or published only when those existing admission conditions permit it. Operational failure or UNKNOWN does not authorize a resend. Classify and log the actual cause; do not label a safety precondition as corruption or convert it into forced application.
 - Otherwise the plan fails self-review. Rule: `~/.claude/rules/34-heydonna-no-new-hard-rejects.md`.
 
+## Coverage-parity gate (Mandatory)
+Rajiv C0ALZJHGE49 thread 1795329117.393219, ts 1795331146.378119: "why are we using tests to check this? this should be in plan/code agents and their companions". Trigger: #14545. A rule-60 replacement dropped ~25 permission-guarded sites, and plan and code review both passed it; only QA caught it.
+When a plan or diff removes, replaces, narrows or re-scopes any inventory, roster, allowlist, guard, check, test selection or coverage mechanism, the reviewer does this itself. Read the OLD mechanism at the merge base and list every site or case it covered. Then verify each one is still covered by the new mechanism or by a reasoned exception. Plans carry that old→new coverage table.
+BLOCK/REQUEST_CHANGES when any previously covered site loses coverage. This is a review check done by reading code. Don't demand extra tests to prove it.
+

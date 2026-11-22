@@ -15,7 +15,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "b51b0245d3526130dd5c0146057136c43acf927cff3071bb895973a85eb7421c",
+      "sha256": "ef21b7b43500a232ec4c1f194f59e4ffc0f8c771af3b31852fa18f21ec7bee1f",
       "source_path": "claude/agents/codex-code-reviewer.md"
     },
     {
@@ -24,7 +24,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "569572ad8c33faed12654e0c8c3da15d9315de433a48db457f21c1544a54d49b",
+      "sha256": "bec8c31d70372ee7e93da08fd7a817649d9163952f95773352105d5ff71feb1f",
       "source_path": "claude/agents/codex-plan-reviewer.md"
     },
     {
@@ -33,7 +33,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-planning-agents",
-      "sha256": "2caddd95b43a6edf9aecf23a77e19955e9a82ccd76b2dd9c566211e991f91359",
+      "sha256": "1bc696cadb203b0b2af50830f0c412e2b4c2375a7783c68984f157c58dbb3572",
       "source_path": "claude/agents/plan-agent.md"
     },
     {
@@ -424,6 +424,15 @@
       "source_path": "claude/scripts/ci/ci-rerun-guard-matcher.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/ci/ci_admitted_runs.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-ci-admission",
+      "sha256": "24fa7c9c37cb658bb5bb75ef94e5fca8bdbdb172dabb3b73ac4654f8cc1ef842",
+      "source_path": "claude/scripts/ci/ci_admitted_runs.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/ci/pm-admit-12b.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -433,12 +442,21 @@
       "source_path": "claude/scripts/ci/pm-admit-12b.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/ci/pm-admit-cap.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-ci-admission",
+      "sha256": "c24e64c987ee43a90b27087012d2601ada8e8c10854eac2a1ee8681a9ead255a",
+      "source_path": "claude/scripts/ci/pm-admit-cap.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/ci/pm-admit-ci.sh",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-ci-admission",
-      "sha256": "888e5bb6398ddddc999d65951daa8850330aa53536949631e26695afc29dcc72",
+      "sha256": "cdd5e7c5848b8ae2e14c059c122f28c43932eeb3fba0291f97e1a12b024d056c",
       "source_path": "claude/scripts/ci/pm-admit-ci.sh"
     },
     {
@@ -456,8 +474,17 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-ci-admission",
-      "sha256": "016106762162ed851d90a0b0138e06524ff614e1e8c217fba3317dc83fb43ec0",
+      "sha256": "cff73b56cdc0c38f20ee1a82a3ec245bb9c4c185cc70ea230e8543ba328a22bf",
       "source_path": "claude/scripts/ci/tests/test-pm-admit-ci.sh"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/ci/tests/test_pm_admit_cap.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-ci-admission",
+      "sha256": "a4183d24163a338ca121310af3740c7280ab755c90f4d0cb2c16f2b00fa96436",
+      "source_path": "claude/scripts/ci/tests/test_pm_admit_cap.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/codex-companion-broker-freshness.py",
@@ -879,7 +906,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "3573e5bec3f39d0db1d79c80c4b77f65f4abfb0b3b8f1f256ae7fadcb06bee86",
+      "sha256": "f9467d32fcb641700fb9bbea24f0734e697f20d585a983ceabaace2d116afd6a",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -1160,7 +1187,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-app-review-prompts",
-      "sha256": "5b12b2e16bc3dc4432588346d462a80fa53ee2bc3e7e819de7a9156b0d451ae3",
+      "sha256": "6b77ca1332790ed3566a1d35c654421d37a2481a9bb743801d2e9de1bbc73af2",
       "source_path": "claude/skills/codex-app-code-review/templates/prompt-rework.txt"
     },
     {
@@ -1169,7 +1196,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-app-review-prompts",
-      "sha256": "a3d873b75c16a772760b5f20cf5b038fa0a4df0b39e03753d83eaaade39e6c95",
+      "sha256": "76a6865e3dcfe64c60f6b8b2be82685213e1e426f9ae5b77b4c76306c4a2f14c",
       "source_path": "claude/skills/codex-app-code-review/templates/prompt.txt"
     },
     {
@@ -1178,7 +1205,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-app-review-prompts",
-      "sha256": "7a4e4dfe6eceaf7ad435f29f0ef1e4720f78fdd0e9441f8f55d56bae22908125",
+      "sha256": "4c41e09e8a0e6a659ff35a24e352b78b6a7a6522bd8532f6c289abeb50c1ed47",
       "source_path": "claude/skills/codex-app-plan-review/templates/prompt-rework.txt"
     },
     {
@@ -1187,7 +1214,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-app-review-prompts",
-      "sha256": "a4ea76256a21441fdc91f5be82a4b23ecc659bf553d01890b6aa93fff440f5bd",
+      "sha256": "db772aebff88e0665f3e9fea58618c270f6a62ebe54efdb61f343b1f7208104f",
       "source_path": "claude/skills/codex-app-plan-review/templates/prompt.txt"
     },
     {
@@ -2058,7 +2085,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 225,
+    "selected_count": 228,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",

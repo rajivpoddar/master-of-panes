@@ -1627,8 +1627,8 @@ proxy_agent_tier_models() {
     # OpenCode Go pool (Rajiv D0AMF0XE6TS thread 1794926930.078169, ts 1794930258.014469): hy4-flash-free joins LIGHT, deepseek-v4.1-flash joins MID.
     # Every tier ends with the emergency-only Muse Spark entry (see proxy_agent_is_emergency_muse). Grok stays in its existing slot.
     LIGHT) models="qwen3.8-flash-next deepseek-v4.1-flash hy4-flash-free claude-haiku-5-5 gpt-6-luna gpt-6.1-terra gpt-6.2-sol grok-4.7 muse-spark-1.3-contributor";;
-    # glm-5.3 registered, explicit --model only until one test build passes, Rajiv condition ts 1794942421.644269 (PM steer 2026-11-18: not in any automatic tier list).
-    MID) models="qwen3.8-flash-next deepseek-v4.1-flash hy4-flash-free claude-sonnet-5-5 gpt-6-luna gpt-6.1-terra gpt-6.2-sol grok-4.7 muse-spark-1.3-contributor";;
+    # glm-5.3 joins MID/BUILD1/PROOF1 after its #14254 test build (Codex APPROVE, 9/9 RED→GREEN); Rajiv "yes" D0AMF0XE6TS thread 1795327362.644159, ts 1795327535.503889.
+    MID) models="qwen3.8-flash-next deepseek-v4.1-flash glm-5.3 hy4-flash-free claude-sonnet-5-5 gpt-6-luna gpt-6.1-terra gpt-6.2-sol grok-4.7 muse-spark-1.3-contributor";;
     TOP) models="gpt-6.1-terra gpt-6.2-sol claude-opus-5-5 grok-4.7 muse-spark-1.3-contributor";;
     # gpt-6.2-sol replaces gpt-6.1-sol (the "sol" alias); gpt-6.1-terra stays in the tiers (Rajiv D0AMF0XE6TS thread 1794939318.063889, ts 1794941131.743129: "6.1 terra should stay. 6.2 sol should replace 6.1 sol").
     # Per-role ladders (Rajiv D0AMF0XE6TS thread 1794624936.567599: ts 1794639918.387399 ladder, ts 1794640102.756179 hydrogen in the mid rungs).
@@ -1636,11 +1636,11 @@ proxy_agent_tier_models() {
     PLAN) models="gpt-6.1-terra gpt-6.2-sol grok-4.7 claude-opus-5-5 muse-spark-1.3-contributor";;
     # Grok before Codex in every rung: Codex must last to Thu (Rajiv ts 1794660714.234059 "only grok, claude, codex").
     # Dev ladder (Rajiv C0ALZJHGE49 thread 1794665799.784789, ts 1794665970.826379): haiku/luna → sonnet/terra → opus/sol. No Grok on dev rungs.
-    BUILD1) models="qwen3.8-flash-next deepseek-v4.1-flash hy4-flash-free claude-haiku-5-5 gpt-6-luna gpt-6.1-terra gpt-6.2-sol muse-spark-1.3-contributor";;
+    BUILD1) models="qwen3.8-flash-next deepseek-v4.1-flash glm-5.3 hy4-flash-free claude-haiku-5-5 gpt-6-luna gpt-6.1-terra gpt-6.2-sol muse-spark-1.3-contributor";;
     BUILD2) models="gpt-6.1-terra gpt-6.2-sol claude-sonnet-5-5 muse-spark-1.3-contributor";;
     # S149 (Rajiv ts 1794941131.743129 "6.1 terra should stay. 6.2 sol should replace 6.1 sol"); sol now leads every rung (ts 1795158067.051479, header above).
     BUILD3) models="gpt-6.1-terra gpt-6.2-sol claude-opus-5-5 muse-spark-1.3-contributor";;
-    PROOF1) models="qwen3.8-flash-next deepseek-v4.1-flash hy4-flash-free claude-sonnet-5-5 gpt-6-luna gpt-6.1-terra gpt-6.2-sol muse-spark-1.3-contributor";;
+    PROOF1) models="qwen3.8-flash-next deepseek-v4.1-flash glm-5.3 hy4-flash-free claude-sonnet-5-5 gpt-6-luna gpt-6.1-terra gpt-6.2-sol muse-spark-1.3-contributor";;
     PROOF2) models="gpt-6.1-terra gpt-6.2-sol claude-opus-5-5 muse-spark-1.3-contributor";;
     # 12b reviews: carbon -> fable -> astra (Rajiv D0AMF0XE6TS thread 1794624936.567599, ts 1794640502.657479 "the 12b reviewer ladder can be carbon/fable/astra").
     # Supersedes the earlier fable-first list (thread 1794573312.657559, ts 1794623641.572859). Reviews never skip claude-* at the cap (see below).

@@ -8,6 +8,9 @@
 # 12b: --check-12b-only <PR> is read-only; --no-12b-gate --reason "<text>" audits an explicit override.
 # Main-red gate REMOVED (Rajiv C0ALZJHGE49 thread 1793958692.281499, ts 1793960417.571149: "remove it outright. note main red flakes have to be rerun. ... the skip pr has to be immediately merged with a followup issue. for affected pr's, merge main and re-admit."). Supersedes DM ts 1791877690.725089. --allow-main-red is still accepted (no-op) for compatibility.
 # Scope gate (Rajiv 2026-10-08, DM thread 1791461793.117869): site/docs-only PRs are refused (no CI/E2E); PM may override with --force-ci.
+# Admission cap (Rajiv C0ALZJHGE49 thread 1795324302.697259, ts 1795324706.834969 "yes"): after 2 admitted heads of the PR ended red with a
+# PR-caused classification, admission is refused (ADMISSION_CAP_2, exit 10) and the PR goes to the S131 handoff. See admission_cap_gate below;
+# CTO-approved re-admission: PM_ADMIT_CAP_OVERRIDE=cto:<slack ts> pm-admit-ci.sh <PR>.
 set -euo pipefail
 CHECK_12B_ONLY=0; MERGE_ONLY=0
 case "${1:-}" in
@@ -106,12 +109,46 @@ gate_12b() {
   python3 -I "$SCRIPT_DIR/../pm-ops.py" record --source pm-admit-ci --event 12b_gate_override --actor PM --target-type github_pr --target-id "$PR" --pr "$PR" --head-sha "$head" --payload-json "$payload" >/dev/null || return 3
 }
 
+# Admission cap (Rajiv C0ALZJHGE49 thread 1795324302.697259, ts 1795324706.834969 "yes"), mirroring the 2-round review cap.
+# pm-admit-cap.py (read-only) counts distinct admitted heads of this PR whose CI or E2E ended red with a PR-caused classification:
+# anything except a red recorded as infra / flaky / out-of-diff / inherited-main in the run's ci-failure-investigation verdict comment.
+# At 2 the PR stops re-admitting. Override: PM_ADMIT_CAP_OVERRIDE=cto:<slack ts> (or rajiv:<slack ts>), audited in pm-admit-skip.log.
+# An unreadable record is UNAVAILABLE (REFUSE github_api_error admission_cap), never a guess. Admission mode only: --merge-only and
+# --check-12b-only never admit, so they never reach it. It runs before the 12b gate so a capped PR is not sent to another review first.
+admission_cap_gate() {
+  local out rc=0 ov="${PM_ADMIT_CAP_OVERRIDE:-}"
+  if [ -n "$ov" ] && [[ ! "$ov" =~ ^(cto|rajiv):[0-9]{10}\.[0-9]{6}$ ]]; then
+    echo 'REFUSE: PM_ADMIT_CAP_OVERRIDE must look like cto:<slack ts> (or rajiv:<slack ts>), e.g. cto:1795324706.834969'; exit 64
+  fi
+  out=$(python3 -I "$SCRIPT_DIR/pm-admit-cap.py" --repo "$REPO" --pr "$PR") || rc=$?
+  [ -z "$out" ] || printf '%s\n' "$out"
+  case "$rc" in
+    0) return 0 ;;
+    10)
+      if [ -n "$ov" ]; then
+        echo "ADMISSION_CAP_OVERRIDE: $ov pr=$PR; cap reached, re-admission authorized by the override"
+        [ "$DRY" = 1 ] || echo "$(date -u +%FT%TZ) PR=$PR admission-cap-override=$ov" >> "$HOME/.claude/logs/pm-admit-skip.log" 2>/dev/null || true
+        return 0
+      fi
+      echo "REFUSE: ADMISSION_CAP_2 #$PR; nothing admitted"
+      echo "S131 handoff: stop re-admitting #$PR. Preserve and push any WIP, fence the old writer, and transfer ONE owner one tier up (Skill(hourly-report-processing) Step 3/3b), or send the CTO a head-pinned packet (PR, the heads and run ids above, classification, recommendation). A red that is really infra/flaky/out-of-diff stops counting once the run's ci-failure-investigation verdict records that. CTO-approved re-admission only: PM_ADMIT_CAP_OVERRIDE=cto:<slack ts> pm-admit-ci.sh $PR"
+      exit 10 ;;
+    *)
+      if [ -n "$ov" ]; then
+        echo "ADMISSION_CAP_OVERRIDE: $ov pr=$PR; cap lookup unavailable (rc=$rc), proceeding on the override"
+        return 0
+      fi
+      api_fail admission_cap ;;
+  esac
+}
+
 # The open-state guard applies to both modes; the review gate is for admission only.
 if [ "$MERGE_ONLY" = 0 ]; then
   H0=$(gh_get pr_head sha gh pr view "$PR" --repo "$REPO" --json headRefOid --jq .headRefOid) || api_fail pr_head
 fi
 PRSTATE=$(gh_get pr_state ok gh pr view "$PR" --repo "$REPO" --json state --jq .state) || api_fail pr_state
 [ "$PRSTATE" = OPEN ] || { echo "REFUSE: PR #$PR is $PRSTATE, not OPEN; nothing admitted"; exit 8; }
+if [ "$MERGE_ONLY" = 0 ] && [ "$CHECK_12B_ONLY" = 0 ]; then admission_cap_gate; fi
 if [ "$MERGE_ONLY" = 0 ]; then
   gate_12b "$H0" || exit "$?"
   [ "$CHECK_12B_ONLY" = 0 ] || exit 0
