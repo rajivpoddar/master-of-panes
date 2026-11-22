@@ -15,7 +15,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "514a5e16cc4c22c1e2af96fb36d2c133df0b65d8a27017dcdb01529a86884b7d",
+      "sha256": "b51b0245d3526130dd5c0146057136c43acf927cff3071bb895973a85eb7421c",
       "source_path": "claude/agents/codex-code-reviewer.md"
     },
     {
@@ -24,7 +24,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "eedff0e2a3b9b6728332fd80be80dac1ad164f6a9c67a0285f14a594a23dae15",
+      "sha256": "569572ad8c33faed12654e0c8c3da15d9315de433a48db457f21c1544a54d49b",
       "source_path": "claude/agents/codex-plan-reviewer.md"
     },
     {
@@ -33,7 +33,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-planning-agents",
-      "sha256": "1845134c895d52797f9ba35fac8f8945403b8414835679fccb1ed9f51f9fc29d",
+      "sha256": "2caddd95b43a6edf9aecf23a77e19955e9a82ccd76b2dd9c566211e991f91359",
       "source_path": "claude/agents/plan-agent.md"
     },
     {
@@ -357,7 +357,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "ae8f3bdd42ad883371a235ea64c2445943da789c57ac36f92d1da7b440e221d5",
+      "sha256": "419a955e2ea0e7186335d7dcc82ca426621174c88d7a0cbc426bd95d3a099969",
       "source_path": "claude/project-agents/pm-code-reviewer.md"
     },
     {
@@ -366,7 +366,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-agents",
-      "sha256": "9cd072ff9f70edc882fb18db53d530d3b7baa6f7ea8b6d353670a110f6993ab9",
+      "sha256": "c58d691d0397ea1165f89d0b71fcdc5fe6a8fe736669267160c202c346c8a6d6",
       "source_path": "claude/project-agents/pm-plan-reviewer.md"
     },
     {
@@ -1295,7 +1295,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "f1569ca08c90baa9479e06328f5592ffb1fc01865a0d99927068423160b47318",
+      "sha256": "cb7595d3b189b76ff524bba93a4ee28765f4c63e5b3f79a9dd6fac5833b0b2e1",
       "source_path": "claude/skills/hourly-report-processing/SKILL.md"
     },
     {

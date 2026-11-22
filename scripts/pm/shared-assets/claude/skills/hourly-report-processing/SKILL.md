@@ -216,6 +216,8 @@ Recovery, in the same turn, in this order. Delegate the mutating steps to ONE PM
 Reply line: `boxes: test <free>/<target> (<queued> queued, <broken> broken, <expired> expired) · browser <free>/<target> · action: <what was done/owner>`.
 
 ## Step 3b: Training progress (Rajiv 2026-10-21, C0ALZJHGE49 thread 1792550718.626739, ts 1792551127.300669)
+
+**RETIRED for Sindhu (Rajiv 2026-11-22, D0AMF0XE6TS thread 1795294265.657749, ts 1795316277.054839: "sindhu run is abandoned. stop tracking it."; C0ALZJHGE49 ts 1795315975.411499: "drop sindhu training from the hourlies").** The hourly no longer checks, resumes or reports the Sindhu run (sindhu-r7-*). Do not launch spark-resume-run for it. This step applies only to a NEW training run Rajiv explicitly starts.
 *"update the processing skill to check verify the sindhu run steps as well. if step count remains the same then check the status with superproofer agent an dm me."*
 
 Each hourly, read the report's `*Training:*` line (e.g. `sindhu-r7-n5625 step 1150/5625 ... (as of HH:MM IST)`) and compare its run id and step against the PREVIOUS hourly report's training line in C0ALZJHGE49.

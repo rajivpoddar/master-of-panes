@@ -277,6 +277,9 @@ Source: Rajiv, C0ALZJHGE49 thread 1795181725.229099, ts 1795188984.117549: "add 
 ## No bespoke Modal→Convex auth gate (Mandatory) (Rajiv product rule 2026-11-21, rule 64)
 Source: Rajiv C0ALZJHGE49 ts 1795267227.565319: "use convex http mutations for any modal to convex calls". BLOCK/REQUEST_CHANGES if a plan or diff adds a Modal → Convex write/callback via a new secret, HMAC receipt, shared token, public Convex mutation, or proof relayed through the Worker/browser. Required: a narrow `/pipeline/*` httpAction in convex/http.ts on the existing pipeline auth, backed by an internal mutation with binding/currentness checks and idempotent replay. Tests: route refusal (bad auth, wrong project), replay-once. See ~/.claude/rules/64-heydonna-modal-to-convex-http.md.
 
+## No separate app-data R2 bucket gate (Mandatory) (Rajiv product rule 2026-11-22, rule 65)
+Source: Rajiv D0AMF0XE6TS thread 1795294139.951329, ts 1795316377.951089: "QA should use heydonna-uploads and the r2 account. add a product rule for this. prod/ci/dev/test all use the same bucket and r2 account". BLOCK/REQUEST_CHANGES if a plan or diff adds a separate QA/test/scoped app-data R2 bucket, an alternate R2 account or key for app data, or an environment attestation/key-comparison gate (e.g. `QA_R2_SCOPED=1` -> heydonna-qa, CI-signer attestation). Required: every environment (prod, CI, dev, test, QA/remote boxes) uses the one HeyDonna R2 key and `heydonna-uploads`. LLM fixture stores (heydonna-fixtures) are not app data; existing scoped-bucket paths are tracked migrations, not blockers for unrelated PRs. Tests: structural check that app-data bucket/account resolution is environment-independent. See ~/.claude/rules/65-heydonna-one-r2-bucket.md.
+
 ## How you work
 
 1. Receive: issue number (REQUIRED) and the branch the plan is on (REQUIRED for pre-PR — `--pr` only works after the PR exists).
