@@ -32,7 +32,7 @@ if str(CONTROL_PLANE_DIR) not in sys.path:
     sys.path.insert(0, str(CONTROL_PLANE_DIR))
 
 from issue_claimability import NON_DISPATCHABLE_CLAIMABLE_TYPES
-from ready_pool_select import candidate as selection_candidate, evaluate_dependency, is_gated, owned_issues, prefetch_dependencies
+from ready_pool_select import candidate as selection_candidate, evaluate_dependency, is_gated, owned_issues, prefetch_dependencies, prefetch_native
 
 
 REPO = os.environ.get("GH_REPO", "Scribie/heydonna-app")
@@ -1270,10 +1270,8 @@ def open_pr_issue_numbers() -> set[int]:
     return set(owned_issues(json.loads(proc.stdout or "[]"))[0])
 
 
-def is_claimable_ready_pool_todo(
-    issue: dict[str, Any], open_nums: set[int], pr_issues: set[int], dependency_cache: dict | None = None
-) -> bool:
-    """Pool count includes only claimable status:todo issues (Rajiv 2026-10-11)."""
+def is_claimable_before_dependency(issue: dict[str, Any], open_nums: set[int], pr_issues: set[int]) -> bool:
+    """Every claimability check that needs no dependency lookup (no network)."""
     if not is_clean_ready_pool_todo(issue, open_nums):
         return False
     if int(issue["number"]) in pr_issues:
@@ -1285,17 +1283,42 @@ def is_claimable_ready_pool_todo(
             or name.startswith("pm-nonclaimable")
         ):
             return False
-    selection = selection_candidate(issue, "new_issue")
-    evaluate_dependency(selection, dependency_cache if dependency_cache is not None else {})
-    if is_gated(selection):
-        return False
     return True
+
+
+def dependency_gate_clear(issue: dict[str, Any], cache: dict) -> bool:
+    """Selector dependency gate for one issue; reads `cache`, so prefetch it first."""
+    selection = selection_candidate(issue, "new_issue")
+    evaluate_dependency(selection, cache)
+    return not is_gated(selection)
+
+
+def is_claimable_ready_pool_todo(
+    issue: dict[str, Any], open_nums: set[int], pr_issues: set[int], dependency_cache: dict | None = None
+) -> bool:
+    """Pool count includes only claimable status:todo issues (Rajiv 2026-10-11)."""
+    if not is_claimable_before_dependency(issue, open_nums, pr_issues):
+        return False
+    return dependency_gate_clear(issue, dependency_cache if dependency_cache is not None else {})
 
 
 def clean_ready_pool_todo_count(issues: list[dict[str, Any]], open_nums: set[int]) -> int:
     pr_issues = open_pr_issue_numbers()
     cache: dict = {}
-    return sum(1 for issue in issues if is_claimable_ready_pool_todo(issue, open_nums, pr_issues, cache))
+    # Row 38444: evaluate_dependency() on a cold cache made one serial REST blocked_by call per
+    # claimable todo (~1s each, 350+ issues), which exhausted the repair budget. Reuse the
+    # selector's batched lookups once for the whole claimable set; evaluate_dependency() then
+    # reads the shared cache. A failed batch still stores None and latches "unavailable", so
+    # every affected issue stays gated by LOOKUP_FAILED (fail closed). Shallow copies keep the
+    # prefetch's `_dependency_comments` annotations off the caller's issue dicts.
+    shaped = [dict(i) for i in issues if is_claimable_before_dependency(i, open_nums, pr_issues)]
+    if shaped:
+        prefetch_dependencies(shaped, cache)
+        # Every evaluated number, not native_candidates(): its classify() filter would leave
+        # some issues to the serial REST fallback in native_dependencies().
+        prefetch_native([int(i["number"]) for i in shaped], cache)
+    # The pre-dependency checks (incl. the handoff preflight subprocess) already ran once above.
+    return sum(1 for issue in shaped if dependency_gate_clear(issue, cache))
 
 
 def compute_promotion_deficit(
@@ -2686,6 +2709,10 @@ def audit_ready_pool_main(argv: list[str]) -> int:
     parked_or_owned: list[dict[str, Any]] = []
     dependency_cache: dict = {}
     prefetch_dependencies(todos, dependency_cache)
+    if todos:
+        # Same defect as clean_ready_pool_todo_count (row 38444): without this, each todo
+        # below made a serial REST blocked_by call.
+        prefetch_native([int(i["number"]) for i in todos], dependency_cache)
     for issue in todos:
         number = int(issue["number"])
         names = labels(issue)

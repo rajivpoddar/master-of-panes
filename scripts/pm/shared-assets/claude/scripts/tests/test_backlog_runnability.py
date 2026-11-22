@@ -171,6 +171,59 @@ def test_promotion_preserves_existing_legacy_dependency_label(monkeypatch):
     assert "pm-blocked:dependency" not in calls[0][calls[0].index("--remove-label") + 1]
 
 
+# Row 38444 (2026-11-22): the promoter's pool count ran evaluate_dependency() on a cold cache, one
+# serial REST blocked_by call (~1s) per claimable todo. It must reuse the selector's batched lookups.
+def _pool_todo(n, extra=()):
+    return {"number": n, "title": f"t{n}", "body": "", "updatedAt": "",
+            "labels": [{"name": x} for x in ("status:todo", "P1", *extra)]}
+
+
+def _pool_env(monkeypatch, batch_fn):
+    import ready_pool_select as sel
+    seen = {"batches": [], "serial": []}
+    def batch(numbers):
+        seen["batches"].append(list(numbers))
+        return batch_fn(numbers)
+    def serial(number):
+        seen["serial"].append(number)
+        raise AssertionError("serial REST blocked_by lookup")
+    monkeypatch.setenv("GH_BUDGET_DISABLE", "1")  # no shared disk cache
+    monkeypatch.setattr(sel, "_prefetch_native_batch", batch)
+    monkeypatch.setattr(sel, "_native_fetch", serial)
+    monkeypatch.setattr(sel, "graphql_nodes", lambda *a, **k: {})
+    monkeypatch.setattr(bt, "open_pr_issue_numbers", lambda: set())
+    monkeypatch.setattr(bt, "is_clean_ready_pool_todo", lambda issue, open_nums: True)
+    return seen
+
+
+def test_pool_count_uses_batched_native_lookup(monkeypatch):
+    seen = _pool_env(monkeypatch, lambda nums: {n: [] for n in nums})
+    issues = [_pool_todo(n) for n in range(1, 121)] + [_pool_todo(500, ("slot:3",))]
+    assert bt.clean_ready_pool_todo_count(issues, set()) == 120
+    assert seen["serial"] == []
+    assert [len(b) for b in seen["batches"]] == [50, 50, 20]  # 120 issues, 3 round trips
+    assert 500 not in {n for b in seen["batches"] for n in b}  # non-claimable never looked up
+    assert not any("_dependency_comments" in i for i in issues)  # caller's dicts untouched
+
+
+def test_pool_count_fails_closed_when_batch_lookup_fails(monkeypatch):
+    def boom(nums):
+        raise OSError("graphql down")
+    seen = _pool_env(monkeypatch, boom)
+    issues = [_pool_todo(n) for n in range(1, 6)]
+    assert bt.clean_ready_pool_todo_count(issues, set()) == 0  # LOOKUP_FAILED gates every issue
+    assert seen["serial"] == []  # and no slow serial retry either
+
+
+def test_pool_count_open_native_blocker_is_gated(monkeypatch):
+    import ready_pool_select as sel
+    seen = _pool_env(monkeypatch, lambda nums: {n: ([(999, "default")] if n == 2 else []) for n in nums})
+    monkeypatch.setattr(sel, "graphql_nodes", lambda *a, **k: {999: {"state": "OPEN"}})
+    issues = [_pool_todo(1), _pool_todo(2), _pool_todo(3)]
+    assert bt.clean_ready_pool_todo_count(issues, set()) == 2
+    assert seen["serial"] == []
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_") and callable(fn) and name != "test_audit_separates_parked_and_owned_from_missing_contract": fn()
