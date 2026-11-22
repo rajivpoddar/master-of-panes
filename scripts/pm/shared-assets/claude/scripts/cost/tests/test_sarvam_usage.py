@@ -1,12 +1,16 @@
 """Sarvam TF measured estimate: attribution by REGISTERED ROUTE ONLY (bare upstream ids from foreign-provider lanes
-never count), per-completion usage summed once across continuations, verified lane usage x published rates (separate
-cached rate), UNAVAILABLE with a reason instead of an invented zero, balance kept separate.
+never count), per-completion usage summed once across continuations (cumulative snapshots counted once per session),
+each completion placed by its OWN timestamp (never the transcript mtime), verified lane usage x published rates
+(separate cached rate), UNAVAILABLE with a reason instead of an invented zero (empty/malformed usage, unknown
+invocation boundary, unrecoverable time), balance kept separate.
 
 Structural, not inventory-pinned (rule 60): route tables are discovered from `su.ROUTES` and the launcher, never copied.
 
 Run by path (the launcher tests do the same): python3 -I ~/.claude/scripts/cost/tests/test_sarvam_usage.py
 """
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import re
@@ -25,27 +29,43 @@ GLM = "sarvam-glm-5.3"
 BANNED_WORDING = ("lower bound", "upper bound", "≤", "floor")
 
 
+def fmt(when: datetime) -> str:
+    return when.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
 def ts(minutes_ago: float) -> str:
-    return (NOW - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    return fmt(NOW - timedelta(minutes=minutes_ago))
 
 
 def init(model):
     return json.dumps({"type": "system", "subtype": "init", "model": model, "session_id": "s-1"}, separators=(",", ":"))
 
 
-def asst(msg_id, model, minutes_ago=5, inp=0, out=0, kind="assistant", text=None):
-    """An assistant event. Real Sarvam lanes print the UPSTREAM id here and a placeholder usage (output_tokens 0)."""
+def asst(msg_id, model, minutes_ago=5, inp=0, out=0, kind="assistant", text=None, when=None, session_id="s-1"):
+    """An assistant event. Real Sarvam lanes print the UPSTREAM id here and a placeholder usage (output_tokens 0).
+
+    `when` (a datetime) overrides `minutes_ago`; `session_id` is the lane's session (the key a result is bound by)."""
     message = {"id": msg_id, "model": model, "usage": {"input_tokens": inp, "output_tokens": out}}
     if text:
         message["content"] = [{"type": "text", "text": text}]
-    return json.dumps({"type": kind, "message": message, "timestamp": ts(minutes_ago)}, separators=(",", ":"))
+    event = {"type": kind, "message": message, "timestamp": fmt(when) if when is not None else ts(minutes_ago)}
+    if session_id is not None:
+        event["session_id"] = session_id
+    return json.dumps(event, separators=(",", ":"))
 
 
-def result(uuid=None, since_last=None, **by_model):
+def counters(tokens):
+    tokens = tuple(tokens) + (0,) * (4 - len(tokens))
+    return {"inputTokens": tokens[0], "cacheReadInputTokens": tokens[1], "outputTokens": tokens[2],
+            "cacheCreationInputTokens": tokens[3]}
+
+
+def result(uuid=None, since_last=None, session_id="s-1", **by_model):
     """A result event. by_model: model-key -> (inputTokens, cacheRead, outputTokens[, cacheCreation]).
 
     `since_last` (dict of the same shape) writes `model_usage_since_last_result`, the per-completion delta the real
-    harness emits; without it the event carries only the cumulative `modelUsage` (the older shape).
+    harness emits; without it the event carries only the cumulative `modelUsage` (the older shape). `session_id` is
+    the invocation key the real harness stamps on every result of a session (None omits it).
     """
     usage = {}
     for key, tokens in by_model.items():
@@ -54,6 +74,8 @@ def result(uuid=None, since_last=None, **by_model):
             "inputTokens": tokens[0], "cacheReadInputTokens": tokens[1], "outputTokens": tokens[2],
             "cacheCreationInputTokens": tokens[3]}
     event = {"type": "result", "subtype": "success", "modelUsage": usage}
+    if session_id is not None:
+        event["session_id"] = session_id
     if uuid is not None:
         event["uuid"] = uuid
         event["result_index"] = 0
@@ -65,6 +87,13 @@ def result(uuid=None, since_last=None, **by_model):
                 "inputTokens": tokens[0], "cacheReadInputTokens": tokens[1], "outputTokens": tokens[2],
                 "cacheCreationInputTokens": tokens[3]}
         event["model_usage_since_last_result"] = deltas
+    return json.dumps(event, separators=(",", ":"))
+
+
+def raw_result(uuid, usage, session_id="s-1", **extra):
+    """A result event with a hand-built usage object (empty, partial or malformed), as the harness could write one."""
+    event = {"type": "result", "subtype": "success", "session_id": session_id, "uuid": uuid, "result_index": 0,
+             "modelUsage": usage, "model_usage_since_last_result": usage, **extra}
     return json.dumps(event, separators=(",", ":"))
 
 
@@ -82,11 +111,11 @@ class Sandbox(unittest.TestCase):
         self.ledger = Path(self._tmp.name) / "state" / "ledger.jsonl"
         self.caps = Path(self._tmp.name) / "proxy-caps.env"
 
-    def lane(self, stem, *events, launch_alias=None, minutes_ago=5):
-        """A lane transcript (+ optional LAUNCH manifest) whose mtime is the lane's end time."""
+    def lane(self, stem, *events, launch_alias=None, minutes_ago=5, mtime=None):
+        """A lane transcript (+ optional LAUNCH manifest) whose mtime is the lane's last write (`mtime` overrides)."""
         path = self.root / f"{stem}.jsonl"
         path.write_text("\n".join(events) + "\n")
-        stamp = NOW.timestamp() - minutes_ago * 60
+        stamp = mtime.timestamp() if mtime is not None else NOW.timestamp() - minutes_ago * 60
         os.utime(path, (stamp, stamp))
         if launch_alias is not None:
             (self.root / f"{stem}.log").write_text(
@@ -98,9 +127,9 @@ class Sandbox(unittest.TestCase):
                     completions=None):
         """A lane shaped like the real ones: init prints the alias, messages print the upstream id.
 
-        `completions` (list of (uuid, delta) pairs) shapes a multi-completion continuation lane; each completion
-        carries `modelUsage` = the running cumulative and `model_usage_since_last_result` = its own delta, exactly
-        as the launcher appends them.
+        `completions` (list of (uuid, delta[, minutes_ago]) tuples) shapes a multi-completion continuation lane; each
+        completion is preceded by its own stamped message and carries `modelUsage` = the running cumulative and
+        `model_usage_since_last_result` = its own delta, exactly as the launcher appends them.
         """
         upstream = su.ROUTES[alias]["upstream"]
         events = [init(alias), asst(f"{stem}-1", upstream, minutes_ago, inp=123456), asst(f"{stem}-2", upstream, minutes_ago)]
@@ -110,9 +139,10 @@ class Sandbox(unittest.TestCase):
                                      **{alias.replace("-", "_"): usage}))
             else:
                 cumulative = [0, 0, 0]
-                for i, (uuid, delta) in enumerate(completions):
+                for uuid, delta, *when in completions:
                     cumulative = [c + d for c, d in zip(cumulative, tuple(delta) + (0,) * (3 - len(delta)))]
                     key = alias.replace("-", "_")
+                    events.append(asst(f"{stem}-c{uuid}", upstream, when[0] if when else minutes_ago))
                     events.append(result(uuid=uuid, since_last={key: delta}, **{key: tuple(cumulative)}))
         return self.lane(stem, *events, launch_alias=alias, minutes_ago=minutes_ago)
 
@@ -253,19 +283,68 @@ class Continuations(Sandbox):
         self.assertEqual(out["summary"]["priced_lanes"], 2)
         self.assertAlmostEqual(out["summary"]["used_inr"], priced(GLM, 2_000_000), places=6)
 
-    def test_old_cumulative_only_results_are_merged_by_max_per_invocation(self):
-        # Backward shape: results that carry ONLY cumulative modelUsage (no per-result delta). Successive results
-        # of one invocation keep the max; a new invocation (new assistant id) starts a fresh row.
+    def test_cumulative_snapshots_with_distinct_uuids_count_once_per_invocation(self):
+        # The CTO's case at 58a2c73: results that carry ONLY cumulative modelUsage, each with its own result uuid and
+        # its own assistant id. Snapshots 1M then 2M are ONE invocation whose true cumulative is 2M: counting each
+        # snapshot (or each uuid/assistant-id basis) as a separate row billed 3M.
+        key = GLM.replace("-", "_")
         self.lane("a", init(GLM),
                   asst("base-1", su.ROUTES[GLM]["upstream"]),
-                  result(**{GLM.replace("-", "_"): (1_000_000, 0, 0)}),
-                  result(**{GLM.replace("-", "_"): (2_000_000, 0, 0)}),  # same invocation, cumulative grew
+                  result(uuid="u1", **{key: (1_000_000, 0, 0)}),
                   asst("base-2", su.ROUTES[GLM]["upstream"]),
-                  result(**{GLM.replace("-", "_"): (500_000, 0, 0)}),  # counter reset: a new invocation
+                  result(uuid="u2", **{key: (2_000_000, 0, 0)}),
                   launch_alias=GLM)
         out = self.run_collect()
-        self.assertAlmostEqual(out["summary"]["used_inr"], priced(GLM, 2_500_000), places=6)
-        self.assertEqual(out["summary"]["priced_lanes"], 2)
+        self.assertAlmostEqual(out["summary"]["used_inr"], priced(GLM, 2_000_000), places=6)
+        self.assertEqual(out["summary"]["tokens"]["in"], 2_000_000)
+
+    def test_repeated_cumulative_snapshot_adds_nothing(self):
+        key = GLM.replace("-", "_")
+        self.lane("a", init(GLM), asst("m1", su.ROUTES[GLM]["upstream"]),
+                  result(uuid="u1", **{key: (1_000_000, 0, 0)}), asst("m2", su.ROUTES[GLM]["upstream"]),
+                  result(uuid="u2", **{key: (1_000_000, 0, 0)}), launch_alias=GLM)
+        self.assertAlmostEqual(self.run_collect()["summary"]["used_inr"], priced(GLM, 1_000_000), places=6)
+
+    def test_cumulative_snapshot_after_per_completion_deltas_counts_only_the_growth(self):
+        # since_last results already counted 1M; a later snapshot-only result at cumulative 3M adds just the 2M growth.
+        key = GLM.replace("-", "_")
+        self.lane("a", init(GLM), asst("m1", su.ROUTES[GLM]["upstream"]),
+                  result(uuid="r0", since_last={key: (1_000_000, 0, 0)}, **{key: (1_000_000, 0, 0)}),
+                  asst("m2", su.ROUTES[GLM]["upstream"]), result(uuid="r1", **{key: (3_000_000, 0, 0)}),
+                  launch_alias=GLM)
+        self.assertAlmostEqual(self.run_collect()["summary"]["used_inr"], priced(GLM, 3_000_000), places=6)
+
+    def test_cumulative_counter_going_backwards_is_unknown_boundary_and_never_summed(self):
+        # 2M then 500k: a reset or a foreign counter. The boundary is unknown, so the 500k is UNAVAILABLE and
+        # reported, never added (the old reading billed 2.5M) and never guessed to be a fresh invocation.
+        key = GLM.replace("-", "_")
+        self.lane("a", init(GLM), asst("m1", su.ROUTES[GLM]["upstream"]),
+                  result(uuid="u1", **{key: (2_000_000, 0, 0)}), asst("m2", su.ROUTES[GLM]["upstream"]),
+                  result(uuid="u2", **{key: (500_000, 0, 0)}), launch_alias=GLM)
+        out = self.run_collect()
+        self.assertAlmostEqual(out["summary"]["used_inr"], priced(GLM, 2_000_000), places=6)
+        self.assertEqual(out["unbounded_lanes"], 1)
+        self.assertIn("unknown invocation boundary", out["line"])
+        self.assertIn("never summed", out["line"])
+
+    def test_cumulative_only_result_with_no_session_id_is_unavailable_never_counted(self):
+        key = GLM.replace("-", "_")
+        self.lane("a", init(GLM), asst("m1", su.ROUTES[GLM]["upstream"]),
+                  result(uuid="u1", session_id=None, **{key: (4_000_000, 0, 0)}), launch_alias=GLM)
+        out = self.run_collect()
+        self.assertEqual(out["summary"]["priced_lanes"], 0)
+        self.assertEqual(out["unbounded_lanes"], 1)
+        self.assertFalse(out["available"])
+        self.assertTrue(out["line"].startswith("Sarvam TF: measured estimate UNAVAILABLE"), out["line"])
+        self.assertNotIn("₹0.00", out["line"])
+
+    def test_two_sessions_in_one_lane_are_separate_invocations(self):
+        key = GLM.replace("-", "_")
+        self.lane("a", init(GLM), asst("m1", su.ROUTES[GLM]["upstream"], session_id="s-1"),
+                  result(uuid="u1", session_id="s-1", **{key: (1_000_000, 0, 0)}),
+                  asst("m2", su.ROUTES[GLM]["upstream"], session_id="s-2"),
+                  result(uuid="u2", session_id="s-2", **{key: (500_000, 0, 0)}), launch_alias=GLM)
+        self.assertAlmostEqual(self.run_collect()["summary"]["used_inr"], priced(GLM, 1_500_000), places=6)
 
     def test_result_usage_from_a_foreign_lane_without_since_last_is_refused_too(self):
         upstream = su.ROUTES[GLM]["upstream"]
@@ -317,13 +396,54 @@ class CostMath(Sandbox):
         self.sarvam_lane("new", usage=(1_000_000, 0, 0), minutes_ago=10)
         self.assertAlmostEqual(self.run_collect()["summary"]["used_inr"], priced(GLM, 1_000_000), places=6)
 
+    def test_a_recently_written_lane_does_not_pull_its_old_completions_into_this_month(self):
+        # The transcript was written to a minute ago, but its only completion happened in October: the completion's
+        # own time places it, never the file mtime (the 58a2c73 reading billed it to this month).
+        self.sarvam_lane("a", completions=[("r0", (1_000_000, 0, 0), 60 * 24 * 30)])
+        os.utime(self.root / "a.jsonl", (NOW.timestamp() - 60, NOW.timestamp() - 60))
+        out = self.run_collect()
+        self.assertEqual(out["summary"]["priced_lanes"], 0)
+        self.assertEqual(out["summary"]["used_inr"], 0.0)
+
+    def test_one_continued_lane_spans_the_burn_window_and_the_ist_month_boundary(self):
+        # ONE lane (one session, the transcript's mtime = now) holds four completions across both boundaries. Placed by
+        # mtime (the 58a2c73 reading) all four would land at "now". Each must land in its own window and month instead.
+        now = datetime(2026, 12, 1, 5, 30, tzinfo=timezone.utc)  # 11:00 IST Dec 1: IST month 2026-12, window cutoff 02:30Z
+        key = GLM.replace("-", "_")
+        upstream = su.ROUTES[GLM]["upstream"]
+        marks = [("c0", datetime(2026, 11, 30, 18, 0, tzinfo=timezone.utc)),   # 23:30 IST Nov 30: LAST month
+                 ("c1", datetime(2026, 11, 30, 18, 45, tzinfo=timezone.utc)),  # 00:15 IST Dec 1: this month, outside 3h
+                 ("c2", datetime(2026, 12, 1, 3, 0, tzinfo=timezone.utc)),     # inside the 3h window
+                 ("c3", datetime(2026, 12, 1, 5, 0, tzinfo=timezone.utc))]     # inside the 3h window
+        events = [init(GLM)]
+        for count, (uuid, when) in enumerate(marks, 1):
+            events.append(asst(f"m-{uuid}", upstream, when=when))
+            events.append(result(uuid=uuid, since_last={key: (1_000_000, 0, 0)}, **{key: (count * 1_000_000, 0, 0)}))
+        self.lane("a", *events, launch_alias=GLM, mtime=now)
+        out = self.run_collect(now=now)
+        self.assertEqual(out["summary"]["month"], "2026-12")
+        self.assertEqual(out["summary"]["priced_lanes"], 3)  # c0 belongs to November
+        self.assertAlmostEqual(out["summary"]["used_inr"], priced(GLM, 3_000_000), places=6)
+        self.assertAlmostEqual(out["summary"]["window_inr"], priced(GLM, 2_000_000), places=6)  # c2 and c3 only
+        self.assertEqual(out["summary"]["untimed"], {})
+        self.assertIn(f"burn {su._inr(priced(GLM, 2_000_000) / 3)}/h (3h avg)", out["line"])
+
+    def test_the_result_records_own_timestamp_wins_over_the_preceding_message(self):
+        usage = {GLM: {"inputTokens": 1_000_000, "cacheReadInputTokens": 0, "outputTokens": 0,
+                       "cacheCreationInputTokens": 0}}
+        self.lane("a", init(GLM), asst("m1", su.ROUTES[GLM]["upstream"], minutes_ago=5),
+                  raw_result("r0", usage, timestamp=ts(60 * 4)), launch_alias=GLM)
+        out = self.run_collect()
+        self.assertAlmostEqual(out["summary"]["used_inr"], priced(GLM, 1_000_000), places=6)
+        self.assertEqual(out["summary"]["window_inr"], 0.0)  # 4h ago: this month, outside the 3h window
+
     def test_burn_is_trailing_window_average(self):
         cheap = "sarvam-105b"
         self.sarvam_lane("in", cheap, usage=(3_000_000, 0, 0), minutes_ago=60)       # inside 3h
         self.sarvam_lane("out", cheap, usage=(9_000_000, 0, 0), minutes_ago=60 * 5)  # 5h ago: month only
         out = self.run_collect()
         self.assertAlmostEqual(out["summary"]["window_inr"], priced(cheap, 3_000_000), places=6)
-        self.assertIn(f"burn ₹{priced(cheap, 3_000_000) / 3:.2f}/h (3h avg)", out["line"])
+        self.assertIn(f"burn {su._inr(priced(cheap, 3_000_000) / 3)}/h (3h avg)", out["line"])
 
 
 class Unavailable(Sandbox):
@@ -372,8 +492,8 @@ class Unavailable(Sandbox):
     def test_failed_scan_on_stale_ledger_keeps_month_total_but_burn_is_unavailable(self):
         self.ledger.parent.mkdir(parents=True)
         old = NOW - timedelta(hours=10)
-        row = {"v": 2, "id": "a:" + GLM, "ts": ts(60 * 11), "route": GLM, "in": 1_000_000, "cin": 0, "out": 0}
-        self.ledger.write_text(json.dumps(row) + "\n" + json.dumps({"v": 2, "scan_at": old.timestamp()}) + "\n")
+        row = {"v": su.SCHEMA, "id": "a:" + GLM, "ts": ts(60 * 11), "route": GLM, "in": 1_000_000, "cin": 0, "out": 0}
+        self.ledger.write_text(json.dumps(row) + "\n" + json.dumps({"v": su.SCHEMA, "scan_at": old.timestamp()}) + "\n")
         self.root = self.root / "missing"
         out = self.run_collect()
         self.assertTrue(out["available"])
@@ -476,7 +596,7 @@ class Ledger(Sandbox):
         again = self.run_collect(record=True)
         self.assertAlmostEqual(again["summary"]["used_inr"], priced(GLM, 1_000_000), places=6)
 
-    def test_rows_and_watermark_carry_the_v2_schema(self):
+    def test_rows_and_watermark_carry_the_current_schema(self):
         self.sarvam_lane("a")
         self.run_collect(record=True)
         rows = self.ledger_rows()
@@ -505,19 +625,178 @@ class Ledger(Sandbox):
     def test_unversioned_torn_or_foreign_ledger_lines_are_ignored(self):
         self.ledger.parent.mkdir(parents=True)
         legacy = {"id": "gw-1", "ts": ts(5), "model": GLM, "in": 1_000_000, "out": 0}  # old per-message row, no "v"
-        self.ledger.write_text(json.dumps(legacy) + '\n{"id":"gw-2","ts"\n[1]\n')
+        inflated = {"v": su.SCHEMA - 1, "id": "a:" + GLM + ":r0", "ts": ts(5), "route": GLM, "in": 30_000_000,
+                    "cin": 0, "out": 0}  # a mtime-stamped, double-counted row from the previous schema: never reused
+        self.ledger.write_text(json.dumps(legacy) + "\n" + json.dumps(inflated) + '\n{"id":"gw-2","ts"\n[1]\n')
         out = self.run_collect()
         self.assertEqual(out["summary"]["used_inr"], 0.0)
         self.assertEqual(out["summary"]["priced_lanes"], 0)
 
-    def test_v2_watermark_limits_rescans_but_an_unversioned_one_forces_a_full_month_rescan(self):
+    def test_current_watermark_limits_rescans_but_an_older_or_unversioned_one_forces_a_full_month_rescan(self):
         self.sarvam_lane("old", usage=(1_000_000, 0, 0), minutes_ago=60)
         self.ledger.parent.mkdir(parents=True)
         mark = NOW.timestamp() - 60  # scanned a minute ago
-        self.ledger.write_text(json.dumps({"v": 2, "scan_at": mark}) + "\n")
+        self.ledger.write_text(json.dumps({"v": su.SCHEMA, "scan_at": mark}) + "\n")
         self.assertEqual(self.run_collect()["summary"]["priced_lanes"], 0)  # predates the watermark: not reread
-        self.ledger.write_text(json.dumps({"scan_at": mark}) + "\n")
-        self.assertEqual(self.run_collect()["summary"]["priced_lanes"], 1)  # unversioned watermark: rescan
+        for stale in ({"v": su.SCHEMA - 1, "scan_at": mark}, {"scan_at": mark}):
+            self.ledger.write_text(json.dumps(stale) + "\n")
+            self.assertEqual(self.run_collect()["summary"]["priced_lanes"], 1)  # older/unversioned watermark: rescan
+
+
+class TrustedTime(Sandbox):
+    """A completion with no recoverable timestamp is never placed by guesswork (never the transcript mtime)."""
+
+    def untimed_lane(self, stem, minutes_ago, alias=GLM):
+        key = alias.replace("-", "_")
+        usage = (1_000_000, 0, 0)
+        # No assistant/user event of the result's session precedes it, so its own time cannot be recovered.
+        return self.lane(stem, init(alias), result(uuid=f"{stem}-r0", since_last={key: usage}, **{key: usage}),
+                         launch_alias=alias, minutes_ago=minutes_ago)
+
+    def test_untimed_completion_makes_month_and_burn_unavailable_never_a_guess(self):
+        self.untimed_lane("a", minutes_ago=10)  # last written 10 minutes ago: it could be inside the burn window
+        out = self.run_collect()
+        self.assertEqual(out["summary"]["untimed"], {GLM: 1})
+        self.assertEqual(out["summary"]["priced_lanes"], 0)
+        self.assertFalse(out["available"])
+        self.assertIn("measured estimate UNAVAILABLE (1 completion on " + GLM + " with no recoverable per-completion "
+                      "timestamp", out["line"])
+        self.assertIn("burn n/a (completion times unrecoverable)", out["line"])
+        self.assertNotRegex(out["line"], r"₹\d")
+
+    def test_untimed_completion_last_written_before_the_window_keeps_burn_available(self):
+        cheap = "sarvam-105b"
+        self.sarvam_lane("in", cheap, usage=(3_000_000, 0, 0), minutes_ago=60)  # timed, inside the window
+        self.untimed_lane("old", minutes_ago=60 * 5)  # untimed, last written 5h ago: cannot be in the 3h window
+        out = self.run_collect()
+        self.assertEqual(out["summary"]["untimed"], {GLM: 1})
+        self.assertEqual(out["summary"]["untimed_recent"], 0)
+        self.assertIn("measured estimate UNAVAILABLE", out["line"])  # month-to-date still needs that completion's time
+        self.assertIn(f"burn {su._inr(priced(cheap, 3_000_000) / 3)}/h (3h avg)", out["line"])
+
+    def test_an_untimed_row_last_written_in_another_month_is_not_this_months(self):
+        row = {"id": "x", "ts": None, "route": GLM, "in": 1_000_000, "cin": 0, "out": 0, "seen": "2026-10-30T10:00:00Z"}
+        summary = su.summarize({"x": row}, NOW, 3.0)
+        self.assertEqual((summary["untimed"], summary["used_inr"], summary["priced_lanes"]), ({}, 0.0, 0))
+        current = dict(row, seen=fmt(NOW - timedelta(minutes=30)))
+        summary = su.summarize({"x": current}, NOW, 3.0)
+        self.assertEqual((summary["untimed"], summary["untimed_recent"], summary["used_inr"]), ({GLM: 1}, 1, 0.0))
+
+    def test_a_later_result_never_borrows_a_message_time_already_used_by_an_earlier_one(self):
+        key = GLM.replace("-", "_")
+        self.lane("a", init(GLM), asst("m1", su.ROUTES[GLM]["upstream"], minutes_ago=5),
+                  result(uuid="r0", since_last={key: (1_000_000, 0, 0)}, **{key: (1_000_000, 0, 0)}),
+                  result(uuid="r1", since_last={key: (1_000_000, 0, 0)}, **{key: (2_000_000, 0, 0)}),
+                  launch_alias=GLM)
+        out = self.run_collect()
+        self.assertEqual(out["summary"]["priced_lanes"], 1)  # r0 is timed by m1
+        self.assertEqual(out["summary"]["untimed"], {GLM: 1})  # r1 has no time of its own
+        self.assertFalse(out["available"])
+
+    def test_untimed_row_is_recorded_with_its_upper_bound_and_no_invented_time(self):
+        self.untimed_lane("a", minutes_ago=10)
+        self.run_collect(record=True)
+        usage_rows = [json.loads(line) for line in self.ledger.read_text().splitlines() if '"id"' in line]
+        self.assertEqual(len(usage_rows), 1)
+        self.assertIsNone(usage_rows[0]["ts"])
+        self.assertEqual(usage_rows[0]["seen"], ts(10).replace(".000Z", "Z"))
+
+
+class UnverifiedUsage(Sandbox):
+    """Empty or malformed result usage is unverified (excluded and reported), never a priced zero row."""
+
+    def test_empty_usage_result_is_reported_unverified_not_a_zero_priced_row(self):
+        self.lane("a", init(GLM), asst("m1", su.ROUTES[GLM]["upstream"]), raw_result("r0", {}), launch_alias=GLM)
+        out = self.run_collect(record=True)
+        self.assertEqual(out["malformed_lanes"], 1)
+        self.assertEqual(out["summary"]["priced_lanes"], 0)
+        self.assertEqual(out["recorded"], 0)  # nothing written as a zero row
+        self.assertFalse(out["available"])
+        self.assertTrue(out["line"].startswith("Sarvam TF: measured estimate UNAVAILABLE"), out["line"])
+        self.assertIn("reported empty or malformed usage counters; excluded as unverified (not counted as zero)",
+                      out["line"])
+        self.assertNotIn("₹0.00", out["line"])
+        self.assertEqual([line for line in self.ledger.read_text().splitlines() if '"id"' in line], [])
+
+    def test_empty_usage_beside_a_real_completion_counts_only_the_real_one_and_flags_the_gap(self):
+        key = GLM.replace("-", "_")
+        upstream = su.ROUTES[GLM]["upstream"]
+        self.lane("a", init(GLM), asst("m1", upstream),
+                  result(uuid="c0", since_last={key: (1_000_000, 0, 0)}, **{key: (1_000_000, 0, 0)}),
+                  asst("m2", upstream), raw_result("c1", {}), launch_alias=GLM)
+        out = self.run_collect()
+        self.assertAlmostEqual(out["summary"]["used_inr"], priced(GLM, 1_000_000), places=6)
+        self.assertEqual(out["malformed_lanes"], 1)
+        self.assertIn("reported empty or malformed usage counters", out["line"])
+        self.assertIn("burn n/a (some lane usage is unavailable)", out["line"])
+
+    def test_missing_partial_or_malformed_counters_are_excluded_and_reported(self):
+        full = {"inputTokens": 1_000_000, "cacheReadInputTokens": 0, "outputTokens": 0, "cacheCreationInputTokens": 0}
+        bad_usages = {
+            "missing-counters": {"inputTokens": 1_000_000},
+            "string-counter": dict(full, inputTokens="1000000"),
+            "negative-counter": dict(full, outputTokens=-5),
+            "float-counter": dict(full, cacheReadInputTokens=1.5),
+            "bool-counter": dict(full, inputTokens=True),
+            "null-counter": dict(full, outputTokens=None),
+            "not-an-object": "1000000",
+        }
+        for stem, bad in bad_usages.items():
+            self.lane(stem, init(GLM), asst(f"{stem}-m", su.ROUTES[GLM]["upstream"]),
+                      raw_result(f"{stem}-r", {GLM: bad}), launch_alias=GLM)
+        out = self.run_collect()
+        self.assertEqual(out["malformed_lanes"], len(bad_usages))
+        self.assertEqual(out["summary"]["priced_lanes"], 0)
+        self.assertEqual(out["summary"]["used_inr"], 0.0)
+        self.assertFalse(out["available"])
+
+    def test_counters_helper_accepts_only_four_present_non_negative_integers(self):
+        full = {"inputTokens": 10, "cacheReadInputTokens": 20, "outputTokens": 30, "cacheCreationInputTokens": 5}
+        self.assertEqual(su._counters(full), [15, 20, 30])  # cache writes billed as input
+        self.assertIsNone(su._counters({}))
+        self.assertIsNone(su._counters(None))
+        for key in full:
+            self.assertIsNone(su._counters({k: v for k, v in full.items() if k != key}), key)
+
+
+class Reconcile(Sandbox):
+    def test_reconcile_backs_up_then_drops_pre_current_lines_and_tombstones(self):
+        self.ledger.parent.mkdir(parents=True)
+        inflated = {"v": su.SCHEMA - 1, "id": "a:" + GLM + ":r0", "ts": ts(5), "route": GLM, "in": 30_000_000,
+                    "cin": 0, "out": 0}
+        current = {"v": su.SCHEMA, "id": "b:" + GLM + ":r1", "ts": ts(5), "route": GLM, "in": 1_000_000, "cin": 0,
+                   "out": 0}
+        original = "\n".join([json.dumps({"scan_at": 123.0}), json.dumps(inflated), '{"torn"', json.dumps(current)]) + "\n"
+        self.ledger.write_text(original)
+        report = su.reconcile_ledger(self.ledger, NOW)
+        self.assertTrue(report["reconciled"])
+        self.assertEqual((report["dropped"], report["kept"]), (3, 1))
+        self.assertEqual(Path(report["backup"]).read_text(), original)  # the untouched original is kept
+        lines = [json.loads(line) for line in self.ledger.read_text().splitlines()]
+        self.assertEqual(lines[0], current)
+        self.assertEqual(lines[-1]["tombstone"]["dropped_lines"], 3)
+        self.assertEqual(lines[-1]["tombstone"]["backup"], Path(report["backup"]).name)
+        rows, watermark, exists = su.read_ledger(self.ledger)
+        self.assertEqual((set(rows), watermark, exists), ({current["id"]}, None, True))  # the inflated total is gone
+
+    def test_reconcile_is_idempotent_and_a_missing_ledger_is_not_an_error(self):
+        self.assertEqual(su.reconcile_ledger(self.ledger, NOW)["reason"], "no ledger")
+        self.ledger.parent.mkdir(parents=True)
+        self.ledger.write_text(json.dumps({"scan_at": 1.0}) + "\n")
+        self.assertTrue(su.reconcile_ledger(self.ledger, NOW)["reconciled"])
+        self.assertEqual(su.reconcile_ledger(self.ledger, NOW)["reason"], "already current")
+        self.assertEqual(len(list(self.ledger.parent.glob("ledger.jsonl.bak-*"))), 1)
+
+    def test_cli_reconcile_prints_the_report_and_never_runs_a_scan(self):
+        self.ledger.parent.mkdir(parents=True)
+        self.ledger.write_text(json.dumps({"scan_at": 1.0}) + "\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = su.main(["--reconcile-ledger", "--ledger", str(self.ledger), "--now", fmt(NOW),
+                            "--transcripts", str(self.root)])
+        self.assertEqual(code, 0)
+        report = json.loads(out.getvalue())
+        self.assertEqual((report["reconciled"], report["dropped"]), (True, 1))
 
 
 class LauncherWiring(unittest.TestCase):
