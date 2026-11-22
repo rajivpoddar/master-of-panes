@@ -681,37 +681,36 @@ def _split_row_inline(line):
         cells = cells[:-1]
     return [c.strip() for c in cells]
 
-def _monospace_sections(rows):
-    from itertools import zip_longest
-    from textwrap import wrap
-
-    # Keep long notes compact without dropping cells. Each section gets a
-    # complete fence and the column headings, even when the grid needs paging.
-    fence = chr(96) * 3
-    widths = [max(1, len(rows[0][i]), min(24, max(map(len, column)))) for i, column in enumerate(zip(*rows))]
-    def aligned(cells):
-        return ' │ '.join(cell.replace(fence, '′′′').ljust(w) for cell, w in zip(cells, widths)).rstrip()
-    header = aligned(rows[0])
-    rule = '─┼─'.join('─' * w for w in widths)
-    page = [fence, header, rule]
-    size = len('\n'.join(page))
+def _plain_table_sections(rows):
+    # Slack allows one native table block per message, so later tables go out as
+    # plain Markdown pipe-table text in mrkdwn sections, with no code fence
+    # (Rajiv C0ALZJHGE49 thread 1795344281.588589, ts 1795345746.446959: remove the
+    # codefences around the burn stats table). Columns, values and order are unchanged. Long tables
+    # are paged under the 3000-char section limit; each page repeats the header.
+    def row(cells):
+        return '| ' + ' | '.join(cells) + ' |'
+    header = row(rows[0])
+    rule = '|' + '|'.join('---' for _ in rows[0]) + '|'
+    page = [header, rule]
+    size = len(header) + len(rule) + 1
     for cells in rows[1:]:
-        wrapped = [wrap(cell, w) or [''] for cell, w in zip(cells, widths)]
-        for line in map(aligned, zip_longest(*wrapped, fillvalue='')):
-            if size + len(line) + 5 > 2900:
-                yield '\n'.join([*page, fence])
-                page = [fence, header, rule]
-                size = len('\n'.join(page))
-            page.append(line)
-            size += len(line) + 1
-    yield '\n'.join([*page, fence])
+        line = row(cells)
+        if len(line) > 2800:
+            line = line[:2799] + '…'
+        if len(page) > 2 and size + len(line) + 1 > 2900:
+            yield '\n'.join(page)
+            page = [header, rule]
+            size = len(header) + len(rule) + 1
+        page.append(line)
+        size += len(line) + 1
+    yield '\n'.join(page)
 
 
 def convert_text_to_blocks(t):
     \"\"\"Convert text with markdown tables into BlockKit blocks.
     Returns None when no table is present.
     The first table is native; Slack allows only one per message, so later
-    tables are standalone monospace sections with their headings intact.
+    tables are standalone plain pipe-table sections (no code fence) with their headings intact.
     Prose around tables -> section blocks with mrkdwn text.
 
     Cell shape (verified via api.slack.com chat.postMessage 2026-05-03):
@@ -758,7 +757,7 @@ def convert_text_to_blocks(t):
         # rectangular grid).
         padded = [r + [''] * (n_cols - len(r)) for r in table_rows]
         if any(b['type'] == 'table' for b in blocks):
-            for grid in _monospace_sections(padded):
+            for grid in _plain_table_sections(padded):
                 blocks.append({'type': 'section', 'text': {'type': 'mrkdwn', 'text': grid}})
             table_rows.clear()
             return

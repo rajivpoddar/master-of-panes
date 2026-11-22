@@ -555,15 +555,20 @@ def test_pace_table_is_accepted_by_the_slack_send_table_converter_as_one_native_
     assert '*Hourly' in prose and 'no usage sample' in prose and '|---|' not in prose and '```' not in prose
 
 
-def test_sender_pages_large_secondary_table_without_splitting_fences_or_losing_cells():
+def _pipe_cells(line):
+    return [c.strip() for c in line.strip().strip('|').split('|')]
+
+
+def test_sender_pages_large_secondary_table_as_plain_pipe_text_without_fences_or_losing_cells():
     body = '\n'.join(['| A | B |', '|---|---|', '| x | y |', '*Later:*', '| Item | Note |', '|---|---|',
                       *(f'| row-{i:03} | {"long note " * 12} |' for i in range(100))])
     blocks = _converter_blocks(body)
     assert sum(b['type'] == 'table' for b in blocks) == 1
-    pages = [b['text']['text'] for b in blocks if b['type'] == 'section' and b['text']['text'].startswith('```')]
+    assert not any('```' in b['text']['text'] for b in blocks if b['type'] == 'section')
+    pages = [b['text']['text'] for b in blocks if b['type'] == 'section' and b['text']['text'].startswith('| Item |')]
     assert len(pages) > 1
-    assert all(len(p) <= 3000 and p.endswith('\n```') and p.count('```') == 2 for p in pages)
-    assert all([c.strip() for c in p.splitlines()[1].split('│')] == ['Item', 'Note'] for p in pages)
+    assert all(len(p) <= 3000 for p in pages)
+    assert all(p.splitlines()[:2] == ['| Item | Note |', '|---|---|'] for p in pages)
     assert re.findall(r'row-\d{3}', '\n'.join(pages)) == [f'row-{i:03}' for i in range(100)]
 
 
@@ -586,13 +591,16 @@ def test_pace_burn_and_opencode_tables_in_one_report_make_exactly_one_native_sla
     tables = [b for b in blocks if b['type'] == 'table']
     assert len(tables) == 1                                        # the Pace table; Slack would reject a second block
     assert [_cell_text(c) for c in tables[0]['rows'][0]] == PACE_HEADER
+    # Rajiv C0ALZJHGE49 thread 1795344281.588589, ts 1795345746.446959: no code fence around the burn stats tables.
+    assert '```' not in report
+    assert not any('```' in b['text']['text'] for b in blocks if b['type'] == 'section')
     burn_grid, opencode_grid = [b['text']['text'].splitlines() for b in blocks
-                                if b['type'] == 'section' and b['text']['text'].startswith('```')]
-    assert all(grid[0] == grid[-1] == '```' for grid in (burn_grid, opencode_grid))
-    assert [c.strip() for c in burn_grid[1].split('│')] == list(composer.BURN_TABLE_HEADER)
-    assert [c.strip() for c in opencode_grid[1].split('│')] == list(composer.OPENCODE_TABLE_HEADER)
-    assert [c.strip() for c in burn_grid[4].split('│')][:3] == ['Claude a@example.test', 'enabled · pinned', '12%']
-    assert [c.strip() for c in opencode_grid[3].split('│')][:3] == ['OpenCode Go pool', '0', '0']
+                                if b['type'] == 'section' and b['text']['text'].startswith('| ')]
+    for grid, header in ((burn_grid, composer.BURN_TABLE_HEADER), (opencode_grid, composer.OPENCODE_TABLE_HEADER)):
+        assert _pipe_cells(grid[0]) == list(header)
+        assert grid[1] == '|' + '|'.join('---' for _ in header) + '|'
+    assert _pipe_cells(burn_grid[3])[:3] == ['Claude a@example.test', 'enabled · pinned', '12%']
+    assert _pipe_cells(opencode_grid[2])[:3] == ['OpenCode Go pool', '0', '0']
     assert any('hy4-flash-free' in line for line in opencode_grid)
 
 
