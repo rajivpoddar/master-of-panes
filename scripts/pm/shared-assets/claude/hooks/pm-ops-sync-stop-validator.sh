@@ -2,35 +2,37 @@
 # Stop only: drain runnable commitments without touching the ledger or services.
 set -uo pipefail
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
-# Consume the hook payload, never the transcript or a remote status/collector.
-cat >/dev/null
-exec python3 - <<'PYEOF'
+# Consume the hook payload, never the transcript or a remote status/collector. The read-only
+# `--hourly-batch OUT.json` export (used by pm-hourly-post.sh) has no payload on stdin.
+if [ "${1:-}" != "--hourly-batch" ]; then cat >/dev/null; fi
+exec python3 - "$@" <<'PYEOF'
 from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timezone
-import fcntl
 import json
 import os
 from pathlib import Path
 import re
 import sqlite3
+import sys
 import time
 
 
 DEFAULT_DB = ("/Users/rajiv/.claude/projects/"
               "-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db")
-# Separate from the obligation ledger: the hook reads the DB read-only, so the
-# once-per-hour surface marker lives in its own tiny flock'd file.
-DEFAULT_HOURLY_STATE = "/tmp/pm-obligation-hourly-surface.json"
 INVENTORY = {"ready_pool", "triage_retained_scope"}
 NOW = datetime.now(timezone.utc)
 DEADLINE = time.monotonic() + 0.75
+# `--hourly-batch OUT.json`: read-only export of the runnable HOURLY rows for the hourly wrapper.
+EXPORT_PATH = sys.argv[2] if len(sys.argv) > 2 and sys.argv[1] == "--hourly-batch" else None
 
 # Two-speed Stop drain (Rajiv D0AMF0XE6TS thread 1795338483.502879, ts 1795352601.197289, "Go").
-# FAST rows block Stop every time they are runnable. HOURLY rows NEVER block Stop: they are
-# listed once per local hour in the non-blocking status advisory (CTO REVISE C0ALZJHGE49
-# 1795353473.878109, ts 1795353556.350659). Classification uses existing row fields only
+# FAST rows block Stop every time they are runnable. HOURLY rows NEVER block Stop and Stop never
+# lists or hands them off: the once-per-hour wrapper pm-hourly-post.sh asks this file for them with
+# `--hourly-batch OUT.json` and posts them in the hourly report (CTO REVISE #2 C0ALZJHGE49
+# 1795353473.878109, ts 1795354512.689229: no second batch trigger, and a standing FAST row must not
+# keep the routine batch from the hourly lane). Classification uses existing row fields only
 # (severity, kind, target_type, evidence), never a list of ids (rule 60). Anything
 # unrecognised is FAST, so a new kind can only ever behave as the pre-change hook did.
 # A Slack thread is a DESTINATION, not an urgency signal: neither the bare word "slack" in a
@@ -67,35 +69,6 @@ def speed(row):
     except (ValueError, TypeError, AttributeError):
         pass
     return "FAST"
-
-
-def hourly_pass_due(bucket=None):
-    """True for the first caller in each local hour, else False.
-
-    Never raises and never blocks: a state problem returns False, so a broken marker
-    file cannot turn HOURLY rows back into a per-Stop block (rule 50: hooks fail open).
-    """
-    bucket = bucket or os.environ.get("PM_OBLIGATION_HOURLY_BUCKET") or NOW.astimezone().strftime("%Y-%m-%dT%H%z")
-    fd = None
-    try:
-        fd = os.open(os.environ.get("PM_OBLIGATION_HOURLY_STATE", DEFAULT_HOURLY_STATE),
-                     os.O_RDWR | os.O_CREAT, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        try:
-            seen = json.loads(os.read(fd, 4096).decode() or "{}").get("hour")
-        except (ValueError, AttributeError, UnicodeDecodeError):
-            seen = None
-        if seen == bucket:
-            return False
-        os.ftruncate(fd, 0)
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, json.dumps({"hour": bucket, "surfaced_at": NOW.isoformat()}).encode())
-        return True
-    except (OSError, ValueError):
-        return False
-    finally:
-        if fd is not None:
-            os.close(fd)
 
 
 def stamp(value):
@@ -225,9 +198,33 @@ def classify(row):
 
 
 def emit_unavailable(reason):
+    if EXPORT_PATH:
+        print("ROUTINE_BATCH_UNAVAILABLE " + reason)
+        return
     print(json.dumps({"continue": True, "reason":
           "[PM_OBLIGATION_DRAIN_UNAVAILABLE] " + reason +
           "; obligation readiness/count UNKNOWN. Stop is permitted; retain custody and repair the read path."}))
+
+
+def export_hourly_batch(hourly_runnable, fast_count, path):
+    """Write the runnable HOURLY rows for pm-hourly-post.sh. Read-only and atomic; Stop never calls it.
+
+    Same classifier and ordering as the Stop hook (one definition of "routine", rule 60). Bounded:
+    HOURLY_BATCH_ROWS rows in full, then HOURLY_BATCH_IDS ids, then a count of the rest. An open FAST
+    row does not affect it, so a standing FAST item cannot starve the routine batch across hours.
+    """
+    rows = [{"id": row["id"], "owner": compact(row.get("owner")) or "PM triage",
+             "title": compact(row.get("title"), 100), "step": compact(step, 160)}
+            for row, _, step in hourly_runnable[:HOURLY_BATCH_ROWS]]
+    ids = [row["id"] for row, _, _ in hourly_runnable[HOURLY_BATCH_ROWS:HOURLY_BATCH_ROWS + HOURLY_BATCH_IDS]]
+    payload = {"generated_at": NOW.isoformat(), "fast_runnable": fast_count,
+               "hourly_runnable": len(hourly_runnable), "rows": rows, "ids": ids,
+               "deferred": len(hourly_runnable) - len(rows) - len(ids)}
+    tmp = f"{path}.tmp{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+    os.replace(tmp, path)
+    print(f"ROUTINE_BATCH_EXPORTED hourly={len(hourly_runnable)} fast={fast_count} rows={len(rows)} ids={len(ids)}")
 
 
 def main():
@@ -276,23 +273,20 @@ def main():
                   or str(item[0].get("kind") or "").startswith("customer_")) else 1,
             {"critical": 0, "high": 1, "medium": 2, "normal": 3}.get(item[0].get("severity"), 4), item[0]["id"])
     # The Stop prompt is scoped to FAST: runnable FAST rows plus classify rows. Routine (HOURLY)
-    # runnable rows are never part of it, so five FAST rows can no longer push them off a
-    # three-row list while the hourly marker is spent (CTO REVISE 1795353556.350659).
+    # runnable rows are never part of it (CTO REVISE 1795353556.350659); the hourly wrapper gets
+    # them through --hourly-batch, independent of how many FAST rows are open.
     actionable = sorted((x for x in runnable if not (x[1] == "runnable" and speeds[x[0]["id"]] == "HOURLY")), key=order)
     hourly_runnable.sort(key=order)
     waiting = [(r, d, s) for r, d, s in findings if d not in {"runnable", "classify"}]
-    # The hourly marker is recorded ONLY when the routine batch is about to be printed in the
-    # non-blocking advisory. A blocking FAST turn never spends it; a marker/state failure reads
-    # as "already surfaced" (rule 50: fail open, never block per Stop).
-    batch = []
-    batch_ids = []
-    if not fast_runnable and hourly_runnable and hourly_pass_due():
-        batch = hourly_runnable[:HOURLY_BATCH_ROWS]
-        batch_ids = [row["id"] for row, _, _ in hourly_runnable[HOURLY_BATCH_ROWS:HOURLY_BATCH_ROWS + HOURLY_BATCH_IDS]]
-    surfaced = len(batch) + len(batch_ids)
+    if EXPORT_PATH:
+        try:
+            export_hourly_batch(hourly_runnable, len(fast_runnable), EXPORT_PATH)
+        except OSError as error:
+            emit_unavailable(type(error).__name__ + ": " + compact(error))
+        return
     parts = [f"open commitments={len(findings)}; " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))]
     parts.append(f"fast-runnable={len(fast_runnable)} hourly-runnable={len(hourly_runnable)} "
-                 f"hourly-surfaced={surfaced} hourly-deferred={len(hourly_runnable) - surfaced}")
+                 "(routine rows go to the hourly report batch, never to Stop)")
     for row, disposition, step in actionable[:3]:
         parts.append(f"obligation:{row['id']} [{disposition}] owner={compact(row.get('owner')) or 'PM triage'} "
                      f"{compact(row.get('title'), 100)}: {compact(step, 450)}")
@@ -302,13 +296,6 @@ def main():
         parts.append(f"obligation:{row['id']} [{disposition}] {compact(step, 240)}")
     if len(waiting) > 3:
         parts.append(f"remaining held/future/in-flight/unverified={len(waiting) - 3}")
-    if batch:
-        parts.append("Hourly routine batch (listed once this hour, does not block Stop):")
-        for row, _, step in batch:
-            parts.append(f"obligation:{row['id']} [hourly] owner={compact(row.get('owner')) or 'PM triage'} "
-                         f"{compact(row.get('title'), 100)}: {compact(step, 160)}")
-        if batch_ids:
-            parts.append("also routine runnable: " + ",".join(str(i) for i in batch_ids))
     parts.append("Inspect remaining rows with pm-ops.py obligation-list --actionable --format json. "
                  "Use original authority/owners and canonical protected writers. No bulk close, unsafe replay or moved-wake waiver.")
     # Rajiv D0AMF0XE6TS ts 1794815313.330999 (11-16): "why has the pm turn not ended for 4h? the stop hook keeps blocking it."

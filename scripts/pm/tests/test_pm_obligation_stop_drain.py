@@ -38,8 +38,7 @@ def lane(tmp_path):
            "PM_STOP_HOOK_ROOT": str(hooks),
            "PM_STOP_GROUP_LOG": str(tmp_path / "group.log"),
            "PM_STOP_GROUP_DEBUG_LOG": str(tmp_path / "debug.log"),
-           "PM_STOP_FINDING_COOLDOWN_STATE": str(tmp_path / "cooldown.json"),
-           "PM_OBLIGATION_HOURLY_STATE": str(tmp_path / "hourly-surface.json")}
+           "PM_STOP_FINDING_COOLDOWN_STATE": str(tmp_path / "cooldown.json")}
     env.pop("PM_STOP_GROUP_COMMANDS_JSON", None)
     subprocess.run([sys.executable, str(WRITER), "init"], env=env, check=True, capture_output=True)
     # The OLD hook's status dependency is isolated too, for causal baseline.
@@ -512,10 +511,6 @@ def test_speed_classification_table(fields, expected):
     assert load_speed()(fields) == expected
 
 
-def hourly_env(lane, bucket):
-    return {**lane[2], "PM_OBLIGATION_HOURLY_BUCKET": bucket}
-
-
 def close_rows(lane, *idents):
     """Close fixture rows in the throwaway test ledger (never a live DB)."""
     with closing(sqlite3.connect(lane[1])) as con, con:
@@ -523,33 +518,17 @@ def close_rows(lane, *idents):
             con.execute("UPDATE obligations SET status='resolved' WHERE id=?", (ident,))
 
 
-@pytest.mark.parametrize("grouped", [False, True])
-def test_hourly_only_runnable_set_allows_stop_and_lists_batch_once_per_hour(lane, grouped):
-    add(lane, 401, severity="normal")
-    add(lane, 402, severity="normal", kind="pm_followup")
-    before = lane[1].read_bytes()
-    first, _ = invoke(lane, grouped=grouped, env=hourly_env(lane, "2026-11-22T10+0530"))
-    assert first.get("decision") != "block", "an hourly-only set must allow Stop"
-    assert "Hourly routine batch" in reason(first)
-    assert "obligation:401 [hourly]" in reason(first) and "obligation:402 [hourly]" in reason(first)
-    assert "hourly-surfaced=2 hourly-deferred=0" in reason(first)
-    for _ in range(3):
-        again, _ = invoke(lane, grouped=grouped, env=hourly_env(lane, "2026-11-22T10+0530"))
-        assert again.get("decision") != "block"
-        assert "hourly-surfaced=0 hourly-deferred=2" in reason(again) and "open commitments=2" in reason(again)
-        assert "obligation:401" not in reason(again), "the routine batch is listed once per hour"
-    nxt, _ = invoke(lane, grouped=grouped, env=hourly_env(lane, "2026-11-22T11+0530"))
-    assert nxt.get("decision") != "block" and "obligation:401 [hourly]" in reason(nxt)
-    assert lane[1].read_bytes() == before, "storage semantics unchanged: hook never writes the ledger"
-    with closing(sqlite3.connect(lane[1])) as con, con:
-        assert con.execute("SELECT count(*) FROM obligations WHERE status='open'").fetchone()[0] == 2
+def export_batch(lane, out=None, db=None):
+    """Run the hook's read-only `--hourly-batch` export (what pm-hourly-post.sh calls) against the fixture ledger."""
+    out = out or lane[3] / "routine-batch.json"
+    env = {**lane[2], **({"PM_OPS_DB": str(db)} if db else {})}
+    result = subprocess.run(["bash", str(lane[0] / "pm-ops-sync-stop-validator.sh"), "--hourly-batch", str(out)],
+                            env=env, stdin=subprocess.DEVNULL, text=True, capture_output=True, timeout=9.8)
+    assert result.returncode == 0, result.stderr
+    return result.stdout, out
 
 
-@pytest.mark.parametrize("grouped", [False, True])
-def test_three_plus_fast_rows_block_while_routine_rows_wait_for_the_hourly_batch(lane, grouped):
-    """CTO REVISE 1795353556.350659: five FAST rows used to push every routine row off the three-row
-    list while the hourly marker was spent. FAST scopes the Stop prompt; routine rows are surfaced
-    once, later, in the non-blocking batch."""
+def seven_rows_five_fast(lane):
     add(lane, 501, severity="normal", kind="customer_followup")
     add(lane, 502, severity="normal", kind="p0_custody")
     add(lane, 503, severity="high")
@@ -557,57 +536,71 @@ def test_three_plus_fast_rows_block_while_routine_rows_wait_for_the_hourly_batch
     add(lane, 505, severity="normal", kind="slack_reply_due", target_type="slack_thread")   # due Slack reply: FAST
     add(lane, 506, severity="normal")                                                        # routine followup
     add(lane, 507, severity="normal", kind="slack_watch", target_type="slack_thread")        # routine Slack watch
-    env = hourly_env(lane, "2026-11-22T10+0530")
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+def test_hourly_only_runnable_set_allows_stop_and_stop_never_lists_the_batch(lane, grouped):
+    add(lane, 401, severity="normal")
+    add(lane, 402, severity="normal", kind="pm_followup")
+    before = lane[1].read_bytes()
     for _ in range(3):
-        blocked, _ = invoke(lane, grouped=grouped, env=env)
+        result, _ = invoke(lane, grouped=grouped)
+        assert result.get("decision") != "block", "an hourly-only set must allow Stop"
+        assert "fast-runnable=0 hourly-runnable=2" in reason(result) and "open commitments=2" in reason(result)
+        # Stop is not a batch trigger (CTO REVISE #2 ts 1795354512.689229): no list, no marker, nothing to spend.
+        assert "obligation:401" not in reason(result) and "Hourly routine batch" not in reason(result)
+    assert lane[1].read_bytes() == before, "storage semantics unchanged: hook never writes the ledger"
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+def test_three_plus_fast_rows_block_with_a_fast_scoped_prompt(lane, grouped):
+    """CTO REVISE 1795353556.350659: five FAST rows used to push every routine row off the three-row list."""
+    seven_rows_five_fast(lane)
+    for _ in range(3):
+        blocked, _ = invoke(lane, grouped=grouped)
         assert blocked.get("decision") == "block" and "Handle every currently runnable FAST" in reason(blocked)
-        assert "fast-runnable=5 hourly-runnable=2 hourly-surfaced=0 hourly-deferred=2" in reason(blocked)
+        assert "fast-runnable=5 hourly-runnable=2" in reason(blocked)
         assert "remaining runnable/classification=2" in reason(blocked)
         assert "obligation:506" not in reason(blocked) and "obligation:507" not in reason(blocked)
-        assert "Hourly routine batch" not in reason(blocked)
-    assert not (lane[3] / "hourly-surface.json").exists(), "a blocking FAST turn must not spend the hourly marker"
+
+
+def test_hourly_batch_export_returns_routine_rows_while_three_plus_fast_rows_stay_open(lane):
+    """CTO REVISE #2: a standing FAST item must not keep the routine batch from the hourly lane."""
+    seven_rows_five_fast(lane)
+    before = lane[1].read_bytes()
+    for _ in range(3):   # stateless: every hour (every call) sees the same routine rows, whatever the FAST set is
+        stdout, out = export_batch(lane)
+        data = json.loads(out.read_text())
+        assert "ROUTINE_BATCH_EXPORTED hourly=2 fast=5 rows=2 ids=0" in stdout
+        assert data["fast_runnable"] == 5 and data["hourly_runnable"] == 2 and data["deferred"] == 0
+        assert [r["id"] for r in data["rows"]] == [506, 507] and data["ids"] == []
+        assert all(r["owner"] and r["title"] and r["step"] for r in data["rows"])
+    assert lane[1].read_bytes() == before, "the export is read-only"
+    assert invoke(lane, grouped=False)[0].get("decision") == "block", "FAST rows still block Stop"
     close_rows(lane, 501, 502, 503, 504, 505)
-    first, _ = invoke(lane, grouped=grouped, env=env)
-    assert first.get("decision") != "block"
-    assert "Hourly routine batch" in reason(first)
-    assert "obligation:506 [hourly]" in reason(first) and "obligation:507 [hourly]" in reason(first)
-    assert "hourly-surfaced=2 hourly-deferred=0" in reason(first)
-    again, _ = invoke(lane, grouped=grouped, env=env)
-    assert again.get("decision") != "block" and "obligation:506" not in reason(again)
-    assert "hourly-surfaced=0 hourly-deferred=2" in reason(again)
+    assert invoke(lane, grouped=False)[0].get("decision") != "block", "an hourly-only set allows Stop"
+    assert [r["id"] for r in json.loads(export_batch(lane)[1].read_text())["rows"]] == [506, 507]
 
 
-def test_a_fast_row_arriving_after_the_batch_still_blocks_in_the_same_hour(lane):
-    add(lane, 511, severity="normal")
-    env = hourly_env(lane, "2026-11-22T10+0530")
-    assert invoke(lane, env=env)[0].get("decision") != "block"
-    add(lane, 512, severity="normal", kind="slack_reply_due", target_type="slack_thread")
-    blocked, _ = invoke(lane, env=env)
-    assert blocked.get("decision") == "block" and "obligation:512 [runnable]" in reason(blocked)
-    assert "obligation:511" not in reason(blocked)
-
-
-def test_a_large_routine_batch_lists_rows_then_ids_in_one_non_blocking_pass(lane):
-    for ident in range(900, 912):
+def test_large_routine_batch_export_is_bounded_rows_then_ids_then_a_count(lane):
+    for ident in range(900, 960):
         add(lane, ident, severity="normal")
-    env = hourly_env(lane, "2026-11-22T10+0530")
-    first, _ = invoke(lane, env=env)
-    assert first.get("decision") != "block"
-    assert "hourly-surfaced=12 hourly-deferred=0" in reason(first)
-    assert "obligation:900 [hourly]" in reason(first) and "obligation:907 [hourly]" in reason(first)
-    assert "also routine runnable: 908,909,910,911" in reason(first)
-    again, _ = invoke(lane, env=env)
-    assert again.get("decision") != "block" and "hourly-surfaced=0 hourly-deferred=12" in reason(again)
+    data = json.loads(export_batch(lane)[1].read_text())
+    assert data["hourly_runnable"] == 60 and len(data["rows"]) == 8 and len(data["ids"]) == 40
+    assert data["rows"][0]["id"] == 900 and data["ids"][0] == 908 and data["deferred"] == 12
+
+
+def test_export_failure_writes_nothing_and_reports_unavailable(lane):
+    stdout, out = export_batch(lane, db=lane[3] / "missing.db")
+    assert stdout.startswith("ROUTINE_BATCH_UNAVAILABLE") and not out.exists()
 
 
 @pytest.mark.parametrize("extra", [{"kind": "never_seen_before_kind"}, {"kind": "investigation"},
                                    {"kind": "followup", "severity": "P1"}])
-def test_unknown_or_fast_row_blocks_every_stop_in_the_same_hour(lane, extra):
-    extra = {"severity": "normal", **extra}
-    add(lane, 601, **extra)
-    env = hourly_env(lane, "2026-11-22T10+0530")
+def test_unknown_or_fast_row_blocks_every_stop(lane, extra):
+    add(lane, 601, **{"severity": "normal", **extra})
     for _ in range(3):
-        result, _ = invoke(lane, env=env)
+        result, _ = invoke(lane)
         assert result.get("decision") == "block" and "obligation:601 [runnable]" in reason(result)
 
 
@@ -618,36 +611,71 @@ def test_unknown_or_fast_row_blocks_every_stop_in_the_same_hour(lane, extra):
 def test_proxy_run_blocks_every_stop_only_after_the_lane_ended(lane, evidence, always_blocks):
     add(lane, 701, kind="proxy_run", severity="normal", evidence_json=evidence,
         required_action="Monitor proxy run and act on its result")
-    env = hourly_env(lane, "2026-11-22T10+0530")
     for _ in range(2):
-        result, _ = invoke(lane, env=env)
+        result, _ = invoke(lane)
         assert (result.get("decision") == "block") is always_blocks
 
 
-def test_hourly_surface_state_failures_fail_open_never_block_per_stop(lane):
-    add(lane, 801, severity="normal")
-    # An unusable marker (a directory) reads as "already surfaced": visible status, no block, no crash.
-    broken = lane[3] / "marker-dir"
-    broken.mkdir()
-    env = {**hourly_env(lane, "2026-11-22T10+0530"), "PM_OBLIGATION_HOURLY_STATE": str(broken)}
-    for _ in range(2):
-        result, elapsed = invoke(lane, env=env)
-        assert result.get("decision") != "block" and "open commitments=1" in reason(result)
-        assert "hourly-surfaced=0 hourly-deferred=1" in reason(result) and "obligation:801" not in reason(result)
-        assert elapsed < 1, elapsed
-    # A corrupt marker file is treated as "not yet surfaced this hour": the batch is listed (still
-    # without blocking Stop) and the first write repairs the marker.
-    garbage = lane[3] / "garbage.json"
-    garbage.write_text("{not json")
-    env = {**hourly_env(lane, "2026-11-22T10+0530"), "PM_OBLIGATION_HOURLY_STATE": str(garbage)}
-    first, _ = invoke(lane, env=env)
-    assert first.get("decision") != "block" and "obligation:801 [hourly]" in reason(first)
-    second, _ = invoke(lane, env=env)
-    assert second.get("decision") != "block" and "obligation:801" not in reason(second)
-    assert json.loads(garbage.read_text())["hour"] == "2026-11-22T10+0530"
+def run_wrapper(lane, bucket_hour):
+    """Run a path-rewritten COPY of pm-hourly-post.sh with stubbed compose/Slack/cleanup, all under tmp (no live /tmp, ~/.claude or Slack)."""
+    tmp = lane[3]
+    scripts = tmp / "claude-scripts"
+    scripts.mkdir(exist_ok=True)
+    (scripts / "sakshi-heartbeat.sh").write_text("#!/bin/bash\nprintf '*Hourly - 10:13 IST*\\n\\nbody\\n'\n")
+    (scripts / "slack-send.sh").write_text(
+        "#!/bin/bash\nn=$(ls \"$STUB_SENDS\" | wc -l | tr -d ' ')\ncat > \"$STUB_SENDS/send-$n.txt\"\n"
+        "echo \"OK ts=1795354000.00$n channel=C0ALZJHGE49\"\n")
+    (scripts / "hourly-thread-ts").write_text("#!/bin/bash\nexit 0\n")
+    (scripts / "tmux-dead-window-cleanup.sh").write_text("#!/bin/bash\nexit 0\n")
+    sends = tmp / "sends"
+    sends.mkdir(exist_ok=True)
+    wrapper = (ROOT / "scripts/pm/shared-assets/claude/scripts/pm-hourly-post.sh").read_text()
+    wrapper = wrapper.replace("/Users/rajiv/.claude/scripts/", f"{scripts}/").replace("/tmp/heartbeat-1h", f"{tmp}/heartbeat-1h")
+    wrapper = wrapper.replace("BUCKET=$(date +%Y-%m-%d:%H)", f"BUCKET={bucket_hour}")
+    copy = tmp / "pm-hourly-post.sh"
+    copy.write_text(wrapper)
+    env = {**lane[2], "STUB_SENDS": str(sends), "PM_STOP_DRAIN_HOOK": str(lane[0] / "pm-ops-sync-stop-validator.sh")}
+    result = subprocess.run(["bash", str(copy)], env=env, stdin=subprocess.DEVNULL, text=True, capture_output=True, timeout=30)
+    return result, sorted(sends.glob("send-*.txt")), tmp / ".claude" / "hourly-heartbeat-posts" / bucket_hour
 
 
-def test_hourly_surface_never_touches_user_prompt_submit_or_hook_registration():
-    """Rule 50: the change is confined to the Stop obligation hook; no gate in front of PM input or tools."""
+def test_hourly_wrapper_hands_off_one_routine_batch_while_fast_rows_stay_open(lane):
+    """CTO REVISE #2: one batch handed to the hourly lane with 3+ FAST rows open, no duplicate in that hour."""
+    seven_rows_five_fast(lane)
+    first, sends, claim = run_wrapper(lane, "2026-11-22:10")
+    assert first.returncode == 0, first.stderr + first.stdout
+    assert "ROUTINE_BATCH_HANDOFF" in first.stdout and "hourly_runnable=2 listed_rows=2 listed_ids=0 fast_open=5" in first.stdout
+    assert len(sends) == 1
+    posted = sends[0].read_text()
+    assert "*Routine batch" in posted and "obligation:506 [hourly]" in posted and "obligation:507 [hourly]" in posted
+    assert "obligation:501" not in posted, "FAST rows stay on the Stop drain, not in the routine batch"
+    receipt = (claim / "routine-batch.handoff").read_text()
+    assert "parent_ts=1795354000.000" in receipt and "fast_open=5" in receipt
+    # A second invocation in the same hour finds the claim, posts nothing and hands nothing off again.
+    again, sends_again, _ = run_wrapper(lane, "2026-11-22:10")
+    assert "HOURLY_ALREADY_POSTED" in again.stdout and "ROUTINE_BATCH_HANDOFF" not in again.stdout
+    assert len(sends_again) == 1
+    # The Stop hook is not a second trigger: with the same rows it never lists a batch.
+    assert "Hourly routine batch" not in reason(invoke(lane, grouped=False)[0])
+    # Next hour hands the still-open routine rows off again, once.
+    nxt, sends_next, _ = run_wrapper(lane, "2026-11-22:11")
+    assert nxt.stdout.count("ROUTINE_BATCH_HANDOFF") == 1 and len(sends_next) == 2
+
+
+def test_hourly_wrapper_posts_without_a_batch_when_the_export_fails_or_nothing_is_routine(lane):
+    add(lane, 801, severity="high")   # FAST only: nothing routine to hand off
+    done, sends, claim = run_wrapper(lane, "2026-11-22:10")
+    assert done.returncode == 0 and "*Routine batch" not in sends[0].read_text()
+    assert "ROUTINE_BATCH_HANDOFF" in done.stdout and "hourly_runnable=0" in done.stdout
+    (lane[3] / "missing-hook-run").mkdir()
+    env_lane = (lane[0], lane[1], {**lane[2], "PM_OPS_DB": str(lane[3] / "missing.db")}, lane[3])
+    failed, sends2, _ = run_wrapper(env_lane, "2026-11-22:11")
+    assert failed.returncode == 0 and "ROUTINE_BATCH_SKIPPED" in failed.stdout and "POSTED ts=" in failed.stdout
+    assert len(sends2) == 2
+
+
+def test_stop_hook_has_no_hourly_marker_and_never_touches_user_prompt_submit():
+    """Rule 50: confined to the Stop obligation hook; no gate in front of PM input or tools; no second batch trigger."""
     src = (HOOKS / "pm-ops-sync-stop-validator.sh").read_text()
     assert "UserPromptSubmit" not in src and "PreToolUse" not in src
+    assert "hourly_pass_due" not in src and "fcntl" not in src and "PM_OBLIGATION_HOURLY" not in src

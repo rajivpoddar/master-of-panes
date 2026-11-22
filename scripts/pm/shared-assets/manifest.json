@@ -204,7 +204,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-ops-sync-stop-validator",
-      "sha256": "9c0f4940e7f531a87b70a47e8e7c925f326cfe9938c942c24744a07bfa7a01cb",
+      "sha256": "b2469e69498d3640fc78429d01fb447f69e2acaf2da159688126a7654aa73665",
       "source_path": "claude/hooks/pm-ops-sync-stop-validator.sh"
     },
     {
@@ -726,7 +726,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-runtime-closure",
-      "sha256": "cdec25ea7a2ef4f089a284248aa7c9c96f0c0523f346d4e7963ad7d3f6df00b1",
+      "sha256": "19dcbe9c84134aac96a758082c8dee5d8d3efd112499458de850d1c8b95dbad8",
       "source_path": "claude/scripts/pm-hourly-post.sh"
     },
     {
