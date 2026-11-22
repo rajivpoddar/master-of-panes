@@ -8,13 +8,21 @@ Sarvam publishes no usage, credit or balance API (the docs point at the dashboar
 statistics (usage-statistics-enabled: false). So the figure is a MEASURED ESTIMATE: token usage that Claude Code
 recorded for each proxy lane (/tmp/proxy-agent/*.jsonl) times the published rupee rates per 1M tokens (ex-GST).
 
-Attribution is by REGISTERED ROUTE, never by the model id the transcript happens to print. A lane is Sarvam usage when
-its launch manifest (<stem>.log LAUNCH ... model_alias=) or its init event names a registered gateway alias, and the
-usage counted is the lane's own `result` event `modelUsage` for that alias: inputTokens, cacheReadInputTokens,
-cacheCreationInputTokens and outputTokens as the upstream reported them. The per-message `usage` in `assistant` events is
-NOT used for cost: for Sarvam routes it carries a prompt size and a zero output_tokens placeholder, and it prints the
-upstream id (`glm5.3`), not the alias. A lane that has not written its result yet (in flight, or killed first) therefore
-has no verified usage; it is reported as such and never costed.
+Attribution is by REGISTERED ROUTE ONLY. A lane is Sarvam usage when its launch manifest (<stem>.log LAUNCH ... model_alias=)
+or its init event names a registered gateway alias (a `sarvam-*` entry of ROUTES). Bare upstream ids (`glm5.3`,
+`deepseekv4.1-flash-1017`, ...) are never enough on their own: other providers sell the same upstream models (a GLM lane
+routed via OpenCode prints `glm-5.3` and would be misattributed), so usage from a lane with no registered Sarvam route is
+ignored, whatever id its events print. Within a Sarvam lane the usage counted is the lane's own `result` events for that
+alias: inputTokens, cacheReadInputTokens, cacheCreationInputTokens and outputTokens as the upstream reported them. The
+per-message `usage` in `assistant` events is NOT used for cost: for Sarvam routes it carries a prompt size and a zero
+output_tokens placeholder, and it prints the upstream id (`glm5.3`), not the alias.
+
+Continuations are counted per completion, exactly once. The launcher appends continuation results to the same lane
+transcript, and a re-invoked lane RESETS its cumulative counter, so "max per field at one file time" both overcounts and
+undercounts. Each `result` event is bound to its invocation by its own `uuid` and carries `model_usage_since_last_result`,
+the exact usage of that completion; the lane's totals are the SUM of those per-completion deltas (one row id per result
+uuid, merged by max, so a re-scan of an unchanged file can only re-observe the same rows). A lane that has not written a
+result yet (in flight, or killed first) therefore has no verified usage; it is reported as such and never costed.
 
 Never invents a number, and never prints a bare zero for a missing input. Each gap is reported with its reason:
   - no verified usage at all but Sarvam lanes exist (in flight, unpriced route, or an unregistered alias/upstream id):
@@ -24,11 +32,11 @@ Never invents a number, and never prints a bare zero for a missing input. Each g
     allowance minus the measured estimate, labelled as an allowance, never as a provider reading. No default exists.
   - transcripts: unreadable and no ledger means the whole line is UNAVAILABLE.
 
-State: --record appends deduped per-lane usage rows plus a scan watermark to ~/.claude/state/sarvam-usage-ledger.jsonl,
-so the month total survives /tmp being cleared and later scans only read files changed since the watermark. Rows and
-watermarks carry "v": 2; anything else in an older ledger is ignored (and the month is rescanned). Without --record the
-script is read-only (the dry-run path). It never reads the Sarvam key, never posts to Slack and never touches the pm-ops
-DB.
+State: --record appends deduped per-completion usage rows plus a scan watermark to ~/.claude/state/sarvam-usage-ledger.jsonl,
+so the month total survives /tmp being cleared and later scans only read files changed since the watermark. Each row id
+is lane-stem:route:result-uuid, so an unchanged lane re-scanned past the watermark dedupes to itself. Rows and watermarks
+carry "v": 2; anything else in an older ledger is ignored (and the month is rescanned). Without --record the script is
+read-only (the dry-run path). It never reads the Sarvam key, never posts to Slack and never touches the pm-ops DB.
 """
 from __future__ import annotations
 
@@ -101,7 +109,12 @@ def _month_start_epoch(now: datetime) -> float:
 
 
 def resolve_route(model) -> str | None:
-    """Registered gateway alias for an alias OR its upstream id, else None."""
+    """REGISTERED gateway alias for an alias OR its upstream id, else None.
+
+    Only ever consulted for a lane that already carries a registered Sarvam route (manifest/init alias), so a bare
+    upstream id from a foreign-provider lane is never attributed on its own. Foreign aliases like `glm-5.3` (OpenCode)
+    do not match `glm5.3` (Sarvam's upstream id) and never resolve.
+    """
     if not isinstance(model, str):
         return None
     if model in ROUTES:
@@ -110,7 +123,8 @@ def resolve_route(model) -> str | None:
 
 
 def _merge(rows: dict, row: dict) -> None:
-    """One row per id: earliest timestamp, largest token counts (a re-scanned lane can only have grown)."""
+    """One row per id (one lane COMPLETION): earliest timestamp, largest token counts (a re-scanned unchanged file
+    re-observes the same completion rows, so the max merge is pure dedupe; a grown file adds new result uuids)."""
     old = rows.get(row["id"])
     if old is None:
         rows[row["id"]] = dict(row)
@@ -157,20 +171,28 @@ def _launch_alias(jsonl_path: str):
     return match.group(1).decode("utf-8", "replace") if match else None
 
 
-def scan_lane(manifest, data: bytes) -> dict:
+def scan_lane(manifest, data: bytes):
     """Usage facts for one lane transcript; `manifest` is the lane's LAUNCH model_alias (or None).
 
-    Returns {"route", "verified": {alias: [in, cin, out]}, "unverified": [alias], "unattributed": [model names]}.
-    `verified` comes only from `result` events' modelUsage (any key that resolves to a registered route, so a Sarvam
-    request made inside a non-Sarvam lane is still seen). `unverified` is a registered route whose requests were seen
-    but never reported usage. `unattributed` is a lane whose manifest/init alias is `sarvam-*` yet unregistered, or whose
-    registered route produced only unregistered upstream ids: attribution is missing there, so it is flagged loudly.
+    Returns {"route", "verified": {alias: [in, cin, out]}, "results": [{uuid, alias, delta}], "unverified": [alias],
+    "unattributed": [model names], "foreign_usage": bool}. `route` is the lane's REGISTERED Sarvam route from its
+    manifest or init event only -- bare upstream ids never make a lane Sarvam, because other providers sell the same
+    upstream models. `verified`/`results` come only from `result` events once the lane has a registered route: each
+    result is bound to its invocation by its own uuid and counts its `model_usage_since_last_result` delta exactly
+    once, so continuations sum instead of collapsing into one per-field maximum. `unverified` is a registered route
+    whose requests were seen but never reported usage. `unattributed` is a lane whose manifest/init alias is `sarvam-*`
+    yet unregistered, or whose registered route produced only unregistered upstream ids. `foreign_usage` flags a
+    foreign lane (no registered route) whose result named a registered alias anyway: attribution refused there, so
+    that traffic is loudly reported, never silently counted.
     """
-    route = resolve_route(manifest)
+    route = manifest if isinstance(manifest, str) and manifest in ROUTES else None  # bare upstream ids never route
     declared = manifest
     verified: dict = {}
+    results: list = []
     seen: set = set()  # ids of assistant messages on a registered model (routed lanes only)
     others: set = set()  # other non-synthetic upstream ids seen (routed lanes only)
+    foreign_usage = False
+    last_assistant_id = None  # invocation basis for cumulative result rows without a delta field
     for line in data.split(b"\n"):
         is_init = b'"subtype":"init"' in line
         is_result = b'"type":"result"' in line
@@ -186,27 +208,57 @@ def scan_lane(manifest, data: bytes) -> dict:
         kind = event.get("type")
         if kind == "system" and event.get("subtype") == "init":
             model = event.get("model")
-            if route is None and resolve_route(model):
-                route = resolve_route(model)
+            if route is None and isinstance(model, str) and model in ROUTES:
+                route = model  # a registered alias from the lane's own init; upstream ids never reach here
             if declared is None and isinstance(model, str):
                 declared = model
-        elif kind == "result" and isinstance(event.get("modelUsage"), dict):
-            for key, usage in event["modelUsage"].items():
+        elif kind == "result":
+            usage = event.get("model_usage_since_last_result")
+            if isinstance(usage, dict) and usage:
+                deltas = usage
+                cumulative = False
+            elif isinstance(event.get("modelUsage"), dict):
+                # Older/edge completions without the per-result delta: only trustworthy as a per-invocation cumulative.
+                deltas = event["modelUsage"]
+                cumulative = True
+            else:
+                deltas = {}
+                cumulative = False
+            for key, usage_row in deltas.items():
                 alias = resolve_route(key)
-                if alias is None or not isinstance(usage, dict):
+                if alias is None or not isinstance(usage_row, dict):
                     continue
-                got = [_int(usage.get("inputTokens")) + _int(usage.get("cacheCreationInputTokens")),
-                       _int(usage.get("cacheReadInputTokens")), _int(usage.get("outputTokens"))]
+                if route is None:
+                    foreign_usage = True  # a registered alias reported by a lane with no registered Sarvam route
+                    continue
+                got = [_int(usage_row.get("inputTokens")) + _int(usage_row.get("cacheCreationInputTokens")),
+                       _int(usage_row.get("cacheReadInputTokens")), _int(usage_row.get("outputTokens"))]
+                uuid = event.get("uuid")
+                if not isinstance(uuid, str):
+                    uuid = f"idx{event.get('result_index')}"
+                if cumulative:
+                    # A cumulative row without a uuid of its own is per-invocation: the invocation boundary is the
+                    # last-seen assistant message id, so successive results with the same basis keep only the max
+                    # (the cumulative can only grow), while a new basis starts a fresh row.
+                    basis = last_assistant_id
+                    row_id = f"{uuid}:{basis}"
+                    cur = verified.setdefault(alias, [0, 0, 0])
+                    for i, value in enumerate(got):
+                        cur[i] = max(cur[i], value)
+                    results.append({"uuid": row_id, "alias": alias, "delta": list(got)})
+                    continue
+                results.append({"uuid": f"{uuid}", "alias": alias, "delta": list(got)})
                 cur = verified.setdefault(alias, [0, 0, 0])
                 for i, value in enumerate(got):
-                    cur[i] = max(cur[i], value)
+                    cur[i] += value
         elif kind == "assistant" and isinstance(event.get("message"), dict):
             message = event["message"]
             model = message.get("model")
             alias = resolve_route(model)
             if alias is not None:
-                if isinstance(message.get("id"), str):
+                if route is not None and isinstance(message.get("id"), str):
                     seen.add((alias, message["id"]))
+                    last_assistant_id = message["id"]
             elif isinstance(model, str) and model and not model.startswith("<"):
                 others.add(model)
     unverified = sorted({alias for alias, _ in seen if alias not in verified})
@@ -215,19 +267,24 @@ def scan_lane(manifest, data: bytes) -> dict:
         unattributed.append(declared)  # a sarvam-* alias nobody registered
     elif route is not None and route not in verified and not any(a == route for a, _ in seen) and others:
         unattributed.extend(sorted(others))  # routed, but every upstream id it printed is unregistered
-    return {"route": route, "verified": verified, "unverified": unverified, "unattributed": unattributed}
+    return {"route": route, "verified": verified, "results": results, "unverified": unverified,
+            "unattributed": unattributed, "foreign_usage": foreign_usage}
 
 
 def scan_transcripts(root: Path, since_epoch: float, deadline: float):
     """Rows for verified Sarvam lane usage in transcripts modified at/after since_epoch.
 
     Returns (rows by id, info): info has error (str|None), partial (bool), files (int), unverified (int lanes),
-    unattributed (int lanes) and unattributed_models (sorted list). A file is only parsed when its manifest or its
-    bytes name a registered route, so scanning GBs of unrelated lane logs stays a memchr-speed pass.
+    unattributed (int lanes), unattributed_models (sorted list), unverified_routes and foreign_usage (int lanes).
+    Each row is one lane COMPLETION (lane-stem:route:result-uuid, summed via the lane's verified totals), so
+    continuations count once each and a re-scan of an unchanged lane dedupes to the same rows. A file is only parsed
+    when its manifest or its bytes name a registered route, so scanning GBs of unrelated lane logs stays a
+    memchr-speed pass; a foreign lane with no registered route is still counted in foreign_usage when its bytes
+    name a registered alias, so refused attribution stays visible instead of silently reading as zero.
     """
     rows: dict = {}
     info = {"error": None, "partial": False, "files": 0, "unverified": 0, "unattributed": 0,
-            "unattributed_models": [], "unverified_routes": []}
+            "unattributed_models": [], "unverified_routes": [], "foreign_usage": 0}
     models: set = set()
     routes: set = set()
     try:
@@ -251,21 +308,26 @@ def scan_transcripts(root: Path, since_epoch: float, deadline: float):
             continue
         info["files"] += 1
         manifest = _launch_alias(entry.path)
-        routed = isinstance(manifest, str) and (resolve_route(manifest) is not None
-                                                or manifest.startswith(ALIAS_PREFIX))
+        routed = isinstance(manifest, str) and (manifest in ROUTES or manifest.startswith(ALIAS_PREFIX))
         if not (routed or any(mark in data for mark in MARKS)):
             continue  # neither the manifest nor the transcript names a Sarvam route: skip without parsing
         lane = scan_lane(manifest, data)
+        if lane["foreign_usage"]:
+            info["foreign_usage"] += 1
+        if lane["unattributed"]:
+            info["unattributed"] += 1
+            models.update(lane["unattributed"])
+        if lane["route"] is None:
+            continue  # foreign lane: registered-alias bytes are not Sarvam usage, whatever ids its events print
+        stem = entry.name[:-len(".jsonl")]
         stamp = datetime.fromtimestamp(stat.st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        for alias, (tokens_in, tokens_cached, tokens_out) in lane["verified"].items():
-            _merge(rows, {"id": f"{entry.name[:-len('.jsonl')]}:{alias}", "ts": stamp, "route": alias,
+        for res in lane["results"]:
+            tokens_in, tokens_cached, tokens_out = res["delta"]
+            _merge(rows, {"id": f"{stem}:{res['alias']}:{res['uuid']}", "ts": stamp, "route": res["alias"],
                           "in": tokens_in, "cin": tokens_cached, "out": tokens_out})
         if lane["unverified"]:
             info["unverified"] += 1
             routes.update(lane["unverified"])
-        if lane["unattributed"]:
-            info["unattributed"] += 1
-            models.update(lane["unattributed"])
     info["unattributed_models"] = sorted(models)
     info["unverified_routes"] = sorted(routes)
     return rows, info
@@ -345,6 +407,9 @@ def gap_notes(summary: dict, scan: dict) -> list:
     if scan.get("unattributed"):
         names = ", ".join(scan.get("unattributed_models") or [])
         notes.append(f"{_lanes(scan['unattributed'])} on unregistered route/upstream id ({names}) not attributable")
+    if scan.get("foreign_usage"):
+        notes.append(f"{_lanes(scan['foreign_usage'])} with no registered Sarvam route named a registered alias in "
+                     "its usage; refused (not Sarvam traffic, e.g. the same upstream model via another provider)")
     if summary["unpriced"]:
         notes.append("unpriced (provisioned throughput or unregistered rate): "
                      + ", ".join(f"{route} x{_lanes(n)}" for route, n in sorted(summary["unpriced"].items())))
@@ -437,12 +502,14 @@ def collect(now: datetime, root: Path = TRANSCRIPTS, ledger: Path = LEDGER, caps
         recorded = len(fresh)
     return {"line": line, "available": summary["priced_lanes"] > 0, "recorded": recorded, "new_rows": new_rows,
             "summary": summary, "allowance": allowance, "files_scanned": info["files"],
-            "unverified_lanes": info["unverified"], "unattributed_lanes": info["unattributed"]}
+            "unverified_lanes": info["unverified"], "unattributed_lanes": info["unattributed"],
+            "foreign_usage_lanes": info["foreign_usage"]}
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--record", action="store_true", help="append new per-lane rows + scan watermark to the ledger")
+    parser.add_argument("--record", action="store_true",
+                        help="append new per-completion rows + scan watermark to the ledger")
     parser.add_argument("--json", action="store_true", help="print the full summary as JSON instead of the line")
     parser.add_argument("--now", help="ISO time override (tests/dry-run)")
     parser.add_argument("--transcripts", default=str(TRANSCRIPTS))

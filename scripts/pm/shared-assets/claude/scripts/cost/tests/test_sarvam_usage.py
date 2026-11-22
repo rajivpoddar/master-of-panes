@@ -1,5 +1,6 @@
-"""Sarvam TF measured estimate: attribution by registered route, verified lane usage x published rates (separate cached
-rate), UNAVAILABLE with a reason instead of an invented zero, balance kept separate.
+"""Sarvam TF measured estimate: attribution by REGISTERED ROUTE ONLY (bare upstream ids from foreign-provider lanes
+never count), per-completion usage summed once across continuations, verified lane usage x published rates (separate
+cached rate), UNAVAILABLE with a reason instead of an invented zero, balance kept separate.
 
 Structural, not inventory-pinned (rule 60): route tables are discovered from `su.ROUTES` and the launcher, never copied.
 
@@ -40,15 +41,31 @@ def asst(msg_id, model, minutes_ago=5, inp=0, out=0, kind="assistant", text=None
     return json.dumps({"type": kind, "message": message, "timestamp": ts(minutes_ago)}, separators=(",", ":"))
 
 
-def result(**by_model):
-    """A final result event; each kwarg is model-key -> (inputTokens, cacheRead, outputTokens[, cacheCreation])."""
+def result(uuid=None, since_last=None, **by_model):
+    """A result event. by_model: model-key -> (inputTokens, cacheRead, outputTokens[, cacheCreation]).
+
+    `since_last` (dict of the same shape) writes `model_usage_since_last_result`, the per-completion delta the real
+    harness emits; without it the event carries only the cumulative `modelUsage` (the older shape).
+    """
     usage = {}
     for key, tokens in by_model.items():
         tokens = tuple(tokens) + (0,) * (4 - len(tokens))
         usage[key.replace("_", "-") if key.startswith("sarvam") else key] = {
             "inputTokens": tokens[0], "cacheReadInputTokens": tokens[1], "outputTokens": tokens[2],
             "cacheCreationInputTokens": tokens[3]}
-    return json.dumps({"type": "result", "subtype": "success", "modelUsage": usage}, separators=(",", ":"))
+    event = {"type": "result", "subtype": "success", "modelUsage": usage}
+    if uuid is not None:
+        event["uuid"] = uuid
+        event["result_index"] = 0
+    if since_last is not None:
+        deltas = {}
+        for key, tokens in since_last.items():
+            tokens = tuple(tokens) + (0,) * (4 - len(tokens))
+            deltas[key.replace("_", "-") if key.startswith("sarvam") else key] = {
+                "inputTokens": tokens[0], "cacheReadInputTokens": tokens[1], "outputTokens": tokens[2],
+                "cacheCreationInputTokens": tokens[3]}
+        event["model_usage_since_last_result"] = deltas
+    return json.dumps(event, separators=(",", ":"))
 
 
 def priced(alias, in_tok=0, cached=0, out_tok=0):
@@ -77,12 +94,26 @@ class Sandbox(unittest.TestCase):
                 f"model_id={launch_alias} MODE:dev\nother noise\n")
         return path
 
-    def sarvam_lane(self, stem, alias=GLM, usage=(1_000_000, 0, 0), minutes_ago=5, with_result=True):
-        """A lane shaped like the real ones: init prints the alias, messages print the upstream id."""
+    def sarvam_lane(self, stem, alias=GLM, usage=(1_000_000, 0, 0), minutes_ago=5, with_result=True,
+                    completions=None):
+        """A lane shaped like the real ones: init prints the alias, messages print the upstream id.
+
+        `completions` (list of (uuid, delta) pairs) shapes a multi-completion continuation lane; each completion
+        carries `modelUsage` = the running cumulative and `model_usage_since_last_result` = its own delta, exactly
+        as the launcher appends them.
+        """
         upstream = su.ROUTES[alias]["upstream"]
         events = [init(alias), asst(f"{stem}-1", upstream, minutes_ago, inp=123456), asst(f"{stem}-2", upstream, minutes_ago)]
         if with_result:
-            events.append(result(**{alias.replace("-", "_"): usage}))
+            if completions is None:
+                events.append(result(uuid=f"{stem}-r0", since_last={alias.replace("-", "_"): usage},
+                                     **{alias.replace("-", "_"): usage}))
+            else:
+                cumulative = [0, 0, 0]
+                for i, (uuid, delta) in enumerate(completions):
+                    cumulative = [c + d for c, d in zip(cumulative, tuple(delta) + (0,) * (3 - len(delta)))]
+                    key = alias.replace("-", "_")
+                    events.append(result(uuid=uuid, since_last={key: delta}, **{key: tuple(cumulative)}))
         return self.lane(stem, *events, launch_alias=alias, minutes_ago=minutes_ago)
 
     def run_collect(self, environ=None, record=False, now=NOW, **kw):
@@ -92,11 +123,40 @@ class Sandbox(unittest.TestCase):
 
 class Attribution(Sandbox):
     def test_upstream_id_lane_is_attributed_through_its_registered_route(self):
-        # The CTO's failing case: lane manifests log upstream `glm5.3`, which the old alias-only filter dropped (₹0.00).
+        # A REGISTERED Sarvam lane whose events print the upstream id: attributed through the manifest route.
         self.sarvam_lane("a", GLM, usage=(1_000_000, 0, 0))
         out = self.run_collect()
         self.assertEqual(out["summary"]["priced_lanes"], 1)
         self.assertAlmostEqual(out["summary"]["used_inr"], priced(GLM, 1_000_000), places=9)
+
+    def test_foreign_provider_glm_lane_counts_zero_for_sarvam(self):
+        # The CTO's control: a GLM lane routed via OpenCode. Its manifest alias is `glm-5.3` (NOT the registered
+        # alias), its events print `glm-5.3`, and even a result whose modelUsage key is Sarvam's own upstream id
+        # must count ZERO for Sarvam: no registered route, no attribution.
+        upstream = su.ROUTES[GLM]["upstream"]  # "glm5.3": the id Sarvam's route maps, which must not help OpenCode
+        foreign = upstream.replace("glm", "glm-")  # "glm-5.3": a lookalike foreign alias
+        self.assertNotIn(foreign, su.ROUTES)
+        events = [init(foreign), asst("m1", foreign, inp=9_000_000),
+                  result(**{foreign: (9_000_000, 0, 9_000_000)}),
+                  result(**{upstream: (9_000_000, 0, 9_000_000)})]  # bare upstream id in usage: still refused
+        self.lane("a", *events, launch_alias=foreign)
+        out = self.run_collect()
+        self.assertEqual(out["summary"]["priced_lanes"], 0)
+        self.assertEqual(out["summary"]["used_inr"], 0.0)
+        self.assertEqual(out["foreign_usage_lanes"], 1)
+        self.assertIn("no registered Sarvam route", out["line"])
+
+    def test_foreign_lane_manifest_glmm53_style_bare_upstream_id_is_not_a_route(self):
+        # The CTO's named failure: a lane manifest that logs the BARE upstream id (`glm5.3`) is a lane routed to
+        # another provider as far as attribution can prove; its usage must not be counted as Sarvam.
+        upstream = su.ROUTES[GLM]["upstream"]
+        self.lane("a", init(upstream), asst("m1", upstream, inp=5_000_000),
+                  result(**{upstream: (5_000_000, 0, 5_000_000)}), launch_alias=upstream)
+        out = self.run_collect()
+        self.assertEqual(out["summary"]["priced_lanes"], 0)
+        self.assertEqual(out["summary"]["used_inr"], 0.0)
+        self.assertEqual(out["unattributed_lanes"], 0)
+        self.assertEqual(out["foreign_usage_lanes"], 1)  # loudly refused, never a silent zero
 
     def test_manifest_route_attributes_even_when_the_init_alias_is_missing(self):
         upstream = su.ROUTES[GLM]["upstream"]
@@ -128,6 +188,15 @@ class Attribution(Sandbox):
         self.assertIsNone(su.resolve_route("claude-sonnet-5-5"))
         self.assertIsNone(su.resolve_route(None))
 
+    def test_scan_lane_route_comes_from_registered_aliases_only(self):
+        # Structural: upstream ids never make a lane Sarvam; only a registered alias in the manifest or init does.
+        # A self-named upstream (sarvam-105b) is the one legal overlap: it is itself a registered alias.
+        for alias, route in su.ROUTES.items():
+            self.assertEqual(su.scan_lane(alias, b"")["route"], alias)
+            if route["upstream"] == alias:
+                continue
+            self.assertIsNone(su.scan_lane(route["upstream"], b"")["route"])
+
     def test_unregistered_sarvam_alias_is_flagged_unattributed_never_zero(self):
         self.lane("a", init("sarvam-newmodel-9"), asst("m1", "newmodel9", inp=1000),
                   result(**{"sarvam-newmodel-9": (5_000_000, 0, 5_000_000)}), launch_alias="sarvam-newmodel-9")
@@ -136,6 +205,76 @@ class Attribution(Sandbox):
         self.assertTrue(out["line"].startswith("Sarvam TF: measured estimate UNAVAILABLE"), out["line"])
         self.assertIn("sarvam-newmodel-9", out["line"])
         self.assertNotIn("₹0.00", out["line"])
+
+
+class Continuations(Sandbox):
+    """The launcher appends continuation results to the same lane transcript; each result is one completion."""
+
+    def test_three_completions_are_summed_not_maxed(self):
+        # The CTO's live case: one lane, three result records. modelUsage is the running cumulative; the deltas are
+        # each completion's own usage and must SUM to the final cumulative (per-field maxima would drop two of them).
+        deltas = [(321395, 6850560, 19381), (2892, 415744, 375), (13098, 1404928, 949)]
+        self.sarvam_lane("lane", completions=[(f"r{i}", d) for i, d in enumerate(deltas)])
+        out = self.run_collect()
+        want_in = sum(d[0] for d in deltas)
+        want_cached = sum(d[1] for d in deltas)
+        want_out = sum(d[2] for d in deltas)
+        self.assertEqual(out["summary"]["priced_lanes"], 3)
+        self.assertAlmostEqual(out["summary"]["used_inr"], priced(GLM, want_in, want_cached, want_out), places=6)
+
+    def test_a_reinvoked_lane_whose_counter_resets_is_never_dropped_by_a_max(self):
+        # A re-invocation RESETS the cumulative counter; per-field maxima would silently drop the second run's
+        # smaller numbers. Per-completion deltas keep both invocations.
+        first = (3_000_000, 0, 0)
+        second = (1_000_000, 0, 0)  # smaller than first: a max-based merge would lose it
+        events = [init(GLM), asst("m1", su.ROUTES[GLM]["upstream"]),
+                  result(uuid="r0", since_last={GLM.replace("-", "_"): first}, **{GLM.replace("-", "_"): first}),
+                  asst("m2", su.ROUTES[GLM]["upstream"]),
+                  result(uuid="r1", since_last={GLM.replace("-", "_"): second}, **{GLM.replace("-", "_"): second})]
+        self.lane("a", *events, launch_alias=GLM)
+        self.assertAlmostEqual(self.run_collect()["summary"]["used_inr"], priced(GLM, 4_000_000), places=6)
+
+    def test_duplicate_result_uuid_across_rescans_is_counted_once(self):
+        # The same result uuid seen again (a re-scan past the watermark, or a repeated event) is the same row id:
+        # merged by max, never summed twice.
+        deltas = [(1_000_000, 0, 0), (2_000_000, 0, 0)]
+        self.sarvam_lane("a", completions=[(f"r{i}", d) for i, d in enumerate(deltas)])
+        first = self.run_collect(record=True)
+        self.assertAlmostEqual(first["summary"]["used_inr"], priced(GLM, 3_000_000), places=6)
+        again = self.run_collect()  # unchanged file, still inside the overlap window: re-read, same uuids
+        self.assertAlmostEqual(again["summary"]["used_inr"], priced(GLM, 3_000_000), places=6)
+        self.assertEqual(again["summary"]["priced_lanes"], 2)
+
+    def test_two_lanes_with_the_same_result_uuid_stay_separate_rows(self):
+        # Row ids are lane-stem + route + result uuid, so a uuid colliding across lanes does not merge them.
+        for stem in ("laneA", "laneB"):
+            self.sarvam_lane(stem, completions=[("same-uuid", (1_000_000, 0, 0))])
+        out = self.run_collect()
+        self.assertEqual(out["summary"]["priced_lanes"], 2)
+        self.assertAlmostEqual(out["summary"]["used_inr"], priced(GLM, 2_000_000), places=6)
+
+    def test_old_cumulative_only_results_are_merged_by_max_per_invocation(self):
+        # Backward shape: results that carry ONLY cumulative modelUsage (no per-result delta). Successive results
+        # of one invocation keep the max; a new invocation (new assistant id) starts a fresh row.
+        self.lane("a", init(GLM),
+                  asst("base-1", su.ROUTES[GLM]["upstream"]),
+                  result(**{GLM.replace("-", "_"): (1_000_000, 0, 0)}),
+                  result(**{GLM.replace("-", "_"): (2_000_000, 0, 0)}),  # same invocation, cumulative grew
+                  asst("base-2", su.ROUTES[GLM]["upstream"]),
+                  result(**{GLM.replace("-", "_"): (500_000, 0, 0)}),  # counter reset: a new invocation
+                  launch_alias=GLM)
+        out = self.run_collect()
+        self.assertAlmostEqual(out["summary"]["used_inr"], priced(GLM, 2_500_000), places=6)
+        self.assertEqual(out["summary"]["priced_lanes"], 2)
+
+    def test_result_usage_from_a_foreign_lane_without_since_last_is_refused_too(self):
+        upstream = su.ROUTES[GLM]["upstream"]
+        foreign = upstream.replace("glm", "glm-")
+        self.lane("a", init(foreign), asst("m1", foreign), result(**{upstream: (1_000_000, 0, 0)}),
+                  launch_alias=foreign)
+        out = self.run_collect()
+        self.assertEqual(out["summary"]["used_inr"], 0.0)
+        self.assertEqual(out["foreign_usage_lanes"], 1)
 
 
 class CostMath(Sandbox):
@@ -163,10 +302,14 @@ class CostMath(Sandbox):
         self.assertEqual(out["summary"]["used_inr"], 0.0)
         self.assertEqual(out["summary"]["priced_lanes"], 0)
 
-    def test_result_usage_is_max_per_field_not_a_sum_across_repeated_results(self):
+    def test_result_usage_dedupes_on_result_uuid_not_summed_across_repeats(self):
+        # The same completion (same result uuid, same delta) written twice in one file is one row: max merge.
         self.lane("a", init(GLM), asst("m1", su.ROUTES[GLM]["upstream"]),
-                  result(**{GLM.replace("-", "_"): (1_000_000, 0, 0)}),
-                  result(**{GLM.replace("-", "_"): (1_000_000, 0, 0)}), launch_alias=GLM)
+                  result(uuid="dup", since_last={GLM.replace("-", "_"): (1_000_000, 0, 0)},
+                         **{GLM.replace("-", "_"): (1_000_000, 0, 0)}),
+                  result(uuid="dup", since_last={GLM.replace("-", "_"): (1_000_000, 0, 0)},
+                         **{GLM.replace("-", "_"): (1_000_000, 0, 0)}),
+                  launch_alias=GLM)
         self.assertAlmostEqual(self.run_collect()["summary"]["used_inr"], priced(GLM, 1_000_000), places=9)
 
     def test_previous_month_excluded(self):
@@ -349,12 +492,15 @@ class Ledger(Sandbox):
         self.assertEqual(out["recorded"], 0)
         self.assertEqual([row for row in self.ledger_rows() if "id" in row], [])
 
-    def test_a_lane_that_grows_between_scans_is_merged_by_max_not_summed(self):
-        self.sarvam_lane("a", usage=(1_000_000, 0, 0))
+    def test_a_lane_that_gains_a_new_completion_between_scans_adds_only_the_new_row(self):
+        # Scan 1 sees one completion; scan 2 re-reads the grown file: the first row dedupes by its result uuid and
+        # only the second completion's row is new usage.
+        self.sarvam_lane("a", completions=[("r0", (1_000_000, 0, 0))])
         self.run_collect(record=True)  # watermark = NOW; later scans only re-read files changed within its overlap
-        self.sarvam_lane("a", usage=(3_000_000, 0, 0), minutes_ago=1)
+        self.sarvam_lane("a", completions=[("r0", (1_000_000, 0, 0)), ("r1", (2_000_000, 0, 0))], minutes_ago=1)
         out = self.run_collect(record=True)
         self.assertAlmostEqual(out["summary"]["used_inr"], priced(GLM, 3_000_000), places=6)
+        self.assertEqual(out["new_rows"], 1)
 
     def test_unversioned_torn_or_foreign_ledger_lines_are_ignored(self):
         self.ledger.parent.mkdir(parents=True)
@@ -403,7 +549,10 @@ class LauncherWiring(unittest.TestCase):
         self.assertEqual(len(su.UPSTREAM_ALIAS), len(su.ROUTES), "two aliases share one upstream id")
         for alias, route in su.ROUTES.items():
             self.assertTrue(alias.startswith(su.ALIAS_PREFIX), alias)
-            self.assertNotIn(route["upstream"], su.ROUTES, "an upstream id must not collide with an alias")
+            # An upstream id must not collide with a DIFFERENT alias (a self-named upstream like sarvam-105b is fine:
+            # it still cannot route a foreign lane, because ROUTES keys are the only route source).
+            self.assertNotIn(route["upstream"], {a for a in su.ROUTES if a != alias},
+                            "an upstream id must not collide with another alias")
             price = route["price"]
             if price is not None:
                 rate_in, rate_cached, rate_out = price
