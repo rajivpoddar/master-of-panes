@@ -98,11 +98,6 @@ def all_names(box):
                                                                                                  speaker_mapping_name(box)]
 
 
-def retired_r2_lease_secret_name(box):
-    """Per-box Modal secret NAME the retired scoped app-data mode created; only stop() still deletes it (idempotent, absent is fine)."""
-    return 'heydonna-qa-r2-' + identity(box)
-
-
 def onmiss_dict_name(box):
     """Box-local capture-on-miss payload store (Modal Dict, owned by this box lease, deleted by stop())."""
     return 'heydonna-qa-onmiss-' + identity(box)
@@ -110,24 +105,14 @@ def onmiss_dict_name(box):
 
 ONMISS_CAP_USD = 3
 
-# ---- M15 exact-hash capture-on-miss (CTO GO C0ALZJHGE49 thread 1794677380.515009 ts 1795301055.769519; Option A custody
+# ---- M15 scoped exact-hash capture-on-miss (CTO GO C0ALZJHGE49 thread 1794677380.515009 ts 1795301055.769519; Option A custody
 # ts 1795301727.470839). Opt-in ONLY through --exact-manifest; stock --on-miss and every storage default are untouched. ----------
-# STORE (Rajiv D0AMF0XE6TS thread 1795294139.951329, ts 1795316993.447349 "do it", retiring the separate QA bucket; rule 65): the exact lane's
-# fixture reads, staging, ledgers, report and PUT-if-absent publication all live in the canonical heydonna-fixtures store (the same
-# fixtures/llm/v2/ keys CI strict replay reads), signed by the ONE shared R2 key. The five-minute sessions below are prefix-scoped
-# DERIVATIONS of that key (containment inside one run, not a second credential). QA-only ledgers live under QA_LEDGER_PREFIX,
-# never beside the legacy qa-capture-ledgers/ ledgers that stock --on-miss writes; staging keeps the standard staging/llm-capture/
-# prefix the unchanged publisher reads, under this run's own remote-qa-onmiss-* run id.
 EXACT_MANIFEST_MAX_BYTES = 16384
 EXACT_MANIFEST_MAX_HASHES = 4
 EXACT_SESSION_TTL_S = 300        # fixture and report sessions are prefix-scoped and live five minutes
 EXACT_SESSION_REFRESH_S = 100    # the controller re-mints this often while a leg runs; a stopped controller expires inside 5 minutes
 EXACT_SESSION_WAIT_S = 60        # a proxy fixture client waits this long for its first armed session, then fails closed
-FIXTURE_STORE_BUCKET = 'heydonna-fixtures'
-QA_LEDGER_PREFIX = 'qa-onmiss/ledgers/'            # exact-mode ledgers (box, attempt, per-run); legacy ones stay under qa-capture-ledgers/
-LEGACY_LEDGER_PREFIX = 'qa-capture-ledgers/'
-QA_STORE_CARRY_KEY = 'qa-onmiss/migration/qa-store-carry.json'  # written once by the store-migration tool; custody refuses without it
-SHARED_R2_FP = '3be914b2600e2b2d'  # sha256(access key id)[:16] of the ONE shared HeyDonna R2 key (rule 65); the value is never printed
+CANARY_MAX_AGE_S = 48 * 3600
 EXACT_ENTRY_KEYS = {'hash', 'provider', 'model', 'operation', 'canonical_key'}
 # Explicit proof PROFILES (CTO GO C0ALZJHGE49 thread 1795302375.270589, ts 1795310865.915209; ladder pel-mwr0n14v-a9f99e2f). Every exact manifest NAMES
 # one; a missing or unknown profile is refused. The M15 profile keeps the mandatory native-LangSmith join. The PR #14414 profile is for ONE
@@ -244,7 +229,7 @@ def derive_exact_ids(box, head, spend_box):
             raise ValueError('QA_SCOPED_MINT_DENIED: a pool lease needs its physical pool server identity')
     elif spend_box != box:
         raise ValueError('QA_SCOPED_MINT_DENIED: an ephemeral box is its own physical identity')
-    return onmiss_keys(box, spend_box, head, exact=True)
+    return onmiss_keys(box, spend_box, head)
 
 
 def check_exact_ids(derived, claimed, manifest):
@@ -281,43 +266,22 @@ def _ledger_view(raw, approved):
             'prior_claims': sorted(k for k, r in requests.items() if k in approved and r.get('state') != 'refused')}
 
 
-def _carry_view(raw):
-    """The one-time store-migration receipt (QA_STORE_CARRY_KEY): written only by the migration tool after every ledger of the retired QA
-    store was copied (PUT-if-absent, digest-verified) into QA_LEDGER_PREFIX. Without it a fresh QA ledger would silently reset the
-    box/attempt caps, prior reservations and UNKNOWN claims, so custody refuses (None = authoritatively absent)."""
-    if raw is None:
-        return {'state': 'absent'}
-    try:
-        doc = json.loads(raw)
-    except ValueError:
-        return {'state': 'invalid'}
-    if not (isinstance(doc, dict) and doc.get('schema') == 'qa-store-carry/v1' and doc.get('complete') is True
-            and isinstance(doc.get('ledgers'), list) and doc.get('dest_prefix') == QA_LEDGER_PREFIX):
-        return {'state': 'invalid'}
-    return {'state': 'complete', 'sha256': hashlib.sha256(raw).hexdigest(), 'at': doc.get('at'), 'ledgers': len(doc['ledgers'])}
-
-
 def reconcile_custody(ids, manifest, legacy_get, qa_get, qa_put=None, now=None):
-    """Spend custody before any dispatch, on the trusted host. Reads the LEGACY (heydonna-fixtures qa-capture-ledgers/, written by stock
-    --on-miss) and QA (heydonna-fixtures qa-onmiss/ledgers/, written by the exact lane; carried there from the retired QA store by
-    the one-time migration, see QA_STORE_CARRY_KEY) on-miss ledgers for BOTH the physical box and the exact head. Any lookup that is not an authoritative present/absent refuses (a 403 is
+    """Spend custody before any dispatch, on the trusted host. Reads the LEGACY (heydonna-fixtures) and QA (heydonna-qa) on-miss
+    ledgers for BOTH the physical box and the exact head. Any lookup that is not an authoritative present/absent refuses (a 403 is
     neither absence nor balance). Refuses on a prior claim for an approved hash anywhere, a halted ledger, or a combined allowance
     below the approved single-request bound. Unless read-only (dry-check), binds the combined exposure into the QA ledgers
     (carry row + a custody marker bound to this manifest digest) so the proxy's own cap and single-flight claim see it and
     refuses every reservation without that marker. legacy_get/qa_get(key) -> (raw, etag) | None; qa_put(key, doc_bytes, etag)."""
     approved = set(manifest['entries'])
-    scopes = {'box': (ids['legacy_box_key'], ids['box_key']), 'attempt': (ids['legacy_attempt_key'], ids['attempt_key'])}
+    scopes = {'box': ids['box_key'], 'attempt': ids['attempt_key']}
     receipt = {'at': int(now if now is not None else time.time()), 'manifest_digest': manifest['digest'], 'head': ids['head'],
                'spend_box': ids['spend_box'], 'cap_usd': ONMISS_CAP_USD, 'max_reserve_usd': manifest['max_reserve_usd'],
                'scopes': {}, 'refusals': [], 'bound': False}
-    carry = qa_get(QA_STORE_CARRY_KEY)
-    receipt['store_carry'] = _carry_view(carry[0] if carry else None)
-    if receipt['store_carry']['state'] != 'complete':
-        receipt['refusals'].append({'code': 'QA_CUSTODY_STORE_NOT_MIGRATED', 'state': receipt['store_carry']['state']})
     fetched = {}
-    for scope, (legacy_key, key) in scopes.items():
-        legacy, qa = legacy_get(legacy_key), qa_get(key)
-        view = {'key': key, 'legacy_key': legacy_key, 'legacy': _ledger_view(legacy[0] if legacy else None, approved),
+    for scope, key in scopes.items():
+        legacy, qa = legacy_get(key), qa_get(key)
+        view = {'key': key, 'legacy': _ledger_view(legacy[0] if legacy else None, approved),
                 'qa': _ledger_view(qa[0] if qa else None, approved)}
         if legacy:
             view['legacy']['etag'] = legacy[1]
@@ -340,11 +304,11 @@ def reconcile_custody(ids, manifest, legacy_get, qa_get, qa_put=None, now=None):
     if qa_put is None:
         receipt['status'] = 'RECONCILED_READ_ONLY'
         return receipt
-    for scope, (legacy_key, key) in scopes.items():
+    for scope, key in scopes.items():
         view = receipt['scopes'][scope]
         legacy, qa = fetched[scope]
         marker = {'manifest_digest': manifest['digest'], 'at': receipt['at'], 'head': ids['head'], 'spend_box': ids['spend_box'],
-                  'legacy': {'bucket': LEGACY_BUCKET, 'state': view['legacy']['state'], 'committed_usd': view['legacy']['committed_usd'],
+                  'legacy': {'bucket': 'heydonna-fixtures', 'state': view['legacy']['state'], 'committed_usd': view['legacy']['committed_usd'],
                              'sha256': view['legacy']['sha256']}}
         doc = json.loads(qa[0]) if qa else {'run_id': 'custody-reconcile', 'cap_usd': ONMISS_CAP_USD, 'attempts': {}, 'events': [],
                                             'halted': False, 'allow_billable_tools': False, 'tool_admission_budget_usd': 2.0,
@@ -358,11 +322,11 @@ def reconcile_custody(ids, manifest, legacy_get, qa_get, qa_put=None, now=None):
                                          'provider': 'legacy', 'model': 'legacy-ledger', 'reserved_usd': usd, 'charged_bound_usd': usd,
                                          'settled': True, 'billable_tools': False, 'reserved_search_cost_usd': 0, 'per_search_usd': 0,
                                          'input_rate_per_million': 0, 'output_rate_per_million': 0,
-                                         'legacy_source': {'bucket': LEGACY_BUCKET, 'key': legacy_key, 'sha256': view['legacy']['sha256'],
+                                         'legacy_source': {'bucket': 'heydonna-fixtures', 'key': key, 'sha256': view['legacy']['sha256'],
                                                            'etag': view['legacy'].get('etag')}}
         qa_put(key, json.dumps(doc).encode(), qa[1] if qa else None)
     # Read back: the marker, the carried exposure and the combined total must be exactly what was bound.
-    for scope, (legacy_key, key) in scopes.items():
+    for scope, key in scopes.items():
         got = qa_get(key)
         view = receipt['scopes'][scope]
         back = _ledger_view(got[0] if got else None, approved)
@@ -375,18 +339,62 @@ def reconcile_custody(ids, manifest, legacy_get, qa_get, qa_put=None, now=None):
     return receipt
 
 
+def check_grant_receipt(path):
+    """The Run 9 parent grant, on the exact launch path: one active allow policy, object read/write only, solely on heydonna-qa."""
+    p = Path(path)
+    if p.is_symlink() or not p.is_file() or p.stat().st_size > 16384:
+        raise ValueError('QA_GRANT_RECEIPT_INVALID: unreadable')
+    r = json.loads(p.read_text())
+    resources = r.get('resources') if isinstance(r, dict) else None
+    ok = (isinstance(r, dict) and r.get('signer_fingerprint') == RUN9_SIGNER_FP and r.get('status') == 'active'
+          and r.get('effect') == 'allow' and r.get('policy_count') == 1 and r.get('object_only') is True
+          and isinstance(resources, dict) and len(resources) == 1 and all(k.endswith('_default_heydonna-qa') and v == '*' for k, v in resources.items())
+          and sorted(r.get('permission_groups') or []) == ['Workers R2 Storage Bucket Item Read', 'Workers R2 Storage Bucket Item Write'])
+    if not ok:
+        raise ValueError('QA_GRANT_RECEIPT_INVALID: not the verified Run 9 object-only grant on heydonna-qa')
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+RUN9_SIGNER_FP = '9b8c9f309b38da1f'  # access-id SHA-256 prefix of the verified Run 9 heydonna-qa object-only signer
 APP_DATA_R2_NAMES = ('R2_ACCOUNT_ID', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_BUCKET_NAME', 'R2_ENDPOINT_URL')
-APP_DATA_MODES = ('ci-parity',)
+SHARED_R2_SECRET = '"heydonna-r2-credentials"'
+
+
+def app_data_values(env_text):
+    """The scoped QA storage values an env file carries; refuses anything that is not the Run 9 scoped identity (explicit
+    QA_R2_SCOPED selection, bucket heydonna-qa, signer fingerprint 9b8c9f309b38da1f, account endpoint, no public host,
+    no production bucket reference). Returns (values, fingerprint). Values are never printed by callers."""
+    values = {}
+    for line in env_text.splitlines():
+        key, sep, value = line.removeprefix('export ').partition('=')
+        key = key.strip()
+        if sep and key in APP_DATA_R2_NAMES + ('R2_PUBLIC_URL', 'QA_R2_SCOPED'):
+            try:
+                parts = shlex.split(value, comments=True)
+            except ValueError:
+                raise ValueError('QA_APP_DATA_UNSCOPED: ambiguous env entry') from None
+            values[key] = parts[0] if len(parts) == 1 else ''
+    fp = hashlib.sha256(values.get('R2_ACCESS_KEY_ID', '').encode()).hexdigest()[:16]
+    if (any(not values.get(k) for k in APP_DATA_R2_NAMES) or values['R2_BUCKET_NAME'] != SCOPED_FIXTURE_BUCKET or fp != RUN9_SIGNER_FP
+            or values['R2_ENDPOINT_URL'] != 'https://' + values['R2_ACCOUNT_ID'] + '.r2.cloudflarestorage.com'
+            or values.get('R2_PUBLIC_URL') or 'heydonna-uploads' in ' '.join(values.values())):
+        raise ValueError('QA_APP_DATA_UNSCOPED: app-data storage is not the Run 9 scoped heydonna-qa identity')
+    return {k: values[k] for k in APP_DATA_R2_NAMES}, fp
+
+
+APP_DATA_MODES = ('scoped', 'ci-parity')
 CI_PARITY_BUCKET = 'heydonna-uploads'
 APP_DATA_DECISION = ('Rajiv C0ALZJHGE49 thread 1794677380.515009 ts 1795311474.240329 "option a. outcome takes precdence." '
-                     '(QA app data uses heydonna-uploads with the CI key, like CI); rule 65: one R2 account, one bucket, one key everywhere')
+                     '(QA app data uses heydonna-uploads with the CI key, like CI)')
 
 
 def app_data_readback(env_text, mode):
-    """Launch-path readback of the APP-DATA runtimes' storage identity (rule 65). 'ci-parity' is the only mode: the base env's
-    heydonna-uploads bucket with the ONE shared HeyDonna R2 key, exactly like CI. The fixture, staging, ledger and report clients stay
-    on prefix-scoped sessions derived from that same key. The signer fingerprint is RECORDED, never printed in full, and must be the
-    shared key's (SHARED_R2_FP)."""
+    """Launch-path readback of the APP-DATA runtimes' storage identity, by explicit mode. 'scoped' = the Run 9 heydonna-qa identity
+    (app_data_values). 'ci-parity' = Rajiv's decision (option A): the base env's heydonna-uploads bucket with the CI key, exactly like CI;
+    the fixture, staging, ledger and report clients stay on prefix-scoped sessions either way. The signer fingerprint is RECORDED, never printed in full."""
+    if mode == 'scoped':
+        _values, fingerprint = app_data_values(env_text)
+        return {'mode': 'scoped', 'bucket': SCOPED_FIXTURE_BUCKET, 'signer': fingerprint}
     if mode != 'ci-parity':
         raise ValueError('QA_APP_DATA_MODE_INVALID')
     values = {}
@@ -402,10 +410,33 @@ def app_data_readback(env_text, mode):
     if (any(not values.get(k) for k in APP_DATA_R2_NAMES) or values['R2_BUCKET_NAME'] != CI_PARITY_BUCKET
             or values['R2_ENDPOINT_URL'] != 'https://' + values['R2_ACCOUNT_ID'] + '.r2.cloudflarestorage.com'):
         raise ValueError('QA_APP_DATA_UNEXPECTED: app-data storage is not the CI-parity ' + CI_PARITY_BUCKET + ' identity')
-    signer = hashlib.sha256(values['R2_ACCESS_KEY_ID'].encode()).hexdigest()[:16]
-    if signer != SHARED_R2_FP:
-        raise ValueError('QA_APP_DATA_UNEXPECTED: app-data signer is not the one shared HeyDonna R2 key')
-    return {'mode': 'ci-parity', 'bucket': CI_PARITY_BUCKET, 'signer': signer, 'decision': APP_DATA_DECISION}
+    return {'mode': 'ci-parity', 'bucket': CI_PARITY_BUCKET, 'signer': hashlib.sha256(values['R2_ACCESS_KEY_ID'].encode()).hexdigest()[:16],
+            'decision': APP_DATA_DECISION}
+
+
+def r2_lease_secret_name(box):
+    return 'heydonna-qa-r2-' + identity(box)
+
+
+def overlay_app_data_mounts(root, box, changes):
+    """Exact mode: every shared R2 mount in the checkout's Modal sources (non-test) becomes THIS lease's QA-only secret, so no
+    leased runtime mounts the shared (production-parity) R2 secret. Stages into changes; returns (files, replaced)."""
+    files = replaced = 0
+    for p in sorted(Path(root).glob('modal/**/*.py')):
+        if '/tests/' in str(p) or '__pycache__' in str(p):
+            continue
+        text = changes.get(p) if p in changes else p.read_text()
+        count = text.count(SHARED_R2_SECRET)
+        if count:
+            changes[p] = text.replace(SHARED_R2_SECRET, '"' + r2_lease_secret_name(box) + '"')
+            files, replaced = files + 1, replaced + count
+    return files, replaced
+
+
+def shared_mounts_remaining(root):
+    """Static readback on the box checkout: non-test Modal sources that still reference the shared R2 secret."""
+    return sorted(str(p.relative_to(root)) for p in Path(root).glob('modal/**/*.py')
+                  if '/tests/' not in str(p) and '__pycache__' not in str(p) and SHARED_R2_SECRET in p.read_text())
 
 
 def _same_request(a, b):
@@ -499,7 +530,7 @@ def load_exact_ids(path):
     return ids
 
 
-def onmiss_identity(root, box, exact=False):
+def onmiss_identity(root, box):
     """Server-side spend identities for capture-on-miss (CTO ts 1793378243.332849): $3 per PHYSICAL box lifetime and per
     QA attempt (exact head). Derived on the box from its hostname and the checkout HEAD, never from a caller flag, so a
     warm-pool re-lease, redeploy, restart or replacement box cannot open a fresh budget."""
@@ -517,27 +548,22 @@ def onmiss_identity(root, box, exact=False):
         raise RuntimeError('capture-on-miss: pool box hostname unverified (' + host + '); refusing a per-lease budget')
     else:
         spend_box = box  # ephemeral box: the receipt name is unique for the box lifetime
-    return onmiss_keys(box, spend_box, head, exact)
+    return onmiss_keys(box, spend_box, head)
 
 
-def onmiss_keys(box, spend_box, head, exact=False):
+def onmiss_keys(box, spend_box, head):
     """Pure: the lease, ledger objects and staging prefix for (lease box, physical box, exact head). Shared by the box
-    (onmiss_identity) and by the TRUSTED HOST (derive_exact_ids), so a scope can be derived without trusting the box.
-    Stock --on-miss keeps the legacy qa-capture-ledgers/ keys. Exact mode (exact=True) keeps its QA ledgers under QA_LEDGER_PREFIX in the
-    same fixture store, so they never share an object with a legacy ledger; the legacy_* keys are the legacy objects custody must read."""
+    (onmiss_identity) and by the TRUSTED HOST (derive_exact_ids), so a scope can be derived without trusting the box."""
     digest = lambda s: hashlib.sha256(s.encode()).hexdigest()[:16]
-    prefix = QA_LEDGER_PREFIX if exact else LEGACY_LEDGER_PREFIX
     return {'lease': identity(box), 'spend_box': spend_box, 'head': head, 'dict': onmiss_dict_name(box),
-            'box_key': prefix + 'onmiss/box-' + digest('box:' + spend_box) + '.json',
-            'attempt_key': prefix + 'onmiss/attempt-' + digest('head:' + head) + '.json',
-            'legacy_box_key': LEGACY_LEDGER_PREFIX + 'onmiss/box-' + digest('box:' + spend_box) + '.json',
-            'legacy_attempt_key': LEGACY_LEDGER_PREFIX + 'onmiss/attempt-' + digest('head:' + head) + '.json',
+            'box_key': 'qa-capture-ledgers/onmiss/box-' + digest('box:' + spend_box) + '.json',
+            'attempt_key': 'qa-capture-ledgers/onmiss/attempt-' + digest('head:' + head) + '.json',
             # S161 scope: on-miss stages under its OWN run prefix (this lease + head), so a failed capture lane's or an
             # older lease's leftovers are never published by an on-miss finish (rule 32: failed capture stays FAILED).
             'stage_run': 'remote-qa-onmiss-' + identity(box) + '-' + head[:12],
             # The proxy's own per-run replay-event ledger (_QA_LEDGER, one CAS object per lease): its _log_action writes to it on every
             # hit/miss/forward, so an exact-mode write session must reach it (found by the real-R2 proof; fakes allow everything).
-            'run_key': prefix + 'remote-qa-' + identity(box) + '.json'}
+            'run_key': 'qa-capture-ledgers/remote-qa-' + identity(box) + '.json'}
 
 
 def onmiss_effective(root, box, onmiss, exact=None, dry=False):
@@ -546,7 +572,7 @@ def onmiss_effective(root, box, onmiss, exact=None, dry=False):
     if not onmiss:
         return None
     try:
-        ids = onmiss_identity(root, box, bool(exact))
+        ids = onmiss_identity(root, box)
         if exact:
             ids['exact'] = load_exact_manifest(exact, ids['head'])
             ids['exact_dry'] = bool(dry)
@@ -847,7 +873,7 @@ def stop(box, remote=False):
     listed = cli(['secret', 'list', '--json'], env, True)
     if not isinstance(listed, list):
         raise RuntimeError('Unrecognised Modal secret list')
-    for secret_name in ('heydonna-qa-' + identity(box), retired_r2_lease_secret_name(box)):  # invocation secret + a lease-only R2 secret a retired scoped run may have left
+    for secret_name in ('heydonna-qa-' + identity(box), r2_lease_secret_name(box)):  # invocation secret + exact-mode lease-only R2 secret
         if any(r.get('name') == secret_name for r in listed):
             cli(['secret', 'delete', secret_name, '--yes'], env)
     print('QA_MODAL_CLEANUP=verified box=' + box)
@@ -970,7 +996,7 @@ def ledger_source(box, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmis
         return source + QA_ONMISS_OFF_SOURCE
     if allow_billable_tools:
         raise ValueError('capture-on-miss never enables paid tools/search')
-    for k in ('dict', 'lease', 'spend_box', 'box_key', 'attempt_key', 'run_key'):
+    for k in ('dict', 'lease', 'spend_box', 'box_key', 'attempt_key'):
         source_value = onmiss[k]
         if not isinstance(source_value, str) or not re.fullmatch(r'[A-Za-z0-9._/-]{1,120}', source_value):
             raise ValueError('Invalid capture-on-miss identity: ' + k)
@@ -986,11 +1012,10 @@ def ledger_source(box, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmis
                      .replace('__ONMISS_SPEND_ID__', repr(onmiss['spend_box']))
                      .replace('__ONMISS_BOX_KEY__', repr(onmiss['box_key']))
                      .replace('__ONMISS_ATTEMPT_KEY__', repr(onmiss['attempt_key']))
-                     .replace('__ONMISS_RUN_KEY__', repr(onmiss['run_key']))
                      .replace('__ONMISS_CAP_USD__', repr(ONMISS_CAP_USD))
                      .replace('__ONMISS_RUN__', repr(onmiss['stage_run']))
                      .replace('__ONMISS_EXACT__', repr(exact_source))
-                     .replace('__SCOPED_BUCKET__', repr(FIXTURE_STORE_BUCKET))
+                     .replace('__SCOPED_BUCKET__', repr(SCOPED_FIXTURE_BUCKET))
                      .replace('__EXACT_WAIT_S__', repr(EXACT_SESSION_WAIT_S))
                      + (QA_ONMISS_EXACT_SOURCE if exact_source else ''))
 
@@ -1323,8 +1348,12 @@ echo "QA_MODAL_DEPLOY_SECONDS=$((SECONDS-qa_deploy_started)) parallel=true"
                 Path(ids_out).write_text(json.dumps(record, indent=2) + '\n')
         changes[proxy] = overlay_proxy(proxy.read_text(), box, capture, allow_billable_tools, tool_spend_cap_usd, ids)
     if exact and app_data not in APP_DATA_MODES:
-        raise ValueError('QA_APP_DATA_MODE_INVALID: exact mode needs an explicit --app-data ci-parity')
-    if exact and box:
+        raise ValueError('QA_APP_DATA_MODE_INVALID: exact mode needs an explicit --app-data scoped|ci-parity')
+    if exact and box and app_data == 'scoped':
+        # Run 9 binding: no leased runtime may mount the shared R2 secret; every mount becomes this lease's QA-only secret.
+        mount_files, mount_count = overlay_app_data_mounts(root, box, changes)
+        print('QA_APP_DATA_MOUNTS mode=scoped replaced=' + str(mount_count) + ' files=' + str(mount_files) + ' lease_secret=' + r2_lease_secret_name(box))
+    elif exact and box:
         print('QA_APP_DATA_MOUNTS mode=ci-parity shared_mount=kept (CI parity, ' + APP_DATA_DECISION + ')')
     # Check every anchor before replacing any file; validate shell syntax on staged copies.
     staged = []
@@ -1677,7 +1706,6 @@ _QA_ONMISS_OPS = (":generateContent", ":streamGenerateContent", "/messages", "/c
 _QA_ONMISS_GEMINI_FIELDS = {"contents", "systemInstruction", "generationConfig", "tools", "toolConfig", "safetySettings", "labels"}
 _QA_EXACT = __ONMISS_EXACT__  # None (stock --on-miss) or {"digest", "approval_ref", "entries": {canonical_key: {hash, provider, model, operation}}}
 _QA_SCOPED_BUCKET = __SCOPED_BUCKET__
-_QA_RUN_KEY = __ONMISS_RUN_KEY__
 _QA_EXACT_SESSION_WAIT_S = __EXACT_WAIT_S__
 
 def _qa_onmiss_active():
@@ -1943,7 +1971,6 @@ QA_ONMISS_EXACT_SOURCE = r'''
 # ---- exact-hash scoped mode (_QA_EXACT is None for stock --on-miss): allowlist gate, prefix-scoped five-minute sessions armed in
 # this box's Modal Dict, and NO fallback to the application R2 signer for any fixture, staging or ledger client. -----------------
 if _QA_EXACT:
-    _QA_LEDGER = _QA_RUN_KEY  # the per-run replay-event ledger lives under the QA ledger prefix in exact mode
     import boto3 as _qa_boto3
     import threading as _qa_threading
     _QA_EXACT_CTX = _qa_threading.local()
@@ -2581,9 +2608,22 @@ def prepare(box, root, config_path, capture=False, allow_billable_tools=False, t
     cli(['secret','create','--from-dotenv',str(secret_env),updates['MODAL_API_KEY_SECRET_NAME']], env)
     print('QA_MODAL_SECRET=created name='+updates['MODAL_API_KEY_SECRET_NAME'])
     if exact_ids and exact_ids.get('exact') and app_data not in APP_DATA_MODES:
-        raise ValueError('QA_APP_DATA_MODE_INVALID: exact mode needs an explicit --app-data ci-parity')
-    if exact_ids and exact_ids.get('exact'):
+        raise ValueError('QA_APP_DATA_MODE_INVALID: exact mode needs an explicit --app-data scoped|ci-parity')
+    if exact_ids and exact_ids.get('exact') and app_data == 'ci-parity':
         print('QA_APP_DATA_SECRET=not-created mode=ci-parity (the shared R2 mount is kept, like CI; ' + APP_DATA_DECISION + ')')
+    if exact_ids and exact_ids.get('exact') and app_data == 'scoped':
+        # Exact mode: the lease-only QA R2 secret every leased runtime mounts instead of the shared one (Run 9 binding), built from the
+        # scoped .env.local values after they are proven to be the verified heydonna-qa identity; removed at teardown by stop().
+        r2_values, r2_fp = app_data_values(env_snapshot.decode())
+        r2_env = config_path.parent/'r2-lease.env'
+        r2_env.write_text(''.join(k + '=' + v + '\n' for k, v in r2_values.items()))
+        os.chmod(r2_env, 0o600)
+        register_secret(r2_values['R2_SECRET_ACCESS_KEY'])
+        try:
+            cli(['secret','create','--from-dotenv',str(r2_env),r2_lease_secret_name(box)], env)
+        finally:
+            r2_env.unlink()
+        print('QA_APP_DATA_SECRET=created name=' + r2_lease_secret_name(box) + ' bucket=' + SCOPED_FIXTURE_BUCKET + ' signer=' + r2_fp)
     if extra:
         print('QA_EXTRA_MODAL_SECRET names='+','.join(extra)+' secret='+updates['MODAL_API_KEY_SECRET_NAME'])
 
@@ -2690,18 +2730,18 @@ def resolve(box, root, config_path, verify=False):
 
 
 
-SCOPED_FIXTURE_BUCKET = FIXTURE_STORE_BUCKET  # prefix-scoped sessions on the canonical fixture store (derived from the one shared key)
+SCOPED_FIXTURE_BUCKET = 'heydonna-qa'
 SCOPED_FIXTURE_R2_ENV = tuple('QA_FIXTURE_R2_' + name for name in (
     'BUCKET', 'ACCOUNT_ID', 'ACCESS_KEY_ID', 'SECRET_ACCESS_KEY', 'SESSION_TOKEN'))
 
 
 def scoped_fixture_env(values):
-    """No implicit SDK chain, parent env aliases, or bucket default for a prefix-scoped session."""
+    """No implicit SDK chain, parent env aliases, or bucket default in scoped mode."""
     selected = {name: values.get(name, '') for name in SCOPED_FIXTURE_R2_ENV}
     bucket, account, *_ = selected.values()
     if (bucket != SCOPED_FIXTURE_BUCKET or not re.fullmatch(r'[0-9a-f]{32}', account)
             or not all(value and value == value.strip() for value in selected.values())):
-        raise RuntimeError('QA_SCOPED_R2_UNAVAILABLE: the explicit fixture bucket and all three session credential fields required')
+        raise RuntimeError('QA_SCOPED_R2_UNAVAILABLE: explicit QA bucket and all three session credential fields required')
     return selected
 
 
@@ -2719,7 +2759,7 @@ def scoped_canary_keys(nonce):
         raise ValueError('Invalid QA canary identity')
     run = 'm15-scope-canary-' + nonce
     canonical = 'fixtures/llm/v2/qa_canary/' + nonce + '/' + hashlib.sha256(run.encode()).hexdigest() + '.bin'
-    return run, canonical, 'staging/llm-capture/' + run + '/probe.bin', QA_LEDGER_PREFIX + 'onmiss/' + run + '.json'
+    return run, canonical, 'staging/llm-capture/' + run + '/probe.bin', 'qa-capture-ledgers/onmiss/' + run + '.json'
 
 
 def qa_scope_canary(s3, bucket, publisher, nonce):
@@ -2784,25 +2824,17 @@ def qa_scope_canary(s3, bucket, publisher, nonce):
 SCOPED_SESSION_ACTIONS_CANARY = ['ListObjectsV2', 'GetObject', 'PutObject', 'DeleteObject']
 
 
-def shared_r2_parent():
-    """Trusted host only: the ONE shared HeyDonna R2 key (rule 65), read by name from the app env file; values are never printed."""
-    values = _env_names(LEGACY_ENV_DEFAULT, ('R2_ACCOUNT_ID', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'))
-    if len(values) != 3 or not re.fullmatch(r'[0-9a-f]{32}', values['R2_ACCOUNT_ID']):
-        raise RuntimeError('QA_SCOPED_R2_REFUSED: the shared R2 key is unavailable')
-    if hashlib.sha256(values['R2_ACCESS_KEY_ID'].encode()).hexdigest()[:16] != SHARED_R2_FP:
-        raise RuntimeError('QA_SCOPED_R2_REFUSED: signer is not the one shared HeyDonna R2 key')
-    register_secret(values['R2_SECRET_ACCESS_KEY'])
-    return values
-
-
 def _mint_session(paths, actions, ttl_s):
-    """Trusted host only; a prefix-scoped session DERIVED from the one shared R2 key (same signer, narrower reach), with no standing token
-    creation. Returns (QA_FIXTURE_R2_* values, expiry epoch)."""
-    import base64, hmac
+    """Trusted host only; a prefix-scoped session derived from the verified Run 9 parent, with no standing token creation.
+    Returns (QA_FIXTURE_R2_* values, expiry epoch)."""
+    import base64, hmac, runpy
     if os.environ.get('REMOTE_BOX') == '1':
         raise RuntimeError('QA_SCOPED_R2_REFUSED: mint only on trusted host')
-    parent = shared_r2_parent()
-    account, access, secret = parent['R2_ACCOUNT_ID'], parent['R2_ACCESS_KEY_ID'], parent['R2_SECRET_ACCESS_KEY']
+    parent = runpy.run_path(str(Path(__file__).with_name('remote-qa-r2.py')))['qa_values']()
+    account, access, secret = (parent['R2_' + k] for k in ('ACCOUNT_ID', 'ACCESS_KEY_ID', 'SECRET_ACCESS_KEY'))
+    if hashlib.sha256(access.encode()).hexdigest()[:16] != RUN9_SIGNER_FP:
+        raise RuntimeError('QA_SCOPED_R2_REFUSED: signer does not match the verified Run 9 parent')
+    register_secret(secret)
     now = int(time.time())
     claims = {'iss': access, 'sub': account, 'aud': account + '.r2.cloudflarestorage.com',
               'iat': now, 'exp': now + ttl_s, 'bucket': SCOPED_FIXTURE_BUCKET,
@@ -2835,8 +2867,8 @@ def mint_exact_sessions(kind, ids, manifest):
                  'write': ([stage] + ledgers + [ids['run_key']], ['GetObject', 'PutObject'])}
     elif kind == 'report':
         specs = {'report': ([stage] + sorted(manifest['entries']) + ledgers, ['ListObjectsV2', 'GetObject', 'PutObject'])}
-    elif kind == 'custody':  # trusted host only: bind legacy + QA custody into the two ledger objects, and read the store-carry marker
-        specs = {'custody': (ledgers + [QA_STORE_CARRY_KEY], ['GetObject', 'PutObject'])}
+    elif kind == 'custody':  # trusted host only: bind legacy + QA custody into the two ledger objects (nothing else)
+        specs = {'custody': (ledgers, ['GetObject', 'PutObject'])}
     else:
         raise ValueError('unknown session kind')
     rows = {}
@@ -2984,6 +3016,24 @@ def load_report_session(path, ids):
     return dict(zip(SCOPED_FIXTURE_R2_ENV, (row['bucket'], row['account'], row['access'], row['secret'], row['token'])))
 
 
+def check_canary_receipt(path):
+    """Arming prerequisite: a PASSED publish/readback canary produced by THIS controller file, not older than 48 hours."""
+    p = Path(path)
+    if p.is_symlink() or not p.is_file() or p.stat().st_size > 65536:
+        raise ValueError('QA_SCOPED_CANARY_RECEIPT_INVALID: unreadable')
+    r = json.loads(p.read_text())
+    ok = (isinstance(r, dict) and r.get('bucket') == SCOPED_FIXTURE_BUCKET and r.get('list_and_read') is True
+          and r.get('first_conditional_put') == 'created' and r.get('second_conditional_put') == 'precondition_failed'
+          and isinstance(r.get('before'), dict) and r.get('before') == r.get('after')
+          and 'HTTP 403' in str(r.get('out_of_scope_get', '')) and (r.get('canary_objects_removed') or 0) >= 3
+          and str(r.get('modal_teardown', '')).startswith('verified')
+          and r.get('report_secret_mount') == 'ephemeral scoped session only'
+          and r.get('tooling_sha256') == hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+          and isinstance(r.get('at'), int) and 0 <= time.time() - r['at'] <= CANARY_MAX_AGE_S)
+    if not ok:
+        raise ValueError('QA_SCOPED_CANARY_RECEIPT_INVALID: not a passed canary of this controller, or older than 48 hours')
+
+
 def run_capture_report(root, app_name, run_id, capture, ids, scoped_env=None, canary=None):
     import modal
     app = modal.App(app_name)
@@ -3010,70 +3060,28 @@ def run_capture_report(root, app_name, run_id, capture, ids, scoped_env=None, ca
         return finish_run.remote(run_id, capture, ids, scoped, canary)
 
 
-def store_proof(root, output):
-    """Pre-spend proof of the QA store, run on the trusted host with ZERO provider I/O (rule 65; CTO requirement): (1) a canonical fixture
-    read from heydonna-fixtures through the same read-only prefix-scoped session kind the proxy uses, byte-identical to a direct read, plus an
-    authoritative NoSuchKey miss and an out-of-prefix 403; (2) the guarded PUT-if-absent publisher with readback on a synthetic key, run in a
-    Modal container with only a derived session, the synthetic objects deleted and verified gone. Not an arming prerequisite: a report to
-    read, to re-run on demand. Never writes anything but the synthetic objects, and never touches a real fixture, ledger or the carry marker."""
-    import boto3
-    from botocore.config import Config
-    parent = shared_r2_parent()
-    account, access, secret = parent['R2_ACCOUNT_ID'], parent['R2_ACCESS_KEY_ID'], parent['R2_SECRET_ACCESS_KEY']
+def scoped_report_canary(root, output):
     nonce = secrets.token_hex(16)
-    direct = boto3.client('s3', endpoint_url='https://' + account + '.r2.cloudflarestorage.com', aws_access_key_id=access,
-                          aws_secret_access_key=secret, region_name='auto', config=Config(retries={'total_max_attempts': 2}, read_timeout=20, connect_timeout=10))
-    listing = direct.list_objects_v2(Bucket=FIXTURE_STORE_BUCKET, Prefix='fixtures/llm/v2/', MaxKeys=50)
-    candidates = sorted((o for o in listing.get('Contents', []) if 0 < o.get('Size', 0) <= 524288), key=lambda o: o['Size'])
-    if not candidates:
-        raise RuntimeError('QA_STORE_PROOF_NO_CANONICAL_FIXTURE')
-    key = candidates[0]['Key']
-    read_env, _ = _mint_session(['fixtures/llm/v2/'], ['GetObject'], 120)
-    bucket, acct, acc, sec, tok = (read_env[n] for n in SCOPED_FIXTURE_R2_ENV)
-    session = boto3.client('s3', endpoint_url='https://' + acct + '.r2.cloudflarestorage.com', aws_access_key_id=acc, aws_secret_access_key=sec,
-                           aws_session_token=tok, region_name='auto', config=Config(retries={'total_max_attempts': 1}, read_timeout=20, connect_timeout=10))
-    want = direct.get_object(Bucket=bucket, Key=key)['Body'].read()
-    got = session.get_object(Bucket=bucket, Key=key)['Body'].read()
-    def code_of(error):
-        response = getattr(error, 'response', {})
-        return response.get('Error', {}).get('Code'), response.get('ResponseMetadata', {}).get('HTTPStatusCode')
-    try:
-        session.get_object(Bucket=bucket, Key='fixtures/llm/v2/qa_canary/' + nonce + '/absent.bin')
-        miss = 'UNEXPECTED_HIT'
-    except Exception as error:
-        miss = 'NoSuchKey' if code_of(error)[0] in ('NoSuchKey', '404', 'NotFound') else 'LOOKUP_FAILED:' + str(code_of(error))
-    try:
-        session.get_object(Bucket=bucket, Key='qa-onmiss/proof-outside-scope/' + nonce)
-        outside = 'UNEXPECTED_READ'
-    except Exception as error:
-        outside = 'HTTP 403 AccessDenied' if code_of(error) == ('AccessDenied', 403) else 'UNPROVEN:' + str(code_of(error))
-    read_proof = {'bucket': bucket, 'canonical_key': key, 'bytes': len(got), 'sha256': hashlib.sha256(got).hexdigest(),
-                  'identical_to_direct_read': got == want and len(got) > 0, 'authoritative_miss': miss, 'out_of_prefix_read': outside,
-                  'provider_io': 'none'}
     scoped_env = mint_scoped_canary_session(nonce)
     env = modal_env()
     os.environ.update(env)
-    app_name = 'qa-store-proof-' + nonce
+    app_name = 'heydonna-qa-ledger-canary-' + nonce
     try:
-        publish_proof = run_capture_report(root, app_name, '', False, None, scoped_env, nonce)
+        report = run_capture_report(root, app_name, '', False, None, scoped_env, nonce)
     finally:
         for attempt in range(5):
             apps = cli(['app', 'list', '--json'], env, True)
             if not any(a.get('description') == app_name and a.get('state', '').lower() != 'stopped' for a in apps):
                 break
             if attempt == 4:
-                raise RuntimeError('QA_STORE_PROOF_MODAL_TEARDOWN_UNVERIFIED')
+                raise RuntimeError('QA_SCOPED_CANARY_MODAL_TEARDOWN_UNVERIFIED')
             time.sleep(3)
-    ok = (read_proof['identical_to_direct_read'] and miss == 'NoSuchKey' and outside == 'HTTP 403 AccessDenied'
-          and publish_proof.get('first_conditional_put') == 'created' and publish_proof.get('second_conditional_put') == 'precondition_failed'
-          and publish_proof.get('before') == publish_proof.get('after') and (publish_proof.get('canary_objects_removed') or 0) >= 3)
-    report = {'schema': 'qa-store-proof/v1', 'bucket': FIXTURE_STORE_BUCKET, 'signer': SHARED_R2_FP, 'read': read_proof, 'publish': publish_proof,
-              'modal_teardown': 'verified no active proof app', 'tooling_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-              'at': int(time.time()), 'passed': bool(ok)}
+    report['modal_teardown'] = 'verified no active canary app'
+    report['report_secret_mount'] = 'ephemeral scoped session only'
+    report['tooling_sha256'] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    report['at'] = int(time.time())
     output.write_text(json.dumps(report, indent=2) + '\n')
-    print('QA_STORE_PROOF=' + ('PASS' if ok else 'FAIL') + ' bucket=' + FIXTURE_STORE_BUCKET + ' signer=' + SHARED_R2_FP)
-    if not ok:
-        raise RuntimeError('QA_STORE_PROOF_FAILED')
+    print('QA_SCOPED_CANARY=PASS')
 
 
 def capture_report(box, root, output, capture=False, allow_billable_tools=False, tool_spend_cap_usd=2.0,
@@ -3191,9 +3199,9 @@ def ready():
 
 def main():
     parser=argparse.ArgumentParser()
-    parser.add_argument('command',choices=['register','credentials','check-credentials','finish','stop','reap','overlay','prepare','resolve','ready','provider-ready','capture-report','store-proof','tool-policy','route-check',
-                                            'check-exact-manifest','mint-session','arm-session','check-exact-ids',
-                                            'reconcile-custody','check-app-data','verify-join','check-m15-stage'])
+    parser.add_argument('command',choices=['register','credentials','check-credentials','finish','stop','reap','overlay','prepare','resolve','ready','provider-ready','capture-report','scoped-report-canary','tool-policy','route-check',
+                                            'check-exact-manifest','check-canary-receipt','mint-session','arm-session','check-exact-ids',
+                                            'reconcile-custody','check-grant-receipt','check-app-data','check-app-mounts','verify-join','check-m15-stage'])
     parser.add_argument('--box')
     parser.add_argument('--ttl',type=int,default=2700)
     parser.add_argument('--root',type=Path)
@@ -3220,18 +3228,19 @@ def main():
     parser.add_argument('--kind',choices=['proxy','report','custody','check'],help='mint-session')
     parser.add_argument('--spend-box',help='trusted-host physical box identity (pool server name; the box itself for an ephemeral box)')
     parser.add_argument('--dry-check',action='store_true',help='overlay --exact-manifest: authoritative-miss dry-check, never prices, claims, reserves or dispatches')
-    parser.add_argument('--read-only',action='store_true',help='reconcile-custody: read the legacy and QA ledgers, write nothing')
+    parser.add_argument('--read-only',action='store_true',help='reconcile-custody: read both buckets, write nothing')
     parser.add_argument('--env',type=Path,help='check-app-data: the .env.local to read back')
-    parser.add_argument('--legacy-env',type=Path,default=Path(LEGACY_ENV_DEFAULT),help='reconcile-custody: app env file holding the shared R2 key used to read the legacy ledgers (names only; never printed)')
+    parser.add_argument('--legacy-env',type=Path,default=Path(LEGACY_ENV_DEFAULT),help='reconcile-custody: app env file holding the legacy-bucket read key (names only; never printed)')
     parser.add_argument('--report',type=Path,help='verify-join')
     parser.add_argument('--trace',type=Path,help='verify-join: the run-local spec langsmith-trace.json (optional)')
     parser.add_argument('--run-id',help='verify-join: the controller run id')
     parser.add_argument('--session-file',type=Path,help='capture-report --exact-manifest: controller-piped report session (deleted after use)')
+    parser.add_argument('--receipt',type=Path,help='check-canary-receipt')
     parser.add_argument('--head',help='check-exact-manifest: required checkout head')
     parser.add_argument('--spec',help='check-exact-manifest: the launch spec path, which must be the profile-approved spec')
     parser.add_argument('--draft',type=Path,help='check-m15-stage: the aligned ASR draft (must be the manifest-pinned digest)')
     parser.add_argument('--observer',type=Path,help='check-m15-stage: the observer script to stage')
-    parser.add_argument('--app-data',choices=list(APP_DATA_MODES),help='exact mode: app-data storage binding. ci-parity = heydonna-uploads with the one shared R2 key, like CI (rule 65)')
+    parser.add_argument('--app-data',choices=list(APP_DATA_MODES),help='exact mode: app-data storage binding. scoped = Run 9 heydonna-qa identity; ci-parity = Rajiv option A (heydonna-uploads + CI key, like CI)')
     a=parser.parse_args()
     tool_policy(a.allow_billable_tools, a.tool_spend_cap_usd)
     if a.extra_secret and a.command!='prepare':
@@ -3246,7 +3255,7 @@ def main():
                                               'check-exact-ids','reconcile-custody','verify-join','check-m15-stage'):
         parser.error('--exact-manifest is not valid for this command')
     if a.exact_manifest and a.command in ('overlay','prepare','capture-report') and not a.app_data:
-        parser.error('--exact-manifest requires an explicit --app-data ci-parity')
+        parser.error('--exact-manifest requires an explicit --app-data scoped|ci-parity')
     if a.dry_check and a.command != 'overlay':
         parser.error('--dry-check is only valid with overlay')
     if a.command in ('register','credentials','finish','stop','prepare'):
@@ -3284,6 +3293,11 @@ def main():
             parser.error('check-m15-stage requires --exact-manifest, --draft and --observer')
         staged = check_m15_stage(load_exact_manifest(a.exact_manifest, a.head), a.draft, a.observer)
         print('QA_M15_STAGE ok ' + ' '.join(k + '=' + str(v) for k, v in staged.items()))
+    elif a.command=='check-canary-receipt':
+        if not a.receipt:
+            parser.error('check-canary-receipt requires --receipt')
+        check_canary_receipt(a.receipt)
+        print('QA_SCOPED_CANARY_RECEIPT ok')
     elif a.command=='mint-session':
         if a.kind=='check':
             _mint_session(['fixtures/llm/v2/'], ['GetObject'], 60)
@@ -3309,14 +3323,25 @@ def main():
         if not (a.box and a.head and a.exact_manifest and a.output):
             parser.error('reconcile-custody requires --box, --head, --spend-box, --exact-manifest and --output')
         reconcile_custody_cli(a.box, a.head, a.spend_box, a.exact_manifest, a.output, a.read_only, a.legacy_env)
+    elif a.command=='check-grant-receipt':
+        if not a.receipt:
+            parser.error('check-grant-receipt requires --receipt')
+        print('QA_GRANT_RECEIPT ok sha256=' + check_grant_receipt(a.receipt))
     elif a.command=='check-app-data':
         if not a.env:
             parser.error('check-app-data requires --env')
         if not a.app_data:
-            parser.error('check-app-data requires --app-data ci-parity')
+            parser.error('check-app-data requires --app-data scoped|ci-parity')
         readback = app_data_readback(a.env.read_text(), a.app_data)
         print('QA_APP_DATA_READBACK mode=' + readback['mode'] + ' bucket=' + readback['bucket'] + ' signer=' + readback['signer'] + ' ok'
               + (' decision="' + readback['decision'] + '"' if readback.get('decision') else ''))
+    elif a.command=='check-app-mounts':
+        if not a.root:
+            parser.error('check-app-mounts requires --root')
+        remaining = shared_mounts_remaining(a.root)
+        print('QA_APP_MOUNTS shared_mount_remaining=' + str(len(remaining)) + (' files=' + ','.join(remaining[:5]) if remaining else ''))
+        if remaining:
+            raise RuntimeError('QA_APP_MOUNTS_SHARED_REMAIN: a leased runtime would mount the shared R2 secret')
     elif a.command=='verify-join':
         if not (a.report and a.exact_manifest and a.run_id and a.output):
             parser.error('verify-join requires --report, --exact-manifest, --run-id and --output')
@@ -3341,10 +3366,10 @@ def main():
         if not a.exact_manifest or not a.box:
             parser.error('arm-session requires --box and --exact-manifest')
         arm_exact_sessions(a.box, a.exact_manifest)
-    elif a.command=='store-proof':
+    elif a.command=='scoped-report-canary':
         if not a.root or not a.output or a.on_miss or a.capture:
-            parser.error('store-proof requires --root and --output, with no capture or provider dispatch flags')
-        store_proof(a.root, a.output)
+            parser.error('scoped-report-canary requires --root and --output, with no capture or provider dispatch flags')
+        scoped_report_canary(a.root, a.output)
     elif a.command=='resolve': resolve(a.box,a.root,a.config,a.verify)
     elif a.command=='ready': ready()
     elif a.command=='provider-ready': provider_ready(a.root)

@@ -51,42 +51,40 @@
 #   (value from the process env, never argv; same allowlist; ownership = saved receipt + scoped CONVEX_ADMIN_KEY binding + the
 #   controller's box receipt/anchors, checked before the write; prints QA_DEPLOYMENT_ENV_SET names=STRIPE_WEBHOOK_SECRET.)
 #   Without --stripe-test-env nothing changes (slot .env.local files already hold Stripe entries; presence is NOT the trigger).
-#   --on-miss-exact MANIFEST (OPT-IN, M15; CTO GO C0ALZJHGE49 thread 1794677380.515009 ts 1795301055.769519,
-#   Option A custody ts 1795301727.470839): exact-hash capture, REPLACING stock --on-miss (never both, never a default).
+#   --on-miss-exact MANIFEST --canary-receipt FILE (OPT-IN, M15; CTO GO C0ALZJHGE49 thread 1794677380.515009 ts 1795301055.769519,
+#   Option A custody ts 1795301727.470839): SCOPED exact-hash capture, REPLACING stock --on-miss (never both, never a default).
 #   MANIFEST = {"version":1,"head":"<40hex = --head>","approval_ref":"...","hashes":[{"hash":"<64hex>","provider","model","operation",
 #   "canonical_key"}]} (1-4 full hashes, no prefixes). Only those exact request hashes may dispatch live (checked after an AUTHORITATIVE
 #   replay miss and before pricing or any reservation; a lookup error or 403 is never a miss); every other miss is a typed refusal
 #   (QA_ONMISS_NOT_APPROVED, with its full hash) and zero provider I/O. Spend: stock $3 box-lifetime + per-attempt ledgers, both CAS
 #   reservations before the single send, zero retries, no reclaim of an earlier lease's completed claim, UNKNOWN stays consumed at its
-#   bound. Storage (rule 65; Rajiv D0AMF0XE6TS 1795294139.951329 ts 1795316993.447349): the canonical heydonna-fixtures store, the same
-#   fixtures/llm/v2/ keys CI strict replay reads; QA ledgers live under qa-onmiss/ledgers/, staging under staging/llm-capture/ with this
-#   run's own remote-qa-onmiss-* id. The proxy's fixture/staging/ledger clients and the report container get ONLY prefix-scoped 5-minute
-#   sessions minted on this host from the ONE shared R2 key (re-minted every 100 s during the leg; the report session is minted after the
-#   leg), no fallback; the app-data runtimes use heydonna-uploads with the same key. The existing guarded publisher runs unchanged (PUT-if-absent), then each canonical
+#   bound. Storage: the proxy's fixture/staging/ledger clients and the report container get ONLY prefix-scoped 5-minute sessions minted
+#   on this host (re-minted every 100 s during the leg; the report session is minted after the leg), no shared secret and no fallback;
+#   the app-data runtimes keep their existing binding. The existing guarded publisher runs unchanged (PUT-if-absent), then each canonical
 #   object is read back (bytes, status, content type) and the dispatch id + LangSmith ids are joined by ingress request id. The
-#   run-local spec writes /root/qa/out/langsmith-trace.json {request_id, run_id, trace_id, project, transcript_id}.
-#   Label: ON_MISS_CAPTURED only with readback_match>=1 and join COMPLETE; else lane-fail reason=QA_ONMISS_*.
+#   run-local spec writes /root/qa/out/langsmith-trace.json {request_id, run_id, trace_id, project, transcript_id}. --canary-receipt = the
+#   passed scoped-report-canary receipt of THIS deployed controller (<=48 h old). Label: ON_MISS_CAPTURED only with readback_match>=1 and
+#   join COMPLETE; else lane-fail reason=QA_ONMISS_*.
 #   CTO REVISE 1795306033.832689 (pel-mwr051ua-91fb8062): (1) the trusted host DERIVES every scoped path (lease, ledger objects, staging
 #   prefix) from its own box receipt, the physical-box identity (POOL_BOX, or the box itself) and --head before minting; the box-written
-#   ids file is only checked against it (DENIED on any difference). Exact mode records the app-data binding it verified (always CI-parity:
-#   heydonna-uploads with the one shared R2 key, Rajiv option A C0ALZJHGE49 ts 1795311474.240329 and rule 65, in lane.txt/the report; the
-#   shared R2 mount is kept, there is no QA-only secret and no grant or canary receipt to supply), and on the launch path: the box env
-#   readback (bucket heydonna-uploads, signer = the shared key) and the approved product pin (manifest product_pin; the launch head may
-#   differ from it only by the run-local spec). (2) Before any session exists the trusted host reconciles the LEGACY (qa-capture-ledgers/)
-#   and QA (qa-onmiss/ledgers/) ledgers, both in heydonna-fixtures, for the physical box AND the exact head (prior claims for the approved
-#   hash, halts, UNKNOWN exposure, combined allowance >= manifest max_reserve_usd) and binds the result into the QA ledgers (carry rows +
-#   custody marker); it REFUSES until the one-time store migration has carried every prior QA-ledger reservation and UNKNOWN claim into
-#   qa-onmiss/ledgers/ (QA_CUSTODY_STORE_NOT_MIGRATED); the proxy refuses every reservation without it and any priced bound above
-#   max_reserve_usd. (3) The join verifies the native LangSmith project, transcript and aligned draft the approval pinned.
-#   --exact-dry-check bakes an authoritative-miss dry-check: the proxy proves the miss on the scoped path and never prices, claims,
-#   reserves or dispatches (custody reconcile is then read-only).
+#   ids file is only checked against it (DENIED on any difference). Exact mode also requires an EXPLICIT scoped app-data selection
+#   (QA_R2_SCOPED=1 = Run 9 scoped heydonna-qa; QA_R2_SCOPED=0/unset = CI-parity heydonna-uploads with the CI key, Rajiv option A C0ALZJHGE49
+#   ts 1795311474.240329, recorded in lane.txt/the report; the mount replacement is then skipped), --grant-receipt (the Run 9 object-only grant,
+#   which backs the prefix-scoped sessions in BOTH modes), and on the launch path: the box env readback (scoped: bucket heydonna-qa,
+#   signer 9b8c9f309b38da1f), every shared R2 mount replaced by a lease-only QA secret, and the approved product pin (manifest
+#   product_pin; the launch head may differ from it only by the run-local spec). (2) Before any session exists the trusted host reconciles
+#   the LEGACY (heydonna-fixtures) and QA ledgers for the physical box AND the exact head (prior claims for the approved hash, halts, UNKNOWN
+#   exposure, combined allowance >= manifest max_reserve_usd) and binds the result into the QA ledgers (carry rows + custody marker); the
+#   proxy refuses every reservation without it and any priced bound above max_reserve_usd. (3) The join verifies the native LangSmith
+#   project, transcript and aligned draft the approval pinned. --exact-dry-check bakes an authoritative-miss dry-check: the proxy proves
+#   the miss on the scoped path and never prices, claims, reserves or dispatches (custody reconcile is then read-only).
 #   PROFILES (CTO GO C0ALZJHGE49 thread 1795302375.270589, ts 1795310865.915209): every manifest names one explicit profile; a missing or
 #   unknown profile is refused. m15-langsmith keeps the mandatory verified LangSmith join. pr14414-headerless-capture is for ONE pinned spec
 #   (blob-pinned and verified on the box), head 6edba2fa... and approved hash e5c629a1... only; its completion is exactly one settled
 #   request with ingress + provider response identity and a verified PUT-if-absent readback. It certifies the fixture capture only and is
 #   never that spec's AC1 PASS (AC1 needs a full strict replay on the private template). There is no switch that disables provenance.
 #   M15 SPEC INPUTS (exact mode; CTO-brief add-on, coordinator 2026-11-22): the controller records the app-data binding it selected and the
-#   readback verified, and exports it to the spec env as QA_APP_DATA=ci-parity and QA_APP_DATA_BUCKET=heydonna-uploads
+#   readback verified, and exports it to the spec env as QA_APP_DATA=<scoped|ci-parity> and QA_APP_DATA_BUCKET=<heydonna-qa|heydonna-uploads>
 #   (derived from the selected mode, never echoed back from R2_BUCKET_NAME; the box readback must report the same bucket or the run aborts).
 #   --m15-draft FILE --m15-observer FILE (m15-langsmith profile only, both together): the aligned ASR draft must hash to the manifest's pinned
 #   langsmith.draft_sha256, the observer script is recorded by digest; both are checked on this host before any lease/box/spend, pushed to the
@@ -103,8 +101,8 @@ umask 077
 rtb="$HOME/.claude/scripts/remote-test-box.sh"
 source "$HOME/.claude/scripts/remote-qa-ownership.sh"   # qa_emit_ownership_receipt (shared with capture mode)
 llm_onmiss='' stripe_test_env='' pre_write_check='' extra_secrets=() extra_args_remote='' extra_box_env='' requires_modal='' run_id="qa-spec-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-exact_manifest='' exact_digest='' arm_pid='' exact_args='' exact_overlay_args='' onmiss_stock=''
-exact_dry='' product_pin='' exact_spend_box='' exact_profile='' spec_blob='' app_data=''
+exact_manifest='' canary_receipt='' exact_digest='' arm_pid='' exact_args='' exact_overlay_args='' onmiss_stock=''
+grant_receipt='' exact_dry='' product_pin='' exact_spend_box='' exact_profile='' spec_blob='' app_data=''
 app_data_bucket='' m15_draft='' m15_observer='' m15_draft_sha='' m15_observer_sha=''
 # Label of the requested LLM mode (follows llm_onmiss, which the controller clears if it disables on-miss).
 llm_label() { if [ -z "$llm_onmiss" ]; then echo strict; elif [ -n "$exact_manifest" ]; then echo capture-on-miss-exact; else echo capture-on-miss; fi; }
@@ -130,7 +128,8 @@ while [ $# -gt 0 ]; do
     --pre-write-check) pre_write_check="${2:?--pre-write-check needs a command}"; shift 2;;
     --on-miss) llm_onmiss=--on-miss; onmiss_stock=1; shift;; # opt-in capture-on-miss (see header); never inferred
     --on-miss-exact) exact_manifest="${2:?--on-miss-exact needs an approval manifest}"; llm_onmiss=--on-miss; shift 2;; # M15 scoped exact-hash capture (see header)
-    --canary-receipt|--grant-receipt) echo "$1 is retired (rule 65): the exact lane needs no grant or canary receipt; drop the flag" >&2; exit 2;;
+    --canary-receipt) canary_receipt="${2:?--canary-receipt needs a receipt file}"; shift 2;; # passed scoped publish/readback canary (see header)
+    --grant-receipt) grant_receipt="${2:?--grant-receipt needs the Run 9 parent grant receipt}"; shift 2;; # verified object-only grant (see header)
     --m15-draft) m15_draft="${2:?--m15-draft needs the aligned ASR draft file}"; shift 2;; # M15 spec inputs staged by the controller (see header)
     --m15-observer) m15_observer="${2:?--m15-observer needs the observer script}"; shift 2;;
     --exact-dry-check) exact_dry=1; shift;; # authoritative-miss dry-check: the proxy never prices, claims, reserves or dispatches (see header)
@@ -177,10 +176,12 @@ if [ -n "$llm_onmiss" ]; then
   [ -z "$patch$legs_override" ] || { echo '--on-miss is GREEN-only: RED/mutation proof stays strict replay (no --mutate-patch/--legs)' >&2; exit 2; }
 fi
 if [ -n "$exact_manifest" ]; then
-  # Exact-hash mode: never default, never combined with stock --on-miss. The manifest is
+  # Scoped exact-hash mode: never default, never combined with stock --on-miss, never without the canary receipt. The manifest is
   # validated by the SAME helper code the box and the proxy use (full 64-hex hashes only, exact head, canonical key shape).
   [ -z "$onmiss_stock" ] || { echo '--on-miss-exact replaces --on-miss; do not pass both (stock on-miss is not scoped)' >&2; exit 2; }
   [ -r "$exact_manifest" ] && [ ! -L "$exact_manifest" ] || { echo '--on-miss-exact manifest unreadable' >&2; exit 2; }
+  [ -n "$canary_receipt" ] || { echo '--on-miss-exact requires --canary-receipt (passed scoped publish/readback canary of the deployed controller)' >&2; exit 2; }
+  [ -n "$grant_receipt" ] || { echo '--on-miss-exact requires --grant-receipt (the verified Run 9 object-only grant on heydonna-qa)' >&2; exit 2; }
   exact_line=$(python3 -I "$modal_helper" check-exact-manifest --exact-manifest "$exact_manifest" --head "$head" --spec "$spec") || { echo 'QA_EXACT_MANIFEST_REFUSED' >&2; exit 2; }
   exact_profile=$(printf '%s' "$exact_line" | tr ' ' '\n' | sed -n 's/^profile=//p')
   [[ "$exact_profile" =~ ^[a-z0-9-]+$ ]] || { echo 'QA_EXACT_MANIFEST_REFUSED (profile)' >&2; exit 2; }
@@ -204,7 +205,7 @@ if [ -n "$exact_manifest" ]; then
     [[ "$m15_draft_sha" =~ ^[0-9a-f]{64}$ && "$m15_observer_sha" =~ ^[0-9a-f]{64}$ ]] || { echo 'QA_M15_STAGE_REFUSED (digests)' >&2; exit 2; }
   fi
 else
-  [ -z "$exact_dry$m15_draft$m15_observer" ] || { echo '--exact-dry-check, --m15-draft and --m15-observer are only valid with --on-miss-exact' >&2; exit 2; }
+  [ -z "$canary_receipt$grant_receipt$exact_dry$m15_draft$m15_observer" ] || { echo '--canary-receipt, --grant-receipt, --exact-dry-check, --m15-draft and --m15-observer are only valid with --on-miss-exact' >&2; exit 2; }
 fi
 [ "$allow_seed" = 1 ] || { echo 'Canonical preflight replaces seed tables: --allow-seed-replace requires ownership of the selected dev deployment.' >&2; exit 2; }
 legs=GREEN
@@ -243,10 +244,11 @@ env_file="${env_file:-$HOME/Downloads/projects/heydonna-app-3005/.env.local}"
 [ -r "$env_file" ] || { echo 'Env file unreadable' >&2; exit 2; }
 val() { grep -E "^$1=" "$env_file" | head -1 | cut -d= -f2- | tr -d "\"'" | awk '{print $1}'; }
 if [ -n "$exact_manifest" ]; then
-  # App-data binding, explicit and recorded on every run: always the CI-parity base env, heydonna-uploads with the ONE shared R2 key, like CI
-  # (Rajiv option A, C0ALZJHGE49 thread 1794677380.515009 ts 1795311474.240329 "outcome takes precdence"; rule 65 one account, one bucket,
-  # one key). The fixture, staging, ledger and report clients use prefix-scoped sessions derived from that same key on heydonna-fixtures.
-  app_data=ci-parity app_data_bucket=heydonna-uploads
+  # App-data binding, explicit and recorded on every run. remote-qa-r2.py selects the Run 9 scoped heydonna-qa storage ONLY when QA_R2_SCOPED=1;
+  # any other value (0 or unset) is the CI-parity base env: heydonna-uploads with the CI key, like CI. Rajiv chose that (option A, C0ALZJHGE49
+  # thread 1794677380.515009 ts 1795311474.240329: "outcome takes precdence"). Either way the fixture, staging, ledger and report clients stay
+  # on prefix-scoped sessions; only the application's own data runtimes follow the selected binding.
+  if [ "${QA_R2_SCOPED:-$(val QA_R2_SCOPED || true)}" = 1 ]; then app_data=scoped app_data_bucket=heydonna-qa; else app_data=ci-parity app_data_bucket=heydonna-uploads; fi
   exact_args="$exact_args --app-data $app_data"; exact_overlay_args="$exact_overlay_args --app-data $app_data"
   echo "QA_APP_DATA mode=$app_data" >&2
 fi
@@ -287,9 +289,10 @@ pem=$(val SYNTH_JWT_PRIVATE_KEY_PATH)
 [ -r "$modal_helper" ] && [ -r "$runtime" ] && [ -r "$fetch_helper" ] || { echo 'QA Modal helper / spec runtime / fetch helper missing' >&2; exit 2; }
 python3 -I "$modal_helper" check-credentials   # strict replay needs the box's own disposable Modal proxy
 if [ -n "$exact_manifest" ]; then
-  # Arming prerequisite, before any lease, box or spend: a working trusted-host session mint from the one shared R2 key (a missing mint
-  # would otherwise surface only as a proxy that waits and fails closed). No grant or canary receipt is required (rule 65); the pre-spend
-  # store proof is the separate, on-demand `store-proof` command.
+  # Arming prerequisites, before any lease, box or spend: a passed publish/readback canary of THIS controller file, and a working
+  # trusted-host session mint (a missing mint would otherwise surface only as a proxy that waits and fails closed).
+  python3 -I "$modal_helper" check-grant-receipt --receipt "$grant_receipt" || { echo 'QA_GRANT_RECEIPT_REFUSED' >&2; exit 2; }
+  python3 -I "$modal_helper" check-canary-receipt --receipt "$canary_receipt" || { echo 'QA_SCOPED_CANARY_REQUIRED: run scoped-report-canary on the deployed controller first' >&2; exit 2; }
   python3 -I "$modal_helper" mint-session --kind check || { echo 'QA_SCOPED_MINT_UNAVAILABLE' >&2; exit 2; }
 fi
 mkdir -p "$out"; out=$(cd "$out" && pwd)
@@ -614,7 +617,7 @@ if [ -n "$exact_manifest" ]; then
     qa_rsh "set -e; cd '$remote'; [ \"\$(git rev-parse 'HEAD:$spec')\" = '$spec_blob' ]" >"$out/spec-blob.log" 2>&1 || { echo "QA_SPEC_BLOB_REFUSED: $spec is not the approved blob $spec_blob" | tee -a "$out/lane.txt" >&2; exit 1; }
     echo "QA_SPEC_BLOB ok spec=$spec blob=$spec_blob" | tee -a "$out/lane.txt"
   fi
-  # Effective-storage readback on the exact launch path: the box/Next env must be heydonna-uploads with the one shared R2 key (CI parity).
+  # Run 9 effective-storage readback on the exact launch path: the box/Next env must be the verified scoped heydonna-qa identity.
   qa_rsh "python3 -I /root/qa/modal-lane.py check-app-data --env '$remote/.env.local' --app-data '$app_data'" >"$out/app-data-readback.log" 2>&1 || { echo "QA_APP_DATA_UNEXPECTED: box app-data storage does not match the selected mode ($app_data)" | tee -a "$out/lane.txt" >&2; exit 1; }
   echo "QA_APP_DATA mode=$app_data$([ "$app_data" = ci-parity ] && echo ' by Rajiv decision (option A, C0ALZJHGE49 1794677380.515009 ts 1795311474.240329): app data is CI-parity (heydonna-uploads, CI key); fixture/staging/ledger/report clients stay prefix-scoped')" | tee -a "$out/lane.txt"
   cat "$out/app-data-readback.log" | tee -a "$out/lane.txt"
@@ -664,11 +667,16 @@ if [ -n "$llm_onmiss" ]; then
       qa_rsh "cat /root/qa/onmiss-ids.json" >"$out/onmiss-ids.json" 2>/dev/null || { echo 'QA_ONMISS_IDS_MISSING' | tee -a "$out/lane.txt" >&2; exit 1; }
       # The box-written identities are only CHECKED against the trusted derivation (lease, physical box, exact head); DENIED on any difference.
       python3 -I "$modal_helper" check-exact-ids --box "$box" --head "$head" --spend-box "$exact_spend_box" --ids "$out/onmiss-ids.json" --exact-manifest "$exact_manifest" | tee -a "$out/lane.txt" || { echo 'QA_ONMISS_IDS_DENIED: box-written identities differ from the trusted derivation' | tee -a "$out/lane.txt" >&2; exit 1; }
-      echo 'QA_APP_MOUNTS mode=ci-parity shared_mount=kept (CI parity by Rajiv decision; the proxy fixture/staging/ledger clients never use it)' | tee -a "$out/lane.txt"
-      # Spend custody BEFORE any session exists: legacy (qa-capture-ledgers/) + QA (qa-onmiss/ledgers/) ledgers, both in heydonna-fixtures, for the
-      # physical box AND the exact head, prior claims for the approved hashes, halts and the combined allowance, bound into the QA ledgers (carry
-      # rows + custody marker) so the proxy refuses every reservation without it; refuses until the one-time store migration carried the prior
-      # QA-ledger exposure (QA_CUSTODY_STORE_NOT_MIGRATED). Trusted host only: the shared R2 key never reaches a box.
+      # Run 9 mount readback: no leased runtime may still mount the shared R2 secret.
+      if [ "$app_data" = scoped ]; then
+        qa_rsh "python3 -I /root/qa/modal-lane.py check-app-mounts --root '$remote'" 2>&1 | tee -a "$out/lane.txt"
+        [ "$(grep -c 'shared_mount_remaining=0' "$out/lane.txt")" -ge 1 ] || { echo 'QA_APP_MOUNTS_SHARED_REMAIN' | tee -a "$out/lane.txt" >&2; exit 1; }
+      else
+        echo 'QA_APP_MOUNTS mode=ci-parity shared_mount=kept (CI parity by Rajiv decision; the proxy fixture/staging/ledger clients never use it)' | tee -a "$out/lane.txt"
+      fi
+      # Spend custody BEFORE any session exists: legacy (heydonna-fixtures) + QA (heydonna-qa) ledgers for the physical box AND the exact head,
+      # prior claims for the approved hashes, halts and the combined allowance, bound into the QA ledgers (carry rows + custody marker) so the
+      # proxy refuses every reservation without it. Trusted host only: the legacy read key never reaches a box.
       "${QA_UV:-$HOME/.local/bin/uv}" run --no-project --python 3.13 --with boto3==1.35.99 python "$modal_helper" reconcile-custody --box "$box" --head "$head" --spend-box "$exact_spend_box" --exact-manifest "$exact_manifest" --output "$out/custody-reconcile.json" ${exact_dry:+--read-only} 2>&1 | tee -a "$out/lane.txt"
       [ "$(grep -c '^QA_CUSTODY status=RECONCILED' "$out/lane.txt")" -ge 1 ] || { echo 'QA_CUSTODY_REFUSED: see custody-reconcile.json' | tee -a "$out/lane.txt" >&2; exit 1; }
       echo "QA_ONMISS_EXACT_BOUND manifest_sha256=$exact_digest ids=$out/onmiss-ids.json fixture_session_ttl_s=300 refresh_s=100 no_shared_secret=true" | tee -a "$out/lane.txt"
