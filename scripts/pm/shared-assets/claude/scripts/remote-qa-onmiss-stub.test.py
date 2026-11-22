@@ -720,7 +720,12 @@ try:
               and not any(p.startswith('fixtures/') for p in mint_calls[1][0]) and set(proxy_rows) == {'read', 'write'}
               and all(r['manifest_digest'] == MAN['digest'] and r['lease'] == EX2_IDS['lease'] for r in proxy_rows.values()), str(mint_calls[:2]))
         mint_calls.clear()
-        H.mint_exact_sessions('report', EX2_IDS, MAN)
+        report_rows = H.mint_exact_sessions('report', EX2_IDS, MAN)
+        report_file = MDIR / 'minted-report-session.json'
+        report_file.write_text(json.dumps(report_rows))
+        report_env = H.load_report_session(report_file, EX2_IDS)
+        check('minted report envelope is accepted and consumed',
+              report_env[H.SCOPED_FIXTURE_R2_ENV[0]] == 'heydonna-qa' and not report_file.exists())
         check('mint report: staging + approved canonical keys + the two ledger objects; List/Get/Put; 5 minutes',
               mint_calls == [([stage] + sorted(MAN['entries']) + [EX2_IDS['box_key'], EX2_IDS['attempt_key']], ['ListObjectsV2', 'GetObject', 'PutObject'], 300)], str(mint_calls)[:100])
     finally:

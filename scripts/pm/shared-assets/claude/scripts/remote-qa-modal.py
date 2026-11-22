@@ -2970,6 +2970,8 @@ def load_report_session(path, ids):
         raise RuntimeError('QA_SCOPED_R2_UNAVAILABLE: report session missing')
     try:
         row = json.loads(p.read_text())
+        if isinstance(row, dict) and set(row) == {'report'}:
+            row = row['report']
     finally:
         try:
             p.unlink()
