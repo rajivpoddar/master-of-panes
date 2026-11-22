@@ -67,10 +67,11 @@ PROXY_AGENT_CLAUDE_CAP=5
 STUB_BLOCKED="${STUB_BLOCKED:-}"
 STUB_COOLED="${STUB_COOLED:-}"
 STUB_FAIL="${STUB_FAIL:-}"
-# The local Spark health gate (qwen3.8-flash-next / inkling-2-mini) curls /v1/models. Stub it healthy so a pick is decided by the
-# tier list, the cap and the cooldown only, never by whether this host can reach the Spark. The gate's own behaviour is asserted
-# statically in test_proxy_agent_qwen_routing.py.
-curl() { return 0; }
+# The local Spark health gate (qwen3.8-flash-next / inkling-2-mini) curls /v1/models and now requires the SERVED MODEL ID in the body
+# (peer 22 Nov 03:05). Stub the body from the launcher's own tier lists, so every id the launcher can pick is "served" and a pick is
+# decided by the tier list, the cap and the cooldown only -- never by whether this host can reach the Spark, and never needing an edit
+# when a tier gains a correct entry (rule 60). The gate's own behaviour is asserted in test_proxy_agent_qwen_routing.py.
+curl() { printf '%s' "${STUB_SPARK_BODY:-}"; return 0; }
 proxy_agent_is_capped() { return 0; }
 proxy_agent_live_count() { echo 0; }
 proxy_agent_burn_enforced() { return 0; }
@@ -95,12 +96,19 @@ def _eligible():
     return sorted({m for models in _tier_models().values() for m in models if m != MUSE})
 
 
+def _spark_body():
+    """A /v1/models body that lists every id in every tier list, so the launcher's own model-id health gate passes for any pick."""
+    ids = sorted({m for models in _tier_models().values() for m in models})
+    return '{"data":[' + ','.join('{"id":"%s"}' % m for m in ids) + ']}'
+
+
 def _pick(tmp_path, tier, cooled='', fail='', blocked='', enforced=True, nested=False, env=None):
     override = '' if enforced else 'proxy_agent_burn_enforced() { return 1; }\n'
     body = (PICK_STUBS + override + PICKER + FREE_GUARD_OFF
             + f'proxy_agent_pick_tier {tier}{" nested" if nested else ""} && rc=0 || rc=$?\n'
             + 'printf "rc=%s model=%s reason=%s\\n" "$rc" "${PICK_MODEL-}" "${PICK_REASON-}"\n')
-    result = _bash(body, tmp_path, {'STUB_COOLED': cooled, 'STUB_FAIL': fail, 'STUB_BLOCKED': blocked, **(env or {})})
+    result = _bash(body, tmp_path, {'STUB_COOLED': cooled, 'STUB_FAIL': fail, 'STUB_BLOCKED': blocked,
+                                    'STUB_SPARK_BODY': _spark_body(), **(env or {})})
     assert result.returncode == 0, result.stderr
     fields = dict(part.split('=', 1) for part in result.stdout.strip().splitlines()[-1].split(' ', 2))
     return fields, result.stderr
@@ -209,7 +217,7 @@ def test_opencode_cap_binds_exempt_roles_other_pools_stay_exempt(tmp_path):
 def test_exempt_mid_falls_through_when_opencode_is_at_cap(tmp_path):
     body = (
         'TYPE=ci-repair-agent\nROLE_BRIEF=\nPROXY_AGENT_CAP_OVERRIDE=\n'
-        'curl() { return 0; }\n'  # local Spark health gate: healthy, so the cap and cooldown decide
+        'curl() { printf "%s" "${STUB_SPARK_BODY:-}"; return 0; }\n'  # local Spark health gate: the ids are served, so the cap and cooldown decide
         'proxy_agent_burn_refused() { return 1; }\n'
         'proxy_agent_is_capped() { return 0; }\n'
         'proxy_agent_live_count() { echo 0; }\n'
@@ -219,7 +227,7 @@ def test_exempt_mid_falls_through_when_opencode_is_at_cap(tmp_path):
         + 'proxy_agent_pick_tier MID && rc=0 || rc=$?\n'
         + 'printf "rc=%s model=%s reason=%s\\n" "$rc" "${PICK_MODEL-}" "${PICK_REASON-}"\n'
     )
-    result = _bash(body, tmp_path, {'PROXY_AGENT_STUB_POOL_LIVE': '6', 'OPENCODE_PROXY_CAP': '6', 'QWEN_PROXY_CAP': '8'})
+    result = _bash(body, tmp_path, {'PROXY_AGENT_STUB_POOL_LIVE': '6', 'OPENCODE_PROXY_CAP': '6', 'QWEN_PROXY_CAP': '8', 'STUB_SPARK_BODY': _spark_body()})
     assert result.returncode == 0, result.stderr
     fields = dict(part.split('=', 1) for part in result.stdout.strip().splitlines()[-1].split(' ', 2))
     # ci-repair-agent is a judgment lane: the picker reorders to the tier's Claude ids (opus -> sonnet), then the Codex ladder,
@@ -514,7 +522,7 @@ def test_decorated_opencode_id_uses_the_same_cap_as_the_canonical_id(tmp_path):
 def test_unavailable_opencode_count_falls_through_to_the_next_route(tmp_path):
     body = (
         'TYPE=hd-builder\nROLE_BRIEF=\nPROXY_AGENT_CAP_OVERRIDE=\n'
-        'curl() { return 0; }\n'  # local Spark health gate: healthy, so only the unreadable cap decides
+        'curl() { printf "%s" "${STUB_SPARK_BODY:-}"; return 0; }\n'  # local Spark health gate: the ids are served, so only the unreadable cap decides
         'proxy_agent_is_capped() { return 1; }\n'
         'proxy_agent_burn_refused() { return 1; }\n'
         'proxy_agent_sub_usable() { [[ "$1" == claude-sonnet-5-5 ]] && return 1; return 0; }\n'
@@ -523,7 +531,7 @@ def test_unavailable_opencode_count_falls_through_to_the_next_route(tmp_path):
         + 'proxy_agent_pick_tier MID && rc=0 || rc=$?\n'
         + 'printf "rc=%s model=%s reason=%s\\n" "$rc" "${PICK_MODEL-}" "${PICK_REASON-}"\n'
     )
-    result = _bash(body, tmp_path, {'OPENCODE_PROXY_CAP': '2'})
+    result = _bash(body, tmp_path, {'OPENCODE_PROXY_CAP': '2', 'STUB_SPARK_BODY': _spark_body()})
     assert result.returncode == 0, result.stderr
     assert 'pool_cap UNAVAILABLE pool=opencode' in result.stderr
     assert 'pool_cap skip model=deepseek-v4.1-flash' in result.stderr

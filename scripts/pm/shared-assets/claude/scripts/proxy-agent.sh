@@ -1729,12 +1729,24 @@ proxy_agent_pick_tier() {
     fi
     # Local Spark health gate (side-agent note 21 Nov 23:07 IST: the picker skips rate-limited/over-budget models but not a dead host). A Spark that
     # doesn't answer /v1/models within 3 s is skipped like a cooled model, before `last` is set, so it can never become the fallback pick. Now
-    # applies to qwen3.8-flash-next and the legacy inkling-2-mini; both answer on the same :18120 vLLM (QWEN_HEALTH_URL overrides for the Qwen id).
-    if [[ "$id" == qwen3.8-flash-next || "$id" == inkling-2-mini ]] \
-       && ! curl -s -o /dev/null -m 3 --fail "$([[ "$id" == qwen3.8-flash-next ]] && echo "${QWEN_HEALTH_URL:-http://192.168.68.113:18120/v1/models}" || echo "${INKLING_HEALTH_URL:-http://192.168.68.113:18120/v1/models}")"; then
-      skipped="${skipped:+$skipped,}$id:host_down"
-      printf 'proxy-agent: host_down skip model=%s (local Spark /v1/models did not answer in 3s)\n' "$id" >&2
-      continue
+    # applies to qwen3.8-flash-next and the legacy inkling-2-mini; both answer on the same :18120 vLLM (QWEN_HEALTH_URL / INKLING_HEALTH_URL override
+    # the URL). The check is the SERVED MODEL ID, not just a listening port (peer 22 Nov 03:05): the Spark serves one model at a time, so a host that
+    # answers but lists only the other checkpoint would send this lane into a 404 probe - a failed rung that also closes the emergency gate - instead
+    # of falling through to the next tier model. An id absent from /v1/models is model_not_served, a plain skip.
+    if [[ "$id" == qwen3.8-flash-next || "$id" == inkling-2-mini ]]; then
+      if [[ "$id" == qwen3.8-flash-next ]]; then _spark_url="${QWEN_HEALTH_URL:-http://192.168.68.113:18120/v1/models}"; else _spark_url="${INKLING_HEALTH_URL:-http://192.168.68.113:18120/v1/models}"; fi
+      if ! _spark_ids="$(curl -s -m 3 --fail "$_spark_url" 2>/dev/null)"; then
+        skipped="${skipped:+$skipped,}$id:host_down"
+        printf 'proxy-agent: host_down skip model=%s (local Spark /v1/models did not answer in 3s)\n' "$id" >&2
+        continue
+      fi
+      # Match the quoted id token so qwen3.8-flash-next cannot match a longer alias that merely contains it.
+      if [[ "$_spark_ids" != *"\"$id\""* ]]; then
+        skipped="${skipped:+$skipped,}$id:model_not_served"
+        printf 'proxy-agent: model_not_served skip model=%s (local Spark /v1/models answered but does not list %s)\n' "$id" "$id" >&2
+        continue
+      fi
+      unset _spark_url _spark_ids
     fi
     if proxy_agent_is_emergency_muse "$id"; then
       # Emergency only. Rung-local: an earlier probe failure in this rung is unknown, not exhausted. Global: every eligible

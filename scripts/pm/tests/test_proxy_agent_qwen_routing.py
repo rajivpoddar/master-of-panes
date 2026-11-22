@@ -78,6 +78,17 @@ def test_health_gate_covers_qwen_with_its_own_url_and_three_second_budget():
     assert '-m 3' in gate
 
 
+def test_health_gate_requires_the_served_model_id_not_just_a_listening_port():
+    # Peer 22 Nov 03:05: the Spark serves ONE checkpoint per port, so a host that answers but lists the other id would send a lane into a 404 probe
+    # (a failed rung that also closes the emergency gate). An absent id must be a plain model_not_served skip.
+    gate = SRC[SRC.index("Local Spark health gate"):SRC.index("if proxy_agent_is_emergency_muse \"$id\"; then")]
+    assert '_spark_ids="$(curl -s -m 3 --fail "$_spark_url" 2>/dev/null)"' in gate
+    assert '"\\"$id\\""' in gate  # quoted token match, so a longer alias containing the id cannot pass
+    assert "_spark_ids" in gate and "model_not_served" in gate
+    # host_down (no answer) and model_not_served (answers, wrong checkpoint) are distinct skips.
+    assert "host_down" in gate
+
+
 def test_qwen_has_its_own_pool_cap_outside_the_opencode_pool():
     cap = SRC[SRC.index("proxy_agent_pool_blocked() {"):SRC.index("# Final-primary OpenCode guard")]
     assert re.search(rf"^\s+{re.escape(QWEN)}\) pool=qwen; cap=\"\${{QWEN_PROXY_CAP:-4}}\";;$", cap, re.M)
