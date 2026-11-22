@@ -946,6 +946,15 @@
       "source_path": "claude/scripts/proxy-cap-count.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/proxy-preempt.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "aeb0f59c5bc4aed30ff049ab2702647c158ab05d39f7db30bb014ef6ffc1bf3a",
+      "source_path": "claude/scripts/proxy-preempt.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/proxy-review-cap.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1171,6 +1180,15 @@
       "ownership_class": "shared-claude-proxy-launcher",
       "sha256": "099afc6a8e550a8b1fb233ea713be897f4897d4bb0d5b5ac98eaa1cbf7bc7cdb",
       "source_path": "claude/scripts/tests/test_proxy_agent_tiers.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_proxy_preempt.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "8ded5abc9970ca8d72ffb05be986e56c7c38e9ae8704ef3a04008117d855c0a4",
+      "source_path": "claude/scripts/tests/test_proxy_preempt.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/validate-issue-contract-ledger.py",
@@ -2130,7 +2148,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 233,
+    "selected_count": 235,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
