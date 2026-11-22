@@ -1450,3 +1450,21 @@ test("a table from before the warning column gains it in place and the old remin
   assert.deepEqual(store.claimExpiryWarnings(T0 + 12 * HOUR).map((w) => w.key), ["old"]);
   assert.deepEqual(store.claimExpiryWarnings(T0 + 12 * HOUR), [], "claimed once, not again");
 });
+
+// Rajiv C0ALZJHGE49 ts 1795323488.236789: "change the alert to spark up or down. move it to top level thread in dev channel."
+// An EMPTY thread_ts is the "channel root" sentinel: chat.postMessage must then carry NO thread_ts key at all, because sending
+// an empty string is not the same request as omitting it.
+test("an empty thread_ts posts to the channel root and omits thread_ts entirely", async () => {
+  const envDir = mkdtempSync(join(tmpdir(), "alert-env-"));
+  const envFile = join(envDir, "alerts.env");
+  writeFileSync(envFile, "SLACK_ALERTS_BOT_TOKEN=xoxb-alerts-secret\n");
+  const seen: Array<{ body: Record<string, unknown> }> = [];
+  const fetchImpl = (async (_url: string, init: RequestInit) => {
+    seen.push({ body: JSON.parse(String(init.body)) });
+    return { status: 200, json: async () => ({ ok: true, ts: "1794000000.000200" }) } as Response;
+  }) as unknown as typeof fetch;
+  const poster = new SlackAlertsPoster(envFile, fetchImpl);
+  assert.deepEqual(await poster.post("C0ALZJHGE49", "", "hello"), { ok: true, ts: "1794000000.000200" });
+  assert.equal(seen[0].body.channel, "C0ALZJHGE49");
+  assert.equal("thread_ts" in seen[0].body, false, "a top-level post must omit thread_ts, not send an empty one");
+});

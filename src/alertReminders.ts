@@ -196,8 +196,12 @@ export function normalizeAddRequest(
   const channel = body.channel === undefined || body.channel === null ? ALERT_REMINDER_DEFAULT_CHANNEL : asString(body.channel);
   if (!channel || !CHANNEL_RE.test(channel)) return { ok: false, error: "channel must be a Slack channel id such as C0ALZJHGE49" };
 
-  const threadTs = asString(body.thread_ts);
-  if (!threadTs || !THREAD_TS_RE.test(threadTs)) return { ok: false, error: "thread_ts must look like 1793953549.727149" };
+  // Top-level posts are told apart from threaded ones by an EMPTY thread_ts, which is the same sentinel Slack itself uses for
+  // "this message is a channel root" (chat.postMessage simply omits thread_ts). It keeps the column NOT NULL, so existing rows,
+  // readers and the claim bound-check need no migration. Rajiv C0ALZJHGE49 ts 1795323488.236789: move the Spark alert to a
+  // top-level post in the dev channel.
+  const threadTs = body.thread_ts === undefined || body.thread_ts === null ? "" : asString(body.thread_ts) ?? "";
+  if (threadTs !== "" && !THREAD_TS_RE.test(threadTs)) return { ok: false, error: "thread_ts must look like 1793953549.727149, or be empty for a top-level post" };
 
   const text = asString(body.text)?.trim();
   if (!text) return { ok: false, error: "text is required" };
@@ -871,7 +875,7 @@ export class SlackAlertsPoster implements AlertPoster {
         method: "POST",
         redirect: "manual",
         headers: { "Content-Type": "application/json; charset=utf-8", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ channel, thread_ts: threadTs, text, unfurl_links: false, unfurl_media: false }),
+        body: JSON.stringify({ channel, ...(threadTs ? { thread_ts: threadTs } : {}), text, unfurl_links: false, unfurl_media: false }),
         signal: AbortSignal.timeout(15_000),
       });
     } catch (error) {

@@ -104,9 +104,14 @@ def build_reminder_add_body(args: argparse.Namespace, now: datetime | None = Non
     if interval_s < REMINDER_MIN_INTERVAL_S:
         raise ValueError(f"--every must be at least {REMINDER_MIN_INTERVAL_S // 60}m")
     until_at, until_relative = parse_when(args.until, now)
+    # Top-level posts send an empty thread_ts. --thread and --top-level are mutually exclusive so a caller cannot ask for both.
+    if getattr(args, "top_level", False) and args.thread:
+        raise ValueError("--thread and --top-level cannot both be given")
+    if not getattr(args, "top_level", False) and not args.thread:
+        raise ValueError("--thread is required unless --top-level is given")
     body: dict[str, Any] = {
         "key": args.key,
-        "thread_ts": args.thread,
+        "thread_ts": "" if getattr(args, "top_level", False) else args.thread,
         "text": args.text,
         "interval_s": interval_s,
         "until_at": until_at,
@@ -203,7 +208,8 @@ def build_parser() -> argparse.ArgumentParser:
     rsub = p.add_subparsers(dest="reminder_action", required=True)
     r = rsub.add_parser("add", help="create a recurring reminder; idempotent on --key")
     r.add_argument("--key", required=True)
-    r.add_argument("--thread", required=True, help="Slack thread root ts, e.g. 1793953549.727149")
+    r.add_argument("--thread", default=None, help="Slack thread root ts, e.g. 1793953549.727149; omit with --top-level")
+    r.add_argument("--top-level", action="store_true", help="post as a NEW top-level message in the channel instead of inside a thread")
     r.add_argument("--text", required=True)
     r.add_argument("--every", required=True, help="interval, minimum 10m (e.g. 30m, 1h)")
     r.add_argument("--until", required=True, help="stop time, ISO or +12h; at most 7 days out")
