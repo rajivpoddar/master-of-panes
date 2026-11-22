@@ -48,6 +48,7 @@ COLLECTOR_TIMEOUTS = {
     "pr-open-snapshot": 210, "priority-inversion": 90,
     "pending-github": 90, "remote-boxes": 30,
     "usage": 30, "email": 30, "proxies": 5, "ci-selection": 60, "reminders": 5,
+    "sarvam": 25,
 }
 # Independent hourly checks share one deadline, not the sum of their limits.
 COMPOSE_COLLECTOR_BUDGET = 210
@@ -3454,6 +3455,43 @@ def spark_cap_line(environ: dict | None = None) -> str:
     return f"*Spark proxy cap:* {cap} (Ornith and legacy Qwen alias share one pool)"
 
 
+SARVAM_USAGE_SCRIPT = SCRIPTS.parent.parent / "cost" / "sarvam-usage.py"
+
+
+def sarvam_line(record: bool = False, py: str = sys.executable or "python3",
+                script: Path | None = None, timeout: int | None = None,
+                env: dict | None = None) -> str:
+    """One Sarvam Token Factory burn line under Burn (Rajiv D0AMF0XE6TS 2026-11-22 23:5x IST:
+    "Track the burn rate in hourlies." + 00:19 "Configure and start using sarvam proxies"). Never raises.
+
+    Runs cost/sarvam-usage.py read-only, or with --record only when the caller holds the live
+    hourly bucket claim (same single-writer gate as the usage sampler). The script itself prints
+    "Sarvam TF: UNAVAILABLE (<reason>)" with rc 0 on any failure, so an unraised wrap here is
+    enough: a timeout or missing script still renders one UNAVAILABLE line, never a traceback
+    and never a missing section.
+    """
+    timeout = COLLECTOR_TIMEOUTS["sarvam"] if timeout is None else timeout
+    cmd = [py, "-I", str(script if script is not None else SARVAM_USAGE_SCRIPT)]
+    if record:
+        cmd.append("--record")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
+                              timeout=timeout, env=(os.environ if env is None else env))
+        out = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
+    except subprocess.TimeoutExpired:
+        return f"*Sarvam TF:* UNAVAILABLE (timeout {timeout}s)"
+    except Exception as exc:
+        return f"*Sarvam TF:* UNAVAILABLE ({type(exc).__name__})"
+    if proc.returncode != 0 or not out:
+        reason = f"rc={proc.returncode}, no line" if not out else f"rc={proc.returncode}"
+        return f"*Sarvam TF:* UNAVAILABLE ({reason})"
+    line = out[0].strip()
+    if not line.startswith("Sarvam TF:"):
+        return f"*Sarvam TF:* UNAVAILABLE (unexpected output)"
+    body = line[len("Sarvam TF:"):].strip()
+    return f"*Sarvam TF:* {body if body else 'UNAVAILABLE (empty line)'}"
+
+
 def opencode_cap(path: Path = PROXY_CAPS_FILE, environ: dict | None = None) -> tuple[int | None, str]:
     """(effective cap or None, source label), following proxy-agent.sh exactly:
     1. a NONEMPTY inherited OPENCODE_PROXY_CAP wins over the file. If it is not all digits the launcher enforces no OpenCode cap
@@ -3819,6 +3857,7 @@ def compose(
     ci_selection: str | None = None,  # ci_selection_line(): "*CI selection:*" under Remote boxes; 1h only
     expired_reminders: str | None = None,  # expired_reminders_line(): "*Expired reminders (48h):*" under CI selection; 1h only
     spark: str | None = None,  # spark_cap_line(); 1h only
+    sarvam: str | None = None,  # sarvam_line(): "*Sarvam TF:*" under Burn, before the Spark line; 1h only
 ) -> str:
     """Pure: build the Slack mrkdwn message."""
     window = "3h" if mode == "3h" else "1h"
@@ -3887,7 +3926,10 @@ def compose(
     memory_lines = [memory] if (memory and mode == "1h") else []
     opencode_lines = opencode.splitlines() if (opencode and mode == "1h") else []
     spark_lines = [spark] if (spark and mode == "1h") else []
-    lines = [first, *pace_lines, *memory_lines, *(burn_line.splitlines() if burn_line else []), *opencode_lines, *spark_lines, *body]
+    # The Sarvam burn line renders directly under Burn, before the Spark line, 1h only.
+    sarvam_lines = [sarvam] if (sarvam and mode == "1h") else []
+    lines = [first, *pace_lines, *memory_lines, *(burn_line.splitlines() if burn_line else []),
+             *sarvam_lines, *opencode_lines, *spark_lines, *body]
     # Keep the pipe tables intact for slack-send.sh: native Pace first, then monospace Burn and OpenCode Go.
     if asks:
         lines += ["", "*Asks:* " + " | ".join(asks)]
@@ -3909,7 +3951,8 @@ def compose(
     # The pace table is the same kind of multi-line block and gets the same allowance.
     pace_extra = len(pace_lines)
     memory_extra = len(memory_lines)
-    opencode_extra = len(opencode_lines) + len(spark_lines)
+    # The Sarvam line shares the opencode/spark allowance: one line, same class of always-on 1h extra.
+    opencode_extra = len(opencode_lines) + len(spark_lines) + len(sarvam_lines)
     ci_extra = 1 if mode == "1h" else 0  # the CI selection line must never be folded away
     reminders_extra = 1 if mode == "1h" else 0  # nor the expired-reminders line
     if mode == "3h":
@@ -4550,6 +4593,15 @@ def main() -> int:
         except Exception as exc:
             failures.append(f"opencode-go: {type(exc).__name__}")
             opencode = "*OpenCode Go:* UNAVAILABLE"
+    sarvam = None
+    if args.mode == "1h":
+        # sarvam_line never raises; --record only from the claimed normal hourly producer (same
+        # single-writer gate as the usage sampler: unclaimed/dry renders stay read-only).
+        try:
+            sarvam = sarvam_line(record=usage_sample_claim_ok(getattr(args, "sample_usage_claim", None)))
+        except Exception as exc:
+            failures.append(f"sarvam-tf: {type(exc).__name__}")
+            sarvam = "*Sarvam TF:* UNAVAILABLE"
     report = compose(
         args.mode, datetime.now(timezone.utc), axiom, mapping_doc.get("mapping", {}), prs,
         support=support, failures=failures, escalations=args.escalation,
@@ -4566,6 +4618,7 @@ def main() -> int:
         proxies=hourly.get("proxies") if args.mode == "1h" else None,
         burn=burn, pace=pace, memory=memory_line, opencode=opencode,
         spark=spark_cap_line() if args.mode == "1h" else None,
+        sarvam=sarvam,
         ci_selection=hourly.get("ci-selection") if args.mode == "1h" else None,
         expired_reminders=hourly.get("reminders") if args.mode == "1h" else None,
     )

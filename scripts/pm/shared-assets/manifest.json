@@ -505,6 +505,24 @@
       "source_path": "claude/scripts/control_plane_issue_policy.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/cost/sarvam-usage.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-hourly-heartbeat",
+      "sha256": "8402c24c1b224d78b69bcc825927d573453bd3974e9d7a66f319e5d00cfa7f85",
+      "source_path": "claude/scripts/cost/sarvam-usage.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/cost/tests/test_sarvam_usage.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-hourly-heartbeat",
+      "sha256": "62b93e4935c40ef929c1aa959b9b5f385bc5b3ce82c350ec66b45715e12654a4",
+      "source_path": "claude/scripts/cost/tests/test_sarvam_usage.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/cto-relay-snapshot.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -816,7 +834,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "e2ab6636e1dac89565840bf9a6ab91129bd6ea561992674724f3cf251d2a9e23",
+      "sha256": "815abedbbcecaefae79438f89cb7137fbd7655c418e1ebb1db88e61e90b9edb0",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -1126,6 +1144,33 @@
       "ownership_class": "shared-claude-hourly-heartbeat",
       "sha256": "043d3317c0e9eec3d4ccc488a546593fa2966e02a62d92b1e1ecea528bed4a03",
       "source_path": "claude/scripts/tests/test_hourly_collectors.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_proxy_agent_opencode_rotation.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "04b03bbc0a8f85cc8902f7ea018dafa2634ff75ceec05618ed10d5842da6caa7",
+      "source_path": "claude/scripts/tests/test_proxy_agent_opencode_rotation.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_proxy_agent_sarvam_pool.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "c98637230b997c2b4430584c84f524d805e7b05b7949ccdf1ef702cf75bcceed",
+      "source_path": "claude/scripts/tests/test_proxy_agent_sarvam_pool.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_proxy_agent_tiers.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "099afc6a8e550a8b1fb233ea713be897f4897d4bb0d5b5ac98eaa1cbf7bc7cdb",
+      "source_path": "claude/scripts/tests/test_proxy_agent_tiers.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/validate-issue-contract-ledger.py",
@@ -2085,7 +2130,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 228,
+    "selected_count": 233,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
