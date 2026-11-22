@@ -991,6 +991,11 @@ text = re.sub(r'^' + chr(96)*3 + r'[a-zA-Z0-9_+-]+\s*$', chr(96)*3, text, flags=
 #       used for clients that don't render the table block).
 #   SLACK_TABLE_CODEBLOCK=1 -> monospaced ASCII grid inside a code block
 #       (legacy fallback for screenshot/log scraping).
+#   SLACK_TABLE_PLAIN=1 -> no native table block: the pipe text goes out as plain
+#       mrkdwn sections. pm-hourly-post.sh sets it ONLY to re-send an overflow table
+#       whose native-table reply was definitively rejected (Rajiv C0ALZJHGE49 thread
+#       1795351517.305319, ts 1795353266.972289: Burn and OpenCode Go tables as native
+#       blocks; fall back to the old text only if the block post fails).
 import os as _os
 blocks = None
 if has_markdown_table(text):
@@ -998,6 +1003,8 @@ if has_markdown_table(text):
         text = convert_table_to_mrkdwn_rows(text)
     elif _os.environ.get('SLACK_TABLE_CODEBLOCK') == '1':
         text = convert_table_to_codeblock(text)
+    elif _os.environ.get('SLACK_TABLE_PLAIN') == '1':
+        pass  # blocks stays None: plain mrkdwn sections below
     else:
         # DEFAULT: real BlockKit table block. convert_text_to_blocks splits
         # the input into prose-section + table + prose-section blocks.

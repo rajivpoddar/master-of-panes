@@ -76,9 +76,94 @@ awk 'length($0)>2900{print substr($0,1,2800) " … (truncated; full list in /tmp
   /tmp/heartbeat-1h-post.raw.txt > /tmp/heartbeat-1h-post.txt
 # The real 1h composer prefixes a CTO mention when Asks is present (CTO REVISE on MoP 54e8f693, 2026-11-13).
 head -1 /tmp/heartbeat-1h-post.txt | grep -Eq '^(<@[A-Z0-9]+> *)?\*Hourly' || { EXIT_REASON="compose_output_rejected_before_send"; echo "HOURLY_COMPOSE_FAILED unexpected first line ($(_claim_note))"; exit 1; }
+# Overflow tables as native thread replies (Rajiv C0ALZJHGE49 thread 1795351517.305319, ts 1795353266.972289: "why did these two
+# tables not get converted to slack boldkit format like the top one?"). Slack allows ONE native table block per message, and the
+# sender renders every later table in the same message as plain pipe text, so the Burn and OpenCode Go tables (built by the same
+# _pipe_table helper as the pace table) showed as raw pipes. The first table stays in the parent; each later table, with its one-line
+# intro, goes out as a thread reply under the parent, so each is its own message with its own native table block. A table over
+# Slack's 100-row block limit is paged into several replies with the header repeated. Columns and content are unchanged.
+# Failure-safe: any splitter problem leaves N_TABLE_REPLIES=0 and the unsplit report is posted exactly as before.
+IFS= read -r -d '' _SPLIT_PY <<'PY' || true
+import re, sys
+claim, src, out = sys.argv[1:4]
+ROW = re.compile(r'^\s*\|[^\n]*\|[^\n]*\|')    # same row / separator tests as slack-send.sh convert_text_to_blocks
+SEP = re.compile(r'^\s*\|[-:\s|]+\|')
+MAX_BODY_ROWS = 99                               # a Slack table block holds 100 rows, header row included
+lines = open(src, encoding='utf-8').read().split('\n')
+runs, i = [], 0
+while i < len(lines):
+    if ROW.match(lines[i]):
+        j = i
+        while j < len(lines) and ROW.match(lines[j]):
+            j += 1
+        runs.append((i, j))
+        i = j
+    else:
+        i += 1
+drop, replies = set(), []
+for start, end in runs[1:]:                      # the first table stays in the parent
+    run = lines[start:end]
+    body = [l for l in run[1:] if not SEP.match(l)]
+    if not body:
+        continue                                 # header only: nothing to render natively, leave it in the parent
+    rule = [run[1]] if SEP.match(run[1]) else []
+    first = start
+    intro = []
+    if start >= 2 and lines[start - 1].strip() and not lines[start - 2].strip():
+        intro, first = [lines[start - 1]], start - 1     # a one-line paragraph right above the table is its intro
+    for page in range(0, len(body), MAX_BODY_ROWS):
+        replies.append('\n'.join((intro if page == 0 else []) + [run[0]] + rule + body[page:page + MAX_BODY_ROWS]) + '\n')
+    drop.update(range(first, end))
+if replies:
+    parent, dropped = [], False
+    for idx, line in enumerate(lines):
+        if idx in drop:
+            dropped = True
+            continue
+        if dropped and not line.strip() and parent and not parent[-1].strip():
+            dropped = False                      # the removal left two blank lines in a row: keep one
+            continue
+        dropped = False
+        parent.append(line)
+    for n, text in enumerate(replies, 1):
+        open('%s/table-reply-%d.txt' % (claim, n), 'w', encoding='utf-8').write(text)
+    open(out, 'w', encoding='utf-8').write('\n'.join(parent))
+print(len(replies))
+PY
+N_TABLE_REPLIES=$(python3 -I -c "$_SPLIT_PY" "$CLAIM" /tmp/heartbeat-1h-post.txt /tmp/heartbeat-1h-post.parent.txt 2>/dev/null) || N_TABLE_REPLIES=0
+case "$N_TABLE_REPLIES" in ''|*[!0-9]*) N_TABLE_REPLIES=0 ;; esac
+PARENT_BODY=/tmp/heartbeat-1h-post.txt
+if [ "$N_TABLE_REPLIES" -gt 0 ] && head -1 /tmp/heartbeat-1h-post.parent.txt | grep -Eq '^(<@[A-Z0-9]+> *)?\*Hourly'; then
+  PARENT_BODY=/tmp/heartbeat-1h-post.parent.txt
+else
+  N_TABLE_REPLIES=0   # no split, or a parent that fails the first-line check: post the whole report as one message, as before
+fi
+_OK_RE='^OK ts=[0-9]+\.[0-9]+ channel=C0ALZJHGE49$'
+# One overflow-table reply. Best effort: it never writes the parent receipt file and never changes this script's exit status, so a
+# failed reply can never turn a delivered parent into HOURLY_POST_UNCERTAIN. Falls back to the old plain pipe text ONLY on a
+# definitive Slack rejection (SLACK_SEND_FAILED without delivery_uncertain): an uncertain transport error is never re-sent, so a
+# table can't be posted twice.
+_table_reply() {
+  local n="$1" base="$CLAIM/table-reply-$1" rc=0
+  SLACK_SEND_AS=alerts bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -t "$TS" -f < "$base.txt" \
+    > "$base.receipt" 2> "$base.errors" || rc=$?
+  if [ "$rc" -eq 0 ] && [ "$(grep -Ec "$_OK_RE" "$base.receipt" || true)" -eq 1 ]; then
+    echo "TABLE_REPLY n=$n native $(cat "$base.receipt")"; return 0
+  fi
+  if grep -q '^SLACK_SEND_FAILED ' "$base.errors" && ! grep -q 'delivery_uncertain' "$base.errors"; then
+    rc=0
+    SLACK_TABLE_PLAIN=1 SLACK_SEND_AS=alerts bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -t "$TS" -f < "$base.txt" \
+      > "$base.plain.receipt" 2> "$base.plain.errors" || rc=$?
+    if [ "$rc" -eq 0 ] && [ "$(grep -Ec "$_OK_RE" "$base.plain.receipt" || true)" -eq 1 ]; then
+      echo "TABLE_REPLY_FALLBACK n=$n plain text (native post rejected: $(head -c 200 "$base.errors" | tr '\n\r' '  ')) $(cat "$base.plain.receipt")"; return 0
+    fi
+    echo "TABLE_REPLY_FAILED n=$n native post rejected and the plain re-send failed (see $base.plain.errors)"; return 0
+  fi
+  echo "TABLE_REPLY_UNCERTAIN n=$n sender_rc=$rc, not re-sent (see $base.errors); check the thread before any retry"
+}
 SEND_RC=0
 SEND_STARTED=1  # from here the claim is never released: delivery is UNKNOWN until a valid receipt is read
-SLACK_SEND_AS=alerts bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -f < /tmp/heartbeat-1h-post.txt \
+SLACK_SEND_AS=alerts bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -f < "$PARENT_BODY" \
   > "$CLAIM/receipt" 2> "$CLAIM/errors" || SEND_RC=$?
 RECEIPT=$(<"$CLAIM/receipt")
 if [ "$(grep -Ec '^OK ts=[0-9]+\.[0-9]+ channel=C0ALZJHGE49$' "$CLAIM/receipt" || true)" -ne 1 ]; then
@@ -87,6 +172,10 @@ fi
 TS=$(sed -n 's/^OK ts=\([0-9][0-9]*\.[0-9][0-9]*\) channel=C0ALZJHGE49$/\1/p' "$CLAIM/receipt")
 /Users/rajiv/.claude/scripts/hourly-thread-ts --set "$TS" --bucket "$BUCKET" --receipt "$RECEIPT" >/dev/null 2>&1 \
   || echo "WARN hourly-thread-ts --set failed for ts=$TS"
+# Overflow-table replies (see the splitter above): after the parent receipt is validated and registered, one Alerts thread reply per
+# later table, in report order, each its own message so each renders a native table block.
+_n=1
+while [ "$_n" -le "$N_TABLE_REPLIES" ]; do _table_reply "$_n"; _n=$((_n + 1)); done
 # CTO verification reminder (Rajiv C0ALZJHGE49 thread 1794667497.289909, ts 1794668173.816399: "why is cto at mention alerts
 # reminder missing for this? it should triggered for each hourly report thread"). MoP's +5m mention is skipped when PM/this
 # script posts the parent, so schedule it here: +10 min backstop (Rajiv 21:27 IST ts 1794671837.615089: "the cto review message is missing again"). PM posts the CTO verification itself as soon as Step 3 + per-PR replies are done, and deletes this backstop.

@@ -609,7 +609,29 @@ def test_sender_keeps_a_long_cell_whole_and_every_section_within_3000_after_a_wi
             assert wide[0] == line(head) + '\n' + rule
 
 
-def test_pace_burn_and_opencode_tables_in_one_report_make_exactly_one_native_slack_table(tmp_path):
+HOURLY_POST = ASSETS / 'pm-hourly-post.sh'
+
+
+def _split_report(tmp_path, report):
+    """Run the REAL overflow-table splitter embedded in pm-hourly-post.sh (the python3 heredoc between the _SPLIT_PY markers)
+    on a composed report, exactly as the poster does. Returns (parent_text, [reply_text, ...])."""
+    source = HOURLY_POST.read_text(encoding='utf-8')
+    start = source.index("IFS= read -r -d '' _SPLIT_PY <<'PY' || true\n") + len("IFS= read -r -d '' _SPLIT_PY <<'PY' || true\n")
+    code = source[start:source.index('\nPY\n', start)] + '\n'
+    claim = tmp_path / 'claim'
+    claim.mkdir(exist_ok=True)
+    src, out = tmp_path / 'report.txt', tmp_path / 'parent.txt'
+    src.write_text(report, encoding='utf-8')
+    done = subprocess.run([sys.executable, '-I', '-c', code, str(claim), str(src), str(out)],
+                          capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    count = int(done.stdout.strip())
+    replies = [(claim / f'table-reply-{n}.txt').read_text(encoding='utf-8') for n in range(1, count + 1)]
+    assert not (claim / f'table-reply-{count + 1}.txt').exists()
+    return (out.read_text(encoding='utf-8') if count else report), replies
+
+
+def _composed_three_table_report(tmp_path):
     now = BASE + 4 * H
     pace = composer.pace_table(_at(now), snapshot=_write_log(tmp_path / 'log.jsonl', [(BASE, CLAUDE, 45), (now, CLAUDE, 48)]),
                                config=_write_config(tmp_path / 'cfg.json'), state=tmp_path / 'state.json', persist=False)
@@ -621,24 +643,107 @@ def test_pace_burn_and_opencode_tables_in_one_report_make_exactly_one_native_sla
                                       ps_text='    1     0 root /sbin/launchd\n', environ={},
                                       snapshot=tmp_path / 'no-usage-snapshots.jsonl')
     spark = composer.spark_cap_line({'QWEN_PROXY_CAP': '4', 'SPARK_PROXY_CAP': '6'})
-    report = composer.compose('1h', _at(now), None, {}, [], failures=[], pace=pace, burn=burn, opencode=opencode, spark=spark)
+    return composer.compose('1h', _at(now), None, {}, [], failures=[], pace=pace, burn=burn, opencode=opencode, spark=spark)
 
-    blocks = _converter_blocks(report)
-    assert any('*Spark proxy cap:* 6' in b['text']['text'] for b in blocks if b['type'] == 'section')
-    tables = [b for b in blocks if b['type'] == 'table']
-    assert len(tables) == 1                                        # the Pace table; Slack would reject a second block
-    assert [_cell_text(c) for c in tables[0]['rows'][0]] == PACE_HEADER
-    # Rajiv C0ALZJHGE49 thread 1795344281.588589, ts 1795345746.446959: no code fence around the burn stats tables.
-    assert '```' not in report
-    assert not any('```' in b['text']['text'] for b in blocks if b['type'] == 'section')
-    burn_grid, opencode_grid = [b['text']['text'].splitlines() for b in blocks
-                                if b['type'] == 'section' and b['text']['text'].startswith('| ')]
-    for grid, header in ((burn_grid, composer.BURN_TABLE_HEADER), (opencode_grid, composer.OPENCODE_TABLE_HEADER)):
-        assert _pipe_cells(grid[0]) == list(header)
-        assert grid[1] == '|' + '|'.join('---' for _ in header) + '|'
-    assert _pipe_cells(burn_grid[3])[:3] == ['Claude a@example.test', 'enabled · pinned', '12%']
-    assert _pipe_cells(opencode_grid[2])[:3] == ['OpenCode Go pool', '0', '0']
-    assert any('hy4-flash-free' in line for line in opencode_grid)
+
+def test_pace_burn_and_opencode_tables_each_come_out_as_a_native_slack_table_block(tmp_path):
+    """Rajiv C0ALZJHGE49 thread 1795351517.305319, ts 1795353266.972289: the Burn and OpenCode Go tables rendered as raw pipes.
+    Slack allows ONE native table block per message and the sender renders any later table in a message as plain pipe text,
+    so the poster sends each later table as its own thread reply. All three tables must come out as table blocks, one per
+    message, with the intro line above each kept as text and no pipe-separator text left anywhere."""
+    report = _composed_three_table_report(tmp_path)
+    parent, replies = _split_report(tmp_path, report)
+    assert len(replies) == 2
+    messages = [parent, *replies]
+
+    all_blocks = [_converter_blocks(m) for m in messages]
+    for blocks in all_blocks:                                      # one native table per message: Slack would reject two
+        assert [b['type'] for b in blocks].count('table') == 1
+    headers = [[_cell_text(c) for c in next(b for b in blocks if b['type'] == 'table')['rows'][0]] for blocks in all_blocks]
+    assert headers == [PACE_HEADER, list(composer.BURN_TABLE_HEADER), list(composer.OPENCODE_TABLE_HEADER)]
+
+    sections = [b['text']['text'] for blocks in all_blocks for b in blocks if b['type'] == 'section']
+    assert not any('|---|' in s or s.lstrip().startswith('|') for s in sections)   # no raw pipe table text anywhere
+    assert '```' not in report and not any('```' in s for s in sections)           # still no code fence (ts 1795345746.446959)
+    assert '*Spark proxy cap:* 6' in parent                                        # the rest of the report stays in the parent
+    for blocks, intro in ((all_blocks[1], '*Burn:*'), (all_blocks[2], '*OpenCode Go:*')):
+        kinds = [b['type'] for b in blocks]
+        assert kinds.index('table') == 1 and blocks[0]['text']['text'].startswith(intro)   # intro text sits above its table
+    assert '*Burn:*' not in parent and '*OpenCode Go:*' not in parent
+
+    # No content or column change: each table's cells and row order are exactly what the composer produced.
+    burn_table = next(b for b in all_blocks[1] if b['type'] == 'table')
+    assert [_cell_text(c) for c in burn_table['rows'][2]][:3] == ['Claude a@example.test', 'enabled · pinned', '12%']
+    opencode_table = next(b for b in all_blocks[2] if b['type'] == 'table')
+    assert [_cell_text(c) for c in opencode_table['rows'][1]][:3] == ['OpenCode Go pool', '0', '0']
+    assert any(_cell_text(r[0]) == 'hy4-flash-free' for r in opencode_table['rows'])
+    joined = '\n'.join(messages)
+    for line in report.splitlines():                               # every composed line survives in some message
+        assert line in joined, line
+
+
+def test_splitter_leaves_a_single_table_report_untouched_and_parent_keeps_its_first_line(tmp_path):
+    report = '\n'.join(['*Hourly — 18:15 IST* — TL;DR: x', *composer._pipe_table(PACE_HEADER, [['a', '1', '2', '3', '4']]),
+                        '', '*Spark proxy cap:* 6'])
+    parent, replies = _split_report(tmp_path, report)
+    assert replies == [] and parent == report                      # one table: nothing to split, the report is posted as-is
+    three = _composed_three_table_report(tmp_path)
+    (tmp_path / 'three').mkdir()
+    parent3, replies3 = _split_report(tmp_path / 'three', three)
+    assert len(replies3) == 2
+    # The poster's own first-line gate runs on the parent too: the split must not eat the "*Hourly" header line.
+    assert parent3.splitlines()[0] == three.splitlines()[0]
+
+
+def test_splitter_pages_an_overflow_table_over_the_100_row_block_limit_with_the_header_repeated(tmp_path):
+    rows = [[f'row-{i:03}', 'x'] for i in range(250)]
+    report = '\n'.join(['*Hourly — 18:15 IST* — x', '| A | B |', '|---|---|', '| p | q |', '', '*Big:* intro',
+                        *composer._pipe_table(['Item', 'Note'], rows), '', '*Tail:* t'])
+    parent, replies = _split_report(tmp_path, report)
+    assert len(replies) == 3                                       # 99 + 99 + 52 body rows per reply
+    for n, reply in enumerate(replies):
+        blocks = _converter_blocks(reply)
+        table = next(b for b in blocks if b['type'] == 'table')
+        assert len(table['rows']) <= 100                           # header row included: Slack's per-block row limit
+        assert [_cell_text(c) for c in table['rows'][0]] == ['Item', 'Note']
+        assert (blocks[0]['type'] == 'section' and blocks[0]['text']['text'] == '*Big:* intro') == (n == 0)
+    got = [_cell_text(r[0]) for reply in replies for b in _converter_blocks(reply) if b['type'] == 'table' for r in b['rows'][1:]]
+    assert got == [f'row-{i:03}' for i in range(250)]
+    assert '*Tail:* t' in parent and 'row-000' not in parent
+
+
+def test_poster_sends_each_table_reply_in_the_hourly_thread_and_falls_back_only_on_a_definitive_rejection():
+    source = HOURLY_POST.read_text(encoding='utf-8')
+    # Replies go out as thread replies under the validated parent ts, after the parent receipt and thread registration.
+    assert '-c C0ALZJHGE49 -t "$TS" -f < "$base.txt"' in source
+    assert source.index('hourly-thread-ts --set') < source.index('_table_reply "$_n"')
+    # The parent send takes the split body; a splitter problem leaves the full report to go out unsplit, as before.
+    assert '-c C0ALZJHGE49 -f < "$PARENT_BODY"' in source and 'PARENT_BODY=/tmp/heartbeat-1h-post.txt\n' in source
+    assert '|| N_TABLE_REPLIES=0' in source
+    # Plain-text fallback ONLY on a definitive SLACK_SEND_FAILED; an uncertain transport error is never re-sent (no duplicates).
+    fallback = source[source.index('_table_reply() {'):source.index('SEND_RC=0\nSEND_STARTED=1')]
+    assert fallback.count('SLACK_TABLE_PLAIN=1') == 1
+    assert "grep -q '^SLACK_SEND_FAILED '" in fallback and "! grep -q 'delivery_uncertain'" in fallback
+    assert fallback.index("! grep -q 'delivery_uncertain'") < fallback.index('SLACK_TABLE_PLAIN=1')
+    assert 'TABLE_REPLY_UNCERTAIN' in fallback and 'exit' not in fallback.replace('exit status', '')
+    # A reply never touches the parent receipt file, so a failed reply cannot make the parent HOURLY_POST_UNCERTAIN.
+    assert '"$CLAIM/receipt"' not in fallback
+
+
+def test_sender_plain_table_env_sends_every_table_as_plain_sections_for_the_overflow_fallback():
+    source = SLACK_SEND.read_text(encoding='utf-8')
+    assert "_os.environ.get('SLACK_TABLE_PLAIN') == '1'" in source
+    start = source.index('PAYLOAD=$(python3 -c "\n', source.index('# Auto-wrap plain text in Block Kit')) + len('PAYLOAD=$(python3 -c "\n')
+    code = re.sub(r'\\(["\\$`])', r'\1', source[start:source.index('" "$CHANNEL" "$THREAD_TS" "$MESSAGE")', start)])
+    body = '\n'.join(['*Later:*', '| Item | Note |', '|---|---|', '| a | b |'])
+    plain = subprocess.run([sys.executable, '-I', '-c', code, 'C0ALZJHGE49', '', body], capture_output=True, text=True,
+                           timeout=30, env={'SLACK_TABLE_PLAIN': '1', 'PATH': '/usr/bin:/bin'})
+    assert plain.returncode == 0, plain.stderr
+    blocks = json.loads(plain.stdout)['blocks']
+    assert all(b['type'] == 'section' for b in blocks)             # no native table block: the old plain pipe text
+    assert any('| Item | Note |' in b['text']['text'] for b in blocks)
+    native = _converter_blocks(body)                               # without the env var the table is still native
+    assert [b['type'] for b in native].count('table') == 1
 
 
 def test_pace_cell_neutralises_pipes_and_newlines_so_columns_cannot_shift():
