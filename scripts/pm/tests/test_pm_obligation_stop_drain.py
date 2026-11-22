@@ -459,8 +459,19 @@ SPEED_TABLE = [
     ({"kind": "followup", "severity": "P0"}, "FAST"),
     ({"kind": "followup", "severity": "high"}, "FAST"),
     ({"kind": "followup", "severity": "critical"}, "FAST"),
-    ({"kind": "followup", "target_type": "slack_thread"}, "FAST"),
     ({"kind": "followup", "target_type": "customer"}, "FAST"),
+    # A Slack thread is a destination, not urgency: only the kind's own words make a Slack row FAST.
+    ({"kind": "slack_reply_due", "target_type": "slack_thread"}, "FAST"),
+    ({"kind": "slack_reply", "target_type": "slack_thread"}, "FAST"),
+    ({"kind": "customer_reply", "target_type": "slack_thread"}, "FAST"),
+    ({"kind": "promised_followup", "target_type": "slack_thread"}, "FAST"),
+    ({"kind": "promised_followup", "target_type": "github_pr"}, "FAST"),
+    ({"kind": "slack_request_stalled", "target_type": "slack_thread"}, "FAST"),   # unclassified: FAST
+    ({"kind": "slack_intake_reconciliation", "target_type": "slack_thread"}, "FAST"),
+    ({"kind": "slack_watch", "target_type": "slack_thread"}, "HOURLY"),
+    ({"kind": "slack_redate", "target_type": "slack_thread"}, "HOURLY"),
+    ({"kind": "followup", "target_type": "slack_thread"}, "HOURLY"),
+    ({"kind": "followup", "target_type": "slack_thread", "severity": "high"}, "FAST"),
     ({"kind": "followup", "target_type": "transcript"}, "FAST"),
     ({"kind": "merge_ask"}, "FAST"),
     ({"kind": "cadence_inject"}, "FAST"),
@@ -505,39 +516,88 @@ def hourly_env(lane, bucket):
     return {**lane[2], "PM_OBLIGATION_HOURLY_BUCKET": bucket}
 
 
+def close_rows(lane, *idents):
+    """Close fixture rows in the throwaway test ledger (never a live DB)."""
+    with closing(sqlite3.connect(lane[1])) as con, con:
+        for ident in idents:
+            con.execute("UPDATE obligations SET status='resolved' WHERE id=?", (ident,))
+
+
 @pytest.mark.parametrize("grouped", [False, True])
-def test_hourly_only_runnable_set_blocks_once_per_hour(lane, grouped):
+def test_hourly_only_runnable_set_allows_stop_and_lists_batch_once_per_hour(lane, grouped):
     add(lane, 401, severity="normal")
     add(lane, 402, severity="normal", kind="pm_followup")
     before = lane[1].read_bytes()
     first, _ = invoke(lane, grouped=grouped, env=hourly_env(lane, "2026-11-22T10+0530"))
-    assert first.get("decision") == "block" and "Hourly pass" in reason(first)
-    assert "obligation:401 [runnable]" in reason(first) and "obligation:402 [runnable]" in reason(first)
+    assert first.get("decision") != "block", "an hourly-only set must allow Stop"
+    assert "Hourly routine batch" in reason(first)
+    assert "obligation:401 [hourly]" in reason(first) and "obligation:402 [hourly]" in reason(first)
+    assert "hourly-surfaced=2 hourly-deferred=0" in reason(first)
     for _ in range(3):
         again, _ = invoke(lane, grouped=grouped, env=hourly_env(lane, "2026-11-22T10+0530"))
         assert again.get("decision") != "block"
-        assert "hourly-deferred=2" in reason(again) and "open commitments=2" in reason(again)
-        assert "obligation:401 [runnable]" not in reason(again)
+        assert "hourly-surfaced=0 hourly-deferred=2" in reason(again) and "open commitments=2" in reason(again)
+        assert "obligation:401" not in reason(again), "the routine batch is listed once per hour"
     nxt, _ = invoke(lane, grouped=grouped, env=hourly_env(lane, "2026-11-22T11+0530"))
-    assert nxt.get("decision") == "block" and "obligation:401 [runnable]" in reason(nxt)
+    assert nxt.get("decision") != "block" and "obligation:401 [hourly]" in reason(nxt)
     assert lane[1].read_bytes() == before, "storage semantics unchanged: hook never writes the ledger"
     with closing(sqlite3.connect(lane[1])) as con, con:
         assert con.execute("SELECT count(*) FROM obligations WHERE status='open'").fetchone()[0] == 2
 
 
-def test_fast_row_always_blocks_and_hourly_rows_still_surface_once(lane):
-    add(lane, 501, severity="normal")
-    add(lane, 502, severity="normal", kind="customer_followup")
+@pytest.mark.parametrize("grouped", [False, True])
+def test_three_plus_fast_rows_block_while_routine_rows_wait_for_the_hourly_batch(lane, grouped):
+    """CTO REVISE 1795353556.350659: five FAST rows used to push every routine row off the three-row
+    list while the hourly marker was spent. FAST scopes the Stop prompt; routine rows are surfaced
+    once, later, in the non-blocking batch."""
+    add(lane, 501, severity="normal", kind="customer_followup")
+    add(lane, 502, severity="normal", kind="p0_custody")
+    add(lane, 503, severity="high")
+    add(lane, 504, severity="normal", kind="merge_ask")
+    add(lane, 505, severity="normal", kind="slack_reply_due", target_type="slack_thread")   # due Slack reply: FAST
+    add(lane, 506, severity="normal")                                                        # routine followup
+    add(lane, 507, severity="normal", kind="slack_watch", target_type="slack_thread")        # routine Slack watch
+    env = hourly_env(lane, "2026-11-22T10+0530")
+    for _ in range(3):
+        blocked, _ = invoke(lane, grouped=grouped, env=env)
+        assert blocked.get("decision") == "block" and "Handle every currently runnable FAST" in reason(blocked)
+        assert "fast-runnable=5 hourly-runnable=2 hourly-surfaced=0 hourly-deferred=2" in reason(blocked)
+        assert "remaining runnable/classification=2" in reason(blocked)
+        assert "obligation:506" not in reason(blocked) and "obligation:507" not in reason(blocked)
+        assert "Hourly routine batch" not in reason(blocked)
+    assert not (lane[3] / "hourly-surface.json").exists(), "a blocking FAST turn must not spend the hourly marker"
+    close_rows(lane, 501, 502, 503, 504, 505)
+    first, _ = invoke(lane, grouped=grouped, env=env)
+    assert first.get("decision") != "block"
+    assert "Hourly routine batch" in reason(first)
+    assert "obligation:506 [hourly]" in reason(first) and "obligation:507 [hourly]" in reason(first)
+    assert "hourly-surfaced=2 hourly-deferred=0" in reason(first)
+    again, _ = invoke(lane, grouped=grouped, env=env)
+    assert again.get("decision") != "block" and "obligation:506" not in reason(again)
+    assert "hourly-surfaced=0 hourly-deferred=2" in reason(again)
+
+
+def test_a_fast_row_arriving_after_the_batch_still_blocks_in_the_same_hour(lane):
+    add(lane, 511, severity="normal")
+    env = hourly_env(lane, "2026-11-22T10+0530")
+    assert invoke(lane, env=env)[0].get("decision") != "block"
+    add(lane, 512, severity="normal", kind="slack_reply_due", target_type="slack_thread")
+    blocked, _ = invoke(lane, env=env)
+    assert blocked.get("decision") == "block" and "obligation:512 [runnable]" in reason(blocked)
+    assert "obligation:511" not in reason(blocked)
+
+
+def test_a_large_routine_batch_lists_rows_then_ids_in_one_non_blocking_pass(lane):
+    for ident in range(900, 912):
+        add(lane, ident, severity="normal")
     env = hourly_env(lane, "2026-11-22T10+0530")
     first, _ = invoke(lane, env=env)
-    assert first.get("decision") == "block" and "Handle every currently runnable" in reason(first)
-    assert reason(first).index("obligation:502") < reason(first).index("obligation:501")
-    for _ in range(3):
-        again, _ = invoke(lane, env=env)
-        assert again.get("decision") == "block" and "obligation:502 [runnable]" in reason(again)
-        assert "obligation:501 [runnable]" not in reason(again) and "hourly-deferred=1" in reason(again)
-    resolve(lane, 502)
-    assert invoke(lane, env=env)[0].get("decision") != "block"
+    assert first.get("decision") != "block"
+    assert "hourly-surfaced=12 hourly-deferred=0" in reason(first)
+    assert "obligation:900 [hourly]" in reason(first) and "obligation:907 [hourly]" in reason(first)
+    assert "also routine runnable: 908,909,910,911" in reason(first)
+    again, _ = invoke(lane, env=env)
+    assert again.get("decision") != "block" and "hourly-surfaced=0 hourly-deferred=12" in reason(again)
 
 
 @pytest.mark.parametrize("extra", [{"kind": "never_seen_before_kind"}, {"kind": "investigation"},
@@ -559,9 +619,9 @@ def test_proxy_run_blocks_every_stop_only_after_the_lane_ended(lane, evidence, a
     add(lane, 701, kind="proxy_run", severity="normal", evidence_json=evidence,
         required_action="Monitor proxy run and act on its result")
     env = hourly_env(lane, "2026-11-22T10+0530")
-    assert invoke(lane, env=env)[0].get("decision") == "block"
-    second, _ = invoke(lane, env=env)
-    assert (second.get("decision") == "block") is always_blocks
+    for _ in range(2):
+        result, _ = invoke(lane, env=env)
+        assert (result.get("decision") == "block") is always_blocks
 
 
 def test_hourly_surface_state_failures_fail_open_never_block_per_stop(lane):
@@ -573,13 +633,17 @@ def test_hourly_surface_state_failures_fail_open_never_block_per_stop(lane):
     for _ in range(2):
         result, elapsed = invoke(lane, env=env)
         assert result.get("decision") != "block" and "open commitments=1" in reason(result)
+        assert "hourly-surfaced=0 hourly-deferred=1" in reason(result) and "obligation:801" not in reason(result)
         assert elapsed < 1, elapsed
-    # A corrupt marker file is treated as "not yet surfaced this hour", then repaired by the first write.
+    # A corrupt marker file is treated as "not yet surfaced this hour": the batch is listed (still
+    # without blocking Stop) and the first write repairs the marker.
     garbage = lane[3] / "garbage.json"
     garbage.write_text("{not json")
     env = {**hourly_env(lane, "2026-11-22T10+0530"), "PM_OBLIGATION_HOURLY_STATE": str(garbage)}
-    assert invoke(lane, env=env)[0].get("decision") == "block"
-    assert invoke(lane, env=env)[0].get("decision") != "block"
+    first, _ = invoke(lane, env=env)
+    assert first.get("decision") != "block" and "obligation:801 [hourly]" in reason(first)
+    second, _ = invoke(lane, env=env)
+    assert second.get("decision") != "block" and "obligation:801" not in reason(second)
     assert json.loads(garbage.read_text())["hour"] == "2026-11-22T10+0530"
 
 

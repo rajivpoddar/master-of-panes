@@ -28,19 +28,25 @@ NOW = datetime.now(timezone.utc)
 DEADLINE = time.monotonic() + 0.75
 
 # Two-speed Stop drain (Rajiv D0AMF0XE6TS thread 1795338483.502879, ts 1795352601.197289, "Go").
-# FAST rows block Stop every time they are runnable; HOURLY rows surface at most once per
-# local hour. Classification uses existing row fields only (severity, kind, target_type,
-# evidence), never a list of ids (rule 60). Anything unrecognised is FAST, so a new kind
-# can only ever behave as the pre-change hook did.
+# FAST rows block Stop every time they are runnable. HOURLY rows NEVER block Stop: they are
+# listed once per local hour in the non-blocking status advisory (CTO REVISE C0ALZJHGE49
+# 1795353473.878109, ts 1795353556.350659). Classification uses existing row fields only
+# (severity, kind, target_type, evidence), never a list of ids (rule 60). Anything
+# unrecognised is FAST, so a new kind can only ever behave as the pre-change hook did.
+# A Slack thread is a DESTINATION, not an urgency signal: neither the bare word "slack" in a
+# kind nor a slack_thread target makes a row FAST. Urgency comes from the kind's own words
+# (reply, due, promised, customer, lockout...), severity, or an unclassified kind.
 FAST_SEVERITIES = {"p0", "p1", "critical", "high"}
 FAST_KIND = re.compile(
-    r"\b(customer|lockout|p0|custody|rajiv|cto|slack|reply|cadence|due|deadline|production|"
+    r"\b(customer|lockout|p0|custody|rajiv|cto|reply|promise|promised|cadence|due|deadline|production|"
     r"billing|security|merge ask|ci failure reconcile|main red|pr red)\b")
-FAST_TARGET = re.compile(r"\b(customer|slack thread|transcript|transcript hash|incident)\b")
+FAST_TARGET = re.compile(r"\b(customer|transcript|transcript hash|incident)\b")
 HOURLY_KIND = re.compile(
     r"\b(followup|watch|wait|hold|held|parked|parking|queued|backlog|tooling|readback|"
     r"redate|reminder|renewal)\b")
 HOURLY_TARGET = re.compile(r"\b(tooling|ops tooling|process|pm config|mop|mop reminder|reminder)\b")
+HOURLY_BATCH_ROWS = 8   # routine rows listed in full in the once-per-hour batch
+HOURLY_BATCH_IDS = 40   # further routine row ids listed compactly after them
 
 
 def speed(row):
@@ -260,45 +266,59 @@ def main():
     speeds = {r["id"]: speed(r) for r, _, _ in runnable}
     fast_runnable = [x for x in runnable if x[1] == "runnable" and speeds[x[0]["id"]] == "FAST"]
     hourly_runnable = [x for x in runnable if x[1] == "runnable" and speeds[x[0]["id"]] == "HOURLY"]
-    # FAST always blocks. HOURLY-only work blocks at most once per local hour; the marker is
-    # consumed only when there is HOURLY work, and a state failure reads as "already surfaced".
-    hourly_due = bool(hourly_runnable) and hourly_pass_due()
     # Runnable first, then FAST before HOURLY, then urgent (P0/customer) classify, then severity
     # (CTO REVISE 11-16 ts 1794817176.197419).
-    runnable.sort(key=lambda item: (
-        0 if item[1] == "runnable" else 1,
-        0 if speeds[item[0]["id"]] == "FAST" else 1,
-        0 if (str(item[0].get("severity") or "") == "P0" or str(item[0].get("kind") or "") == "p0_custody"
-              or str(item[0].get("kind") or "").startswith("customer_")) else 1,
-        {"critical": 0, "high": 1, "medium": 2, "normal": 3}.get(item[0].get("severity"), 4), item[0]["id"]))
-    if not hourly_due:
-        # Deferred HOURLY rows stay counted but are not listed until their hourly pass.
-        runnable = [x for x in runnable if not (x[1] == "runnable" and speeds[x[0]["id"]] == "HOURLY")]
+    def order(item):
+        return (
+            0 if item[1] == "runnable" else 1,
+            0 if speeds[item[0]["id"]] == "FAST" else 1,
+            0 if (str(item[0].get("severity") or "") == "P0" or str(item[0].get("kind") or "") == "p0_custody"
+                  or str(item[0].get("kind") or "").startswith("customer_")) else 1,
+            {"critical": 0, "high": 1, "medium": 2, "normal": 3}.get(item[0].get("severity"), 4), item[0]["id"])
+    # The Stop prompt is scoped to FAST: runnable FAST rows plus classify rows. Routine (HOURLY)
+    # runnable rows are never part of it, so five FAST rows can no longer push them off a
+    # three-row list while the hourly marker is spent (CTO REVISE 1795353556.350659).
+    actionable = sorted((x for x in runnable if not (x[1] == "runnable" and speeds[x[0]["id"]] == "HOURLY")), key=order)
+    hourly_runnable.sort(key=order)
     waiting = [(r, d, s) for r, d, s in findings if d not in {"runnable", "classify"}]
+    # The hourly marker is recorded ONLY when the routine batch is about to be printed in the
+    # non-blocking advisory. A blocking FAST turn never spends it; a marker/state failure reads
+    # as "already surfaced" (rule 50: fail open, never block per Stop).
+    batch = []
+    batch_ids = []
+    if not fast_runnable and hourly_runnable and hourly_pass_due():
+        batch = hourly_runnable[:HOURLY_BATCH_ROWS]
+        batch_ids = [row["id"] for row, _, _ in hourly_runnable[HOURLY_BATCH_ROWS:HOURLY_BATCH_ROWS + HOURLY_BATCH_IDS]]
+    surfaced = len(batch) + len(batch_ids)
     parts = [f"open commitments={len(findings)}; " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))]
     parts.append(f"fast-runnable={len(fast_runnable)} hourly-runnable={len(hourly_runnable)} "
-                 f"hourly-deferred={0 if hourly_due else len(hourly_runnable)}")
-    for row, disposition, step in runnable[:3]:
+                 f"hourly-surfaced={surfaced} hourly-deferred={len(hourly_runnable) - surfaced}")
+    for row, disposition, step in actionable[:3]:
         parts.append(f"obligation:{row['id']} [{disposition}] owner={compact(row.get('owner')) or 'PM triage'} "
                      f"{compact(row.get('title'), 100)}: {compact(step, 450)}")
-    if len(runnable) > 3:
-        parts.append(f"remaining runnable/classification={len(runnable) - 3}")
+    if len(actionable) > 3:
+        parts.append(f"remaining runnable/classification={len(actionable) - 3}")
     for row, disposition, step in waiting[:3]:
         parts.append(f"obligation:{row['id']} [{disposition}] {compact(step, 240)}")
     if len(waiting) > 3:
         parts.append(f"remaining held/future/in-flight/unverified={len(waiting) - 3}")
+    if batch:
+        parts.append("Hourly routine batch (listed once this hour, does not block Stop):")
+        for row, _, step in batch:
+            parts.append(f"obligation:{row['id']} [hourly] owner={compact(row.get('owner')) or 'PM triage'} "
+                         f"{compact(row.get('title'), 100)}: {compact(step, 160)}")
+        if batch_ids:
+            parts.append("also routine runnable: " + ",".join(str(i) for i in batch_ids))
     parts.append("Inspect remaining rows with pm-ops.py obligation-list --actionable --format json. "
                  "Use original authority/owners and canonical protected writers. No bulk close, unsafe replay or moved-wake waiver.")
     # Rajiv D0AMF0XE6TS ts 1794815313.330999 (11-16): "why has the pm turn not ended for 4h? the stop hook keeps blocking it."
     # Only concrete runnable steps block Stop; classify rows are advisory and are worked at the hourly/brief.
     # Side-agent catch (11-16): P0 and customer classify rows must still block; only routine classify rows are advisory.
     # CTO REVISE 11-16 (ts 1794817176.197419): only executable (runnable) rows block; urgency only orders the advisory list.
-    # Two-speed drain: runnable FAST rows block every Stop; HOURLY-only work blocks once per local hour.
-    if fast_runnable or hourly_due:
-        lead = ("[PM_OBLIGATION_DRAIN] Handle every currently runnable PM step before Stop; one unrelated resolution does not waive the rest."
-                if fast_runnable else
-                "[PM_OBLIGATION_DRAIN] Hourly pass (surfaces once per hour): handle the routine runnable PM steps below; they will not block Stop again this hour.")
-        parts.insert(0, lead)
+    # Two-speed drain: runnable FAST rows block every Stop; an HOURLY-only set always allows Stop.
+    if fast_runnable:
+        parts.insert(0, "[PM_OBLIGATION_DRAIN] Handle every currently runnable FAST PM step before Stop; one unrelated "
+                        "resolution does not waive the rest. Routine (hourly) rows never block Stop and are not asked of this turn.")
         message = " | ".join(parts)
         print(json.dumps({"decision": "block", "message": message, "reason": message}))
     else:

@@ -204,7 +204,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-ops-sync-stop-validator",
-      "sha256": "8731773167e984c511897d69bcd821ddb0b7d274e561b976ce0d79903c839574",
+      "sha256": "9c0f4940e7f531a87b70a47e8e7c925f326cfe9938c942c24744a07bfa7a01cb",
       "source_path": "claude/hooks/pm-ops-sync-stop-validator.sh"
     },
     {
