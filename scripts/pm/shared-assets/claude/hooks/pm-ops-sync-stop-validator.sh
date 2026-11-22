@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timezone
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -19,9 +20,76 @@ import time
 
 DEFAULT_DB = ("/Users/rajiv/.claude/projects/"
               "-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db")
+# Separate from the obligation ledger: the hook reads the DB read-only, so the
+# once-per-hour surface marker lives in its own tiny flock'd file.
+DEFAULT_HOURLY_STATE = "/tmp/pm-obligation-hourly-surface.json"
 INVENTORY = {"ready_pool", "triage_retained_scope"}
 NOW = datetime.now(timezone.utc)
 DEADLINE = time.monotonic() + 0.75
+
+# Two-speed Stop drain (Rajiv D0AMF0XE6TS thread 1795338483.502879, ts 1795352601.197289, "Go").
+# FAST rows block Stop every time they are runnable; HOURLY rows surface at most once per
+# local hour. Classification uses existing row fields only (severity, kind, target_type,
+# evidence), never a list of ids (rule 60). Anything unrecognised is FAST, so a new kind
+# can only ever behave as the pre-change hook did.
+FAST_SEVERITIES = {"p0", "p1", "critical", "high"}
+FAST_KIND = re.compile(
+    r"\b(customer|lockout|p0|custody|rajiv|cto|slack|reply|cadence|due|deadline|production|"
+    r"billing|security|merge ask|ci failure reconcile|main red|pr red)\b")
+FAST_TARGET = re.compile(r"\b(customer|slack thread|transcript|transcript hash|incident)\b")
+HOURLY_KIND = re.compile(
+    r"\b(followup|watch|wait|hold|held|parked|parking|queued|backlog|tooling|readback|"
+    r"redate|reminder|renewal)\b")
+HOURLY_TARGET = re.compile(r"\b(tooling|ops tooling|process|pm config|mop|mop reminder|reminder)\b")
+
+
+def speed(row):
+    """Return "FAST" or "HOURLY". Pure; any doubt or malformed field is FAST."""
+    try:
+        if str(row.get("severity") or "").strip().lower() in FAST_SEVERITIES:
+            return "FAST"
+        kind = tokens(row.get("kind"))
+        target = tokens(row.get("target_type"))
+        if FAST_KIND.search(kind) or FAST_TARGET.search(target):
+            return "FAST"
+        if kind == "proxy run":
+            # A running lane is routine; its ended result (PROXY_STOP seen) is not.
+            evidence = json.loads(row.get("evidence_json") or "{}")
+            return "FAST" if not isinstance(evidence, dict) or evidence.get("finished_at") else "HOURLY"
+        if HOURLY_KIND.search(kind) or HOURLY_TARGET.search(target):
+            return "HOURLY"
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return "FAST"
+
+
+def hourly_pass_due(bucket=None):
+    """True for the first caller in each local hour, else False.
+
+    Never raises and never blocks: a state problem returns False, so a broken marker
+    file cannot turn HOURLY rows back into a per-Stop block (rule 50: hooks fail open).
+    """
+    bucket = bucket or os.environ.get("PM_OBLIGATION_HOURLY_BUCKET") or NOW.astimezone().strftime("%Y-%m-%dT%H%z")
+    fd = None
+    try:
+        fd = os.open(os.environ.get("PM_OBLIGATION_HOURLY_STATE", DEFAULT_HOURLY_STATE),
+                     os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            seen = json.loads(os.read(fd, 4096).decode() or "{}").get("hour")
+        except (ValueError, AttributeError, UnicodeDecodeError):
+            seen = None
+        if seen == bucket:
+            return False
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, json.dumps({"hour": bucket, "surfaced_at": NOW.isoformat()}).encode())
+        return True
+    except (OSError, ValueError):
+        return False
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def stamp(value):
@@ -166,7 +234,7 @@ def main():
         # One consistent read; no status CLI, ingestion, MoP or provider call.
         rows = [dict(r) for r in con.execute(
             "SELECT id, kind, severity, horizon, owner, title, required_action, blocker, "
-            "target_id, issue, pr, next_review_at, suppress_until, evidence_json "
+            "target_type, target_id, issue, pr, next_review_at, suppress_until, evidence_json "
             "FROM obligations WHERE status='open' ORDER BY id")]
     except (OSError, ValueError, sqlite3.Error) as error:
         emit_unavailable(type(error).__name__ + ": " + compact(error))
@@ -189,14 +257,27 @@ def main():
         findings.append((row, disposition, step))
     counts = Counter(d for _, d, _ in findings)
     runnable = [(r, d, s) for r, d, s in findings if d in {"runnable", "classify"}]
-    # Runnable first, then urgent (P0/customer) classify, then severity (CTO REVISE 11-16 ts 1794817176.197419).
+    speeds = {r["id"]: speed(r) for r, _, _ in runnable}
+    fast_runnable = [x for x in runnable if x[1] == "runnable" and speeds[x[0]["id"]] == "FAST"]
+    hourly_runnable = [x for x in runnable if x[1] == "runnable" and speeds[x[0]["id"]] == "HOURLY"]
+    # FAST always blocks. HOURLY-only work blocks at most once per local hour; the marker is
+    # consumed only when there is HOURLY work, and a state failure reads as "already surfaced".
+    hourly_due = bool(hourly_runnable) and hourly_pass_due()
+    # Runnable first, then FAST before HOURLY, then urgent (P0/customer) classify, then severity
+    # (CTO REVISE 11-16 ts 1794817176.197419).
     runnable.sort(key=lambda item: (
         0 if item[1] == "runnable" else 1,
+        0 if speeds[item[0]["id"]] == "FAST" else 1,
         0 if (str(item[0].get("severity") or "") == "P0" or str(item[0].get("kind") or "") == "p0_custody"
               or str(item[0].get("kind") or "").startswith("customer_")) else 1,
         {"critical": 0, "high": 1, "medium": 2, "normal": 3}.get(item[0].get("severity"), 4), item[0]["id"]))
+    if not hourly_due:
+        # Deferred HOURLY rows stay counted but are not listed until their hourly pass.
+        runnable = [x for x in runnable if not (x[1] == "runnable" and speeds[x[0]["id"]] == "HOURLY")]
     waiting = [(r, d, s) for r, d, s in findings if d not in {"runnable", "classify"}]
     parts = [f"open commitments={len(findings)}; " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items()))]
+    parts.append(f"fast-runnable={len(fast_runnable)} hourly-runnable={len(hourly_runnable)} "
+                 f"hourly-deferred={0 if hourly_due else len(hourly_runnable)}")
     for row, disposition, step in runnable[:3]:
         parts.append(f"obligation:{row['id']} [{disposition}] owner={compact(row.get('owner')) or 'PM triage'} "
                      f"{compact(row.get('title'), 100)}: {compact(step, 450)}")
@@ -211,13 +292,13 @@ def main():
     # Rajiv D0AMF0XE6TS ts 1794815313.330999 (11-16): "why has the pm turn not ended for 4h? the stop hook keeps blocking it."
     # Only concrete runnable steps block Stop; classify rows are advisory and are worked at the hourly/brief.
     # Side-agent catch (11-16): P0 and customer classify rows must still block; only routine classify rows are advisory.
-    def _urgent(row):
-        kind = str(row.get("kind") or "")
-        return (str(row.get("severity") or "") == "P0" or kind == "p0_custody"
-                or kind.startswith("customer_") or kind in {"lockout_followup", "lockout_watch", "production_data", "save_suppression_investigation"})
     # CTO REVISE 11-16 (ts 1794817176.197419): only executable (runnable) rows block; urgency only orders the advisory list.
-    if any(d == "runnable" for _, d, _ in runnable):
-        parts.insert(0, "[PM_OBLIGATION_DRAIN] Handle every currently runnable PM step before Stop; one unrelated resolution does not waive the rest.")
+    # Two-speed drain: runnable FAST rows block every Stop; HOURLY-only work blocks once per local hour.
+    if fast_runnable or hourly_due:
+        lead = ("[PM_OBLIGATION_DRAIN] Handle every currently runnable PM step before Stop; one unrelated resolution does not waive the rest."
+                if fast_runnable else
+                "[PM_OBLIGATION_DRAIN] Hourly pass (surfaces once per hour): handle the routine runnable PM steps below; they will not block Stop again this hour.")
+        parts.insert(0, lead)
         message = " | ".join(parts)
         print(json.dumps({"decision": "block", "message": message, "reason": message}))
     else:

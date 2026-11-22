@@ -38,7 +38,8 @@ def lane(tmp_path):
            "PM_STOP_HOOK_ROOT": str(hooks),
            "PM_STOP_GROUP_LOG": str(tmp_path / "group.log"),
            "PM_STOP_GROUP_DEBUG_LOG": str(tmp_path / "debug.log"),
-           "PM_STOP_FINDING_COOLDOWN_STATE": str(tmp_path / "cooldown.json")}
+           "PM_STOP_FINDING_COOLDOWN_STATE": str(tmp_path / "cooldown.json"),
+           "PM_OBLIGATION_HOURLY_STATE": str(tmp_path / "hourly-surface.json")}
     env.pop("PM_STOP_GROUP_COMMANDS_JSON", None)
     subprocess.run([sys.executable, str(WRITER), "init"], env=env, check=True, capture_output=True)
     # The OLD hook's status dependency is isolated too, for causal baseline.
@@ -51,7 +52,9 @@ def lane(tmp_path):
 
 def add(lane, ident, **extra):
     _, db, _, _ = lane
-    row = dict(id=ident, status="open", kind="followup", severity="normal", horizon="daily",
+    # Default severity "high" is a FAST row, so the pre-existing drain tests still prove the unchanged
+    # block-every-Stop contract. HOURLY behaviour is tested with explicit severity="normal" rows below.
+    row = dict(id=ident, status="open", kind="followup", severity="high", horizon="daily",
                title=f"Commitment {ident}", owner="pm", required_action="Inspect retained source and return the result.",
                created_at="2026-01-01T00:00:00Z", updated_at="2026-01-01T00:00:00Z",
                target_type="task", target_id=str(ident), evidence_json="{}")
@@ -96,7 +99,7 @@ def resolve(lane, ident):
 
 
 @pytest.mark.parametrize("grouped", [False, True])
-def test_normal_daily_and_unknown_high_kind_are_actions(lane, grouped):
+def test_fast_daily_and_unknown_high_kind_are_actions(lane, grouped):
     add(lane, 301)
     add(lane, 302, kind="new_deliberate_commitment", severity="high", horizon="hourly")
     result, elapsed = invoke(lane, grouped=grouped)
@@ -177,7 +180,8 @@ def test_future_suppress_until_defers_explicitly_postponed_row(lane):
 def test_postpone_list_and_clear_blocker(lane):
     env = lane[2]
     base = [sys.executable, str(WRITER), "obligation-upsert", "--kind", "followup",
-            "--target-type", "task", "--target-id", "postpone", "--action", "Do work"]
+            "--target-type", "task", "--target-id", "postpone", "--action", "Do work",
+            "--severity", "high"]
     subprocess.run(base + ["--blocker", "blocked", "--suppress-until", FUTURE],
                    env=env, check=True, capture_output=True)
     def rows():
@@ -429,3 +433,157 @@ def test_no_network_status_collector_or_hook_registration_change(lane):
     children = module.default_groups(lane[0])["obligations"]
     assert max(c.timeout for c in children) < 10
     assert next(c.timeout for c in children if c.name == "pm-ops-sync-stop-validator") <= 2
+
+
+# ---- Two-speed drain (Rajiv D0AMF0XE6TS thread 1795338483.502879, ts 1795352601.197289, "Go") ----
+
+def load_speed():
+    """The hook is bash plus an embedded Python heredoc: compile everything except the final main() call."""
+    src = (HOOKS / "pm-ops-sync-stop-validator.sh").read_text()
+    body = src.split("<<'PYEOF'\n", 1)[1].rsplit("\nPYEOF", 1)[0].rsplit("\nmain()", 1)[0]
+    namespace = {"__name__": "stop_drain_speed"}
+    exec(compile(body, "pm-ops-sync-stop-validator.sh", "exec"), namespace)
+    return namespace["speed"]
+
+
+FINISHED_LANE = {"finished_at": "2026-01-01T00:00:00Z", "rc": 0, "reason": "done"}
+
+SPEED_TABLE = [
+    # FAST: customer/lockout, P0/high, due Slack/merge-ask/cadence, finished lanes, CI reconcile
+    ({"kind": "customer_followup"}, "FAST"),
+    ({"kind": "customer_recovery"}, "FAST"),
+    ({"kind": "customer_wait"}, "FAST"),          # FAST beats the HOURLY "wait" token
+    ({"kind": "lockout_followup"}, "FAST"),
+    ({"kind": "lockout_watch"}, "FAST"),          # FAST beats the HOURLY "watch" token
+    ({"kind": "p0_custody"}, "FAST"),
+    ({"kind": "followup", "severity": "P0"}, "FAST"),
+    ({"kind": "followup", "severity": "high"}, "FAST"),
+    ({"kind": "followup", "severity": "critical"}, "FAST"),
+    ({"kind": "followup", "target_type": "slack_thread"}, "FAST"),
+    ({"kind": "followup", "target_type": "customer"}, "FAST"),
+    ({"kind": "followup", "target_type": "transcript"}, "FAST"),
+    ({"kind": "merge_ask"}, "FAST"),
+    ({"kind": "cadence_inject"}, "FAST"),
+    ({"kind": "admission_due"}, "FAST"),
+    ({"kind": "ci_failure_reconcile"}, "FAST"),
+    ({"kind": "pr_red_unowned"}, "FAST"),
+    ({"kind": "security_followup"}, "FAST"),
+    ({"kind": "proxy_run", "evidence_json": json.dumps(FINISHED_LANE)}, "FAST"),
+    # HOURLY: routine re-dates, backlog/parked/watch/hold/wait rows, tooling, queued launches, running lanes
+    ({"kind": "followup", "severity": "normal"}, "HOURLY"),
+    ({"kind": "pm_followup"}, "HOURLY"),
+    ({"kind": "ci_followup"}, "HOURLY"),
+    ({"kind": "ops_tooling_followup", "target_type": "ops_tooling"}, "HOURLY"),
+    ({"kind": "something", "target_type": "tooling"}, "HOURLY"),
+    ({"kind": "pr_parked"}, "HOURLY"),
+    ({"kind": "parking_review"}, "HOURLY"),
+    ({"kind": "merge_hold"}, "HOURLY"),
+    ({"kind": "pm_hold"}, "HOURLY"),
+    ({"kind": "held_no_spend"}, "HOURLY"),
+    ({"kind": "ext_wait"}, "HOURLY"),
+    ({"kind": "agent_launch_queued"}, "HOURLY"),
+    ({"kind": "burn_queued"}, "HOURLY"),
+    ({"kind": "proxy_run", "evidence_json": json.dumps({"lane": "running"})}, "HOURLY"),
+    ({"kind": "proxy_run", "evidence_json": "{}"}, "HOURLY"),
+    # Unknown or unclassifiable defaults to FAST (the pre-change behaviour)
+    ({"kind": "never_seen_before_kind"}, "FAST"),
+    ({"kind": "investigation"}, "FAST"),
+    ({"kind": None, "severity": None, "target_type": None}, "FAST"),
+    ({}, "FAST"),
+    ({"kind": "proxy_run", "evidence_json": "not json"}, "FAST"),
+    ({"kind": "proxy_run", "evidence_json": "[]"}, "FAST"),
+]
+
+
+@pytest.mark.parametrize("fields,expected", SPEED_TABLE,
+                         ids=[f"{i:02d}-{(f.get('kind') or 'none')}-{e}" for i, (f, e) in enumerate(SPEED_TABLE)])
+def test_speed_classification_table(fields, expected):
+    assert load_speed()(fields) == expected
+
+
+def hourly_env(lane, bucket):
+    return {**lane[2], "PM_OBLIGATION_HOURLY_BUCKET": bucket}
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+def test_hourly_only_runnable_set_blocks_once_per_hour(lane, grouped):
+    add(lane, 401, severity="normal")
+    add(lane, 402, severity="normal", kind="pm_followup")
+    before = lane[1].read_bytes()
+    first, _ = invoke(lane, grouped=grouped, env=hourly_env(lane, "2026-11-22T10+0530"))
+    assert first.get("decision") == "block" and "Hourly pass" in reason(first)
+    assert "obligation:401 [runnable]" in reason(first) and "obligation:402 [runnable]" in reason(first)
+    for _ in range(3):
+        again, _ = invoke(lane, grouped=grouped, env=hourly_env(lane, "2026-11-22T10+0530"))
+        assert again.get("decision") != "block"
+        assert "hourly-deferred=2" in reason(again) and "open commitments=2" in reason(again)
+        assert "obligation:401 [runnable]" not in reason(again)
+    nxt, _ = invoke(lane, grouped=grouped, env=hourly_env(lane, "2026-11-22T11+0530"))
+    assert nxt.get("decision") == "block" and "obligation:401 [runnable]" in reason(nxt)
+    assert lane[1].read_bytes() == before, "storage semantics unchanged: hook never writes the ledger"
+    with closing(sqlite3.connect(lane[1])) as con, con:
+        assert con.execute("SELECT count(*) FROM obligations WHERE status='open'").fetchone()[0] == 2
+
+
+def test_fast_row_always_blocks_and_hourly_rows_still_surface_once(lane):
+    add(lane, 501, severity="normal")
+    add(lane, 502, severity="normal", kind="customer_followup")
+    env = hourly_env(lane, "2026-11-22T10+0530")
+    first, _ = invoke(lane, env=env)
+    assert first.get("decision") == "block" and "Handle every currently runnable" in reason(first)
+    assert reason(first).index("obligation:502") < reason(first).index("obligation:501")
+    for _ in range(3):
+        again, _ = invoke(lane, env=env)
+        assert again.get("decision") == "block" and "obligation:502 [runnable]" in reason(again)
+        assert "obligation:501 [runnable]" not in reason(again) and "hourly-deferred=1" in reason(again)
+    resolve(lane, 502)
+    assert invoke(lane, env=env)[0].get("decision") != "block"
+
+
+@pytest.mark.parametrize("extra", [{"kind": "never_seen_before_kind"}, {"kind": "investigation"},
+                                   {"kind": "followup", "severity": "P1"}])
+def test_unknown_or_fast_row_blocks_every_stop_in_the_same_hour(lane, extra):
+    extra = {"severity": "normal", **extra}
+    add(lane, 601, **extra)
+    env = hourly_env(lane, "2026-11-22T10+0530")
+    for _ in range(3):
+        result, _ = invoke(lane, env=env)
+        assert result.get("decision") == "block" and "obligation:601 [runnable]" in reason(result)
+
+
+@pytest.mark.parametrize("evidence,always_blocks", [
+    ({"lane": "proxy-hd-builder-aaaa"}, False),
+    (FINISHED_LANE, True),
+])
+def test_proxy_run_blocks_every_stop_only_after_the_lane_ended(lane, evidence, always_blocks):
+    add(lane, 701, kind="proxy_run", severity="normal", evidence_json=evidence,
+        required_action="Monitor proxy run and act on its result")
+    env = hourly_env(lane, "2026-11-22T10+0530")
+    assert invoke(lane, env=env)[0].get("decision") == "block"
+    second, _ = invoke(lane, env=env)
+    assert (second.get("decision") == "block") is always_blocks
+
+
+def test_hourly_surface_state_failures_fail_open_never_block_per_stop(lane):
+    add(lane, 801, severity="normal")
+    # An unusable marker (a directory) reads as "already surfaced": visible status, no block, no crash.
+    broken = lane[3] / "marker-dir"
+    broken.mkdir()
+    env = {**hourly_env(lane, "2026-11-22T10+0530"), "PM_OBLIGATION_HOURLY_STATE": str(broken)}
+    for _ in range(2):
+        result, elapsed = invoke(lane, env=env)
+        assert result.get("decision") != "block" and "open commitments=1" in reason(result)
+        assert elapsed < 1, elapsed
+    # A corrupt marker file is treated as "not yet surfaced this hour", then repaired by the first write.
+    garbage = lane[3] / "garbage.json"
+    garbage.write_text("{not json")
+    env = {**hourly_env(lane, "2026-11-22T10+0530"), "PM_OBLIGATION_HOURLY_STATE": str(garbage)}
+    assert invoke(lane, env=env)[0].get("decision") == "block"
+    assert invoke(lane, env=env)[0].get("decision") != "block"
+    assert json.loads(garbage.read_text())["hour"] == "2026-11-22T10+0530"
+
+
+def test_hourly_surface_never_touches_user_prompt_submit_or_hook_registration():
+    """Rule 50: the change is confined to the Stop obligation hook; no gate in front of PM input or tools."""
+    src = (HOOKS / "pm-ops-sync-stop-validator.sh").read_text()
+    assert "UserPromptSubmit" not in src and "PreToolUse" not in src
