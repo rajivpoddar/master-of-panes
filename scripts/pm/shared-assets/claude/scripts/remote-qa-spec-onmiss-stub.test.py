@@ -111,6 +111,45 @@ for why, kwargs, manifest_path in (('another spec', dict(head=P14HEAD, spec=M15S
     check('PR 14414 profile refuses ' + why, rc == 2 and 'QA_EXACT_MANIFEST_REFUSED' in o, o[-80:])
 rc, o = dry('--disposable-convex', '--on-miss-exact', good, *RECEIPTS, spec=P14SPEC)
 check('M15 profile refuses the PR 14414 spec', rc == 2 and 'QA_EXACT_MANIFEST_REFUSED' in o, o[-80:])
+# ---- M15 spec inputs staged by the CONTROLLER + the controller-selected app-data bucket (coordinator add-on 2026-11-22) ----
+import hashlib
+m15dir = Path(tempfile.mkdtemp())
+(m15dir / 'draft.txt').write_bytes(b'Q. Aligned draft.\nA. Yes.\n')
+(m15dir / 'observe.sh').write_text('#!/usr/bin/env bash\necho observer\n')
+(m15dir / 'empty.sh').write_bytes(b'')
+(m15dir / 'big.sh').write_bytes(b'x' * 262145)
+(m15dir / 'other.txt').write_bytes(b'not the pinned draft')
+os.symlink(m15dir / 'draft.txt', m15dir / 'link.txt')
+pinned = manifest(langsmith={'draft_sha256': hashlib.sha256((m15dir / 'draft.txt').read_bytes()).hexdigest(),
+                             'aligned_slice_sha256': '3d5adf320e3e151cffd1a1b66d510ebdab7ccd098174c40be75cb61b2ed62a76'})
+M15 = lambda d, o: ('--m15-draft', str(m15dir / d), '--m15-observer', str(m15dir / o))
+rc, o = dry('--disposable-convex', '--on-miss-exact', pinned, *M15('draft.txt', 'observe.sh'), *RECEIPTS)
+check('M15 stage: the manifest-pinned draft + an observer resolve llm_mode=capture-on-miss-exact', rc == 0 and o.endswith('llm_mode=capture-on-miss-exact'), o[-80:])
+for why, args, manifest_path in (('a draft that is not the manifest-pinned bytes', M15('other.txt', 'observe.sh'), pinned),
+                                 ('a symlinked draft', M15('link.txt', 'observe.sh'), pinned),
+                                 ('an empty observer', M15('draft.txt', 'empty.sh'), pinned),
+                                 ('an oversize observer', M15('draft.txt', 'big.sh'), pinned),
+                                 ('a missing observer file', M15('draft.txt', 'nope.sh'), pinned),
+                                 ('a draft when the manifest pins another digest', M15('draft.txt', 'observe.sh'), good)):
+    rc, o = dry('--disposable-convex', '--on-miss-exact', manifest_path, *args, *RECEIPTS)
+    check('M15 stage refuses ' + why, rc == 2 and 'QA_M15_STAGE_REFUSED' in o, o[-80:])
+rc, o = dry('--disposable-convex', '--on-miss-exact', pinned, '--m15-draft', str(m15dir / 'draft.txt'), *RECEIPTS)
+check('M15 stage: the draft and the observer go together', rc == 2 and 'go together' in o, o[-80:])
+rc, o = dry('--disposable-convex', *M15('draft.txt', 'observe.sh'), '--dry-run')
+check('M15 stage flags are only valid with --on-miss-exact', rc == 2 and 'only valid with --on-miss-exact' in o, o[-80:])
+rc, o = dry('--disposable-convex', '--on-miss-exact', pmanifest(), *M15('draft.txt', 'observe.sh'), *RECEIPTS, head=P14HEAD, spec=P14SPEC)
+check('M15 stage flags are refused for any profile but m15-langsmith', rc == 2 and 'only valid with the m15-langsmith profile' in o, o[-80:])
+check('spec env: the controller records the app-data mode AND the bucket it selected from that mode, never echoed back from R2_BUCKET_NAME',
+      'app_data=scoped app_data_bucket=heydonna-qa' in SPEC_SH and 'app_data=ci-parity app_data_bucket=heydonna-uploads' in SPEC_SH
+      and 'spec_env="QA_APP_DATA=$app_data QA_APP_DATA_BUCKET=$app_data_bucket"' in SPEC_SH and 'val R2_BUCKET_NAME' not in SPEC_SH)
+check('spec env: written to the .env.local.next copy BEFORE the install (the pool-reset byte-hash covers it) and must match the box readback',
+      SPEC_SH.index('QA_APP_DATA_BUCKET=$app_data_bucket"') < SPEC_SH.index("mv '$remote/.env.local.next'")
+      and 'QA_APP_DATA_READBACK mode=$app_data bucket=$app_data_bucket ' in SPEC_SH
+      and SPEC_SH.index('check-app-data --env') < SPEC_SH.index('QA_APP_DATA_READBACK mode=$app_data bucket=$app_data_bucket '))
+check('M15 stage: fixed box paths, digest re-verified on the box, exported to the spec env; the launcher stages files only',
+      all(s in SPEC_SH for s in ('/root/qa/m15/draft.txt', '/root/qa/m15/observe.sh', 'QA_M15_DRAFT_PATH=/root/qa/m15/draft.txt', 'QA_M15_OBSERVER_PATH=/root/qa/m15/observe.sh',
+                                 'QA_M15_OBSERVER_LOG=/root/qa/m15/modal.raw', "sha256sum </root/qa/m15/draft.txt", 'bash -n /root/qa/m15/observe.sh', 'does not run the observer'))
+      and SPEC_SH.index('check-m15-stage') < SPEC_SH.index('rtb" up --owner'))
 check('exact wiring: the profile spec BLOB is verified on the box; capture is reported separate from the spec AC1 PASS',
       'QA_SPEC_BLOB ok' in SPEC_SH and 'spec_ac_pass=NOT_ASSESSED' in SPEC_SH and 'EXACT_PROFILE name=' in SPEC_SH
       and not any(s in SPEC_SH for s in ('--skip-provenance', '--no-langsmith', '--no-join', 'skip_provenance')))

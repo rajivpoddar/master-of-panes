@@ -83,6 +83,15 @@
 #   (blob-pinned and verified on the box), head 6edba2fa... and approved hash e5c629a1... only; its completion is exactly one settled
 #   request with ingress + provider response identity and a verified PUT-if-absent readback. It certifies the fixture capture only and is
 #   never that spec's AC1 PASS (AC1 needs a full strict replay on the private template). There is no switch that disables provenance.
+#   M15 SPEC INPUTS (exact mode; CTO-brief add-on, coordinator 2026-11-22): the controller records the app-data binding it selected and the
+#   readback verified, and exports it to the spec env as QA_APP_DATA=<scoped|ci-parity> and QA_APP_DATA_BUCKET=<heydonna-qa|heydonna-uploads>
+#   (derived from the selected mode, never echoed back from R2_BUCKET_NAME; the box readback must report the same bucket or the run aborts).
+#   --m15-draft FILE --m15-observer FILE (m15-langsmith profile only, both together): the aligned ASR draft must hash to the manifest's pinned
+#   langsmith.draft_sha256, the observer script is recorded by digest; both are checked on this host before any lease/box/spend, pushed to the
+#   fixed box paths /root/qa/m15/draft.txt (mode 444) and /root/qa/m15/observe.sh (mode 555, bash -n), re-verified by digest on the box,
+#   and exported as QA_M15_DRAFT_PATH, QA_M15_OBSERVER_PATH and QA_M15_OBSERVER_LOG=/root/qa/m15/modal.raw (the log the observer writes).
+#   The spec env travels in .env.local (preflight sources it into Playwright); the lines are written to the .env.local.next copy BEFORE the
+#   install, so the byte-hash pool reset verifies already covers them. The launcher stages files only: it does not run the observer.
 # Never prod, never push: the mutation exists only in the box worktree and is reverse-applied + sha256-verified after RED.
 set -euo pipefail
 umask 077
@@ -94,6 +103,7 @@ source "$HOME/.claude/scripts/remote-qa-ownership.sh"   # qa_emit_ownership_rece
 llm_onmiss='' stripe_test_env='' pre_write_check='' extra_secrets=() extra_args_remote='' extra_box_env='' requires_modal='' run_id="qa-spec-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 exact_manifest='' canary_receipt='' exact_digest='' arm_pid='' exact_args='' exact_overlay_args='' onmiss_stock=''
 grant_receipt='' exact_dry='' product_pin='' exact_spend_box='' exact_profile='' spec_blob='' app_data=''
+app_data_bucket='' m15_draft='' m15_observer='' m15_draft_sha='' m15_observer_sha=''
 # Label of the requested LLM mode (follows llm_onmiss, which the controller clears if it disables on-miss).
 llm_label() { if [ -z "$llm_onmiss" ]; then echo strict; elif [ -n "$exact_manifest" ]; then echo capture-on-miss-exact; else echo capture-on-miss; fi; }
 modal_helper="${QA_MODAL_HELPER:-$HOME/.claude/scripts/remote-qa-modal.py}"
@@ -120,6 +130,8 @@ while [ $# -gt 0 ]; do
     --on-miss-exact) exact_manifest="${2:?--on-miss-exact needs an approval manifest}"; llm_onmiss=--on-miss; shift 2;; # M15 scoped exact-hash capture (see header)
     --canary-receipt) canary_receipt="${2:?--canary-receipt needs a receipt file}"; shift 2;; # passed scoped publish/readback canary (see header)
     --grant-receipt) grant_receipt="${2:?--grant-receipt needs the Run 9 parent grant receipt}"; shift 2;; # verified object-only grant (see header)
+    --m15-draft) m15_draft="${2:?--m15-draft needs the aligned ASR draft file}"; shift 2;; # M15 spec inputs staged by the controller (see header)
+    --m15-observer) m15_observer="${2:?--m15-observer needs the observer script}"; shift 2;;
     --exact-dry-check) exact_dry=1; shift;; # authoritative-miss dry-check: the proxy never prices, claims, reserves or dispatches (see header)
     --stripe-test-env) stripe_test_env=--stripe-test-env; shift;; # opt-in Stripe TEST env on the disposable deployment (see header)
     --extra-secret) extra_secrets+=("${2:?--extra-secret needs NAME=generate}"); shift 2;; # opt-in box-generated dev-only secret (see header)
@@ -181,8 +193,19 @@ if [ -n "$exact_manifest" ]; then
   [[ "$product_pin" =~ ^[0-9a-f]{40}$ ]] || { echo 'QA_EXACT_MANIFEST_REFUSED (product pin)' >&2; exit 2; }
   exact_args=' --exact-manifest /root/qa/exact-manifest.json'
   exact_overlay_args="$exact_args --ids-out /root/qa/onmiss-ids.json${exact_dry:+ --dry-check}"
+  if [ -n "$m15_draft$m15_observer" ]; then
+    # M15 inputs staged by the CONTROLLER at fixed box paths (never a box-side prewrite): the aligned ASR draft must be the exact bytes the
+    # approved manifest pins (langsmith.draft_sha256); the observer script is the operator's file, recorded by digest. Checked here, before
+    # any lease, box or spend, and re-checked by digest on the box after the push.
+    [ "$exact_profile" = m15-langsmith ] || { echo '--m15-draft/--m15-observer are only valid with the m15-langsmith profile' >&2; exit 2; }
+    [ -n "$m15_draft" ] && [ -n "$m15_observer" ] || { echo '--m15-draft and --m15-observer go together' >&2; exit 2; }
+    m15_line=$(python3 -I "$modal_helper" check-m15-stage --exact-manifest "$exact_manifest" --head "$head" --draft "$m15_draft" --observer "$m15_observer") || { echo 'QA_M15_STAGE_REFUSED' >&2; exit 2; }
+    m15_draft_sha=$(printf '%s' "$m15_line" | sed -n 's/.* draft_sha256=\([0-9a-f]\{64\}\) .*/\1/p')
+    m15_observer_sha=$(printf '%s' "$m15_line" | sed -n 's/.* observer_sha256=\([0-9a-f]\{64\}\) .*/\1/p')
+    [[ "$m15_draft_sha" =~ ^[0-9a-f]{64}$ && "$m15_observer_sha" =~ ^[0-9a-f]{64}$ ]] || { echo 'QA_M15_STAGE_REFUSED (digests)' >&2; exit 2; }
+  fi
 else
-  [ -z "$canary_receipt$grant_receipt$exact_dry" ] || { echo '--canary-receipt, --grant-receipt and --exact-dry-check are only valid with --on-miss-exact' >&2; exit 2; }
+  [ -z "$canary_receipt$grant_receipt$exact_dry$m15_draft$m15_observer" ] || { echo '--canary-receipt, --grant-receipt, --exact-dry-check, --m15-draft and --m15-observer are only valid with --on-miss-exact' >&2; exit 2; }
 fi
 [ "$allow_seed" = 1 ] || { echo 'Canonical preflight replaces seed tables: --allow-seed-replace requires ownership of the selected dev deployment.' >&2; exit 2; }
 legs=GREEN
@@ -225,7 +248,7 @@ if [ -n "$exact_manifest" ]; then
   # any other value (0 or unset) is the CI-parity base env: heydonna-uploads with the CI key, like CI. Rajiv chose that (option A, C0ALZJHGE49
   # thread 1794677380.515009 ts 1795311474.240329: "outcome takes precdence"). Either way the fixture, staging, ledger and report clients stay
   # on prefix-scoped sessions; only the application's own data runtimes follow the selected binding.
-  if [ "${QA_R2_SCOPED:-$(val QA_R2_SCOPED || true)}" = 1 ]; then app_data=scoped; else app_data=ci-parity; fi
+  if [ "${QA_R2_SCOPED:-$(val QA_R2_SCOPED || true)}" = 1 ]; then app_data=scoped app_data_bucket=heydonna-qa; else app_data=ci-parity app_data_bucket=heydonna-uploads; fi
   exact_args="$exact_args --app-data $app_data"; exact_overlay_args="$exact_overlay_args --app-data $app_data"
   echo "QA_APP_DATA mode=$app_data" >&2
 fi
@@ -534,6 +557,16 @@ qa_put "$pem" /root/qa/synth-private.pem
 qa_put "$HOME/.claude/scripts/remote-qa-config.cjs" /root/qa/config.cjs
 [ -z "$patch" ] || qa_put "$patch" /root/qa/mutate.patch
 if [ -n "$config" ]; then qa_put "$config" /root/qa/config.json; else qa_rsh "printf '{}' > /root/qa/config.json"; fi
+if [ -n "$exact_manifest" ]; then
+  # Spec env (controller-selected, NOT echoed back from R2_BUCKET_NAME): preflight sources .env.local into Playwright and prepare keeps
+  # unknown lines. Written to the .env.local.next copy BEFORE the install below, so the byte-hash pool reset verifies already covers it.
+  # The box readback below must report this same bucket for the selected mode, else the run aborts before Playwright.
+  spec_env="QA_APP_DATA=$app_data QA_APP_DATA_BUCKET=$app_data_bucket"
+  [ -z "$m15_draft" ] || spec_env="$spec_env QA_M15_DRAFT_PATH=/root/qa/m15/draft.txt QA_M15_OBSERVER_PATH=/root/qa/m15/observe.sh QA_M15_OBSERVER_LOG=/root/qa/m15/modal.raw"
+  qa_rsh "set -e; f='$remote/.env.local.next'; sed -i '/^QA_APP_DATA=/d; /^QA_APP_DATA_BUCKET=/d; /^QA_M15_DRAFT_PATH=/d; /^QA_M15_OBSERVER_PATH=/d; /^QA_M15_OBSERVER_LOG=/d' \"\$f\"; [ -z \"\$(tail -c1 \"\$f\")\" ] || echo >>\"\$f\"; printf '%s\\n' $spec_env >>\"\$f\"; grep -qx 'QA_APP_DATA=$app_data' \"\$f\"; grep -qx 'QA_APP_DATA_BUCKET=$app_data_bucket' \"\$f\"" \
+    || { echo 'QA_SPEC_ENV_FAILED: could not record the controller-selected spec env' | tee -a "$out/lane.txt" >&2; exit 1; }
+  echo "QA_SPEC_ENV names=$(printf '%s' "$spec_env" | tr ' ' '\n' | cut -d= -f1 | paste -sd, -) app_data=$app_data bucket=$app_data_bucket (controller-selected)" | tee -a "$out/lane.txt"
+fi
 qa_rsh "set -e; chmod 600 '$remote/.env.local.next' /root/qa/synth-private.pem; sed -i 's#^SYNTH_JWT_PRIVATE_KEY_PATH=.*#SYNTH_JWT_PRIVATE_KEY_PATH=/root/qa/synth-private.pem#' '$remote/.env.local.next'; sed -i '/^MODAL_API_KEY=/d; /^MODAL_KEY=/d; /^MODAL_SECRET=/d' '$remote/.env.local.next'; bash -n '$remote/.env.local.next'; mv '$remote/.env.local.next' '$remote/.env.local'; printf '%s\\t%s\\t%s\\n' \"\$(sha256sum <'$remote/.env.local' | cut -c1-64)\" \"\$(readlink -f '$remote/.env.local')\" \"\$(cat /var/lib/rtb/gen 2>/dev/null || echo -)\" >>/root/qa/.rtb-env-copies.tsv; chmod 600 /root/qa/.rtb-env-copies.tsv"
 # Ownership receipt (same function/contract as capture mode) BEFORE any Convex write: Modal prepare, runtime config apply,
 # preflight seed import and the spec's own setup all come later. The Modal lease was registered above, so v2 binds it.
@@ -588,6 +621,17 @@ if [ -n "$exact_manifest" ]; then
   qa_rsh "python3 -I /root/qa/modal-lane.py check-app-data --env '$remote/.env.local' --app-data '$app_data'" >"$out/app-data-readback.log" 2>&1 || { echo "QA_APP_DATA_UNEXPECTED: box app-data storage does not match the selected mode ($app_data)" | tee -a "$out/lane.txt" >&2; exit 1; }
   echo "QA_APP_DATA mode=$app_data$([ "$app_data" = ci-parity ] && echo ' by Rajiv decision (option A, C0ALZJHGE49 1794677380.515009 ts 1795311474.240329): app data is CI-parity (heydonna-uploads, CI key); fixture/staging/ledger/report clients stay prefix-scoped')" | tee -a "$out/lane.txt"
   cat "$out/app-data-readback.log" | tee -a "$out/lane.txt"
+  # The bucket the controller selected for this mode (exported to the spec as QA_APP_DATA_BUCKET) must be what the box readback verified.
+  grep -q "^QA_APP_DATA_READBACK mode=$app_data bucket=$app_data_bucket " "$out/app-data-readback.log" || { echo "QA_APP_DATA_UNEXPECTED: the box readback does not report the controller-selected $app_data bucket $app_data_bucket" | tee -a "$out/lane.txt" >&2; exit 1; }
+  if [ -n "$m15_draft" ]; then
+    # Controller-staged M15 inputs at the fixed paths the spec reads (QA_M15_DRAFT_PATH / QA_M15_OBSERVER_PATH, exported through .env.local above).
+    qa_rsh "set -e; umask 077; mkdir -p /root/qa/m15; chmod 700 /root/qa/m15"
+    qa_put "$m15_draft" /root/qa/m15/draft.txt
+    qa_put "$m15_observer" /root/qa/m15/observe.sh
+    qa_rsh "set -e; [ \"\$(sha256sum </root/qa/m15/draft.txt | cut -c1-64)\" = '$m15_draft_sha' ]; [ \"\$(sha256sum </root/qa/m15/observe.sh | cut -c1-64)\" = '$m15_observer_sha' ]; bash -n /root/qa/m15/observe.sh; chmod 444 /root/qa/m15/draft.txt; chmod 555 /root/qa/m15/observe.sh" >"$out/m15-stage.log" 2>&1 \
+      || { echo 'QA_M15_STAGE_FAILED: the staged bytes differ from the checked sources or the observer does not parse (see m15-stage.log)' | tee -a "$out/lane.txt" >&2; exit 1; }
+    echo "QA_M15_STAGE ok draft=/root/qa/m15/draft.txt draft_sha256=$m15_draft_sha observer=/root/qa/m15/observe.sh observer_sha256=$m15_observer_sha (the launcher stages files only; it does not run the observer)" | tee -a "$out/lane.txt"
+  fi
   exact_spend_box="${pool_box:-$box}"
 fi
 python3 -I "$modal_helper" credentials --box "$box" | qa_rsh 'umask 077; cat > /root/qa/modal.env'

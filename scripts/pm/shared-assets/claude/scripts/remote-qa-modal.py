@@ -189,6 +189,34 @@ def check_exact_profile_spec(manifest, spec):
         raise ValueError('QA_EXACT_MANIFEST_INVALID: spec is not the approved spec of profile ' + manifest['profile'])
 
 
+M15_STAGE_DRAFT_MAX_BYTES = 65536
+M15_STAGE_OBSERVER_MAX_BYTES = 262144
+
+
+def check_m15_stage(manifest, draft, observer):
+    """M15 inputs the CONTROLLER stages on the box (never a box-side prewrite): the aligned ASR draft must be the exact bytes the approved
+    manifest pins (langsmith.draft_sha256); the observer script is the operator's file, size-bounded and recorded by digest. Both must be
+    regular files (a symlink is refused). Pure and fail-closed; returns the non-secret digests."""
+    import stat as stat_mod
+    if manifest['profile'] != 'm15-langsmith':
+        raise ValueError('QA_M15_STAGE_REFUSED: only the m15-langsmith profile stages M15 inputs')
+    blobs = {}
+    for label, path, limit in (('draft', draft, M15_STAGE_DRAFT_MAX_BYTES), ('observer', observer, M15_STAGE_OBSERVER_MAX_BYTES)):
+        p = Path(path)
+        try:
+            info = p.lstat()
+            blobs[label] = p.read_bytes() if stat_mod.S_ISREG(info.st_mode) and 0 < info.st_size <= limit else None
+        except OSError:
+            blobs[label] = None
+        if blobs[label] is None:
+            raise ValueError('QA_M15_STAGE_REFUSED: the ' + label + ' is unreadable, not a regular file, empty or over ' + str(limit) + ' bytes')
+    digest = hashlib.sha256(blobs['draft']).hexdigest()
+    if digest != manifest['langsmith']['draft_sha256']:
+        raise ValueError('QA_M15_STAGE_REFUSED: the draft is not the digest-pinned aligned ASR draft of this manifest')
+    return {'draft_sha256': digest, 'draft_bytes': len(blobs['draft']),
+            'observer_sha256': hashlib.sha256(blobs['observer']).hexdigest(), 'observer_bytes': len(blobs['observer'])}
+
+
 def derive_exact_ids(box, head, spend_box):
     """TRUSTED-HOST derivation of everything a scoped credential is bound to: the lease (from the controller's own box receipt), the
     physical-box identity (from the controller's pool/ephemeral receipt) and the exact head. Nothing the box wrote is used; a
@@ -3173,7 +3201,7 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('command',choices=['register','credentials','check-credentials','finish','stop','reap','overlay','prepare','resolve','ready','provider-ready','capture-report','scoped-report-canary','tool-policy','route-check',
                                             'check-exact-manifest','check-canary-receipt','mint-session','arm-session','check-exact-ids',
-                                            'reconcile-custody','check-grant-receipt','check-app-data','check-app-mounts','verify-join'])
+                                            'reconcile-custody','check-grant-receipt','check-app-data','check-app-mounts','verify-join','check-m15-stage'])
     parser.add_argument('--box')
     parser.add_argument('--ttl',type=int,default=2700)
     parser.add_argument('--root',type=Path)
@@ -3210,6 +3238,8 @@ def main():
     parser.add_argument('--receipt',type=Path,help='check-canary-receipt')
     parser.add_argument('--head',help='check-exact-manifest: required checkout head')
     parser.add_argument('--spec',help='check-exact-manifest: the launch spec path, which must be the profile-approved spec')
+    parser.add_argument('--draft',type=Path,help='check-m15-stage: the aligned ASR draft (must be the manifest-pinned digest)')
+    parser.add_argument('--observer',type=Path,help='check-m15-stage: the observer script to stage')
     parser.add_argument('--app-data',choices=list(APP_DATA_MODES),help='exact mode: app-data storage binding. scoped = Run 9 heydonna-qa identity; ci-parity = Rajiv option A (heydonna-uploads + CI key, like CI)')
     a=parser.parse_args()
     tool_policy(a.allow_billable_tools, a.tool_spend_cap_usd)
@@ -3222,7 +3252,7 @@ def main():
     if a.exact_manifest and a.command in ('register','overlay','prepare','capture-report') and not a.on_miss:
         parser.error('--exact-manifest requires --on-miss')
     if a.exact_manifest and a.command not in ('register','overlay','prepare','capture-report','check-exact-manifest','mint-session','arm-session',
-                                              'check-exact-ids','reconcile-custody','verify-join'):
+                                              'check-exact-ids','reconcile-custody','verify-join','check-m15-stage'):
         parser.error('--exact-manifest is not valid for this command')
     if a.exact_manifest and a.command in ('overlay','prepare','capture-report') and not a.app_data:
         parser.error('--exact-manifest requires an explicit --app-data scoped|ci-parity')
@@ -3258,6 +3288,11 @@ def main():
               + ' profile=' + manifest['profile'] + ' spec_blob=' + str(EXACT_PROFILES[manifest['profile']]['spec_blob'] or 'none')
               + ' max_reserve_usd=' + str(manifest['max_reserve_usd']) + ' hashes=' + str(len(manifest['entries']))
               + ' approval_ref=' + manifest['approval_ref'])
+    elif a.command=='check-m15-stage':
+        if not (a.exact_manifest and a.draft and a.observer):
+            parser.error('check-m15-stage requires --exact-manifest, --draft and --observer')
+        staged = check_m15_stage(load_exact_manifest(a.exact_manifest, a.head), a.draft, a.observer)
+        print('QA_M15_STAGE ok ' + ' '.join(k + '=' + str(v) for k, v in staged.items()))
     elif a.command=='check-canary-receipt':
         if not a.receipt:
             parser.error('check-canary-receipt requires --receipt')
