@@ -89,6 +89,16 @@ def test_health_gate_requires_the_served_model_id_not_just_a_listening_port():
     assert "host_down" in gate
 
 
+def test_host_down_retries_once_before_routing_the_lane_to_a_paid_model():
+    # A single dropped LAN probe must not demote the lane to a paid model. The fetch retries once; only two empty answers count as host_down,
+    # and the empty check is on the BODY (a failed curl can leave `_spark_ids` set but empty under some sh semantics).
+    gate = SRC[SRC.index("Local Spark health gate"):SRC.index("if proxy_agent_is_emergency_muse \"$id\"; then")]
+    assert gate.count('curl -s -m 3 --fail "$_spark_url"') == 2
+    assert '[[ -z "$_spark_ids" ]]' in gate
+    assert 'if ! _spark_ids=' not in gate  # exit-status-only check would miss a 200 with an empty body
+    assert "twice" in gate
+
+
 def test_qwen_has_its_own_pool_cap_outside_the_opencode_pool():
     cap = SRC[SRC.index("proxy_agent_pool_blocked() {"):SRC.index("# Final-primary OpenCode guard")]
     assert re.search(rf"^\s+{re.escape(QWEN)}\) pool=qwen; cap=\"\${{QWEN_PROXY_CAP:-4}}\";;$", cap, re.M)

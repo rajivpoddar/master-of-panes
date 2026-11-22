@@ -1735,9 +1735,13 @@ proxy_agent_pick_tier() {
     # of falling through to the next tier model. An id absent from /v1/models is model_not_served, a plain skip.
     if [[ "$id" == qwen3.8-flash-next || "$id" == inkling-2-mini ]]; then
       if [[ "$id" == qwen3.8-flash-next ]]; then _spark_url="${QWEN_HEALTH_URL:-http://192.168.68.113:18120/v1/models}"; else _spark_url="${INKLING_HEALTH_URL:-http://192.168.68.113:18120/v1/models}"; fi
-      if ! _spark_ids="$(curl -s -m 3 --fail "$_spark_url" 2>/dev/null)"; then
+      # ONE retry before declaring the host down: the LAN occasionally drops a single probe under load (measured 4/20 then 0/80 on the same
+      # endpoint minutes apart), and a spurious host_down silently routes the lane to a PAID model, which is the exact cost this tier exists to
+      # avoid. Worst case is 2 x 3 s for a genuinely dead host, and a real outage still fails both attempts.
+      _spark_ids="$(curl -s -m 3 --fail "$_spark_url" 2>/dev/null)" || { sleep 0.4; _spark_ids="$(curl -s -m 3 --fail "$_spark_url" 2>/dev/null)"; }
+      if [[ -z "$_spark_ids" ]]; then
         skipped="${skipped:+$skipped,}$id:host_down"
-        printf 'proxy-agent: host_down skip model=%s (local Spark /v1/models did not answer in 3s)\n' "$id" >&2
+        printf 'proxy-agent: host_down skip model=%s (local Spark /v1/models did not answer in 3s, twice)\n' "$id" >&2
         continue
       fi
       # Match the quoted id token so qwen3.8-flash-next cannot match a longer alias that merely contains it.
