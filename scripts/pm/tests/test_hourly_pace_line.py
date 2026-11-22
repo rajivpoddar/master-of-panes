@@ -572,6 +572,43 @@ def test_sender_pages_large_secondary_table_as_plain_pipe_text_without_fences_or
     assert re.findall(r'row-\d{3}', '\n'.join(pages)) == [f'row-{i:03}' for i in range(100)]
 
 
+def test_sender_keeps_a_long_cell_whole_and_every_section_within_3000_after_a_wide_header():
+    """CTO REVISE on 4cf292ea (C0ALZJHGE49 thread 1795344281.588589, ts 1795346339.695999): a secondary-table row over
+    2,800 chars was cut with an ellipsis, and the first row on a page skipped the paging test, so a wide repeated header
+    plus a long row could pass Slack's 3000-char section limit. The row is now split into unfenced continuation sections,
+    never cut, and every section is budgeted after its header. Width 70 = a ~1k-char header that repeats on each page;
+    width 200 = a ~2.6k-char header that is printed once and not repeated."""
+    long_cell = ' '.join(f'tok{n:04}' for n in range(420))                 # ~3.4k chars: more than a whole section
+
+    def line(cells):
+        return '| ' + ' | '.join(cells) + ' |'
+
+    def table_row(tag, cell='c'):
+        return [tag, 'a', 'b', cell, *('d' for _ in range(8))]
+
+    for width in (70, 200):
+        head = [f'Column {i:02} ' + 'h' * width for i in range(12)]
+        rule = '|' + '|'.join('---' for _ in head) + '|'
+        rows = [table_row('row-first', long_cell), table_row('row-mid'), table_row('row-long', long_cell),
+                table_row('row-tail')]
+        body = '\n'.join(['| A | B |', '|---|---|', '| x | y |', '*Later:*', line(head), rule, *(line(r) for r in rows)])
+        blocks = _converter_blocks(body)
+        assert [b['type'] for b in blocks].count('table') == 1              # the A/B table; the wide one is plain text
+        sections = [b['text']['text'] for b in blocks if b['type'] == 'section']
+        assert sections[0] == '*Later:*' and not any('```' in s for s in sections)
+        wide = sections[1:]
+        assert all(0 < len(s) <= 3000 for s in wide), [len(s) for s in wide]
+        text = ' '.join('\n'.join(wide).split())                             # section breaks read as one space
+        assert text.count(long_cell) == 2 and '…' not in text               # the whole cell, twice; no truncation mark
+        assert re.findall(r'row-(?:first|mid|long|tail)', text) == ['row-first', 'row-mid', 'row-long', 'row-tail']
+        assert text.count(line(head)) == (4 if width == 70 else 1)
+        if width == 70:
+            led = [s for s in wide if 'row-' in s]                           # every page that holds a row starts
+            assert len(led) == 4 and all(s.splitlines()[:2] == [line(head), rule] for s in led)  # with the header
+        else:
+            assert wide[0] == line(head) + '\n' + rule
+
+
 def test_pace_burn_and_opencode_tables_in_one_report_make_exactly_one_native_slack_table(tmp_path):
     now = BASE + 4 * H
     pace = composer.pace_table(_at(now), snapshot=_write_log(tmp_path / 'log.jsonl', [(BASE, CLAUDE, 45), (now, CLAUDE, 48)]),

@@ -681,29 +681,71 @@ def _split_row_inline(line):
         cells = cells[:-1]
     return [c.strip() for c in cells]
 
+def _wrap_line(line, first, limit):
+    # Split one over-long line at spaces (hard cut when a span has none). The first piece is at most
+    # first chars, every later piece at most limit. Nothing is dropped: rejoining the pieces with a
+    # space (nothing, after a hard cut) gives the line back.
+    pieces = []
+    cap = first
+    while len(line) > cap:
+        cut = line.rfind(' ', 0, cap + 1)
+        if cut <= 0:
+            cut = cap
+        pieces.append(line[:cut])
+        line = line[cut:].lstrip(' ')
+        cap = limit
+    pieces.append(line)
+    return pieces
+
 def _plain_table_sections(rows):
     # Slack allows one native table block per message, so later tables go out as
     # plain Markdown pipe-table text in mrkdwn sections, with no code fence
     # (Rajiv C0ALZJHGE49 thread 1795344281.588589, ts 1795345746.446959: remove the
-    # codefences around the burn stats table). Columns, values and order are unchanged. Long tables
-    # are paged under the 3000-char section limit; each page repeats the header.
+    # codefences around the burn stats table). Columns, values and order are unchanged.
+    # Long tables are paged under the 3000-char section limit (2900 working budget); each page
+    # repeats the header. Every section is budgeted AFTER its header, including the first row on
+    # a page. A row too long for a page is never cut: its first piece fills the rest of the
+    # header page and the remainder goes out as unfenced continuation sections (CTO REVISE,
+    # C0ALZJHGE49 ts 1795346339.695999). A header too wide to repeat (over half the budget) is
+    # printed once, wrapped, and the rows are paged without it.
+    limit = 2900
     def row(cells):
         return '| ' + ' | '.join(cells) + ' |'
     header = row(rows[0])
     rule = '|' + '|'.join('---' for _ in rows[0]) + '|'
-    page = [header, rule]
-    size = len(header) + len(rule) + 1
+    lead = [header, rule]
+    lead_size = len(header) + len(rule) + 1
+    if lead_size > limit // 2:
+        for piece in _wrap_line(header + '\n' + rule, limit, limit):
+            yield piece
+        lead = []
+        lead_size = 0
+    page = list(lead)
+    size = lead_size
+    filled = False
     for cells in rows[1:]:
         line = row(cells)
-        if len(line) > 2800:
-            line = line[:2799] + '…'
-        if len(page) > 2 and size + len(line) + 1 > 2900:
+        if filled and size + 1 + len(line) > limit:
             yield '\n'.join(page)
-            page = [header, rule]
-            size = len(header) + len(rule) + 1
-        page.append(line)
-        size += len(line) + 1
-    yield '\n'.join(page)
+            page = list(lead)
+            size = lead_size
+            filled = False
+        room = limit - size - (1 if page else 0)
+        if len(line) <= room:
+            size += len(line) + (1 if page else 0)
+            page.append(line)
+            filled = True
+            continue
+        pieces = _wrap_line(line, room, limit)
+        page.append(pieces[0])
+        yield '\n'.join(page)
+        for piece in pieces[1:]:
+            yield piece
+        page = list(lead)
+        size = lead_size
+        filled = False
+    if page and (filled or len(rows) == 1):
+        yield '\n'.join(page)
 
 
 def convert_text_to_blocks(t):
