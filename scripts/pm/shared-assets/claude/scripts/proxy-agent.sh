@@ -1520,6 +1520,16 @@ proxy_agent_resolve_sarvam_cap() {
       fi
     done < "$HOME/.claude/state/proxy-caps.env"
   fi
+  # PM pin (2026-11-23 05:19 IST): proxy-burn-dial.py rewrites proxy-caps.env and drops SARVAM_PROXY_CAP, so a PM-set
+  # Sarvam cap lives in its own file the dial never touches. Format: SARVAM_PROXY_CAP=<n>. Remove the file to return to 4.
+  if [[ -r "$HOME/.claude/state/sarvam-cap.pin" ]]; then
+    while IFS== read -r k v; do
+      if [[ "$k" == SARVAM_PROXY_CAP && "$v" =~ ^[0-9]+$ ]]; then
+        printf '%s' "$v"
+        return 0
+      fi
+    done < "$HOME/.claude/state/sarvam-cap.pin"
+  fi
   printf '4'
 }
 
