@@ -555,6 +555,67 @@ def test_pace_table_is_accepted_by_the_slack_send_table_converter_as_one_native_
     assert '*Hourly' in prose and 'no usage sample' in prose and '|---|' not in prose and '```' not in prose
 
 
+def test_one_native_table_keeps_the_first_table_and_rewrites_later_ones_as_plain_rows():
+    """Rajiv C0ALZJHGE49 ts 1795323839.696369 turned the Burn and OpenCode Go sections into pipe tables. Slack accepts ONE
+    table block per message (only_one_table_allowed), so the Pace table keeps the slot and every later table is rewritten
+    as "lead — Header: value · Header: value" rows, with the header and separator dropped and "—"/empty cells omitted."""
+    pace = ['| Account | Used |', '|---|---|', '| Claude | 48% |']
+    burn = ['*Burn:* legend', '| Pool / account | State | Weekly used | Note |', '|---|---|---|---|',
+            '| Claude pool | OK · routes NORMAL | — | totals exclude 1 unmeasured account(s) |',
+            '| Claude a@example.test | enabled · pinned | 0% |  |']
+    opencode = ['*OpenCode Go:* legend', '| Item | Live now | Used |', '|---|---|---|', '| OpenCode Go pool | 4 | monthly 17% |',
+                '| hy4-flash-free | 1 | — |']
+    out = composer.one_native_table(['*Hourly — 07:00 IST*', *pace, '', *burn, *opencode])
+    assert out[:5] == ['*Hourly — 07:00 IST*', *pace, '']                 # first table untouched, byte for byte
+    assert out[5:] == ['*Burn:* legend',
+                       'Claude pool — State: OK · routes NORMAL · Note: totals exclude 1 unmeasured account(s)',
+                       'Claude a@example.test — State: enabled · pinned · Weekly used: 0%',
+                       '*OpenCode Go:* legend',
+                       'OpenCode Go pool — Live now: 4 · Used: monthly 17%',
+                       'hy4-flash-free — Live now: 1']
+    assert not any(row.lstrip().startswith('|') for row in out[5:])      # no pipe row left to become a second table block
+
+
+def test_one_native_table_leaves_one_table_and_non_table_rows_untouched_and_never_folds_a_rewritten_row():
+    only = ['*Hourly*', '| A | B |', '|---|---|', '| x | y |', 'prose', '• bullet']
+    assert composer.one_native_table(only) == only
+    assert composer.one_native_table([]) == []
+    # A multi-line entry is split into rows, and a row that has only a lead cell keeps just the lead.
+    assert composer.one_native_table(['| A | B |\n|---|---|\n| x | y |', 'gap', '| C | D |', '|---|---|', '| lone | — |']) == [
+        '| A | B |', '|---|---|', '| x | y |', 'gap', 'lone']
+    # Adjacent pipe rows with no prose between them are ONE table (the converter sees one block), so they stay as they are.
+    adjacent = ['| A | B |', '|---|---|', '| x | y |', '| C | D |']
+    assert composer.one_native_table(adjacent) == adjacent
+    # A rewritten row starts with the name, so compact_report cannot take it for a bullet, indent, heading or table row.
+    rewritten = composer.one_native_table(['| A | B |', '|---|---|', '| x | y |', 'gap', '| C | D |', '|---|---|', '| name | v |'])[-1]
+    assert rewritten == 'name — D: v' and not rewritten.startswith(('•', '- ', '  ', '*', '|', '_'))
+
+
+def test_pace_burn_and_opencode_tables_in_one_report_make_exactly_one_native_slack_table(tmp_path):
+    now = BASE + 4 * H
+    pace = composer.pace_table(_at(now), snapshot=_write_log(tmp_path / 'log.jsonl', [(BASE, CLAUDE, 45), (now, CLAUDE, 48)]),
+                               config=_write_config(tmp_path / 'cfg.json'), state=tmp_path / 'state.json', persist=False)
+    burn_rows = [['Claude pool', 'OK · routes NORMAL', 'n/a', '0.00', '0.63', '+0.63', 'n/a', 'n/a', '—'],
+                 ['Claude a@example.test', 'enabled · pinned', '12%', '0.40', '0.63', '+0.23', '5%', 'n/a', '—']]
+    burn = ('\n'.join(['*Burn:* legend', *composer._pipe_table(composer.BURN_TABLE_HEADER, burn_rows)]), {})
+    (tmp_path / 'runs').mkdir()                                    # an absent run-state root reads UNAVAILABLE, not 0
+    opencode = composer.opencode_line(_at(now), caps=tmp_path / 'caps', root=tmp_path / 'runs', log=tmp_path / 'muse.log',
+                                      ps_text='    1     0 root /sbin/launchd\n', environ={},
+                                      snapshot=tmp_path / 'no-usage-snapshots.jsonl')
+    report = composer.compose('1h', _at(now), None, {}, [], failures=[], pace=pace, burn=burn, opencode=opencode)
+
+    blocks = _converter_blocks(report)
+    tables = [b for b in blocks if b['type'] == 'table']
+    assert len(tables) == 1                                        # the Pace table; Slack would reject a second block
+    assert [_cell_text(c) for c in tables[0]['rows'][0]] == PACE_HEADER
+    prose = '\n'.join(b['text']['text'] for b in blocks if b['type'] == 'section')
+    assert 'Claude pool — State: OK · routes NORMAL' in prose
+    assert 'Claude a@example.test — State: enabled · pinned · Weekly used: 12%' in prose
+    assert 'OpenCode Go pool — Live now: 0 · Registered last 1h: 0' in prose
+    assert 'hy4-flash-free — Live now: 0' in prose
+    assert '|---|' not in prose and '| Item |' not in prose and '| Pool / account |' not in prose
+
+
 def test_pace_cell_neutralises_pipes_and_newlines_so_columns_cannot_shift():
     assert composer._pace_cell('a | b\nc') == 'a / b c'
     assert composer._pace_cell('0.75 ✅') == '0.75 ✅'

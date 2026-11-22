@@ -1343,7 +1343,16 @@ def remote_boxes_line(timeout: int = 20) -> str:
 # ---------------------------------------------------------------------------
 CI_SELECTION_REPO = "Scribie/heydonna-app"
 CI_SELECTION_RUNS = 3
-CI_SELECTION_SCAN = 40  # completed pull_request runs listed to find CI_SELECTION_RUNS non-skipped ones
+# Rajiv C0ALZJHGE49 ts 1795323839.696369 / PM brief 2026-11-22: ci.yml fires on every `labeled` event but only the
+# `ci-head:<sha>` label admits a run. A run triggered by any other label is a noop: classify-change-scope still runs, but every
+# lane (unit-tests, typescript, ...) is skipped on the label mismatch and so is the `test` job's "Require all CI phases" step.
+# Those used to be quoted as "PARTIAL 0/5 shards", which read as a CI problem. Only admitted runs are shown as shard
+# coverage; noop runs are counted as "noop (not admitted)", never as shards. Verified on 12 live runs 2026-11-22: the gate
+# step was skipped on all 9 noop runs and success/failure on all 3 admitted ones.
+CI_SELECTION_SCAN = 100  # completed pull_request runs listed to find CI_SELECTION_RUNS admitted ones
+CI_SELECTION_CANDIDATES = 30  # non-skipped runs whose jobs are read, newest first, while looking for admitted ones
+CI_GATE_JOB = "test"
+CI_GATE_STEP = "Require all CI phases"
 CI_SELECTION_MAX_CHARS = 299  # the whole line stays under 300 chars
 CI_LOG_WINDOW = 256 * 1024
 CI_WORKFLOW_PATH = ".github/workflows/ci.yml"
@@ -1464,7 +1473,20 @@ def ci_classify_jobs(entry: dict, jobs: list) -> list[tuple[int, int, bool]]:
 
     Returns the (shard, job id, failed) logs still to read. Raises CiSelectionError when a unit-tests job
     does not carry exactly this run id, attempt and head, so a foreign record can never count as coverage.
+    A run whose `test` job skipped its "Require all CI phases" step was never admitted (the label was not ci-head:<sha>):
+    it is marked entry["noop"] and has no shards to read. Anything short of that exact, bound, completed signal is not a
+    noop, so an unexpected jobs shape falls back to the normal shard rendering rather than hiding a real run.
     """
+    for job in jobs:
+        if isinstance(job, dict) and job.get("name") == CI_GATE_JOB:
+            if (type(job.get("id")) is not int or job["id"] <= 0 or str(job.get("run_id")) != str(entry["id"])
+                    or str(job.get("run_attempt")) != str(entry["attempt"]) or job.get("head_sha") != entry["head"]):
+                raise CiSelectionError("job is not of this run attempt and head")
+            steps = job.get("steps") if job.get("status") == "completed" else None
+            gate = [s for s in steps if isinstance(s, dict) and s.get("name") == CI_GATE_STEP] if isinstance(steps, list) else []
+            if len(gate) == 1 and gate[0].get("conclusion") == "skipped":
+                entry["noop"] = True
+                return []
     by_shard: dict[int, list[dict]] = {}
     for job in jobs:
         if not isinstance(job, dict):
@@ -1608,9 +1630,16 @@ def render_ci_selection(runs: list[dict]) -> str:
     prefix = "*CI selection:* "
     if not runs:
         return f"{prefix}unavailable (no completed non-skipped pull_request runs)"
+    # A noop run (label was not ci-head:<sha>, so the run was never admitted) is no coverage evidence at all: it is counted
+    # in its own segment and never quoted as shards.
+    noop = sum(1 for run in runs if run.get("noop"))
+    runs = [run for run in runs if not run.get("noop")]
+    tail = [f"noop (not admitted) ×{noop}"] if noop else []
+    if not runs:
+        return f"{prefix}no admitted ci-head run found; {tail[0]}"
     covs = [ci_coverage(run) for run in runs]
     for width, reasons, detail in CI_COMPACTION:
-        line = prefix + " | ".join(_ci_segment(cov, width, reasons, detail) for cov in covs)
+        line = prefix + " | ".join([*(_ci_segment(cov, width, reasons, detail) for cov in covs), *tail])
         if len(line) <= CI_SELECTION_MAX_CHARS:
             return line
     kept = [cov for cov in covs if cov["status"] != "COMPLETE"]
@@ -1619,7 +1648,7 @@ def render_ci_selection(runs: list[dict]) -> str:
         parts = [_ci_segment(cov, 0, False, False, head) for cov in kept]
         if omitted:
             parts.append(f"+{omitted} omitted")
-        line = prefix + " | ".join(parts)
+        line = prefix + " | ".join([*parts, *tail])
         if len(line) <= CI_SELECTION_MAX_CHARS:
             return line
     return line[:CI_SELECTION_MAX_CHARS - 1] + "…"
@@ -1673,31 +1702,43 @@ def ci_selection_line(run=subprocess.run, timeout: int = COLLECTOR_TIMEOUTS["ci-
         listing = json.loads(gh(["run", "list", "--repo", CI_SELECTION_REPO, "--workflow", "ci.yml",
                                  "--event", "pull_request", "--status", "completed",
                                  "--limit", str(CI_SELECTION_SCAN), "--json", "databaseId,headBranch,headSha,attempt,conclusion"]))
-        picked = [r for r in listing if r.get("conclusion") != "skipped"][:CI_SELECTION_RUNS]
-        if not picked:
+        candidates = [r for r in listing if r.get("conclusion") != "skipped"][:CI_SELECTION_CANDIDATES]
+        if not candidates:
             raise CiSelectionError(f"no completed non-skipped pull_request runs in the last {CI_SELECTION_SCAN}")
-        runs = []
-        for r in picked:
+        entries = []
+        for r in candidates:
             entry = {"id": int(r["databaseId"]), "branch": str(r.get("headBranch") or "?"),
                      "head": r.get("headSha"), "attempt": r.get("attempt"), "shards": {}}
             if not (isinstance(entry["head"], str) and _SHA.fullmatch(entry["head"])
                     and type(entry["attempt"]) is int and entry["attempt"] > 0):
                 entry["error"] = "run attempt or head unknown"
-            runs.append(entry)
-        first = [(e, pool.submit(attempt_jobs, e), pool.submit(workflow_matrix, e["head"])) for e in runs if not e.get("error")]
-        pending = []
-        for entry, jobs_future, matrix_future in first:
-            try:
-                to_read = ci_classify_jobs(entry, wait(jobs_future))
-            except CiSelectionError as exc:
-                entry["error"] = str(exc)
-                continue
+            entries.append(entry)
+        # Walk newest first in waves of "admitted runs still wanted": a run whose classify-change-scope job was skipped is a
+        # noop (never admitted) and does not use one of the CI_SELECTION_RUNS slots, so the next candidate is read instead.
+        runs, pending, admitted, cursor = [], [], 0, 0
+        while admitted < CI_SELECTION_RUNS and cursor < len(entries):
+            wave = entries[cursor:cursor + CI_SELECTION_RUNS - admitted]
+            cursor += len(wave)
+            first = [(e, None if e.get("error") else pool.submit(attempt_jobs, e)) for e in wave]
+            for entry, jobs_future in first:
+                to_read = None
+                if jobs_future is not None:
+                    try:
+                        to_read = ci_classify_jobs(entry, wait(jobs_future))
+                    except CiSelectionError as exc:
+                        entry["error"] = str(exc)
+                runs.append(entry)
+                if entry.get("noop"):
+                    continue
+                admitted += 1
+                if to_read is not None:
+                    pending.append((entry, pool.submit(workflow_matrix, entry["head"]),
+                                    [(n, failed, pool.submit(ci_unit_shard, job_id, n, gh)) for n, job_id, failed in to_read]))
+        for entry, matrix_future, reads in pending:
             try:
                 entry["matrix"] = wait(matrix_future)
             except CiSelectionError:
                 entry["matrix"] = None
-            pending.append((entry, [(n, failed, pool.submit(ci_unit_shard, job_id, n, gh)) for n, job_id, failed in to_read]))
-        for entry, reads in pending:
             for n, failed, future in reads:
                 try:
                     entry["shards"][n] = {"state": "ok", "failed": failed, "row": wait(future)}
@@ -2623,6 +2664,48 @@ def compact_report(lines: list[str], limit: int, cadence: str | None = None) -> 
     return "\n".join(spaced)
 
 
+def one_native_table(lines: list[str]) -> list[str]:
+    """Keep ONE pipe table per post; rewrite every later one as plain rows.
+
+    slack-send.sh turns each unfenced pipe table into a native Slack table block, and Slack accepts ONE table block per
+    message (only_one_table_allowed fails the whole post, which makes the hourly HOURLY_POST_UNCERTAIN). The Pace table sits
+    directly under the *Hourly line and keeps the slot; the Burn and OpenCode Go tables that follow would be a second and
+    third block. Same remedy as cto_slack_rest._later_tables_as_mrkdwn: the first table stays native, a later table becomes
+    one plain row per data line, "lead — Header: value · Header: value", the header and separator rows dropped. The rewritten
+    row starts with the account/model name, so it is never a fold prefix of compact_report (no bullet, "- ", two spaces, "*"
+    or "|"), and a "—" or empty cell is left out. Rows that are not part of a table pass through untouched."""
+    rows = [row for line in lines for row in line.splitlines()]
+    out: list[str] = []
+    seen_table = False
+    header: list[str] | None = None
+    in_table = False
+    for row in rows:
+        if not row.lstrip().startswith("|"):
+            in_table = False
+            header = None
+            out.append(row)
+            continue
+        if not in_table:
+            in_table = True
+            header = None
+            if not seen_table:
+                seen_table = True
+                out.append(row)
+                continue
+            header = [c.strip() for c in row.strip().strip("|").split("|")]
+            continue  # the header row itself is dropped
+        if not seen_table or header is None:
+            out.append(row)  # a row of the first (native) table
+            continue
+        cells = [c.strip() for c in row.strip().strip("|").split("|")]
+        if all(re.fullmatch(r"[-:\s]*", c) for c in cells):
+            continue  # separator row
+        lead = cells[0] if cells else ""
+        rest = [f"{h}: {c}" for h, c in zip(header[1:], cells[1:]) if c and c != "—"]
+        out.append(f"{lead} — " + " · ".join(rest) if rest else lead)
+    return out
+
+
 def composer_release_sha(current: Path | None = None, source: Path | None = None) -> str:
     """Bind the executing composer bytes to the current release's shared manifest."""
     current = current or Path.home() / '.local/share/master-of-panes/current'
@@ -2702,28 +2785,99 @@ def _ist(epoch: float, fmt: str = "%a %H:%M") -> str:
     return datetime.fromtimestamp(epoch, IST).strftime(fmt) + " IST"
 
 
-def _session_state(rows: dict, pool: str, acct: str, ts_now: float) -> str:
-    """Claude 5h session-cap state from the latest session sample; Codex has no session meter."""
+def _session_cell(rows: dict, pool: str, acct: str, ts_now: float) -> str:
+    """Claude 5h session-cap cell from the latest session sample: "54% (resets 14:00 IST)", "CAPPED (resets ...)", "stale"
+    or "n/a" (no usable sample). Codex has no session meter: always "n/a"."""
     if pool != "claude":
-        return ""
+        return "n/a"
     row = rows.get(f"{pool}:{acct}:session") or {}
     pct, reset, sampled = row.get("pct"), row.get("reset"), row.get("ts")
     nums = [v for v in (pct, reset, sampled)
             if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)]
     if len(nums) != 3 or not 0 <= pct <= 100:
-        return " · session n/a"
+        return "n/a"
     # Same reading as proxy-burn-shadow.session_state(): an old, future-dated or reset-passed sample is not current.
     if not 0 <= ts_now - sampled <= USAGE_SAMPLE_MAX_AGE or reset <= ts_now:
-        return " · session stale"
+        return "stale"
     state = "CAPPED" if pct >= 100 else f"{pct:g}%"
-    return f" · session {state} (resets {_ist(reset, '%H:%M')})"
+    return f"{state} (resets {_ist(reset, '%H:%M')})"
 
 
-def _burn_account_row(label: str, acct: str, d: dict, session: str, ts_now: float, horizon) -> str:
+def _session_state(rows: dict, pool: str, acct: str, ts_now: float) -> str:
+    """Claude 5h session-cap state as a row tail (" · session ..."); Codex has no session meter, so it adds nothing."""
+    if pool != "claude":
+        return ""
+    return f" · session {_session_cell(rows, pool, acct, ts_now)}"
+
+
+# Burn table (Rajiv C0ALZJHGE49 ts 1795323839.696369, 2026-11-22: "change the claude team and opencode burn section to
+# tables"). One Markdown pipe table for both pools: a summary row per pool (verdict and route mode), then one row per
+# account. A cell that cannot be measured reads n/a or UNKNOWN, never 0.
+BURN_TABLE_HEADER = ["Pool / account", "State", "Weekly used", "Burn %/h", "Budget %/h", "Headroom %/h", "Session",
+                     "Weekly resets", "Note"]
+# The switch script (cliproxy-claude-switch.py) owns both files: the pin is the one account the proxy routes Claude to, the
+# reserve file lists accounts --auto never picks (one e-mail per line). Both are read here, never written.
+CLAUDE_PIN_FILE = Path.home() / ".claude/state/proxy-claude-account-pin"
+CLAUDE_RESERVE_FILE = Path.home() / ".claude/state/proxy-claude-account-reserve"
+
+
+def _read_email_set(path: Path) -> set[str] | None:
+    """Lower-cased e-mails, one per line (blank lines and # comments skipped), read the way the switch script reads its pin
+    and reserve files. A missing file is the empty set (the switch script writes it only when something is pinned or
+    reserved); any other failure is None = UNKNOWN, never a guessed empty set."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return set()
+    except OSError:
+        return None
+    return {line.lower() for line in map(str.strip, text.splitlines()) if line and not line.startswith("#")}
+
+
+def claude_account_roster(conf: dict) -> dict[str, bool] | None:
+    """{lower-cased e-mail: enabled} for every Claude team account file in the CLIProxyAPI auth-dir, or None when the
+    auth-dir cannot be listed. Only the type, e-mail and disabled flag are kept: the files also hold tokens, which are
+    never read into the report. Skips dot files and .bak copies, like the switch script's claude_files()."""
+    auth = conf.get("auth-dir") if isinstance(conf, dict) else None
+    if not isinstance(auth, str) or not auth:
+        return None
+    root = Path(os.path.expanduser(auth))
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return None
+    roster: dict[str, bool] = {}
+    for name in names:
+        if name.startswith(".") or not name.endswith(".json") or ".bak" in name:
+            continue
+        try:
+            data = json.loads((root / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        email = data.get("email") if isinstance(data, dict) else None
+        if isinstance(data, dict) and data.get("type") == "claude" and isinstance(email, str) and "@" in email:
+            roster[email.lower()] = data.get("disabled") is not True
+    return roster
+
+
+def _claude_state(email: str, enabled: bool, pin: set[str] | None, reserve: set[str] | None) -> str:
+    """State cell of a Claude account row: enabled or disabled, plus pinned and/or reserve when the files say so."""
+    parts = ["enabled" if enabled else "disabled"]
+    key = email.lower()
+    if pin and key in pin:
+        parts.append("pinned")
+    if reserve and key in reserve:
+        parts.append("reserve")
+    return " · ".join(parts)
+
+
+def _burn_account_cells(name: str, state: str, d: dict, session: str, ts_now: float, horizon) -> list[str]:
+    """One BURN_TABLE_HEADER row for an account in the pool."""
     used = _pct(d.get("pct"))
+    reset = d.get("reset")
+    resets = _ist(reset) if isinstance(reset, (int, float)) and not isinstance(reset, bool) and math.isfinite(reset) else "n/a"
     decision = d.get("decision")
     if decision == "exhausted":
-        reset = d.get("reset")
         if d.get("target") == "reset" and d.get("after") is not None:
             tail = f"budget 0 until reset {_ist(reset)}, then {_rate(d['after'])}%/h"
         elif horizon is not None and reset is not None and abs(reset - horizon) <= 1800:
@@ -2732,16 +2886,19 @@ def _burn_account_row(label: str, acct: str, d: dict, session: str, ts_now: floa
             tail = f"budget 0, resets {_ist(reset)} (after the {_ist(horizon)} horizon)"
         else:
             tail = f"budget 0, resets {_ist(reset)}" if reset else "budget 0"
-        return f"{label} {acct}: {used} used · EXHAUSTED · {tail}{session}"
+        return [name, state, used, "n/a", "0", "n/a", session, resets, f"EXHAUSTED · {tail}"]
     if decision in ("allow", "over_budget"):
-        extra = f" (then {_rate(d['after'])}%/h)" if d.get("target") == "reset" and d.get("after") is not None else ""
+        notes = []
+        if d.get("target") == "reset" and d.get("after") is not None:
+            notes.append(f"then {_rate(d['after'])}%/h after reset")
         # Weekly figures stay theoretical; a capped/stale/unknown session means this budget is not usable now.
-        unusable = " · not usable now" if d.get("usable") is False else ""
-        return (f"{label} {acct}: {used} used · burn {_rate(d['burn'])} · budget {_rate(d['budget'])}{extra} · "
-                f"headroom {_rate(d['headroom'], signed=True)} %/h{session}{unusable}")
+        if d.get("usable") is False:
+            notes.append("not usable now")
+        return [name, state, used, _rate(d["burn"]), _rate(d["budget"]), _rate(d["headroom"], signed=True), session,
+                resets, " · ".join(notes)]
     sampled = d.get("ts")
-    age = f", sampled {max(0, round((ts_now - sampled) / 60))}m ago" if isinstance(sampled, (int, float)) else ", sample missing"
-    return f"{label} {acct}: {used} used · burn n/a{age} · {UNKNOWN_DENY}{session}"
+    age = f"sampled {max(0, round((ts_now - sampled) / 60))}m ago" if isinstance(sampled, (int, float)) else "sample missing"
+    return [name, state, used, "n/a", "n/a", "n/a", session, resets, f"{age} · {UNKNOWN_DENY}"]
 
 
 def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = PROXY_CONFIG, shadow=None) -> tuple[str, dict[str, str]]:
@@ -2769,8 +2926,12 @@ def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = 
         except Exception:
             conf = {}
         pace: list[str] = []
-        blocks: list[str] = []
+        table: list[list[str]] = []
         modes: dict[str, str] = {}
+        # Claude team roster, pin and reserve: read-only state the switch script owns. None = unreadable = "n/a" in the cell.
+        roster = claude_account_roster(conf)
+        pin = _read_email_set(CLAUDE_PIN_FILE)
+        reserve = _read_email_set(CLAUDE_RESERVE_FILE)
         for label, pool, model in BURN_MODELS:
             horizon = shadow.active_horizon(pool, horizons, ts_now)
             pace.append(f"{label} " + (f"{_ist(horizon)} ({(horizon - ts_now) / 3600:.1f}h)" if horizon else "own weekly reset"))
@@ -2779,7 +2940,8 @@ def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = 
             except Exception:
                 accounts = None
             if not accounts:
-                blocks.append(f"{label} pool: accounts {UNKNOWN_DENY} → {label} routes: P0-ONLY")
+                table.append([f"{label} pool", f"{UNKNOWN_DENY} · routes P0-ONLY", "—", "n/a", "n/a", "n/a", "—", "—",
+                              "accounts UNKNOWN"])
                 modes[label] = "P0-ONLY"
                 continue
             status = shadow.pool_status(pool, accounts, rows, ts_now, horizons)
@@ -2790,18 +2952,38 @@ def burn_status(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = 
             if isinstance(weekly, (int, float)) and abs(weekly - status["budget"]) > 1e-9:
                 skipped = sum(1 for _, d in status["accounts"]
                               if d.get("decision") in ("allow", "over_budget") and d.get("usable") is False)
-                budget_text = (f"vs usable budget {_rate(status['budget'])} %/h "
-                               f"(weekly budget {_rate(weekly)}, {skipped} account(s) not usable now)")
+                budget_note = f"usable budget; weekly budget {_rate(weekly)}, {skipped} account(s) not usable now"
             else:
-                budget_text = f"vs budget {_rate(status['budget'])} %/h"
-            blocks.append(f"{label} pool: burn {_rate(status['burn'])} {budget_text} → "
-                          f"headroom {_rate(status['headroom'], signed=True)} → {verdict} → {label} routes: {modes[label]}")
+                budget_note = ""
+            live = [d for _, d in status["accounts"] if d.get("decision") in ("allow", "over_budget")]
+            unmeasured = sum(1 for _, d in status["accounts"] if d.get("decision") not in ("allow", "over_budget", "exhausted"))
+            if status["decision"] == "unknown" and not live:
+                # No account was measured, so the pool totals are an empty sum, not a 0 burn and a 0 budget.
+                totals = ["n/a", "n/a", "n/a"]
+            else:
+                totals = [_rate(status["burn"]), _rate(status["budget"]), _rate(status["headroom"], signed=True)]
+                if unmeasured:
+                    budget_note = " · ".join(n for n in (budget_note, f"totals exclude {unmeasured} unmeasured account(s)") if n)
+            table.append([f"{label} pool", f"{verdict} · routes {modes[label]}", "—", *totals, "—", "—", budget_note])
+            shown: set[str] = set()
             for acct, detail in status["accounts"]:
-                blocks.append(_burn_account_row(label, names.get(acct, acct), detail,
-                                                _session_state(rows, pool, acct, ts_now), ts_now, horizon))
+                name = names.get(acct, acct)
+                shown.add(str(name).lower())
+                # Pin and reserve are the Claude switch script's; a pool account is enabled by construction (bindings()
+                # skips disabled auth files). Codex has no pin or reserve.
+                state = _claude_state(str(name), True, pin, reserve) if pool == "claude" else "enabled"
+                table.append(_burn_account_cells(f"{label} {name}", state, detail,
+                                                 _session_cell(rows, pool, acct, ts_now), ts_now, horizon))
+            if pool == "claude" and roster:
+                # Team accounts outside the pool (disabled, or enabled but not bound to this model) still get a row, so a
+                # missing account is visible rather than silent.
+                for email, enabled in sorted(roster.items()):
+                    if email not in shown:
+                        table.append([f"{label} {email}", _claude_state(email, enabled, pin, reserve), "n/a", "n/a", "n/a",
+                                      "n/a", "n/a", "n/a", "not in the pool" if not enabled else "enabled, not bound to the pool"])
         head = (f"*Burn:* pace to {' · '.join(pace)}; headroom = budget - burn, %/h; "
                 f"mode is per pool ({BURN_SCOPE_NOTE})")
-        return "\n".join([head, *blocks]), modes
+        return "\n".join([head, *_pipe_table(BURN_TABLE_HEADER, table)]), modes
     except Exception as exc:
         routes = " | ".join(f"{label} routes: P0-ONLY" for label, _, _ in BURN_MODELS)
         return f"*Burn:* {UNKNOWN_DENY} ({type(exc).__name__}) → {routes} ({BURN_SCOPE_NOTE})", fail_modes
@@ -3170,7 +3352,19 @@ def _pace_cell(text: str) -> str:
     return " ".join(str(text).replace("|", "/").split())
 
 
-PACE_NOTE_PREFIX = "Pace note: "  # not a fold prefix: no bullet, no "- ", no leading spaces, no leading * or _
+def _pipe_table(header: list[str], rows: list[list[str]]) -> list[str]:
+    """Unfenced Markdown pipe table in the Pace table's exact shape: header row, "|---|" separator, one row per entry.
+    slack-send.sh turns it into a native Slack table (header bold, separator skipped, empty cell a space). A row shorter
+    than the header is padded with n/a and a longer one is cut, so a bad row can never shift the columns."""
+    def row(cols: list[str]) -> str:
+        return "| " + " | ".join(_pace_cell(c) for c in cols) + " |"
+
+    width = len(header)
+    body = [row((list(r) + ["n/a"] * width)[:width]) for r in rows]
+    return [row(header), "|" + "|".join("---" for _ in header) + "|", *body]
+
+
+PACE_NOTE_PREFIX ="Pace note: "  # not a fold prefix: no bullet, no "- ", no leading spaces, no leading * or _
 
 
 def _pace_table_lines(resolved: list[tuple]) -> list[str]:
@@ -3425,10 +3619,65 @@ def muse_selection_records(now: datetime, path: Path = MUSE_EMERGENCY_LOG,
     return counts, malformed, False
 
 
+# OpenCode Go table (Rajiv C0ALZJHGE49 ts 1795323839.696369, 2026-11-22: "change the claude team and opencode burn section to
+# tables"): the same sources as the old one-line form, one row per OpenCode model, plus a pool row carrying the cap, its
+# source and the plan usage windows. The usage windows come from the usage sampler's opencode:go:* rows
+# (usage-snapshot.py parse_opencode_usage); a window with no fresh sample reads stale / n/a, never 0.
+OPENCODE_TABLE_HEADER = ["Item", "Live now", "Registered last 1h", "Used", "Note"]
+OPENCODE_MUSE_MODEL = "muse-spark-1.3-contributor"
+OPENCODE_USAGE_WINDOWS = (("monthly", "opencode:go:monthly", "%d %b %H:%M"), ("weekly", "opencode:go:weekly", "%a %H:%M"),
+                          ("rolling", "opencode:go:rolling", "%H:%M"))
+
+
+def _finite(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def opencode_usage(now: datetime, snapshot: Path = USAGE_SNAPSHOTS) -> str:
+    """Plan usage windows of the OpenCode Go account: "monthly 17% (resets 21 Dec 06:09) · weekly 34% (resets Mon 05:30) ·
+    rolling 23% (resets 15:12)". Newest sample per window. A sample older than USAGE_SAMPLE_MAX_AGE, future-dated, or whose
+    reset already passed reads stale; a sample with no usable percentage reads n/a; no opencode:go:* row at all, or an
+    unreadable file, reads UNAVAILABLE. Never a 0 that was not measured."""
+    wanted = {key for _, key, _ in OPENCODE_USAGE_WINDOWS}
+    latest: dict[str, dict] = {}
+    try:
+        with snapshot.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if "opencode:go:" not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(row, dict) or row.get("key") not in wanted:
+                    continue
+                prior = latest.get(row["key"])
+                if prior is None or not _finite(prior.get("ts")) or (_finite(row.get("ts")) and row["ts"] >= prior["ts"]):
+                    latest[row["key"]] = row
+    except OSError:
+        return "UNAVAILABLE"
+    if not latest:
+        return "UNAVAILABLE"
+    ts_now = now.timestamp()
+    parts = []
+    for name, key, fmt in OPENCODE_USAGE_WINDOWS:
+        row = latest.get(key) or {}
+        pct, sampled, reset = row.get("pct"), row.get("ts"), row.get("reset")
+        if row.get("status") != "ok" or not _finite(pct) or not 0 <= pct <= 100 or not _finite(sampled):
+            parts.append(f"{name} n/a")
+        elif not 0 <= ts_now - sampled <= USAGE_SAMPLE_MAX_AGE or (_finite(reset) and reset <= ts_now):
+            parts.append(f"{name} stale")
+        else:
+            parts.append(f"{name} {pct:g}%" + (f" (resets {_ist(reset, fmt)})" if _finite(reset) else ""))
+    return " · ".join(parts)
+
+
 def opencode_line(now: datetime, caps: Path = PROXY_CAPS_FILE, root: Path = PROXY_RUN_STATE,
-                  log: Path = MUSE_EMERGENCY_LOG, ps_text: str | None = None, environ: dict | None = None) -> str:
-    """The hourly *OpenCode Go:* line. Never raises: each source (cap, live, registrations, Muse log) fails independently and
-    reads UNAVAILABLE / UNVERIFIED / PARTIAL for its own field only, never a confirmed-looking 0."""
+                  log: Path = MUSE_EMERGENCY_LOG, ps_text: str | None = None, environ: dict | None = None,
+                  snapshot: Path = USAGE_SNAPSHOTS) -> str:
+    """The hourly *OpenCode Go:* section: one legend line, then a pipe table (OPENCODE_TABLE_HEADER) with a pool row and one
+    row per OpenCode model. Never raises: each source (cap, live, registrations, Muse log, usage windows) fails independently
+    and reads UNAVAILABLE / UNVERIFIED / PARTIAL for its own cell only, never a confirmed-looking 0."""
     try:
         cap, cap_label = opencode_cap(caps, environ)
     except Exception:
@@ -3447,21 +3696,29 @@ def opencode_line(now: datetime, caps: Path = PROXY_CAPS_FILE, root: Path = PROX
     except OSError:
         muse = None
 
-    def cells(counts: dict[str, int] | None) -> str:
-        if counts is None:
-            return "UNAVAILABLE"
-        return " · ".join([f"pool {sum(counts.values())}", *(f"{m} {counts[m]}" for m in OPENCODE_MODELS)])
+    try:
+        used = opencode_usage(now, snapshot)
+    except Exception:
+        used = "UNAVAILABLE"
 
-    cap_text = f"cap {cap} ({cap_label})" if cap is not None else f"cap UNVERIFIED ({cap_label})"
-    live_text = f"live primary procs now (nested alias requests not counted): {cells(live)}"
-    registered_text = "run registrations last 1h (latest per run name, may include failed launches): "
+    def live_cell(model: str | None) -> str:
+        if live is None:
+            return "UNAVAILABLE"
+        return str(live[model] if model else sum(live.values()))
+
+    def registered_cell(model: str | None) -> str:
+        if registered is None:
+            return "UNAVAILABLE"
+        count = registered[model] if model else sum(registered.values())
+        # A manifest that could hide a registration makes every count a lower bound, never a confirmed figure.
+        return f"≥{count}" if partial else str(count)
+
+    pool_note = [f"cap {cap} ({cap_label})" if cap is not None else f"cap UNVERIFIED ({cap_label})"]
     if registered is not None and partial:
-        registered_text += (f"PARTIAL, observed minimum {cells(registered)} ({partial} manifest{'' if partial == 1 else 's'} "
-                            "unreadable, undecodable, malformed or missing model/start time)")
-    else:
-        registered_text += cells(registered)
+        pool_note.append(f"registrations PARTIAL, observed minimum ({partial} manifest{'' if partial == 1 else 's'} "
+                         "unreadable, undecodable, malformed or missing model/start time)")
     if muse is None:
-        muse_text = "Muse selection records logged last 1h: UNAVAILABLE"
+        muse_note = "Muse selection records logged last 1h: UNAVAILABLE"
     else:
         by_role, malformed, absent = muse
         total = sum(by_role.values())
@@ -3473,9 +3730,15 @@ def opencode_line(now: datetime, caps: Path = PROXY_CAPS_FILE, root: Path = PROX
         if malformed:
             detail.append(f"{malformed} malformed or undecodable log line{'' if malformed == 1 else 's'}")
         prefix = f"PARTIAL, observed minimum {total}" if malformed else str(total)
-        muse_text = (f"Muse selection records logged last 1h: {prefix} ({' · '.join(detail)}; "
+        muse_note = (f"Muse selection records logged last 1h: {prefix} ({' · '.join(detail)}; "
                      "selection log only, not proof of use or of no use)")
-    return f"*OpenCode Go:* {cap_text} | {live_text} | {registered_text} | {muse_text}"
+    table = [["OpenCode Go pool", live_cell(None), registered_cell(None), used, "; ".join(pool_note)]]
+    for model in OPENCODE_MODELS:
+        table.append([model, live_cell(model), registered_cell(model), "—",
+                      muse_note if model == OPENCODE_MUSE_MODEL else "—"])
+    head = ("*OpenCode Go:* live = running primary-model procs now (nested alias requests not counted); registered = latest "
+            "manifest per run name in the last 1h (may include failed launches); used = plan windows from the usage sampler")
+    return "\n".join([head, *_pipe_table(OPENCODE_TABLE_HEADER, table)])
 
 
 EXPIRED_REMINDERS_LABEL = "*Expired reminders (48h):*"
@@ -3626,8 +3889,10 @@ def compose(
     burn_line, burn_modes = burn if (burn and mode == "1h") else (None, None)
     pace_lines = pace.splitlines() if (pace and mode == "1h") else []
     memory_lines = [memory] if (memory and mode == "1h") else []
-    opencode_lines = [opencode] if (opencode and mode == "1h") else []
+    opencode_lines = opencode.splitlines() if (opencode and mode == "1h") else []
     lines = [first, *pace_lines, *memory_lines, *(burn_line.splitlines() if burn_line else []), *opencode_lines, *body]
+    # Pace, Burn and OpenCode Go are all pipe tables, but Slack takes one native table per message: the first stays native.
+    lines = one_native_table(lines)
     if asks:
         lines += ["", "*Asks:* " + " | ".join(asks)]
     pm_actions = [] if mode == "3h" else [a for r in (prs or []) for a in r.get("actions") or []]

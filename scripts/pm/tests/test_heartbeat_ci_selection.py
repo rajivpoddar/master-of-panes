@@ -75,6 +75,23 @@ def seg(run_id, attempt, branch, body):
     return f'{run_id}#{attempt}/{head_of(run_id)[:8]} {branch}: {body}'
 
 
+def gate_job(run_id, attempt, skipped, **over):
+    """ci.yml's `test` job. A pull_request run started by any label but ci-head:<sha> skips the gate step."""
+    job = {'id': 9, 'name': 'test', 'status': 'completed', 'conclusion': 'success',
+           'run_id': run_id, 'run_attempt': attempt, 'head_sha': head_of(run_id),
+           'steps': [{'name': 'Set up job', 'conclusion': 'success'},
+                     {'name': 'Require all CI phases', 'conclusion': 'skipped' if skipped else 'success'}]}
+    return {**job, **over}
+
+
+def noop_run(run_id, branch, attempt=1):
+    return dict(run_of(run_id, branch, [], attempt), noop=True)
+
+
+def admitted_run(run_id, branch, **kw):
+    return dict(full_run(run_id, branch, **kw), noop=False)
+
+
 class Fake:
     """gh stand-in: run list, ci.yml at a ref, per-attempt jobs and ranged job logs."""
 
@@ -91,8 +108,14 @@ class Fake:
         jobs = [{'id': s['id'], 'name': f"unit-tests ({s['n']})", 'status': 'completed', 'conclusion': s['conclusion'],
                  'run_id': run['id'], 'run_attempt': run.get('job_attempt', run['attempt']),
                  'head_sha': run.get('job_head', head_of(run['id']))} for s in run['shards']]
-        return jobs + [{'id': 1, 'name': 'typescript', 'status': 'completed', 'conclusion': 'success'},
-                       {'id': 2, 'name': 'unit-tests-isolated', 'status': 'completed', 'conclusion': 'success'}]
+        jobs += [{'id': 1, 'name': 'typescript', 'status': 'completed', 'conclusion': 'success'},
+                 {'id': 2, 'name': 'unit-tests-isolated', 'status': 'completed', 'conclusion': 'success'}]
+        if 'noop' in run:  # opt-in: ci.yml's `test` job, whose "Require all CI phases" step is skipped on a noop run
+            jobs.append(gate_job(run['id'], run['attempt'], skipped=run['noop']))
+            if run['noop']:
+                jobs.append({'id': 3, 'name': 'unit-tests', 'status': 'completed', 'conclusion': 'skipped',
+                             'run_id': run['id'], 'run_attempt': run['attempt'], 'head_sha': head_of(run['id'])})
+        return jobs
 
     def __call__(self, cmd, **kw):
         self.calls.append(cmd)
@@ -160,6 +183,51 @@ class CiSelectionTests(unittest.TestCase):
         self.assertIn(seg(301, 2, 'fix/a', 'coverage UNKNOWN (job is not of this run attempt and head)'), line)
         self.assertIn(seg(302, 1, 'fix/b', 'coverage UNKNOWN (job is not of this run attempt and head)'), line)
         self.assertNotIn('shards', line)
+
+    def test_noop_runs_are_labelled_never_quoted_as_partial_shards(self):
+        """A label-triggered run that was never admitted skips every lane. It must not read as "PARTIAL 0/5 shards"."""
+        fake = Fake([noop_run(501, 'fix/n1'), admitted_run(502, 'fix/a'), noop_run(503, 'fix/n2')])
+        line = m.ci_selection_line(run=fake)
+        full = '5/5 shards ran 2575 files; full:merge_parent_mismatch ×5'
+        self.assertEqual(line, '*CI selection:* ' + seg(502, 1, 'fix/a', full) + ' | noop (not admitted) ×2')
+        self.assertNotIn('PARTIAL', line)
+        self.assertNotIn('501#', line)
+        self.assertNotIn('503#', line)
+
+    def test_noop_runs_do_not_use_up_the_admitted_run_slots(self):
+        wanted = m.CI_SELECTION_RUNS
+        runs = [noop_run(600, 'fix/n0'), noop_run(601, 'fix/n1')]
+        runs += [admitted_run(610 + i, f'fix/a{i}') for i in range(wanted + 1)]
+        fake = Fake(runs)
+        line = m.ci_selection_line(run=fake)
+        for i in range(wanted):
+            self.assertIn(f'{610 + i}#1/', line)
+        self.assertNotIn(f'{610 + wanted}#1/', line)  # one admitted run past the quota is never read
+        self.assertIn('noop (not admitted) ×2', line)
+        self.assertNotIn(f'{610 + wanted}', ' '.join(str(rid) for rid, _ in fake.job_reads))
+        self.assertLessEqual(len(line), 299)
+
+    def test_only_noop_runs_say_so_instead_of_showing_shards(self):
+        line = m.ci_selection_line(run=Fake([noop_run(701, 'fix/a'), noop_run(702, 'fix/b')]))
+        self.assertEqual(line, '*CI selection:* no admitted ci-head run found; noop (not admitted) ×2')
+
+    def test_noop_signal_is_the_test_jobs_gate_step_and_nothing_looser(self):
+        def entry():
+            return {'id': 801, 'attempt': 1, 'head': head_of(801), 'branch': 'fix/x'}
+
+        def classify(job):
+            e = entry()
+            m.ci_classify_jobs(e, [job] if job else [])
+            return bool(e.get('noop'))
+        self.assertTrue(classify(gate_job(801, 1, skipped=True)))
+        self.assertFalse(classify(gate_job(801, 1, skipped=False)))
+        self.assertFalse(classify(None))  # no `test` job: not a noop
+        self.assertFalse(classify(gate_job(801, 1, skipped=True, status='in_progress')))  # not finished: not a noop
+        self.assertFalse(classify(gate_job(801, 1, skipped=True, steps=None)))
+        self.assertFalse(classify(gate_job(801, 1, skipped=True, steps=[{'name': 'Set up job', 'conclusion': 'skipped'}])))
+        self.assertFalse(classify(gate_job(801, 1, skipped=True, name='classify-change-scope')))  # scope job is not the signal
+        with self.assertRaises(m.CiSelectionError):  # a job of another attempt can not mark this run a noop
+            classify(gate_job(801, 1, skipped=True, run_attempt=2))
 
     def test_unknown_expected_shard_set_is_coverage_unknown(self):
         cancelled = full_run(401, 'fix/c')
@@ -248,7 +316,7 @@ class CiSelectionTests(unittest.TestCase):
             self.assertNotIn('none', line.lower())
         skipped = [run_of(1, 'dup', [], conclusion='skipped'), run_of(2, 'dup', [], conclusion='skipped')]
         self.assertEqual(m.ci_selection_line(run=Fake(skipped)),
-                         '*CI selection:* unavailable (no completed non-skipped pull_request runs in the last 40)')
+                         f'*CI selection:* unavailable (no completed non-skipped pull_request runs in the last {m.CI_SELECTION_SCAN})')
 
     def test_unreadable_logs_make_the_shards_unreadable_not_the_line_empty(self):
         bad = run_of(601, 'fix/expired', [dict(leg(601, i + 1), log_rc=1) for i in range(5)])

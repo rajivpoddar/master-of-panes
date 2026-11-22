@@ -196,18 +196,29 @@ def test_hourly_report_shows_usable_budget_and_keeps_the_theoretical_one(scn, tm
     verdict = {'allow': 'OK', 'over_budget': 'OVER', 'unavailable': 'NO USABLE ACCOUNT (deny)'}[scn['decision']]
     mode = 'NORMAL' if scn['decision'] == 'allow' else 'P0-ONLY'
     assert modes[label] == mode
-    pool_line = next(row for row in section.splitlines() if row.startswith(f'{label} pool:'))
-    assert f'→ {verdict} → {label} routes: {mode}' in pool_line
+
+    # Rajiv C0ALZJHGE49 ts 1795323839.696369: the Burn section is a pipe table, one pool row then one row per account.
+    # Columns follow composer.BURN_TABLE_HEADER: Pool / account, State, Weekly used, Burn, Budget, Headroom, Session,
+    # Weekly resets, Note.
+    def table_row(first_cell):
+        row = next(r for r in section.splitlines() if r.startswith(f'| {first_cell} |'))
+        cells = [c.strip() for c in row.strip().strip('|').split('|')]
+        assert len(cells) == len(composer.BURN_TABLE_HEADER), row
+        return dict(zip(composer.BURN_TABLE_HEADER, cells))
+
+    pool_row = table_row(f'{label} pool')
+    assert pool_row['State'] == f'{verdict} · routes {mode}'
+    assert pool_row['Burn %/h'] == f'{scn["burn"]:.2f}'
     if _differs(scn):
         # Theoretical weekly headroom stays in the report, labelled as not usable now.
-        assert f'vs usable budget {scn["budget"]:.2f} %/h' in pool_line
-        assert f'weekly budget {scn["weekly"]:.2f}' in pool_line
-        assert f'{scn["live"] - scn["usable"]} account(s) not usable now' in pool_line
+        assert pool_row['Budget %/h'] == f'{scn["budget"]:.2f}'
+        assert (f'usable budget; weekly budget {scn["weekly"]:.2f}, '
+                f'{scn["live"] - scn["usable"]} account(s) not usable now') in pool_row['Note']
     else:
-        assert f'vs budget {scn["budget"]:.2f} %/h' in pool_line and 'usable budget' not in pool_line
+        assert pool_row['Budget %/h'] == f'{scn["budget"]:.2f}' and 'usable budget' not in pool_row['Note']
     for acct in accounts:
-        row = next(r for r in section.splitlines() if r.startswith(f'{label} {acct}:'))
-        assert ('not usable now' in row) == (acct in scn['unusable']), row
+        account_row = table_row(f'{label} {acct}')
+        assert ('not usable now' in account_row['Note']) == (acct in scn['unusable']), account_row
 
 
 def _dial():

@@ -1,5 +1,9 @@
-"""Hourly *OpenCode Go:* line: cap with its source, live primary procs, latest-per-name run registrations, Muse selection records.
-Counts only.
+"""Hourly *OpenCode Go:* section: a pipe table with a pool row (cap with its source, plan usage windows) and one row per
+OpenCode model (live primary procs, latest-per-name run registrations, Muse selection records).
+
+Rajiv C0ALZJHGE49 ts 1795323839.696369, 2026-11-22: "change the claude team and opencode burn section to tables". The sources
+and the never-silent-zero semantics below are unchanged; only the rendering is a table, and it adds the plan usage windows
+(monthly / weekly / rolling %) that the usage sampler records under opencode:go:*. No cost, no $ and no per-hour rate.
 
 Directive: OpenCode Go pool line for the hourly composer (no cost, no rate, no quota). Revised per the CTO re-review
 (C0ALZJHGE49 thread 1794932691.512539, ts 1794933244.444789):
@@ -33,11 +37,13 @@ spec.loader.exec_module(composer)
 HY4, DEEP, GLM, MUSE = composer.OPENCODE_MODELS
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
-LIVE_LABEL = "live primary procs now (nested alias requests not counted): "
-REG_LABEL = "run registrations last 1h (latest per run name, may include failed launches): "
+POOL = "OpenCode Go pool"
 MUSE_LABEL = "Muse selection records logged last 1h: "
 MUSE_SUFFIX = "selection log only, not proof of use or of no use)"
-BANNED = ("$", "%", "/h", "cost", "rate", "per hour")
+# The Used column now carries plan-window percentages by request, so "%" is allowed there; a dollar figure, a cost word or a
+# per-hour rate never is.
+BANNED = ("$", "%/h", "cost", "per hour")
+NO_SNAPSHOT = "no-usage-snapshots.jsonl"
 
 
 def stamp(seconds_ago):
@@ -64,8 +70,10 @@ def ps(*models):
     return "\n".join(rows)
 
 
-def counts_text(pool, hy4=0, deep=0, muse=0, glm=0):
-    return f"pool {pool} · {HY4} {hy4} · {DEEP} {deep} · {GLM} {glm} · {MUSE} {muse}"
+def counts(pool, hy4=0, deep=0, muse=0, glm=0, floor=False):
+    """Expected per-row count cells; `floor` is the lower-bound form ("≥N") used when a manifest could hide a registration."""
+    mark = "≥" if floor else ""
+    return {POOL: f"{mark}{pool}", HY4: f"{mark}{hy4}", DEEP: f"{mark}{deep}", GLM: f"{mark}{glm}", MUSE: f"{mark}{muse}"}
 
 
 def muse_cell(total, primary, alias, *notes, partial=False):
@@ -73,8 +81,29 @@ def muse_cell(total, primary, alias, *notes, partial=False):
     return f"{head} ({' · '.join([f'primary {primary}', f'alias {alias}', *notes])}; {MUSE_SUFFIX}"
 
 
-def line_of(cap, live, registered, muse):
-    return f"*OpenCode Go:* {cap} | {LIVE_LABEL}{live} | {REG_LABEL}{registered} | {MUSE_LABEL}{muse}"
+def parse(section):
+    """(head line, header cells, separator row, {row name: {header: cell}}, ordered row names) of an OpenCode Go section."""
+    rows = section.splitlines()
+    cells = [[c.strip() for c in r.strip().strip("|").split("|")] for r in rows[1:]]
+    header, body = cells[0], cells[2:]
+    return rows[0], header, rows[2], {r[0]: dict(zip(header, r)) for r in body}, [r[0] for r in body]
+
+
+def render(now, **kw):
+    # An absent usage snapshot keeps host state out of a test; pass snapshot= to exercise the Used column.
+    kw.setdefault("snapshot", Path("/nonexistent") / NO_SNAPSHOT)
+    return composer.opencode_line(now, **kw)
+
+
+def snapshot_file(tmp_path, rows):
+    path = tmp_path / "usage-snapshots.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    return path
+
+
+def usage_row(window, pct=20, ago=600, reset_in=3600, status="ok"):
+    return {"key": f"opencode:go:{window}", "status": status, "pct": pct, "ts": NOW.timestamp() - ago,
+            "reset": NOW.timestamp() + reset_in}
 
 
 # ---- cap: launcher precedence and source label ----
@@ -252,19 +281,18 @@ FIXTURES = [
          runs=[("px-bad", "{not json"), ("px-nomodel", {"started_at": stamp(60)}),
                ("px-future", {"model": DEEP, "started_at": stamp(-3600)}),
                ("px-nostart", {"model": MUSE}), ("px-ok", {"model": HY4, "started_at": stamp(30)})],
-         reg=("PARTIAL, observed minimum " + counts_text(1, hy4=1)
-              + " (4 manifests unreadable, undecodable, malformed or missing model/start time)")),
+         reg=counts(1, hy4=1, floor=True), reg_partial=4),
     dict(id="overwritten-registration-is-latest-per-name-and-failed-launch-still-counts", env={}, caps=None,
          runs=[("px-a", {"model": MUSE, "started_at": stamp(1800)}),  # first registration ...
                ("px-a", {"model": DEEP, "started_at": stamp(5)}),  # ... replaced by a later start/resume of the same name
                ("px-fail", {"model": HY4, "started_at": stamp(40), "rc": "UNAVAILABLE", "reason": "launch_failed"})],
-         reg=counts_text(2, hy4=1, deep=1)),
+         reg=counts(2, hy4=1, deep=1)),
     dict(id="explicit-glm-run-is-counted-in-the-pool", env={}, caps=None, ps=(GLM,),
          runs=[("px-glm", {"model": GLM, "started_at": stamp(30)})],
-         live=counts_text(1, glm=1), reg=counts_text(1, glm=1)),
+         live=counts(1, glm=1), reg=counts(1, glm=1)),
     dict(id="unused-muse-alias-selection-is-a-record-not-use", env={}, caps=None, ps=(DEEP,),
          log=[log_line(90, "px-x", "haiku")],
-         live=counts_text(1, deep=1), reg=counts_text(0), muse=muse_cell(1, 0, 1)),
+         live=counts(1, deep=1), reg=counts(0), muse=muse_cell(1, 0, 1)),
     dict(id="same-name-records-inside-60s-are-not-deduped", env={}, caps=None,
          log=[log_line(120, "px-one", "primary"), log_line(120, "px-one", "haiku"),
               log_line(119, "px-one", "sonnet"), log_line(119, "px-one", "opus")],
@@ -277,8 +305,7 @@ FIXTURES = [
     dict(id="invalid-utf8-manifest-is-partial-not-silent-and-not-a-crash", env={}, caps=None,
          runs=[("px-badutf8", b'{"model": "hy4-flash-free", "started_at": "' + stamp(30).encode() + b'", "note": "\xff\xfe"}'),
                ("px-ok", {"model": HY4, "started_at": stamp(30)})],
-         reg=("PARTIAL, observed minimum " + counts_text(1, hy4=1)
-              + " (1 manifest unreadable, undecodable, malformed or missing model/start time)")),
+         reg=counts(1, hy4=1, floor=True), reg_partial=1),
     dict(id="invalid-utf8-muse-lines-are-partial-unless-stamped-before-the-window", env={}, caps=None,
          log=[log_line(1800, "px-a"),  # decodes: counted
               log_line(120, "px-b").encode().replace(b"px-b", b"px-\xff"),  # in-window, bad byte in a field: PARTIAL
@@ -311,19 +338,28 @@ def test_fixture_table(tmp_path, case):
     log = tmp_path / "muse.log"
     if case.get("log") is not None:
         log.write_bytes(b"".join(row if isinstance(row, bytes) else row.encode() for row in case["log"]))
-    line = composer.opencode_line(NOW, caps=caps, root=runs, log=log, ps_text=ps(*case.get("ps", ())), environ=case["env"])
-    expected = line_of(case.get("cap", "cap 2 (default: key absent, no cap file)"),
-                       case.get("live", counts_text(0)), case.get("reg", counts_text(0)),
-                       case.get("muse", muse_cell(0, 0, 0, "log file absent")))
-    assert line == expected
-    assert "\n" not in line
+    section = render(NOW, caps=caps, root=runs, log=log, ps_text=ps(*case.get("ps", ())), environ=case["env"])
+    head, header, separator, by, names = parse(section)
+    assert header == composer.OPENCODE_TABLE_HEADER
+    assert names == [POOL, HY4, DEEP, GLM, MUSE]
+    live, reg = case.get("live", counts(0)), case.get("reg", counts(0))
+    for name in names:
+        assert (by[name]["Live now"], by[name]["Registered last 1h"]) == (live[name], reg[name]), name
+    expected_pool_note = case.get("cap", "cap 2 (default: key absent, no cap file)")
+    if case.get("reg_partial"):
+        n = case["reg_partial"]
+        expected_pool_note += (f"; registrations PARTIAL, observed minimum ({n} manifest{'' if n == 1 else 's'} "
+                               "unreadable, undecodable, malformed or missing model/start time)")
+    assert by[POOL]["Note"] == expected_pool_note
+    assert by[MUSE]["Note"] == MUSE_LABEL + case.get("muse", muse_cell(0, 0, 0, "log file absent"))
+    assert all(by[name]["Note"] == "—" for name in (HY4, DEEP, GLM))
     for banned in BANNED:
-        assert banned not in line.lower()
+        assert banned not in section.lower()
 
 
-# ---- the line ----
+# ---- the table ----
 
-def test_line_is_counts_only_with_cap_source_live_registrations_and_muse_selections(tmp_path):
+def test_section_is_a_pipe_table_with_one_pool_row_then_one_row_per_model(tmp_path):
     caps = tmp_path / "caps"
     caps.write_text("OPENCODE_PROXY_CAP=3\n")
     runs = tmp_path / "runs"
@@ -333,11 +369,22 @@ def test_line_is_counts_only_with_cap_source_live_registrations_and_muse_selecti
     manifest(runs, "px-c", DEEP, stamp(900))
     log = tmp_path / "muse.log"
     log.write_text(log_line(200, "px-m"))
-    line = composer.opencode_line(NOW, caps=caps, root=runs, log=log, ps_text=ps(DEEP, MUSE), environ={})
-    assert line == line_of("cap 3 (cap file)", counts_text(2, deep=1, muse=1), counts_text(3, hy4=1, deep=2),
-                           muse_cell(1, 1, 0))
+    section = render(NOW, caps=caps, root=runs, log=log, ps_text=ps(DEEP, MUSE), environ={})
+    rows = section.splitlines()
+    assert rows[0].startswith("*OpenCode Go:*")
+    assert rows[1] == "| " + " | ".join(composer.OPENCODE_TABLE_HEADER) + " |"
+    assert rows[2] == "|" + "|".join("---" for _ in composer.OPENCODE_TABLE_HEADER) + "|"
+    for row in rows[1:2] + rows[3:]:  # one cell per header column, or the native table would shift its columns
+        assert len(row.strip().strip("|").split("|")) == len(composer.OPENCODE_TABLE_HEADER), row
+    _, _, _, by, names = parse(section)
+    assert names == [POOL, HY4, DEEP, GLM, MUSE]
+    live, reg = counts(2, deep=1, muse=1), counts(3, hy4=1, deep=2)
+    for name in names:
+        assert (by[name]["Live now"], by[name]["Registered last 1h"]) == (live[name], reg[name])
+    assert by[POOL]["Note"] == "cap 3 (cap file)"
+    assert by[MUSE]["Note"] == MUSE_LABEL + muse_cell(1, 1, 0)
     for banned in BANNED:
-        assert banned not in line.lower()
+        assert banned not in section.lower()
 
 
 def test_each_unreadable_source_fails_independently_and_never_reads_zero(monkeypatch, tmp_path):
@@ -347,9 +394,14 @@ def test_each_unreadable_source_fails_independently_and_never_reads_zero(monkeyp
     monkeypatch.setattr(subprocess, "run", no_ps)
     log_dir = tmp_path / "log-is-a-directory"
     log_dir.mkdir()
-    line = composer.opencode_line(NOW, caps=tmp_path / "caps", root=tmp_path / "no-runs", log=log_dir, environ={})
-    assert line == ("*OpenCode Go:* cap 2 (default: key absent, no cap file) | " + LIVE_LABEL + "UNAVAILABLE | "
-                    + REG_LABEL + "UNAVAILABLE | " + MUSE_LABEL + "UNAVAILABLE")
+    section = render(NOW, caps=tmp_path / "caps", root=tmp_path / "no-runs", log=log_dir, environ={})
+    _, _, _, by, names = parse(section)
+    assert names == [POOL, HY4, DEEP, GLM, MUSE]
+    for name in names:
+        assert (by[name]["Live now"], by[name]["Registered last 1h"]) == ("UNAVAILABLE", "UNAVAILABLE"), name
+    assert by[POOL]["Used"] == "UNAVAILABLE"
+    assert by[POOL]["Note"] == "cap 2 (default: key absent, no cap file)"
+    assert by[MUSE]["Note"] == MUSE_LABEL + "UNAVAILABLE"
 
 
 def test_a_live_failure_does_not_hide_the_registration_counts(monkeypatch, tmp_path):
@@ -360,10 +412,11 @@ def test_a_live_failure_does_not_hide_the_registration_counts(monkeypatch, tmp_p
     runs = tmp_path / "runs"
     runs.mkdir()
     manifest(runs, "px-a", HY4, stamp(60))
-    line = composer.opencode_line(NOW, caps=tmp_path / "caps", root=runs, log=tmp_path / "muse.log", environ={})
-    assert LIVE_LABEL + "UNAVAILABLE" in line
-    assert REG_LABEL + counts_text(1, hy4=1) in line
-    assert MUSE_LABEL + muse_cell(0, 0, 0, "log file absent") in line
+    section = render(NOW, caps=tmp_path / "caps", root=runs, log=tmp_path / "muse.log", environ={})
+    _, _, _, by, _ = parse(section)
+    assert by[POOL]["Live now"] == by[HY4]["Live now"] == "UNAVAILABLE"
+    assert (by[POOL]["Registered last 1h"], by[HY4]["Registered last 1h"], by[DEEP]["Registered last 1h"]) == ("1", "1", "0")
+    assert by[MUSE]["Note"] == MUSE_LABEL + muse_cell(0, 0, 0, "log file absent")
 
 
 def test_a_cap_source_failure_reads_unverified_and_leaves_the_other_fields(monkeypatch, tmp_path):
@@ -373,21 +426,103 @@ def test_a_cap_source_failure_reads_unverified_and_leaves_the_other_fields(monke
     monkeypatch.setattr(composer, "opencode_cap", broken_cap)
     runs = tmp_path / "runs"
     runs.mkdir()
-    line = composer.opencode_line(NOW, caps=tmp_path / "caps", root=runs, log=tmp_path / "muse.log", ps_text=ps(), environ={})
-    assert line.startswith("*OpenCode Go:* cap UNVERIFIED (cap source failed) | " + LIVE_LABEL + counts_text(0))
+    section = render(NOW, caps=tmp_path / "caps", root=runs, log=tmp_path / "muse.log", ps_text=ps(), environ={})
+    _, _, _, by, _ = parse(section)
+    assert by[POOL]["Note"] == "cap UNVERIFIED (cap source failed)"
+    assert (by[POOL]["Live now"], by[POOL]["Registered last 1h"]) == ("0", "0")
+
+
+def test_a_source_failure_in_the_usage_reader_reads_unavailable_not_an_exception(monkeypatch, tmp_path):
+    def broken_usage(*args, **kwargs):
+        raise RuntimeError("usage reader broke")
+
+    monkeypatch.setattr(composer, "opencode_usage", broken_usage)
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    section = render(NOW, caps=tmp_path / "caps", root=runs, log=tmp_path / "muse.log", ps_text=ps(), environ={})
+    _, _, _, by, _ = parse(section)
+    assert by[POOL]["Used"] == "UNAVAILABLE"
+    assert by[POOL]["Live now"] == "0"  # the other columns are unaffected
+
+
+# ---- plan usage windows (the Used column) ----
+
+def test_usage_windows_render_percent_and_reset_per_window_newest_sample_wins(tmp_path):
+    snap = snapshot_file(tmp_path, [
+        usage_row("monthly", pct=11, ago=3000), usage_row("monthly", pct=17, ago=600, reset_in=40 * 86400),
+        usage_row("weekly", pct=34, reset_in=2 * 86400), usage_row("rolling", pct=23, reset_in=3600),
+        {"key": "claude:a@example.test:weekly", "status": "ok", "pct": 99, "ts": NOW.timestamp()},  # another account
+    ])
+    used = composer.opencode_usage(NOW, snap)
+    parts = used.split(" · ")
+    assert [p.split(" ")[0] for p in parts] == ["monthly", "weekly", "rolling"]
+    assert parts[0].startswith("monthly 17% (resets ") and parts[0].endswith(" IST)")
+    assert parts[1].startswith("weekly 34% (resets ") and parts[2].startswith("rolling 23% (resets ")
+    assert "99" not in used and "11%" not in used
+
+
+def test_usage_window_without_a_fresh_percentage_reads_stale_or_n_a_never_zero(tmp_path):
+    snap = snapshot_file(tmp_path, [
+        usage_row("monthly", pct=17, ago=7300),  # sampled longer ago than USAGE_SAMPLE_MAX_AGE
+        usage_row("weekly", pct=34, reset_in=-60),  # its reset has already passed: the percentage is from a closed window
+        usage_row("rolling", status="error"),  # sampler could not read this window
+    ])
+    assert composer.opencode_usage(NOW, snap) == "monthly stale · weekly stale · rolling n/a"
+
+
+def test_usage_window_missing_from_the_snapshot_is_n_a_and_no_row_at_all_is_unavailable(tmp_path):
+    assert composer.opencode_usage(NOW, snapshot_file(tmp_path, [usage_row("weekly", pct=5)])).startswith("monthly n/a · weekly 5%")
+    assert composer.opencode_usage(NOW, snapshot_file(tmp_path, [{"key": "claude:x:weekly", "ts": NOW.timestamp()}])) == "UNAVAILABLE"
+    assert composer.opencode_usage(NOW, tmp_path / "missing.jsonl") == "UNAVAILABLE"
+    assert composer.opencode_usage(NOW, tmp_path) == "UNAVAILABLE"  # a directory: unreadable, not an exception
+
+
+def test_usage_reader_skips_malformed_lines_and_rejects_out_of_range_or_non_numeric_percentages(tmp_path):
+    path = tmp_path / "usage-snapshots.jsonl"
+    rows = ["{not json opencode:go:", json.dumps(["opencode:go:weekly"]),
+            json.dumps(usage_row("monthly", pct=140)), json.dumps(usage_row("weekly", pct=True)),
+            json.dumps(usage_row("rolling", pct="23"))]
+    path.write_text("\n".join(rows) + "\n")
+    assert composer.opencode_usage(NOW, path) == "monthly n/a · weekly n/a · rolling n/a"
+
+
+def test_the_pool_row_carries_the_usage_windows_and_the_model_rows_do_not(tmp_path):
+    snap = snapshot_file(tmp_path, [usage_row("monthly", pct=17), usage_row("weekly", pct=34), usage_row("rolling", pct=23)])
+    runs = tmp_path / "runs"
+    runs.mkdir()
+    section = render(NOW, caps=tmp_path / "caps", root=runs, log=tmp_path / "muse.log", ps_text=ps(), environ={}, snapshot=snap)
+    _, _, _, by, _ = parse(section)
+    assert by[POOL]["Used"].startswith("monthly 17% (resets ") and "weekly 34%" in by[POOL]["Used"]
+    assert all(by[name]["Used"] == "—" for name in (HY4, DEEP, GLM, MUSE))
+    assert "$" not in section and "%/h" not in section
 
 
 # ---- placement in the hourly report ----
 
-def test_compose_places_the_line_under_the_burn_block_on_1h_only():
+def test_compose_places_the_section_under_the_burn_block_on_1h_only():
     now = datetime.now(timezone.utc)
-    line = "*OpenCode Go:* cap 2 (default: key absent) | " + LIVE_LABEL + counts_text(0)
+    section = render(now, ps_text=ps(), environ={}, root=Path("/nonexistent/runs"), log=Path("/nonexistent/muse.log"))
     burn = ("*Burn:* pace to Claude · Codex; headroom = budget - burn, %/h; mode is per pool\n"
-            "Claude pool: burn 0.10 → OK → Claude routes: NORMAL",
+            "| Pool / account | State |\n|---|---|\n| Claude pool | OK · routes NORMAL |",
             {"Claude": "NORMAL", "Codex": "NORMAL"})
-    hourly = composer.compose("1h", now, {"events": 0}, {}, [], burn=burn, opencode=line).splitlines()
-    three = composer.compose("3h", now, {"events": 0}, {}, [], opencode=line)
-    assert line in hourly
-    assert hourly.index(line) > hourly.index("Claude pool: burn 0.10 → OK → Claude routes: NORMAL")
-    assert line not in three
+    hourly = composer.compose("1h", now, {"events": 0}, {}, [], burn=burn, opencode=section).splitlines()
+    three = composer.compose("3h", now, {"events": 0}, {}, [], opencode=section)
+    head = section.splitlines()[0]
+    assert head in hourly
+    assert hourly.index(head) > hourly.index("| Claude pool | OK · routes NORMAL |")
+    assert head not in three
     assert "*OpenCode Go:*" not in composer.compose("1h", now, {"events": 0}, {}, [])
+
+
+def test_compose_keeps_one_native_table_and_turns_the_opencode_table_into_plain_rows():
+    now = datetime.now(timezone.utc)
+    section = render(now, ps_text=ps(), environ={}, root=Path("/nonexistent/runs"), log=Path("/nonexistent/muse.log"))
+    out = composer.compose("1h", now, {"events": 0}, {}, [], opencode=section).splitlines()
+    # With no Burn table above it, the OpenCode table is the first table in the post and stays native.
+    assert "| " + " | ".join(composer.OPENCODE_TABLE_HEADER) + " |" in out
+    pace = ["| Account | Used |", "|---|---|", "| a | 1% |"]
+    rewritten = composer.one_native_table([*pace, *section.splitlines()])
+    assert rewritten[:3] == pace
+    assert not any(row.startswith("|") for row in rewritten[3:])  # Slack allows one native table block per message
+    assert any(row.startswith(f"{POOL} — Live now: 0") for row in rewritten)
+    assert any(row.startswith(f"{HY4} — Live now: 0") for row in rewritten)
