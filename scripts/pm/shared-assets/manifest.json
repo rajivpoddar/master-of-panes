@@ -510,7 +510,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "8402c24c1b224d78b69bcc825927d573453bd3974e9d7a66f319e5d00cfa7f85",
+      "sha256": "40ea12d0b089bbbcf8ec07670e6fde889d268059444f6368b1a2051a214fca2f",
       "source_path": "claude/scripts/cost/sarvam-usage.py"
     },
     {
@@ -519,7 +519,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "62b93e4935c40ef929c1aa959b9b5f385bc5b3ce82c350ec66b45715e12654a4",
+      "sha256": "06168564a4a5f98cbcbcf8a37a3640433051d65472b2ee946bfe8d7cdb6c4538",
       "source_path": "claude/scripts/cost/tests/test_sarvam_usage.py"
     },
     {
@@ -951,7 +951,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "aeb0f59c5bc4aed30ff049ab2702647c158ab05d39f7db30bb014ef6ffc1bf3a",
+      "sha256": "811c5ac65779b5aec4e78beb1e494b532152285b605c4029475b98dcfe02f664",
       "source_path": "claude/scripts/proxy-preempt.py"
     },
     {
@@ -1187,7 +1187,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "8ded5abc9970ca8d72ffb05be986e56c7c38e9ae8704ef3a04008117d855c0a4",
+      "sha256": "295b37b98d8ce2c8e9bb0489f9ab81e8efc508f79835f6abbf38954395e49fef",
       "source_path": "claude/scripts/tests/test_proxy_preempt.py"
     },
     {
