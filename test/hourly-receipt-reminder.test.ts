@@ -2,6 +2,9 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { handoffHourlyReceipt, tickHourlyReminders, tickHourlyProcessing } from "../src/hourlyReceiptReminder.js";
 import type { MoPDatabase } from "../src/db.js";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 function fixture() {
   let value: string | null = null;
@@ -137,5 +140,55 @@ describe("receipt-bound hourly PM processing", () => {
     await tickHourlyProcessing(f.db, submit, now + 3 * 3600_000 + 1);
     assert.equal(calls, 0);
     assert.equal(f.state()[0].processing.state, "expired");
+  });
+
+  describe("routine batch bound to the one lane handoff (CTO REVISE #3)", () => {
+    const bucket = "2026-11-22:10";
+    function claim(payload: Record<string, unknown>) {
+      const root = mkdtempSync(join(tmpdir(), "hourly-batch-"));
+      mkdirSync(join(root, bucket), { recursive: true });
+      writeFileSync(join(root, bucket, "routine-batch.json"), JSON.stringify(payload));
+      return root;
+    }
+    const accepted = async () => ({ ok: true, ambiguous: false, submitKey: "Enter" as const });
+    it("binds the lane prompt to the private file, records acceptance apart from the report post, and hands the bucket off once", async () => {
+      const root = claim({ hourly_runnable: 2, fast_runnable: 5, rows: [{ id: 506, owner: "SECRET-OWNER", title: "SECRET-TITLE", step: "SECRET-STEP" }], ids: [], deferred: 0 });
+      const f = fixture();
+      assert.equal(handoffHourlyReceipt(f.db, ts, receipt, now, bucket), true);
+      assert.equal(f.state()[0].batch_bucket, bucket);
+      assert.equal(f.state()[0].processing.state, "pending", "the report post alone is not lane acceptance");
+      const messages: string[] = [];
+      const submit = async (message: string, event: string) => { messages.push(message); assert.equal(event, `cadence-hourly-processing-${ts}`); return accepted(); };
+      await tickHourlyProcessing(f.db, submit, now, root);
+      assert.equal(messages.length, 1);
+      assert.ok(messages[0].includes(join(root, bucket, "routine-batch.json")));
+      assert.match(messages[0], /2 runnable HOURLY obligation row\(s\) \(5 FAST row\(s\) stay on the Stop drain/);
+      assert.doesNotMatch(messages[0], /SECRET-(OWNER|TITLE|STEP)/, "free-text ledger fields never ride the handoff text");
+      const lane = f.state()[0].processing;
+      assert.equal(lane.state, "delivered");
+      assert.deepEqual(lane.batch, { bucket, file: join(root, bucket, "routine-batch.json"), hourly_runnable: 2, fast_open: 5 });
+      // The same receipt again, and a second parent in the same bucket, never produce another batch handoff.
+      handoffHourlyReceipt(f.db, ts, receipt, now, bucket);
+      const second = "1794375877.000001";
+      handoffHourlyReceipt(f.db, second, `OK ts=${second} channel=C0ALZJHGE49`, now, bucket);
+      assert.equal(f.state().find((row: { ts: string }) => row.ts === second).batch_bucket, undefined);
+      await tickHourlyProcessing(f.db, submit, now, root);
+      assert.equal(messages.length, 2, "the second parent is handed to the lane without the batch");
+      assert.doesNotMatch(messages[1], /ROUTINE BATCH/);
+    });
+    it("an invalid bucket, a missing file or nothing runnable leaves the handoff unchanged and unbound", async () => {
+      const f = fixture();
+      handoffHourlyReceipt(f.db, ts, receipt, now, "../../etc");
+      assert.equal(f.state()[0].batch_bucket, undefined);
+      for (const [label, root] of [["missing", mkdtempSync(join(tmpdir(), "hourly-batch-"))], ["empty", claim({ hourly_runnable: 0, fast_runnable: 3 })]] as const) {
+        const g = fixture();
+        handoffHourlyReceipt(g.db, ts, receipt, now, bucket);
+        let text = "";
+        await tickHourlyProcessing(g.db, async (message: string) => { text = message; return accepted(); }, now, root);
+        assert.doesNotMatch(text, /ROUTINE BATCH/, label);
+        assert.equal(g.state()[0].processing.batch, undefined, label);
+        assert.equal(g.state()[0].processing.state, "delivered", label);
+      }
+    });
   });
 });

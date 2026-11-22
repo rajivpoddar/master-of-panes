@@ -85,6 +85,12 @@ Every hourly list all open issues and PRs, including drafts, via paginated GitHu
 
 Routine CI-red classification and thread replies are inline or ONE batched agent per hour, not one per alert; at ~12 concurrent PM background agents queue additional launches, while PM continues handling urgent input and same-turn ownership inline (S110).
 
+### Routine obligation batch (CTO REVISE #3, C0ALZJHGE49 thread 1795353473.878109, ts 1795355302.148809)
+CTO: *"Feed the existing hourly lane the private routine-batch.json from the same bucket claim. The hourly report can show counts. Record the report post and the lane's acceptance as distinct outcomes, using the existing lane receipt, and keep one trigger."*
+- When the `cadence-hourly-processing-<parent-ts>` handoff text carries a `ROUTINE BATCH` clause, it names a private `routine-batch.json` in that bucket's claim dir (`~/.claude/hourly-heartbeat-posts/<YYYY-MM-DD:HH>/`). The ONE batched agent above works exactly the rows in that file (rows, then ids, then deferred rows from `pm-ops.py obligation-list --actionable --format json`) and each row's outcome is recorded in pm-ops. It is the same handoff as this skill's trigger: no second trigger, and never hand the same bucket's batch off again.
+- Never copy owners, titles or required actions into Slack: the hourly report shows counts only. FAST rows stay on the Stop drain; the Stop hook never lists routine rows and an hourly-only set never blocks Stop.
+- Two separate outcomes: the REPORT POST (the parent receipt; `routine-batch.posted` in the claim) and the LANE ACCEPTANCE (MoP's receipt on the parent's `processing` record, which also names the batch it accepted). A posted report never proves the lane accepted the batch; if acceptance is missing or UNKNOWN, reconcile it as visible work and do not re-send.
+
 ## Step 1: Errors (Axiom section)
 For each error class listed:
 1. **Mapped to an open issue/PR AND count at or below the 7-day same-slot median:** no action. Record "tracked by #N".

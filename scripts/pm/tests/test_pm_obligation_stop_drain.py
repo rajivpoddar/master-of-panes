@@ -639,39 +639,49 @@ def run_wrapper(lane, bucket_hour):
     return result, sorted(sends.glob("send-*.txt")), tmp / ".claude" / "hourly-heartbeat-posts" / bucket_hour
 
 
-def test_hourly_wrapper_hands_off_one_routine_batch_while_fast_rows_stay_open(lane):
-    """CTO REVISE #2: one batch handed to the hourly lane with 3+ FAST rows open, no duplicate in that hour."""
+def test_hourly_wrapper_exports_one_private_batch_with_counts_only_in_slack_while_fast_rows_stay_open(lane):
+    """CTO REVISE #2/#3: one private routine-batch.json per bucket, counts-only report line, report post recorded apart from lane acceptance."""
     seven_rows_five_fast(lane)
     first, sends, claim = run_wrapper(lane, "2026-11-22:10")
     assert first.returncode == 0, first.stderr + first.stdout
-    assert "ROUTINE_BATCH_HANDOFF" in first.stdout and "hourly_runnable=2 listed_rows=2 listed_ids=0 fast_open=5" in first.stdout
+    assert "ROUTINE_BATCH_REPORT_POSTED" in first.stdout and "hourly_runnable=2 fast_open=5" in first.stdout
+    assert "ROUTINE_BATCH_HANDOFF" not in first.stdout, "the wrapper no longer claims a lane handoff; MoP records acceptance"
     assert len(sends) == 1
     posted = sends[0].read_text()
-    assert "*Routine batch" in posted and "obligation:506 [hourly]" in posted and "obligation:507 [hourly]" in posted
-    assert "obligation:501" not in posted, "FAST rows stay on the Stop drain, not in the routine batch"
-    receipt = (claim / "routine-batch.handoff").read_text()
-    assert "parent_ts=1795354000.000" in receipt and "fast_open=5" in receipt
-    # A second invocation in the same hour finds the claim, posts nothing and hands nothing off again.
+    assert "*Routine batch*: 2 runnable routine row(s)" in posted and "5 FAST row(s) stay on the Stop drain" in posted
+    assert "obligation:" not in posted and "owner=" not in posted, "no ledger owners, titles or required actions in Slack"
+    private = json.loads((claim / "routine-batch.json").read_text())
+    assert private["hourly_runnable"] == 2 and private["fast_runnable"] == 5
+    assert {row["id"] for row in private["rows"]} == {506, 507} and all(row["title"] for row in private["rows"])
+    assert not (claim / "routine-batch.section.txt").exists() and not (claim / "routine-batch.handoff").exists()
+    record = (claim / "routine-batch.posted").read_text()
+    assert "outcome=REPORT_POSTED" in record and "parent_ts=1795354000.000" in record and "lane_acceptance=recorded-by-MoP" in record
+    # A second invocation in the same hour finds the claim, posts nothing and records nothing again.
     again, sends_again, _ = run_wrapper(lane, "2026-11-22:10")
-    assert "HOURLY_ALREADY_POSTED" in again.stdout and "ROUTINE_BATCH_HANDOFF" not in again.stdout
+    assert "HOURLY_ALREADY_POSTED" in again.stdout and "ROUTINE_BATCH_REPORT_POSTED" not in again.stdout
     assert len(sends_again) == 1
     # The Stop hook is not a second trigger: with the same rows it never lists a batch.
     assert "Hourly routine batch" not in reason(invoke(lane, grouped=False)[0])
-    # Next hour hands the still-open routine rows off again, once.
+    # Next hour exports the still-open routine rows again, once.
     nxt, sends_next, _ = run_wrapper(lane, "2026-11-22:11")
-    assert nxt.stdout.count("ROUTINE_BATCH_HANDOFF") == 1 and len(sends_next) == 2
+    assert nxt.stdout.count("ROUTINE_BATCH_REPORT_POSTED") == 1 and len(sends_next) == 2
 
 
 def test_hourly_wrapper_posts_without_a_batch_when_the_export_fails_or_nothing_is_routine(lane):
     add(lane, 801, severity="high")   # FAST only: nothing routine to hand off
     done, sends, claim = run_wrapper(lane, "2026-11-22:10")
     assert done.returncode == 0 and "*Routine batch" not in sends[0].read_text()
-    assert "ROUTINE_BATCH_HANDOFF" in done.stdout and "hourly_runnable=0" in done.stdout
+    assert "ROUTINE_BATCH_REPORT_POSTED" not in done.stdout and not (claim / "routine-batch.posted").exists()
     (lane[3] / "missing-hook-run").mkdir()
     env_lane = (lane[0], lane[1], {**lane[2], "PM_OPS_DB": str(lane[3] / "missing.db")}, lane[3])
     failed, sends2, _ = run_wrapper(env_lane, "2026-11-22:11")
     assert failed.returncode == 0 and "ROUTINE_BATCH_SKIPPED" in failed.stdout and "POSTED ts=" in failed.stdout
     assert len(sends2) == 2
+
+
+def test_hourly_thread_ts_sends_the_bucket_to_mop_so_the_lane_binds_this_buckets_batch():
+    src = (HOOKS.parent / "scripts" / "hourly-thread-ts").read_text()
+    assert '"receipt": a.receipt.strip(), "bucket": a.bucket' in src
 
 
 def test_stop_hook_has_no_hourly_marker_and_never_touches_user_prompt_submit():

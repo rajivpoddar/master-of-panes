@@ -76,39 +76,32 @@ awk 'length($0)>2900{print substr($0,1,2800) " … (truncated; full list in /tmp
   /tmp/heartbeat-1h-post.raw.txt > /tmp/heartbeat-1h-post.txt
 # The real 1h composer prefixes a CTO mention when Asks is present (CTO REVISE on MoP 54e8f693, 2026-11-13).
 head -1 /tmp/heartbeat-1h-post.txt | grep -Eq '^(<@[A-Z0-9]+> *)?\*Hourly' || { EXIT_REASON="compose_output_rejected_before_send"; echo "HOURLY_COMPOSE_FAILED unexpected first line ($(_claim_note))"; exit 1; }
-# Routine batch hand-off (CTO REVISE #2 C0ALZJHGE49 thread 1795353473.878109, ts 1795354512.689229: "A runnable FAST item can keep the
-# routine batch from reaching the hourly lane across successive hours ... Have the existing hourly wrapper hand the runnable HOURLY
-# rows to its existing batch lane ... Keep the Stop hook focused on FAST and avoid a second batch trigger."). This wrapper runs once
-# per bucket (the atomic claim above), so it is the ONE batch trigger: the Stop hook only blocks on FAST and never lists routine rows.
-# The runnable HOURLY rows come from the Stop hook's own classifier (`--hourly-batch`, read-only), independent of how many FAST rows are
-# open, and go into this report as a bounded section: PM's hourly-report-processing batch lane ("ONE batched agent per hour") reads it
-# from the posted report and from the ROUTINE_BATCH_HANDOFF line below. Fail-open (rule 50): any problem posts the report without it.
+# Routine batch (CTO REVISE #2 C0ALZJHGE49 thread 1795353473.878109, ts 1795354512.689229: "Have the existing hourly wrapper hand the runnable
+# HOURLY rows to its existing batch lane ... Keep the Stop hook focused on FAST and avoid a second batch trigger."; REVISE #3, ts
+# 1795355302.148809: "Feed the existing hourly lane the private routine-batch.json from the same bucket claim. The hourly report can show
+# counts. Record the report post and the lane's acceptance as distinct outcomes, using the existing lane receipt, and keep one trigger.").
+# This wrapper runs once per bucket (the atomic claim above). It exports the runnable HOURLY rows from the Stop hook's own classifier
+# (`--hourly-batch`, read-only, independent of how many FAST rows are open) into the PRIVATE file $CLAIM/routine-batch.json. Slack gets a
+# counts-only line: no ledger owners, titles or required actions. MoP's receipt-bound lane handoff (`hourly-thread-ts --set` below sends the
+# bucket) binds the existing hourly lane to that file and records lane acceptance on its own processing receipt; this script only records
+# the report post. Fail-open (rule 50): any problem posts the report without the line.
 RB_TOTAL=""; RB_ROWS=""; RB_IDS=""; RB_FAST=""
 _RB_HOOK="${PM_STOP_DRAIN_HOOK:-/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/pm-ops-sync-stop-validator.sh}"
 IFS= read -r -d '' _RB_PY <<'PY' || true
-import json, re, sys
-src, report, section = sys.argv[1:4]
+import json, sys
+src, report = sys.argv[1:3]
 d = json.load(open(src, encoding='utf-8'))
-clean = lambda t: re.sub(r'[<>]', '', ' '.join(str(t or '').split()))   # no accidental Slack mentions from row titles
 rows, ids = d.get('rows') or [], d.get('ids') or []
 total, fast = int(d.get('hourly_runnable') or 0), int(d.get('fast_runnable') or 0)
 if total:
-    lines = ['', "*Routine batch (this hour's one batched agent; does not block Stop)*: %d runnable routine row(s); %d FAST row(s) stay on the Stop drain" % (total, fast)]
-    for r in rows:
-        lines.append('• obligation:%s [hourly] owner=%s %s: %s' % (r['id'], clean(r.get('owner')), clean(r.get('title')), clean(r.get('step'))))
-    if ids:
-        lines.append('also routine runnable: ' + ','.join(str(i) for i in ids))
-    if d.get('deferred'):
-        lines.append('+%d more routine rows (pm-ops.py obligation-list --actionable --format json)' % d['deferred'])
-    text = '\n'.join(lines) + '\n'
-    open(section, 'w', encoding='utf-8').write(text)
     with open(report, 'a', encoding='utf-8') as handle:
-        handle.write(text)
+        handle.write("\n*Routine batch*: %d runnable routine row(s) handed to this hour's batch lane; %d FAST row(s) stay on the Stop drain\n" % (total, fast))
 print('%d %d %d %d' % (total, len(rows), len(ids), fast))
 PY
 if bash "$_RB_HOOK" --hourly-batch "$CLAIM/routine-batch.json" </dev/null > "$CLAIM/routine-batch.export" 2>&1 \
     && [ -s "$CLAIM/routine-batch.json" ] \
-    && _RB=$(python3 -I -c "$_RB_PY" "$CLAIM/routine-batch.json" /tmp/heartbeat-1h-post.txt "$CLAIM/routine-batch.section.txt" 2>/dev/null); then
+    && _RB=$(python3 -I -c "$_RB_PY" "$CLAIM/routine-batch.json" /tmp/heartbeat-1h-post.txt 2>/dev/null); then
+  chmod 600 "$CLAIM/routine-batch.json" 2>/dev/null || true
   read -r RB_TOTAL RB_ROWS RB_IDS RB_FAST <<< "$_RB"
 else
   echo "ROUTINE_BATCH_SKIPPED the routine batch could not be built ($(head -c 160 "$CLAIM/routine-batch.export" 2>/dev/null | tr '\n\r' '  ')); the report posts without it"
@@ -212,12 +205,13 @@ fi
 TS=$(sed -n 's/^OK ts=\([0-9][0-9]*\.[0-9][0-9]*\) channel=C0ALZJHGE49$/\1/p' "$CLAIM/receipt")
 /Users/rajiv/.claude/scripts/hourly-thread-ts --set "$TS" --bucket "$BUCKET" --receipt "$RECEIPT" >/dev/null 2>&1 \
   || echo "WARN hourly-thread-ts --set failed for ts=$TS"
-# Routine batch receipt: written only now, after the parent receipt is valid, so it names the parent ts the batch went out in. The claim
-# is per hour and the section is part of the one parent post, so a second run in this bucket exits above and cannot hand it off twice.
-if [ -n "$RB_TOTAL" ]; then
-  printf 'ts=%s parent_ts=%s bucket=%s hourly_runnable=%s rows=%s ids=%s fast_open=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TS" "$BUCKET" \
-    "$RB_TOTAL" "$RB_ROWS" "$RB_IDS" "$RB_FAST" > "$CLAIM/routine-batch.handoff" 2>/dev/null || true
-  echo "ROUTINE_BATCH_HANDOFF parent_ts=$TS hourly_runnable=$RB_TOTAL listed_rows=$RB_ROWS listed_ids=$RB_IDS fast_open=$RB_FAST receipt=$CLAIM/routine-batch.handoff"
+# Report-post record: written only now, after the parent receipt is valid, so it names the parent ts. It proves the REPORT POST only. Lane
+# ACCEPTANCE of the batch is a separate outcome that MoP records on the parent's lane receipt (hourly_receipt_reminders_v1 processing row)
+# when its single receipt-bound handoff reaches the existing hourly lane. The claim is per hour, so a second run in this bucket exits above.
+if [ "${RB_TOTAL:-0}" -gt 0 ] 2>/dev/null; then
+  printf 'outcome=REPORT_POSTED ts=%s parent_ts=%s bucket=%s hourly_runnable=%s fast_open=%s lane_acceptance=recorded-by-MoP-on-the-parent-lane-receipt\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TS" "$BUCKET" "$RB_TOTAL" "$RB_FAST" > "$CLAIM/routine-batch.posted" 2>/dev/null || true
+  echo "ROUTINE_BATCH_REPORT_POSTED parent_ts=$TS hourly_runnable=$RB_TOTAL fast_open=$RB_FAST (lane acceptance is recorded by MoP, not here) record=$CLAIM/routine-batch.posted"
 fi
 # Overflow-table replies (see the splitter above): after the parent receipt is validated and registered, one Alerts thread reply per
 # later table, in report order, each its own message so each renders a native table block.

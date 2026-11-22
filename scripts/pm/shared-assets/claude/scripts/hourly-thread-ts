@@ -156,10 +156,11 @@ def main() -> int:
             return 3 if (a.bucket or a.receipt) else 0
         # The receipt, not the thread pointer, is the handoff authority. Never retry an
         # uncertain HTTP result here; the server keys accepted handoffs by Slack ts.
+        # The bucket (already validated above) lets MoP bind the lane to this bucket's private routine-batch.json.
         try:
             request = urllib.request.Request(
                 os.environ.get("MOP_HOURLY_RECEIPT_URL", "http://127.0.0.1:3100/hourly-receipt"),
-                data=json.dumps({"ts": a.set, "receipt": a.receipt.strip()}).encode(),
+                data=json.dumps({"ts": a.set, "receipt": a.receipt.strip(), "bucket": a.bucket}).encode(),
                 headers={"Content-Type": "application/json"}, method="POST",
             )
             with urllib.request.urlopen(request, timeout=5) as response:

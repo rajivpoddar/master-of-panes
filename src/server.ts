@@ -1390,8 +1390,9 @@ registerAlertReminderRoutes(app, {
 // - morning-brief: `/morning-brief`
 app.post("/hourly-receipt", async (c) => {
   try {
-    const body = await c.req.json() as { ts?: unknown; receipt?: unknown };
-    if (typeof body.ts !== "string" || typeof body.receipt !== "string" || !handoffHourlyReceipt(db, body.ts, body.receipt)) {
+    const body = await c.req.json() as { ts?: unknown; receipt?: unknown; bucket?: unknown };
+    const bucket = typeof body.bucket === "string" ? body.bucket : undefined;
+    if (typeof body.ts !== "string" || typeof body.receipt !== "string" || !handoffHourlyReceipt(db, body.ts, body.receipt, Date.now(), bucket)) {
       return c.json({ error: "invalid hourly receipt" }, 400);
     }
     void hourlyReminderTick();
