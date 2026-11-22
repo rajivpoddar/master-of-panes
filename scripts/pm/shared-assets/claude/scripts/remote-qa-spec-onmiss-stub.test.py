@@ -46,28 +46,41 @@ check('--on-miss refuses RED/mutation legs (RED stays strict)', rc == 2 and 'GRE
 HX = 'f3dcdecd3e7f1a8b3ccd790d2c9688af6c4febc811c71ada80e3a2b3608c4a80'
 KX = 'fixtures/llm/v2/gemini_vertex/aiplatform.googleapis.com/gemini-3.1-flash-lite.stream/' + HX + '.bin'
 def manifest(**over):
-    doc = {'version': 1, 'head': h40, 'approval_ref': 'C0ALZJHGE49/1795301055.769519',
+    doc = {'version': 1, 'head': h40, 'product_pin': 'e' * 40, 'approval_ref': 'C0ALZJHGE49/1795301055.769519', 'max_reserve_usd': 0.65,
+           'langsmith': {'draft_sha256': '04606bdb97e2616e0d9ed943e7c4860408c769c7344f6606082b0d5335d3ad29',
+                         'aligned_slice_sha256': '3d5adf320e3e151cffd1a1b66d510ebdab7ccd098174c40be75cb61b2ed62a76'},
            'hashes': [{'hash': HX, 'provider': 'gemini_vertex', 'model': 'gemini-3.1-flash-lite', 'operation': 'stream', 'canonical_key': KX}]}
     doc.update(over)
     p = Path(tempfile.mkdtemp()) / 'exact.json'
     p.write_text(json.dumps(doc))
     return str(p)
 good = manifest()
-rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--dry-run')
+rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
 check('spec --on-miss-exact resolves llm_mode=capture-on-miss-exact', rc == 0 and o.endswith('llm_mode=capture-on-miss-exact'), o[-60:])
-rc, o = dry('--disposable-convex', '--on-miss', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--dry-run')
+rc, o = dry('--disposable-convex', '--on-miss', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
 check('--on-miss-exact replaces stock --on-miss (never both)', rc == 2 and 'replaces --on-miss' in o, o[-80:])
 rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--dry-run')
 check('--on-miss-exact refused without --canary-receipt', rc == 2 and 'requires --canary-receipt' in o, o[-80:])
+rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--dry-run')
+check('--on-miss-exact refused without --grant-receipt (the Run 9 object-only grant)', rc == 2 and 'requires --grant-receipt' in o, o[-80:])
+rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--exact-dry-check', '--dry-run')
+check('--exact-dry-check resolves llm_mode=capture-on-miss-exact', rc == 0 and o.endswith('llm_mode=capture-on-miss-exact'), o[-60:])
+rc, o = dry('--disposable-convex', '--on-miss', '--exact-dry-check', '--dry-run')
+check('--exact-dry-check is only valid with --on-miss-exact', rc == 2 and 'only valid with --on-miss-exact' in o, o[-80:])
+bad_pin = manifest(product_pin='e' * 12)
+rc, o = dry('--disposable-convex', '--on-miss-exact', bad_pin, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
+check('--on-miss-exact refuses a manifest without a full product pin', rc == 2 and 'QA_EXACT_MANIFEST_REFUSED' in o, o[-80:])
+rc, o = dry('--disposable-convex', '--on-miss-exact', manifest(max_reserve_usd=9), '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
+check('--on-miss-exact refuses a max_reserve_usd above the $3 cap', rc == 2 and 'QA_EXACT_MANIFEST_REFUSED' in o, o[-80:])
 rc, o = dry('--disposable-convex', '--canary-receipt', '/nonexistent', '--dry-run')
 check('--canary-receipt alone is refused', rc == 2 and 'only valid with --on-miss-exact' in o, o[-80:])
-rc, o = dry('--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--dry-run')
+rc, o = dry('--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
 check('--on-miss-exact without --disposable-convex refused (synthetic-only bound)', rc == 2 and 'requires --disposable-convex' in o, o[-80:])
 for why, bad in (('a 12-char hash prefix', manifest(hashes=[{'hash': HX[:12], 'provider': 'gemini_vertex', 'model': 'gemini-3.1-flash-lite', 'operation': 'stream', 'canonical_key': KX}])),
                  ('a manifest for another head', manifest(head='b' * 40))):
-    rc, o = dry('--disposable-convex', '--on-miss-exact', bad, '--canary-receipt', '/nonexistent', '--dry-run')
+    rc, o = dry('--disposable-convex', '--on-miss-exact', bad, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
     check('--on-miss-exact refuses ' + why, rc == 2 and 'QA_EXACT_MANIFEST_REFUSED' in o, o[-80:])
-rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--mutate-patch', str(pf), '--dry-run')
+rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--mutate-patch', str(pf), '--dry-run')
 check('--on-miss-exact is GREEN-only like stock on-miss', rc == 2 and 'GREEN-only' in o, o[-80:])
 check('llm_onmiss starts empty and is set ONLY by the --on-miss / --on-miss-exact flags',
       "llm_onmiss='' stripe_test_env='' pre_write_check=''" in SPEC_SH
@@ -78,6 +91,19 @@ cs, ce = SPEC_SH.index('cleanup() {'), SPEC_SH.index('trap cleanup EXIT')
 check('exact wiring: sessions armed only after prepare bound the manifest digest, report session minted in cleanup (after the leg), no shared secret anywhere',
       all(v > 0 for v in si.values()) and si['QA_ONMISS_EXACT_BOUND'] < si['scoped_arm_loop & arm_pid=$!'] and cs < si['mint-session --kind report'] < ce
       and 'heydonna-r2-credentials' not in SPEC_SH and 'LLM_FIXTURE_R2' not in SPEC_SH and 'R2_SECRET' not in SPEC_SH, str(si))
+up_at = SPEC_SH.index('rtb" up --owner')
+chk = {name: SPEC_SH.index(name) for name in ('check-grant-receipt', 'QA_APP_DATA_SCOPE_REQUIRED', 'check-app-data', 'check-exact-ids', 'check-app-mounts', 'reconcile-custody', 'scoped_arm_loop & arm_pid=$!')}
+check('REVISE 1: explicit scoped app-data selection and the grant receipt are required before any lease, box or spend',
+      chk['check-grant-receipt'] < up_at and chk['QA_APP_DATA_SCOPE_REQUIRED'] < up_at and 'QA_R2_SCOPED' in SPEC_SH, str(chk))
+check('REVISE 1: box env readback, trusted-derivation check (DENIED), shared-mount readback and custody reconcile all precede the first session',
+      chk['check-app-data'] < chk['check-exact-ids'] < chk['check-app-mounts'] < chk['reconcile-custody'] < chk['scoped_arm_loop & arm_pid=$!'] and 'product-pin.log' in SPEC_SH, str(chk))
+check('REVISE 1: every mint passes the trusted lease, physical box and head (never only a box-written file)',
+      len(re.findall(r'mint-session --kind (?:proxy|report) --box "\$box" --head "\$head" --spend-box "\$exact_spend_box" --ids', SPEC_SH)) == 2
+      and 'exact_spend_box="${pool_box:-$box}"' in SPEC_SH)
+check('REVISE 2: custody reconcile runs on the trusted host (uv + boto3) and the launcher itself never touches the legacy read key',
+      'reconcile-custody --box "$box" --head "$head" --spend-box "$exact_spend_box"' in SPEC_SH and 'LEGACY_ENV' not in SPEC_SH and 'R2_SECRET' not in SPEC_SH)
+check('REVISE 3: the join is verified by the helper (project, transcript, aligned draft), not accepted from the spec file',
+      'verify-join --report' in SPEC_SH and 'JOIN\n' not in SPEC_SH)
 check('exact wiring: the manifest and canary receipt are validated before any lease, box or spend',
       SPEC_SH.index('check-exact-manifest') < SPEC_SH.index('rtb" up --owner') and SPEC_SH.index('check-canary-receipt') < SPEC_SH.index('rtb" up --owner')
       and SPEC_SH.index('mint-session --kind check') < SPEC_SH.index('rtb" up --owner'))

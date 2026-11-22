@@ -192,7 +192,8 @@ def ids_for(box, host, head=None):
     finally:
         socket.gethostname = real
     if head:  # a different QA attempt (head) on the same physical box
-        ids = dict(ids, head=head, attempt_key='qa-capture-ledgers/onmiss/attempt-' + __import__('hashlib').sha256(('head:' + head).encode()).hexdigest()[:16] + '.json')
+        ids = dict(ids, head=head, stage_run='remote-qa-onmiss-' + H.identity(box) + '-' + head[:12],
+                   attempt_key='qa-capture-ledgers/onmiss/attempt-' + __import__('hashlib').sha256(('head:' + head).encode()).hexdigest()[:16] + '.json')
     return ids
 
 
@@ -483,13 +484,19 @@ def entry(key):
 
 
 K_OK, K_TWIN, K_LK, K_NA = learn('EXACT-OK'), learn('EXACT-TWIN SLOW'), learn('EXACT-LOOKUP'), learn('EXACT-NOT-APPROVED')
+K_CU, K_BD, K_DR = learn('EXACT-CUSTODY'), learn('EXACT-BOUND'), learn('EXACT-DRY')
 H_NA = entry(K_NA)['hash']
 MDIR = Path(tempfile.mkdtemp())
 
 
-def manifest_for(head, keys, name):
+PRODUCT_PIN = 'e' * 40
+DRAFT_SHA, ALIGNED_SHA = '04606bdb97e2616e0d9ed943e7c4860408c769c7344f6606082b0d5335d3ad29', '3d5adf320e3e151cffd1a1b66d510ebdab7ccd098174c40be75cb61b2ed62a76'
+
+
+def manifest_for(head, keys, name, max_reserve=1.1):
     p = MDIR / name
-    p.write_text(json.dumps({'version': 1, 'head': head, 'approval_ref': APPROVAL, 'hashes': [entry(k) for k in keys]}))
+    p.write_text(json.dumps({'version': 1, 'head': head, 'product_pin': PRODUCT_PIN, 'approval_ref': APPROVAL, 'max_reserve_usd': max_reserve,
+                             'langsmith': {'draft_sha256': DRAFT_SHA, 'aligned_slice_sha256': ALIGNED_SHA}, 'hashes': [entry(k) for k in keys]}))
     return p
 
 
@@ -502,7 +509,14 @@ for why, mutate in (('prefix hash', lambda x: x['hashes'][0].__setitem__('hash',
                     ('head mismatch', lambda x: x.__setitem__('head', 'e' * 40)),
                     ('empty set', lambda x: x.__setitem__('hashes', [])),
                     ('unknown field', lambda x: x.__setitem__('extra', 1)),
-                    ('duplicate hash', lambda x: x['hashes'].append(dict(x['hashes'][0])))):
+                    ('duplicate hash', lambda x: x['hashes'].append(dict(x['hashes'][0]))),
+                    ('zero max_reserve_usd', lambda x: x.__setitem__('max_reserve_usd', 0)),
+                    ('max_reserve_usd above the $3 cap', lambda x: x.__setitem__('max_reserve_usd', 3.5)),
+                    ('boolean max_reserve_usd', lambda x: x.__setitem__('max_reserve_usd', True)),
+                    ('missing product pin', lambda x: x.pop('product_pin')),
+                    ('short product pin', lambda x: x.__setitem__('product_pin', 'e' * 12)),
+                    ('langsmith pin missing the aligned slice', lambda x: x['langsmith'].pop('aligned_slice_sha256')),
+                    ('langsmith pin that is not a full digest', lambda x: x['langsmith'].__setitem__('draft_sha256', 'abc'))):
     doc = json.loads(MAN_PATH.read_text())
     mutate(doc)
     bad = MDIR / 'bad.json'
@@ -518,6 +532,36 @@ EX2_IDS = dict(ids_for(EX2_BOX, EX_HOST, head=EX_HEAD), exact=MAN)   # second le
 EX3_IDS = dict(ids_for(EX3_BOX, EX_HOST, head=EX_HEAD), exact=MAN)   # third lease: no reclaim of a completed earlier claim
 NS_IDS = dict(ids_for(NS_BOX, NS_HOST, head='c' * 40), exact=H.load_exact_manifest(manifest_for('c' * 40, [K_OK], 'ns.json'), 'c' * 40))
 CREDS, ENV_CLIENTS = [], []
+LEGACY = {}  # legacy (heydonna-fixtures) ledger objects by key: bytes
+
+
+def fake_qa_get(key):
+    with R2.lock:
+        if key not in R2.objects:
+            return None
+        raw, etag, _ = R2.objects[key]
+    return raw, etag
+
+
+def fake_qa_put(key, body, etag):
+    with R2.lock:
+        cur = R2.objects.get(key)
+        if (etag is None and cur is not None) or (etag is not None and (cur is None or cur[1] != etag)):
+            raise RuntimeError('QA_CUSTODY_CONFLICT: precondition')
+        R2.objects[key] = (body, '"%d"' % (9000 + len(R2.objects)), {})
+
+
+def legacy_get(key):
+    return (LEGACY[key], '"legacy"') if key in LEGACY else None
+
+
+def bind(ids, legacy=legacy_get):
+    """The trusted-host custody reconcile, against the fake legacy store and the same fake QA store the proxies use."""
+    return H.reconcile_custody(ids, ids['exact'], legacy, fake_qa_get, fake_qa_put)
+
+
+def led(attempts=None, requests=None, halted=False):
+    return json.dumps({'run_id': 'legacy', 'cap_usd': 3, 'attempts': attempts or {}, 'events': [], 'halted': halted, 'requests': requests or {}}).encode()
 
 
 class FakeSession:
@@ -551,6 +595,8 @@ boto3.Session = FakeSession
 boto3.client = lambda *a, **k: (ENV_CLIENTS.append(k.get('aws_access_key_id')) or FakeS3())
 try:
     UPSTREAM['keys'] = (EX_IDS['box_key'], EX_IDS['attempt_key'])
+    cus = bind(EX_IDS)  # custody bound by the trusted host BEFORE any proxy may reserve (the proxy refuses without it)
+    check('exact: trusted-host custody reconcile binds both QA ledgers before the first proxy boots', cus['status'] == 'RECONCILED_BOUND' and cus['allowance_usd'] == 3.0, cus['status'])
     arm(EX_IDS)
     me, ce = boot(EX_IDS, box=EX_BOX)
     me._QA_EXACT_SESSION_WAIT_S = 1
@@ -665,7 +711,7 @@ try:
         proxy_rows = H.mint_exact_sessions('proxy', EX2_IDS, MAN)
         check('mint proxy: read = fixture store + this run staging, GetObject only; write = staging + the two ledger objects only; 5 minutes',
               mint_calls[0] == (['fixtures/llm/v2/', stage], ['GetObject'], 300)
-              and mint_calls[1] == ([stage, EX2_IDS['box_key'], EX2_IDS['attempt_key']], ['GetObject', 'PutObject'], 300)
+              and mint_calls[1] == ([stage, EX2_IDS['box_key'], EX2_IDS['attempt_key'], EX2_IDS['run_key']], ['GetObject', 'PutObject'], 300)
               and not any(p.startswith('fixtures/') for p in mint_calls[1][0]) and set(proxy_rows) == {'read', 'write'}
               and all(r['manifest_digest'] == MAN['digest'] and r['lease'] == EX2_IDS['lease'] for r in proxy_rows.values()), str(mint_calls[:2]))
         mint_calls.clear()
@@ -730,6 +776,191 @@ try:
         except ValueError:
             ok = False
         check('arming prerequisite: ' + ('accepts ' if expect else 'rejects ') + why, ok is expect)
+    # ---- CTO REVISE 1795306033.832689 (pel-mwr051ua-91fb8062): 1 derivation/DENIED, 2 custody, dry-check, app-data, 3 verified join ----
+    D = H.derive_exact_ids(EX_BOX, EX_HEAD, EX_HOST)
+    check('trusted derivation equals the box-side identity (lease, physical box, ledger objects, staging prefix)',
+          all(D[k] == EX_IDS[k] for k in ('lease', 'spend_box', 'head', 'dict', 'box_key', 'attempt_key', 'stage_run', 'run_key')))
+    claimed = dict(D, manifest_digest=MAN['digest'])
+    check('box-supplied identities equal to the derivation are accepted', H.check_exact_ids(D, claimed, MAN) is True)
+    for why, key, value in (('another lease staging prefix', 'stage_run', 'remote-qa-onmiss-aaaaaaaaaaaa-' + EX_HEAD[:12]),
+                            ('another box ledger object', 'box_key', 'qa-capture-ledgers/onmiss/box-0000000000000000.json'),
+                            ('another attempt ledger object', 'attempt_key', 'qa-capture-ledgers/onmiss/attempt-0000000000000000.json'),
+                            ('another physical box', 'spend_box', 'rtb-pool-99-999999'), ('another head', 'head', 'f' * 40),
+                            ('another per-run replay ledger', 'run_key', 'qa-capture-ledgers/remote-qa-ffffffffffff.json'), ('another lease', 'lease', 'f' * 12), ('another Modal store', 'dict', 'heydonna-qa-onmiss-ffffffffffff'),
+                            ('another manifest digest', 'manifest_digest', '0' * 64)):
+        try:
+            H.check_exact_ids(D, dict(claimed, **{key: value}), MAN)
+            check('DENIED wrong-scope mint: ' + why, False)
+        except ValueError as error:
+            check('DENIED wrong-scope mint: box-supplied ' + why, 'QA_SCOPED_MINT_DENIED' in str(error), str(error)[:60])
+    for why, args in (('a pool lease alias without its physical pool server', (EX_BOX, EX_HEAD, EX_BOX)), ('a pool lease with a non-pool identity', (EX_BOX, EX_HEAD, 'evil-host')),
+                      ('an ephemeral box claiming another physical identity', ('rtb-qa-eph-111111', EX_HEAD, EX_HOST)), ('a short head', (EX_BOX, 'd' * 12, EX_HOST))):
+        try:
+            H.derive_exact_ids(*args)
+            check('derivation refuses ' + why, False)
+        except ValueError as error:
+            check('derivation refuses ' + why, 'QA_SCOPED_MINT_DENIED' in str(error), str(error)[:60])
+    foreign = MDIR / 'foreign-ids.json'
+    foreign.write_text(json.dumps(dict(claimed, stage_run='remote-qa-onmiss-bbbbbbbbbbbb-' + EX_HEAD[:12], box_key='qa-capture-ledgers/onmiss/box-1111111111111111.json')))
+    proc = subprocess.run([sys.executable, '-I', str(HELPER), 'mint-session', '--kind', 'proxy', '--box', EX_BOX, '--head', EX_HEAD, '--spend-box', EX_HOST,
+                           '--ids', str(foreign), '--exact-manifest', str(MAN_PATH)], capture_output=True, text=True, env={'HOME': str(MDIR), 'PATH': os.environ.get('PATH', '')})
+    check('CLI: mint-session with a box-supplied foreign scope is DENIED (rc 1) and emits no credential material',
+          proc.returncode == 1 and 'QA_SCOPED_MINT_DENIED' in proc.stderr and '"secret"' not in proc.stdout + proc.stderr and not proc.stdout.strip(), (proc.stderr or proc.stdout)[:120])
+    # custody
+    def fresh(box, host, head, name, max_reserve=1.1, key=None):
+        ids = dict(ids_for(box, host, head=head))
+        ids['exact'] = H.load_exact_manifest(manifest_for(head, [key or K_OK], name, max_reserve), head)
+        return ids
+    CU1 = fresh('rtbl-a1a1a1a1a1a1a1a1-919191', 'rtb-pool-15-161616', '91' * 20, 'cu1.json')
+    ro = H.reconcile_custody(CU1, CU1['exact'], legacy_get, fake_qa_get, None)
+    check('custody read-only (dry-check): legacy and QA authoritatively absent -> allowance $3, nothing written',
+          ro['status'] == 'RECONCILED_READ_ONLY' and ro['allowance_usd'] == 3.0 and CU1['box_key'] not in R2.objects and CU1['attempt_key'] not in R2.objects, ro['status'])
+    first = bind(CU1)
+    docs = [json.loads(R2.objects[k][0]) for k in (CU1['box_key'], CU1['attempt_key'])]
+    check('custody bound: a marker for THIS manifest digest is in BOTH QA ledgers and read back',
+          first['status'] == 'RECONCILED_BOUND' and all(d['custody']['manifest_digest'] == CU1['exact']['digest'] for d in docs) and not any(d['attempts'] for d in docs))
+    again = bind(CU1)
+    check('custody bind is idempotent (no duplicate carry, still bound)', again['status'] == 'RECONCILED_BOUND' and json.loads(R2.objects[CU1['box_key']][0])['attempts'] == {})
+    CU2 = fresh('rtbl-a2a2a2a2a2a2a2a2-929292', 'rtb-pool-16-171717', '92' * 20, 'cu2.json', key=K_CU)
+    LEGACY[CU2['box_key']] = led({'t1': {'charged_bound_usd': 0.975, 'settled': True}, 't2': {'charged_bound_usd': 0.7, 'settled': False}})
+    LEGACY[CU2['attempt_key']] = led({'t3': {'charged_bound_usd': 0.3, 'settled': True}})
+    c2 = bind(CU2)
+    check('custody: legacy exposure (including an UNSETTLED/UNKNOWN attempt at its bound) is carried into the QA ledgers; combined allowance computed',
+          c2['status'] == 'RECONCILED_BOUND' and c2['scopes']['box']['legacy']['committed_usd'] == 1.675 and c2['scopes']['box']['legacy']['unsettled'] == 1
+          and committed(CU2['box_key']) == 1.675 and committed(CU2['attempt_key']) == 0.3 and c2['allowance_usd'] == 1.325, json.dumps(c2['scopes']['box']['legacy'])[:120])
+    UPSTREAM['keys'] = (CU2['box_key'], CU2['attempt_key'])
+    arm(CU2)
+    mc, cc = boot(CU2, box='rtbl-a2a2a2a2a2a2a2a2-929292')
+    mc._QA_EXACT_SESSION_WAIT_S = 1
+    r = call_x(cc, 'EXACT-CUSTODY')
+    check('custody: the proxy counts the carried legacy exposure (1.675 + settled usage) against the same $3 cap and dispatches once',
+          r.status_code == 200 and n_calls('EXACT-CUSTODY') == 1 and round(committed(CU2['box_key']), 6) == round(1.675 + 0.975, 6), '%s committed=%.6f' % (r.status_code, committed(CU2['box_key'])))
+    CXN = []
+    for why, mutate, code in (('a combined allowance below the approved bound', lambda ids: LEGACY.__setitem__(ids['box_key'], led({'t': {'charged_bound_usd': 2.2, 'settled': True}})), 'QA_CUSTODY_ALLOWANCE'),
+                              ('a prior LEGACY claim for the approved hash', lambda ids: LEGACY.__setitem__(ids['attempt_key'], led(requests={K_OK: {'state': 'completed'}})), 'QA_CUSTODY_PRIOR_CLAIM'),
+                              ('a prior QA claim for the approved hash', lambda ids: R2.objects.__setitem__(ids['attempt_key'], (led(requests={K_OK: {'state': 'unknown'}}), '"5"', {})), 'QA_CUSTODY_PRIOR_CLAIM'),
+                              ('a halted legacy ledger', lambda ids: LEGACY.__setitem__(ids['box_key'], led(halted=True)), 'QA_CUSTODY_HALTED')):
+        n_box = 20 + len(CXN)
+        CXN.append(n_box)
+        CX = fresh('rtbl-%016x-%06d' % (0xb0b0b0b0b0b0b0 + n_box, 930000 + n_box), 'rtb-pool-%02d-%06d' % (30 + n_box, 181818 + n_box), '%040x' % (0xabc000 + n_box), 'cx%d.json' % n_box)
+        mutate(CX)
+        got = bind(CX)
+        check('custody refuses ' + why + ' (typed, nothing bound)', got['status'] == 'REFUSED' and code in {r['code'] for r in got['refusals']}
+              and 'custody' not in json.loads(R2.objects.get(CX['box_key'], (b'{}',))[0] or b'{}'), str([r['code'] for r in got['refusals']]))
+    CU3 = fresh('rtbl-a3a3a3a3a3a3a3a3-949494', 'rtb-pool-17-191919', '93' * 20, 'cu3.json')
+    def uncertain(key):
+        raise RuntimeError('QA_CUSTODY_UNCERTAIN: legacy ledger lookup failed (ClientError)')
+    try:
+        bind(CU3, uncertain)
+        check('custody: a legacy lookup failure (403/timeout) is neither absence nor balance: refused, nothing written', False)
+    except RuntimeError as error:
+        check('custody: a legacy lookup failure (403/timeout) is neither absence nor balance: refused, nothing written',
+              'QA_CUSTODY_UNCERTAIN' in str(error) and CU3['box_key'] not in R2.objects and CU3['attempt_key'] not in R2.objects)
+    # proxy side of custody + bound + dry-check
+    CU4 = fresh('rtbl-a4a4a4a4a4a4a4a4-959595', 'rtb-pool-18-202020', '94' * 20, 'cu4.json', key=K_CU)   # NOT reconciled
+    UPSTREAM['keys'] = (CU4['box_key'], CU4['attempt_key'])
+    arm(CU4)
+    m4, c4 = boot(CU4, box='rtbl-a4a4a4a4a4a4a4a4-959595')
+    m4._QA_EXACT_SESSION_WAIT_S = 1
+    before = n_calls('EXACT-CUSTODY')
+    r = call_x(c4, 'EXACT-CUSTODY')
+    check('proxy: no reservation without the trusted-host custody marker (typed 402, zero upstream)', r.status_code == 402 and r.json().get('error') == 'QA_ONMISS_CUSTODY_UNRECONCILED' and n_calls('EXACT-CUSTODY') == before, str(r.status_code) + r.text[:80])
+    CU5 = fresh('rtbl-a5a5a5a5a5a5a5a5-969696', 'rtb-pool-19-212121', '95' * 20, 'cu5.json', max_reserve=0.5, key=K_BD)
+    bind(CU5)
+    arm(CU5)
+    m5, c5 = boot(CU5, box='rtbl-a5a5a5a5a5a5a5a5-969696')
+    m5._QA_EXACT_SESSION_WAIT_S = 1
+    r = call_x(c5, 'EXACT-BOUND')
+    check('proxy: a priced bound above the approved max_reserve_usd is refused before any reservation (typed 402, zero upstream)',
+          r.status_code == 402 and r.json().get('error') == 'QA_ONMISS_BOUND_EXCEEDS_APPROVAL' and n_calls('EXACT-BOUND') == 0 and committed(CU5['box_key']) == 0, str(r.status_code) + r.text[:80])
+    CU6 = dict(fresh('rtbl-a6a6a6a6a6a6a6a6-979797', 'rtb-pool-21-222222', '96' * 20, 'cu6.json', key=K_DR), exact_dry=True)
+    arm(CU6)
+    m6, c6 = boot(CU6, box='rtbl-a6a6a6a6a6a6a6a6-979797')
+    m6._QA_EXACT_SESSION_WAIT_S = 1
+    hz6 = c6.get('/_healthz').json()
+    r = call_x(c6, 'EXACT-DRY')
+    check('dry-check: AUTHORITATIVE missing fixture proven on the scoped path, typed 424, zero upstream, zero ledger writes',
+          hz6.get('qa_exact_dry') is True and r.status_code == 424 and r.json().get('error') == 'QA_ONMISS_DRY_CHECK_MISSING' and n_calls('EXACT-DRY') == 0
+          and CU6['box_key'] not in R2.objects and CU6['attempt_key'] not in R2.objects, str(r.status_code) + r.text[:90])
+    r = call_x(c6, 'EXACT-NOT-APPROVED')
+    check('dry-check: a nonmember is still refused NOT_APPROVED', r.status_code == 424 and r.json().get('error') == 'QA_ONMISS_NOT_APPROVED')
+    # app-data scoping, mount replacement, grant receipt
+    good_env = ('R2_ACCOUNT_ID=%s\nR2_ACCESS_KEY_ID=TESTACCESS\nR2_SECRET_ACCESS_KEY=s3cret\nR2_BUCKET_NAME=heydonna-qa\nR2_ENDPOINT_URL=https://%s.r2.cloudflarestorage.com\nR2_PUBLIC_URL=\n'
+                % ('a' * 32, 'a' * 32))
+    real_fp = H.RUN9_SIGNER_FP
+    H.RUN9_SIGNER_FP = _hl.sha256(b'TESTACCESS').hexdigest()[:16]
+    try:
+        vals, fp = H.app_data_values(good_env)
+        check('app-data: the verified scoped heydonna-qa identity (bucket, signer fingerprint, account endpoint, no public host) is accepted', fp == H.RUN9_SIGNER_FP and vals['R2_BUCKET_NAME'] == 'heydonna-qa')
+        for why, text in (('the production-parity uploads bucket', good_env.replace('heydonna-qa', 'heydonna-uploads')), ('a public R2 host', good_env.replace('R2_PUBLIC_URL=', 'R2_PUBLIC_URL=https://pub-x.r2.dev')),
+                          ('a foreign endpoint', good_env.replace('.r2.cloudflarestorage.com', '.r2.example.com')), ('a missing secret', good_env.replace('R2_SECRET_ACCESS_KEY=s3cret\n', ''))):
+            try:
+                H.app_data_values(text)
+                check('app-data refuses ' + why, False)
+            except ValueError as error:
+                check('app-data refuses ' + why, 'QA_APP_DATA_UNSCOPED' in str(error))
+    finally:
+        H.RUN9_SIGNER_FP = real_fp
+    try:
+        H.app_data_values(good_env)
+        check('app-data refuses a signer that is not the verified Run 9 grant', False)
+    except ValueError as error:
+        check('app-data refuses a signer that is not the verified Run 9 grant', 'QA_APP_DATA_UNSCOPED' in str(error))
+    tree = MDIR / 'modal-tree'
+    for rel, body in (('modal/audio/processor.py', 'a = modal.Secret.from_name("heydonna-r2-credentials")\nb = [modal.Secret.from_name("heydonna-r2-credentials"), "x"]\n'),
+                      ('modal/shared/names.py', 'NAMES = ("openrouter", "heydonna-r2-credentials",)\n'),
+                      ('modal/audio/tests/test_p.py', 'assert "heydonna-r2-credentials" in names\n')):
+        (tree / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tree / rel).write_text(body)
+    staged = {}
+    nfiles, nrep = H.overlay_app_data_mounts(tree, EX_BOX, staged)
+    for path, text in staged.items():
+        path.write_text(text)
+    check('app-data mounts: every non-test shared R2 mount becomes this lease-only QA secret; tests untouched; none remain',
+          (nfiles, nrep) == (2, 3) and H.shared_mounts_remaining(tree) == [] and ('"heydonna-qa-r2-' + H.identity(EX_BOX) + '"') in (tree / 'modal/audio/processor.py').read_text()
+          and 'heydonna-r2-credentials' in (tree / 'modal/audio/tests/test_p.py').read_text(), str((nfiles, nrep)))
+    (tree / 'modal/audio/leftover.py').write_text('s = modal.Secret.from_name("heydonna-r2-credentials")\n')
+    check('app-data mount readback names a leftover shared mount', H.shared_mounts_remaining(tree) == ['modal/audio/leftover.py'])
+    grant = {'signer_fingerprint': H.RUN9_SIGNER_FP, 'status': 'active', 'effect': 'allow', 'policy_count': 1, 'object_only': True,
+             'resources': {'com.cloudflare.edge.r2.bucket.acct_default_heydonna-qa': '*'},
+             'permission_groups': ['Workers R2 Storage Bucket Item Read', 'Workers R2 Storage Bucket Item Write']}
+    for why, mutate, expect in (('the verified Run 9 object-only grant', lambda g: None, True), ('a grant that also reaches another bucket', lambda g: g['resources'].update({'com.cloudflare.edge.r2.bucket.acct_default_heydonna-fixtures': '*'}), False),
+                                ('a grant with an admin permission group', lambda g: g['permission_groups'].append('Workers R2 Storage Bucket Admin'), False), ('another signer', lambda g: g.__setitem__('signer_fingerprint', '0' * 16), False)):
+        doc = json.loads(json.dumps(grant))
+        mutate(doc)
+        gp = MDIR / 'grant.json'
+        gp.write_text(json.dumps(doc))
+        try:
+            H.check_grant_receipt(gp)
+            ok = True
+        except ValueError:
+            ok = False
+        check('grant receipt: ' + ('accepts ' if expect else 'rejects ') + why, ok is expect)
+    # verified join
+    jrep = {'join': [{'ingress_request_id': 'req-1', 'provider_dispatch': {'provider_response_ids': ['r1']}}]}
+    jt = {'schema': 1, 'verified': True, 'completed': True, 'error': False, 'request_id': 'req-1/proofread', 'run_id': 'run-1', 'trace_id': 'trace-1',
+          'project_session_id': 'sess-1', 'project': 'qa-m15-qa-spec-X', 'transcript_id': 't1', 'created_transcript_id': 't1',
+          'draft_sha256': DRAFT_SHA, 'aligned_slice_sha256': ALIGNED_SHA}
+    for why, report, trace, expect in (
+            ('complete', jrep, jt, 'COMPLETE'), ('a different project', jrep, dict(jt, project='qa-m15-other'), 'LANGSMITH_PROJECT_MISMATCH'),
+            ('a different transcript', jrep, dict(jt, created_transcript_id='t2'), 'LANGSMITH_TRANSCRIPT_MISMATCH'),
+            ('an empty transcript', jrep, dict(jt, transcript_id='', created_transcript_id=''), 'LANGSMITH_TRANSCRIPT_MISMATCH'),
+            ('another aligned draft block', jrep, dict(jt, aligned_slice_sha256='0' * 64), 'ALIGNED_DRAFT_MISMATCH'),
+            ('another persisted draft', jrep, dict(jt, draft_sha256='0' * 64), 'ALIGNED_DRAFT_MISMATCH'),
+            ('another request', jrep, dict(jt, request_id='req-9'), 'LANGSMITH_REQUEST_MISMATCH'),
+            ('missing trace ids', jrep, dict(jt, trace_id=''), 'LANGSMITH_IDS_MISSING'), ('an unverified trace', jrep, dict(jt, verified=False), 'LANGSMITH_UNJOINED'),
+            ('an errored trace', jrep, dict(jt, error=True), 'LANGSMITH_UNJOINED'), ('no trace file', jrep, None, 'LANGSMITH_UNJOINED'),
+            ('no provider dispatch id', {'join': [{'ingress_request_id': 'req-1', 'provider_dispatch': {'provider_response_ids': []}}]}, jt, 'PROVIDER_DISPATCH_ID_MISSING'),
+            ('no ingress id', {'join': [{'provider_dispatch': {'provider_response_ids': ['r1']}}]}, jt, 'INGRESS_ID_MISSING'),
+            ('no dispatch', {'join': []}, jt, 'NO_DISPATCH'), ('no report', None, jt, 'NO_REPORT')):
+        check('join: ' + why + ' -> ' + expect, H.exact_join_status(report, trace, 'qa-spec-X', MAN) == expect)
+    jr, jtp, jo = MDIR / 'jr.json', MDIR / 'jt.json', MDIR / 'jo.json'
+    jr.write_text(json.dumps(jrep))
+    jtp.write_text(json.dumps(jt))
+    proc = subprocess.run([sys.executable, '-I', str(HELPER), 'verify-join', '--report', str(jr), '--trace', str(jtp), '--run-id', 'qa-spec-X', '--exact-manifest', str(MAN_PATH), '--output', str(jo)],
+                          capture_output=True, text=True)
+    check('CLI verify-join prints the status line and writes the verified join receipt', proc.returncode == 0 and 'QA_ONMISS_JOIN_RESULT status=COMPLETE dispatches=1' in proc.stdout
+          and json.loads(jo.read_text())['expected']['project'] == 'qa-m15-qa-spec-X', (proc.stdout + proc.stderr)[:120])
 finally:
     boto3.Session, boto3.client = saved_session, saved_client_ex
 

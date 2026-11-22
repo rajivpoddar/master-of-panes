@@ -953,7 +953,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "52e62f52b78074f38ae87f693d2dfd540964503e6f97acbfa1d5c1e28ed4815e",
+      "sha256": "581e997691b214b3156f21f98af7c4bf71d0c7a119b67d0c44eda9c4f7d45ed6",
       "source_path": "claude/scripts/remote-qa-modal.py"
     },
     {
@@ -962,7 +962,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "229806a1b29113be76ddbe8c512098deba1ebcdd8b61b82b28ab256f82fafeb2",
+      "sha256": "e8ac80c13a893af22fdaf85f661e412aa7e405e271fdda1edcd169fd85047b6c",
       "source_path": "claude/scripts/remote-qa-onmiss-stub.test.py"
     },
     {
@@ -980,7 +980,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "60305e4376ed98c2063e3a6fb63fae997e5042889293e2e66f757f717f4722a9",
+      "sha256": "bfd2d1904556fadb356da3382418dd1a709c8f968ed24e906c138081a131fbb9",
       "source_path": "claude/scripts/remote-qa-spec-onmiss-stub.test.py"
     },
     {
@@ -989,7 +989,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "2549b70d756064ffeeb74c27a44de72997aa69ceaf399753c958287c609fb5c4",
+      "sha256": "9c9eb5488b9a2ce1f051f43eb39e1e5e3365796273086767151c0f364f472634",
       "source_path": "claude/scripts/remote-qa-spec.sh"
     },
     {

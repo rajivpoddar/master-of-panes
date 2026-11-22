@@ -114,13 +114,16 @@ EXACT_SESSION_REFRESH_S = 100    # the controller re-mints this often while a le
 EXACT_SESSION_WAIT_S = 60        # a proxy fixture client waits this long for its first armed session, then fails closed
 CANARY_MAX_AGE_S = 48 * 3600
 EXACT_ENTRY_KEYS = {'hash', 'provider', 'model', 'operation', 'canonical_key'}
-EXACT_TERMINAL_CODES = ('QA_ONMISS_NOT_APPROVED', 'QA_ONMISS_LOOKUP_UNCERTAIN', 'QA_ONMISS_FIXTURE_EXISTS')
+EXACT_TERMINAL_CODES = ('QA_ONMISS_NOT_APPROVED', 'QA_ONMISS_LOOKUP_UNCERTAIN', 'QA_ONMISS_FIXTURE_EXISTS',
+                        'QA_ONMISS_CUSTODY_UNRECONCILED', 'QA_ONMISS_BOUND_EXCEEDS_APPROVAL')
 
 
 def load_exact_manifest(path, head=None):
     """Per-run exact-hash approval. Pure and fail-closed: nothing but this file widens what may be dispatched live.
-    Shape: {version:1, head:<40hex>, approval_ref, hashes:[{hash, provider, model, operation, canonical_key}]}; full 64-hex
-    hashes only (no prefixes or wildcards) and the canonical key must embed exactly that provider, model, operation and hash."""
+    Shape: {version:1, head:<40hex>, product_pin:<40hex>, approval_ref, max_reserve_usd, langsmith:{draft_sha256, aligned_slice_sha256},
+    hashes:[{hash, provider, model, operation, canonical_key}]}; full 64-hex hashes only (no prefixes or wildcards) and the canonical key
+    must embed exactly that provider, model, operation and hash. max_reserve_usd binds the CTO-approved single-request bound; langsmith
+    pins the persisted draft and the aligned alternate block the native trace must show; product_pin is the approved product head."""
     p = Path(path)
     if p.is_symlink() or not p.is_file() or p.stat().st_size > EXACT_MANIFEST_MAX_BYTES:
         raise ValueError('QA_EXACT_MANIFEST_INVALID: unreadable, symlink or too large')
@@ -129,9 +132,15 @@ def load_exact_manifest(path, head=None):
         data = json.loads(raw.decode('utf-8'))
     except ValueError:
         raise ValueError('QA_EXACT_MANIFEST_INVALID: not JSON') from None
-    if (not isinstance(data, dict) or set(data) != {'version', 'head', 'approval_ref', 'hashes'} or data['version'] != 1
+    if (not isinstance(data, dict) or set(data) != {'version', 'head', 'product_pin', 'approval_ref', 'max_reserve_usd', 'langsmith', 'hashes'}
+            or data['version'] != 1
             or not isinstance(data['head'], str) or not re.fullmatch(r'[0-9a-f]{40}', data['head'])
+            or not isinstance(data['product_pin'], str) or not re.fullmatch(r'[0-9a-f]{40}', data['product_pin'])
             or not isinstance(data['approval_ref'], str) or not re.fullmatch(r'[A-Za-z0-9._:/@-]{8,200}', data['approval_ref'])
+            or isinstance(data['max_reserve_usd'], bool) or not isinstance(data['max_reserve_usd'], (int, float))
+            or not 0 < data['max_reserve_usd'] <= ONMISS_CAP_USD
+            or not isinstance(data['langsmith'], dict) or set(data['langsmith']) != {'draft_sha256', 'aligned_slice_sha256'}
+            or any(not isinstance(v, str) or not re.fullmatch(r'[0-9a-f]{64}', v) for v in data['langsmith'].values())
             or not isinstance(data['hashes'], list) or not 1 <= len(data['hashes']) <= EXACT_MANIFEST_MAX_HASHES):
         raise ValueError('QA_EXACT_MANIFEST_INVALID: shape')
     if head is not None and data['head'] != head:
@@ -149,8 +158,233 @@ def load_exact_manifest(path, head=None):
             raise ValueError('QA_EXACT_MANIFEST_INVALID: entry')
         seen.add(digest)
         entries[key] = {'hash': digest, 'provider': provider, 'model': model, 'operation': operation}
-    return {'digest': hashlib.sha256(raw).hexdigest(), 'head': data['head'], 'approval_ref': data['approval_ref'],
-            'entries': entries}
+    return {'digest': hashlib.sha256(raw).hexdigest(), 'head': data['head'], 'product_pin': data['product_pin'],
+            'approval_ref': data['approval_ref'], 'max_reserve_usd': float(data['max_reserve_usd']),
+            'langsmith': dict(data['langsmith']), 'entries': entries}
+
+
+def derive_exact_ids(box, head, spend_box):
+    """TRUSTED-HOST derivation of everything a scoped credential is bound to: the lease (from the controller's own box receipt), the
+    physical-box identity (from the controller's pool/ephemeral receipt) and the exact head. Nothing the box wrote is used; a
+    box-supplied value can only be CHECKED against this (see check_exact_ids)."""
+    identity(box)
+    if not isinstance(head, str) or not re.fullmatch(r'[0-9a-f]{40}', head):
+        raise ValueError('QA_SCOPED_MINT_DENIED: exact head required')
+    if box.startswith('rtbl-'):
+        if not isinstance(spend_box, str) or not re.fullmatch(r'rtb-t?pool-[0-9]{2}(?:-[0-9]{6})?', spend_box):
+            raise ValueError('QA_SCOPED_MINT_DENIED: a pool lease needs its physical pool server identity')
+    elif spend_box != box:
+        raise ValueError('QA_SCOPED_MINT_DENIED: an ephemeral box is its own physical identity')
+    return onmiss_keys(box, spend_box, head)
+
+
+def check_exact_ids(derived, claimed, manifest):
+    """DENIED unless every box-written identity equals the trusted derivation and the baked manifest digest is this run's."""
+    for key in ('lease', 'spend_box', 'head', 'dict', 'box_key', 'attempt_key', 'stage_run', 'run_key'):
+        if claimed.get(key) != derived[key]:
+            raise ValueError('QA_SCOPED_MINT_DENIED: box-supplied ' + key + ' differs from the trusted derivation')
+    if claimed.get('manifest_digest') != manifest['digest'] or manifest['head'] != derived['head']:
+        raise ValueError('QA_SCOPED_MINT_DENIED: box-supplied manifest digest or head differs from the approved manifest')
+    return True
+
+
+CUSTODY_STATES_OPEN = ('reserved', 'unknown', 'upstream_error', 'completed_unstored')
+
+
+def _ledger_view(raw, approved):
+    """Pure summary of one durable on-miss ledger object (None = authoritatively absent). Spend is the SAME sum the proxy uses
+    (every attempt at its charged bound, settled or not); carry rows are reported separately so they are never counted twice."""
+    if raw is None:
+        return {'state': 'absent', 'committed_usd': 0.0, 'own_usd': 0.0, 'carry_usd': 0.0, 'unsettled': 0, 'halted': False,
+                'request_states': {}, 'prior_claims': [], 'sha256': None}
+    doc = json.loads(raw)
+    if not isinstance(doc, dict) or not isinstance(doc.get('attempts', {}), dict) or not isinstance(doc.get('requests', {}), dict):
+        raise ValueError('QA_CUSTODY_UNCERTAIN: ledger shape')
+    attempts, requests = doc.get('attempts') or {}, doc.get('requests') or {}
+    carry = sum(a.get('charged_bound_usd', 0) for a in attempts.values() if a.get('lease') == 'legacy-carry')
+    total = sum(a.get('charged_bound_usd', 0) for a in attempts.values())
+    states = {}
+    for row in requests.values():
+        states[row.get('state')] = states.get(row.get('state'), 0) + 1
+    return {'state': 'present', 'committed_usd': round(total, 6), 'own_usd': round(total - carry, 6), 'carry_usd': round(carry, 6),
+            'unsettled': sum(not a.get('settled') for a in attempts.values()), 'halted': bool(doc.get('halted')),
+            'request_states': states, 'sha256': hashlib.sha256(raw).hexdigest(),
+            'prior_claims': sorted(k for k, r in requests.items() if k in approved and r.get('state') != 'refused')}
+
+
+def reconcile_custody(ids, manifest, legacy_get, qa_get, qa_put=None, now=None):
+    """Spend custody before any dispatch, on the trusted host. Reads the LEGACY (heydonna-fixtures) and QA (heydonna-qa) on-miss
+    ledgers for BOTH the physical box and the exact head. Any lookup that is not an authoritative present/absent refuses (a 403 is
+    neither absence nor balance). Refuses on a prior claim for an approved hash anywhere, a halted ledger, or a combined allowance
+    below the approved single-request bound. Unless read-only (dry-check), binds the combined exposure into the QA ledgers
+    (carry row + a custody marker bound to this manifest digest) so the proxy's own cap and single-flight claim see it and
+    refuses every reservation without that marker. legacy_get/qa_get(key) -> (raw, etag) | None; qa_put(key, doc_bytes, etag)."""
+    approved = set(manifest['entries'])
+    scopes = {'box': ids['box_key'], 'attempt': ids['attempt_key']}
+    receipt = {'at': int(now if now is not None else time.time()), 'manifest_digest': manifest['digest'], 'head': ids['head'],
+               'spend_box': ids['spend_box'], 'cap_usd': ONMISS_CAP_USD, 'max_reserve_usd': manifest['max_reserve_usd'],
+               'scopes': {}, 'refusals': [], 'bound': False}
+    fetched = {}
+    for scope, key in scopes.items():
+        legacy, qa = legacy_get(key), qa_get(key)
+        view = {'key': key, 'legacy': _ledger_view(legacy[0] if legacy else None, approved),
+                'qa': _ledger_view(qa[0] if qa else None, approved)}
+        if legacy:
+            view['legacy']['etag'] = legacy[1]
+        view['combined_usd'] = round(view['legacy']['committed_usd'] + view['qa']['own_usd'], 6)
+        view['remaining_usd'] = round(ONMISS_CAP_USD - view['combined_usd'], 6)
+        receipt['scopes'][scope] = view
+        fetched[scope] = (legacy, qa)
+        for side in ('legacy', 'qa'):
+            if view[side]['prior_claims']:
+                receipt['refusals'].append({'code': 'QA_CUSTODY_PRIOR_CLAIM', 'scope': scope, 'side': side, 'hashes': [k.rsplit('/', 1)[-1][:64] for k in view[side]['prior_claims']]})
+            if view[side]['halted']:
+                receipt['refusals'].append({'code': 'QA_CUSTODY_HALTED', 'scope': scope, 'side': side})
+        if view['remaining_usd'] < manifest['max_reserve_usd']:
+            receipt['refusals'].append({'code': 'QA_CUSTODY_ALLOWANCE', 'scope': scope, 'combined_usd': view['combined_usd'],
+                                        'remaining_usd': view['remaining_usd'], 'max_reserve_usd': manifest['max_reserve_usd']})
+    receipt['allowance_usd'] = min(v['remaining_usd'] for v in receipt['scopes'].values())
+    if receipt['refusals']:
+        receipt['status'] = 'REFUSED'
+        return receipt
+    if qa_put is None:
+        receipt['status'] = 'RECONCILED_READ_ONLY'
+        return receipt
+    for scope, key in scopes.items():
+        view = receipt['scopes'][scope]
+        legacy, qa = fetched[scope]
+        marker = {'manifest_digest': manifest['digest'], 'at': receipt['at'], 'head': ids['head'], 'spend_box': ids['spend_box'],
+                  'legacy': {'bucket': 'heydonna-fixtures', 'state': view['legacy']['state'], 'committed_usd': view['legacy']['committed_usd'],
+                             'sha256': view['legacy']['sha256']}}
+        doc = json.loads(qa[0]) if qa else {'run_id': 'custody-reconcile', 'cap_usd': ONMISS_CAP_USD, 'attempts': {}, 'events': [],
+                                            'halted': False, 'allow_billable_tools': False, 'tool_admission_budget_usd': 2.0,
+                                            'tool_cap_policy': 'soft cap: final call may overshoot by its actual search usage',
+                                            'requests': {}}
+        doc['custody'] = marker
+        carry_id = 'legacy-carry-' + (view['legacy']['sha256'] or 'absent')[:16]
+        if view['legacy']['committed_usd'] > 0 and carry_id not in doc['attempts']:
+            usd = view['legacy']['committed_usd']
+            doc['attempts'][carry_id] = {'hash': 'legacy-carry', 'onmiss_key': None, 'lease': 'legacy-carry', 'spend_box': ids['spend_box'],
+                                         'provider': 'legacy', 'model': 'legacy-ledger', 'reserved_usd': usd, 'charged_bound_usd': usd,
+                                         'settled': True, 'billable_tools': False, 'reserved_search_cost_usd': 0, 'per_search_usd': 0,
+                                         'input_rate_per_million': 0, 'output_rate_per_million': 0,
+                                         'legacy_source': {'bucket': 'heydonna-fixtures', 'key': key, 'sha256': view['legacy']['sha256'],
+                                                           'etag': view['legacy'].get('etag')}}
+        qa_put(key, json.dumps(doc).encode(), qa[1] if qa else None)
+    # Read back: the marker, the carried exposure and the combined total must be exactly what was bound.
+    for scope, key in scopes.items():
+        got = qa_get(key)
+        view = receipt['scopes'][scope]
+        back = _ledger_view(got[0] if got else None, approved)
+        if (not got or json.loads(got[0]).get('custody', {}).get('manifest_digest') != manifest['digest']
+                or back['committed_usd'] < view['legacy']['committed_usd'] + view['qa']['own_usd'] - 1e-9):
+            receipt['refusals'].append({'code': 'QA_CUSTODY_READBACK_MISMATCH', 'scope': scope})
+        view['qa_after'] = back
+    receipt['status'] = 'REFUSED' if receipt['refusals'] else 'RECONCILED_BOUND'
+    receipt['bound'] = not receipt['refusals']
+    return receipt
+
+
+def check_grant_receipt(path):
+    """The Run 9 parent grant, on the exact launch path: one active allow policy, object read/write only, solely on heydonna-qa."""
+    p = Path(path)
+    if p.is_symlink() or not p.is_file() or p.stat().st_size > 16384:
+        raise ValueError('QA_GRANT_RECEIPT_INVALID: unreadable')
+    r = json.loads(p.read_text())
+    resources = r.get('resources') if isinstance(r, dict) else None
+    ok = (isinstance(r, dict) and r.get('signer_fingerprint') == RUN9_SIGNER_FP and r.get('status') == 'active'
+          and r.get('effect') == 'allow' and r.get('policy_count') == 1 and r.get('object_only') is True
+          and isinstance(resources, dict) and len(resources) == 1 and all(k.endswith('_default_heydonna-qa') and v == '*' for k, v in resources.items())
+          and sorted(r.get('permission_groups') or []) == ['Workers R2 Storage Bucket Item Read', 'Workers R2 Storage Bucket Item Write'])
+    if not ok:
+        raise ValueError('QA_GRANT_RECEIPT_INVALID: not the verified Run 9 object-only grant on heydonna-qa')
+    return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+RUN9_SIGNER_FP = '9b8c9f309b38da1f'  # access-id SHA-256 prefix of the verified Run 9 heydonna-qa object-only signer
+APP_DATA_R2_NAMES = ('R2_ACCOUNT_ID', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_BUCKET_NAME', 'R2_ENDPOINT_URL')
+SHARED_R2_SECRET = '"heydonna-r2-credentials"'
+
+
+def app_data_values(env_text):
+    """The scoped QA storage values an env file carries; refuses anything that is not the Run 9 scoped identity (explicit
+    QA_R2_SCOPED selection, bucket heydonna-qa, signer fingerprint 9b8c9f309b38da1f, account endpoint, no public host,
+    no production bucket reference). Returns (values, fingerprint). Values are never printed by callers."""
+    values = {}
+    for line in env_text.splitlines():
+        key, sep, value = line.removeprefix('export ').partition('=')
+        key = key.strip()
+        if sep and key in APP_DATA_R2_NAMES + ('R2_PUBLIC_URL', 'QA_R2_SCOPED'):
+            try:
+                parts = shlex.split(value, comments=True)
+            except ValueError:
+                raise ValueError('QA_APP_DATA_UNSCOPED: ambiguous env entry') from None
+            values[key] = parts[0] if len(parts) == 1 else ''
+    fp = hashlib.sha256(values.get('R2_ACCESS_KEY_ID', '').encode()).hexdigest()[:16]
+    if (any(not values.get(k) for k in APP_DATA_R2_NAMES) or values['R2_BUCKET_NAME'] != SCOPED_FIXTURE_BUCKET or fp != RUN9_SIGNER_FP
+            or values['R2_ENDPOINT_URL'] != 'https://' + values['R2_ACCOUNT_ID'] + '.r2.cloudflarestorage.com'
+            or values.get('R2_PUBLIC_URL') or 'heydonna-uploads' in ' '.join(values.values())):
+        raise ValueError('QA_APP_DATA_UNSCOPED: app-data storage is not the Run 9 scoped heydonna-qa identity')
+    return {k: values[k] for k in APP_DATA_R2_NAMES}, fp
+
+
+def r2_lease_secret_name(box):
+    return 'heydonna-qa-r2-' + identity(box)
+
+
+def overlay_app_data_mounts(root, box, changes):
+    """Exact mode: every shared R2 mount in the checkout's Modal sources (non-test) becomes THIS lease's QA-only secret, so no
+    leased runtime mounts the shared (production-parity) R2 secret. Stages into changes; returns (files, replaced)."""
+    files = replaced = 0
+    for p in sorted(Path(root).glob('modal/**/*.py')):
+        if '/tests/' in str(p) or '__pycache__' in str(p):
+            continue
+        text = changes.get(p) if p in changes else p.read_text()
+        count = text.count(SHARED_R2_SECRET)
+        if count:
+            changes[p] = text.replace(SHARED_R2_SECRET, '"' + r2_lease_secret_name(box) + '"')
+            files, replaced = files + 1, replaced + count
+    return files, replaced
+
+
+def shared_mounts_remaining(root):
+    """Static readback on the box checkout: non-test Modal sources that still reference the shared R2 secret."""
+    return sorted(str(p.relative_to(root)) for p in Path(root).glob('modal/**/*.py')
+                  if '/tests/' not in str(p) and '__pycache__' not in str(p) and SHARED_R2_SECRET in p.read_text())
+
+
+def _same_request(a, b):
+    return bool(a and b) and (a == b or a.startswith(b + '/') or b.startswith(a + '/'))
+
+
+def exact_join_status(report, trace, run_id, manifest):
+    """Provenance join, verified (not merely present): the proxy's ingress id and provider dispatch id (from the durable claim)
+    against the run-local spec's native LangSmith evidence for THIS case: its project, the transcript it created, the persisted
+    draft and the aligned alternate block, each compared with what the approval pinned. First failing check names the status."""
+    rows = (report or {}).get('join') or []
+    if report is None:
+        return 'NO_REPORT'
+    if not rows:
+        return 'NO_DISPATCH'
+    ingress = [r.get('ingress_request_id') for r in rows if r.get('ingress_request_id')]
+    if not ingress:
+        return 'INGRESS_ID_MISSING'
+    if not all(isinstance(r.get('provider_dispatch'), dict) and r['provider_dispatch'].get('provider_response_ids') for r in rows):
+        return 'PROVIDER_DISPATCH_ID_MISSING'
+    t = trace if isinstance(trace, dict) else {}
+    if t.get('schema') != 1 or t.get('verified') is not True or t.get('completed') is not True or t.get('error') is not False:
+        return 'LANGSMITH_UNJOINED'
+    if not any(_same_request(t.get('request_id'), i) for i in ingress):
+        return 'LANGSMITH_REQUEST_MISMATCH'
+    if not t.get('run_id') or not t.get('trace_id') or not t.get('project_session_id'):
+        return 'LANGSMITH_IDS_MISSING'
+    if t.get('project') != 'qa-m15-' + run_id:
+        return 'LANGSMITH_PROJECT_MISMATCH'
+    if not t.get('transcript_id') or t.get('transcript_id') != t.get('created_transcript_id'):
+        return 'LANGSMITH_TRANSCRIPT_MISMATCH'
+    if t.get('draft_sha256') != manifest['langsmith']['draft_sha256'] or t.get('aligned_slice_sha256') != manifest['langsmith']['aligned_slice_sha256']:
+        return 'ALIGNED_DRAFT_MISMATCH'
+    return 'COMPLETE'
 
 
 def load_exact_ids(path):
@@ -159,7 +393,7 @@ def load_exact_ids(path):
     if p.is_symlink() or not p.is_file() or p.stat().st_size > 16384:
         raise ValueError('QA_EXACT_IDS_INVALID')
     ids = json.loads(p.read_text())
-    keys = ('lease', 'spend_box', 'head', 'dict', 'box_key', 'attempt_key', 'stage_run', 'manifest_digest')
+    keys = ('lease', 'spend_box', 'head', 'dict', 'box_key', 'attempt_key', 'stage_run', 'run_key', 'manifest_digest')
     if (not isinstance(ids, dict) or any(not isinstance(ids.get(k), str) or not re.fullmatch(r'[A-Za-z0-9._/-]{1,120}', ids[k])
                                          for k in keys) or not re.fullmatch(r'[0-9a-f]{64}', ids['manifest_digest'])):
         raise ValueError('QA_EXACT_IDS_INVALID')
@@ -184,16 +418,25 @@ def onmiss_identity(root, box):
         raise RuntimeError('capture-on-miss: pool box hostname unverified (' + host + '); refusing a per-lease budget')
     else:
         spend_box = box  # ephemeral box: the receipt name is unique for the box lifetime
+    return onmiss_keys(box, spend_box, head)
+
+
+def onmiss_keys(box, spend_box, head):
+    """Pure: the lease, ledger objects and staging prefix for (lease box, physical box, exact head). Shared by the box
+    (onmiss_identity) and by the TRUSTED HOST (derive_exact_ids), so a scope can be derived without trusting the box."""
     digest = lambda s: hashlib.sha256(s.encode()).hexdigest()[:16]
     return {'lease': identity(box), 'spend_box': spend_box, 'head': head, 'dict': onmiss_dict_name(box),
             'box_key': 'qa-capture-ledgers/onmiss/box-' + digest('box:' + spend_box) + '.json',
             'attempt_key': 'qa-capture-ledgers/onmiss/attempt-' + digest('head:' + head) + '.json',
             # S161 scope: on-miss stages under its OWN run prefix (this lease + head), so a failed capture lane's or an
             # older lease's leftovers are never published by an on-miss finish (rule 32: failed capture stays FAILED).
-            'stage_run': 'remote-qa-onmiss-' + identity(box) + '-' + head[:12]}
+            'stage_run': 'remote-qa-onmiss-' + identity(box) + '-' + head[:12],
+            # The proxy's own per-run replay-event ledger (_QA_LEDGER, one CAS object per lease): its _log_action writes to it on every
+            # hit/miss/forward, so an exact-mode write session must reach it (found by the real-R2 proof; fakes allow everything).
+            'run_key': 'qa-capture-ledgers/remote-qa-' + identity(box) + '.json'}
 
 
-def onmiss_effective(root, box, onmiss, exact=None):
+def onmiss_effective(root, box, onmiss, exact=None, dry=False):
     """ids when capture-on-miss can bind a lifetime spend identity; otherwise None = strict replay (fail safe, visible).
     An --exact-manifest run NEVER degrades: an invalid manifest, head mismatch or unbound identity refuses the run."""
     if not onmiss:
@@ -202,6 +445,7 @@ def onmiss_effective(root, box, onmiss, exact=None):
         ids = onmiss_identity(root, box)
         if exact:
             ids['exact'] = load_exact_manifest(exact, ids['head'])
+            ids['exact_dry'] = bool(dry)
         return ids
     except Exception as error:
         if exact:
@@ -495,12 +739,12 @@ def stop(box, remote=False):
         cli(['dict', 'delete', store, '--yes'], env)
         print('QA_ONMISS_LOCAL_STORE_DELETED name=' + store)
     # A missing secret is an idempotent success, determined by the list, not an ignored CLI failure.
-    secret_name = 'heydonna-qa-' + identity(box)
     listed = cli(['secret', 'list', '--json'], env, True)
     if not isinstance(listed, list):
         raise RuntimeError('Unrecognised Modal secret list')
-    if any(r.get('name') == secret_name for r in listed):
-        cli(['secret', 'delete', secret_name, '--yes'], env)
+    for secret_name in ('heydonna-qa-' + identity(box), r2_lease_secret_name(box)):  # invocation secret + exact-mode lease-only R2 secret
+        if any(r.get('name') == secret_name for r in listed):
+            cli(['secret', 'delete', secret_name, '--yes'], env)
     print('QA_MODAL_CLEANUP=verified box=' + box)
 
 
@@ -630,7 +874,8 @@ def ledger_source(box, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmis
                               or not isinstance(exact.get('entries'), dict) or not exact['entries']):
         raise ValueError('Invalid exact-hash approval')
     exact_source = None if exact is None else {'digest': exact['digest'], 'approval_ref': exact['approval_ref'],
-                                               'entries': exact['entries']}
+                                               'max_reserve_usd': float(exact['max_reserve_usd']),
+                                               'dry': bool(onmiss.get('exact_dry')), 'entries': exact['entries']}
     return source + (QA_ONMISS_SOURCE.replace('__ONMISS_DICT__', repr(onmiss['dict']))
                      .replace('__ONMISS_LEASE__', repr(onmiss['lease']))
                      .replace('__ONMISS_SPEND_ID__', repr(onmiss['spend_box']))
@@ -645,7 +890,7 @@ def ledger_source(box, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmis
 
 
 def overlay(root, box=None, capture=False, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmiss=False, exact=None,
-            ids_out=None):
+            ids_out=None, dry=False):
     if onmiss and capture:
         raise ValueError('--on-miss and --capture are exclusive')
     if exact and not onmiss:
@@ -958,7 +1203,7 @@ echo "QA_MODAL_DEPLOY_SECONDS=$((SECONDS-qa_deploy_started)) parallel=true"
         changes[p] = overlay_audit_secrets(p.read_text())
     if box:
         proxy = root/'modal/shared/llm_proxy_server.py'
-        ids = onmiss_effective(root, box, onmiss, exact)
+        ids = onmiss_effective(root, box, onmiss, exact, dry)
         if ids:
             print('QA_ONMISS_IDENTITY lease=' + ids['lease'] + ' spend_box=' + ids['spend_box'] + ' head=' + ids['head'][:12]
                   + ' cap_usd=' + str(ONMISS_CAP_USD) + ' store=' + ids['dict'])
@@ -966,11 +1211,15 @@ echo "QA_MODAL_DEPLOY_SECONDS=$((SECONDS-qa_deploy_started)) parallel=true"
             print('QA_ONMISS_EXACT digest=' + ids['exact']['digest'] + ' approved=' + str(len(ids['exact']['entries']))
                   + ' approval_ref=' + ids['exact']['approval_ref'])
             if ids_out:
-                record = {k: ids[k] for k in ('lease', 'spend_box', 'head', 'dict', 'box_key', 'attempt_key', 'stage_run')}
+                record = {k: ids[k] for k in ('lease', 'spend_box', 'head', 'dict', 'box_key', 'attempt_key', 'stage_run', 'run_key')}
                 record['manifest_digest'] = ids['exact']['digest']
                 record['canonical_keys'] = sorted(ids['exact']['entries'])
                 Path(ids_out).write_text(json.dumps(record, indent=2) + '\n')
         changes[proxy] = overlay_proxy(proxy.read_text(), box, capture, allow_billable_tools, tool_spend_cap_usd, ids)
+    if exact and box:
+        # Exact mode: no leased runtime may mount the shared R2 secret; every mount becomes this lease's QA-only secret.
+        mount_files, mount_count = overlay_app_data_mounts(root, box, changes)
+        print('QA_APP_DATA_MOUNTS replaced=' + str(mount_count) + ' files=' + str(mount_files) + ' lease_secret=' + r2_lease_secret_name(box))
     # Check every anchor before replacing any file; validate shell syntax on staged copies.
     staged = []
     for p, text in changes.items():
@@ -1334,7 +1583,7 @@ def _qa_onmiss_health():
     import re as _re
     return {"qa_onmiss": _qa_onmiss_active(), "qa_onmiss_cap_usd": _QA_ONMISS_CAP_USD,
             "overlay_baked": bool(_QA_ONMISS),
-            **({"qa_onmiss_exact": True, "qa_exact_digest": _QA_EXACT["digest"]} if _QA_EXACT else {}),
+            **({"qa_onmiss_exact": True, "qa_exact_digest": _QA_EXACT["digest"], "qa_exact_dry": bool(_QA_EXACT.get("dry"))} if _QA_EXACT else {}),
             "strict": bool(_strict_fixtures()), "capture": bool(_capture_mode()),
             "ci": os.environ.get("CI", "").lower() == "true",
             "suffix_ok": bool(_re.fullmatch(r"-qa-[0-9a-f]{12}", os.environ.get("MODAL_ENV_SUFFIX", "")))}
@@ -1403,6 +1652,13 @@ def _qa_onmiss_claim(key, provider, model, priced, request_id="", section_type="
             prior = requests.get(key)
             if ticket in state["attempts"]:
                 return None  # our own write landed but its ACK was lost: the CAS retry sees it, never a second claim
+            if _QA_EXACT:
+                # Custody must have been reconciled by the trusted host for THIS approval (legacy + QA, box + head) before ANY
+                # reservation, and the priced bound may never exceed the single-request bound the approval named.
+                if (state.get("custody") or {}).get("manifest_digest") != _QA_EXACT["digest"]:
+                    return ("custody", "QA_ONMISS_CUSTODY_UNRECONCILED: legacy + QA custody is not bound to this approval on this ledger")
+                if bound > _QA_EXACT["max_reserve_usd"]:
+                    return ("bound", "QA_ONMISS_BOUND_EXCEEDS_APPROVAL: priced bound %.6f > approved %.6f" % (bound, _QA_EXACT["max_reserve_usd"]))
             # Exact mode never reclaims an earlier lease's completed claim: one approved dispatch per exact hash, ever.
             reclaim = (prior and prior.get("state") == "completed" and prior.get("lease") != _QA_ONMISS_LEASE and not _QA_EXACT)
             # A completed response from an EARLIER lease was deleted with that lease's local store: one fresh priced claim,
@@ -1484,6 +1740,9 @@ async def _qa_onmiss_admit(provider, model, path, key, body_bytes, request_id=""
             detail = "the exact fixture already exists; replay it, never dispatch"
             await asyncio.to_thread(_qa_onmiss_note, key, provider, model, "QA_ONMISS_FIXTURE_EXISTS", detail)
             return _qa_onmiss_terminal(409, "QA_ONMISS_FIXTURE_EXISTS", detail + "; no provider call", key)
+        if _QA_EXACT.get("dry"):
+            print("QA_ONMISS_DRY_CHECK_MISSING hash=" + _qa_exact_hash(key) + " authoritative_miss=true")
+            return _qa_onmiss_terminal(424, "QA_ONMISS_DRY_CHECK_MISSING", "authoritative replay miss proven on the scoped path; the dry-check never prices, claims, reserves or dispatches", key)
     try:
         priced = _qa_onmiss_price(provider, model, path, body_bytes)
     except Exception as error:
@@ -1496,6 +1755,10 @@ async def _qa_onmiss_admit(provider, model, path, key, body_bytes, request_id=""
         return _qa_onmiss_terminal(503, "QA_ONMISS_LEDGER_UNAVAILABLE", type(error).__name__ + "; no provider call", key)
     if outcome[0] == "ticket":
         return outcome[1]
+    if outcome[0] in ("custody", "bound"):
+        code = "QA_ONMISS_CUSTODY_UNRECONCILED" if outcome[0] == "custody" else "QA_ONMISS_BOUND_EXCEEDS_APPROVAL"
+        await asyncio.to_thread(_qa_onmiss_note, key, provider, model, code, outcome[1])
+        return _qa_onmiss_terminal(402, code, outcome[1] + "; no provider call", key)
     if outcome[0] == "cap":
         await asyncio.to_thread(_qa_onmiss_note, key, provider, model, "QA_ONMISS_SPEND_CAP", outcome[1])
         return _qa_onmiss_terminal(402, "QA_ONMISS_SPEND_CAP", outcome[1] + "; no provider call", key)
@@ -2209,6 +2472,19 @@ def prepare(box, root, config_path, capture=False, allow_billable_tools=False, t
     env = modal_env(True)
     cli(['secret','create','--from-dotenv',str(secret_env),updates['MODAL_API_KEY_SECRET_NAME']], env)
     print('QA_MODAL_SECRET=created name='+updates['MODAL_API_KEY_SECRET_NAME'])
+    if exact_ids and exact_ids.get('exact'):
+        # Exact mode: the lease-only QA R2 secret every leased runtime mounts instead of the shared one (Run 9 binding), built from the
+        # scoped .env.local values after they are proven to be the verified heydonna-qa identity; removed at teardown by stop().
+        r2_values, r2_fp = app_data_values(env_snapshot.decode())
+        r2_env = config_path.parent/'r2-lease.env'
+        r2_env.write_text(''.join(k + '=' + v + '\n' for k, v in r2_values.items()))
+        os.chmod(r2_env, 0o600)
+        register_secret(r2_values['R2_SECRET_ACCESS_KEY'])
+        try:
+            cli(['secret','create','--from-dotenv',str(r2_env),r2_lease_secret_name(box)], env)
+        finally:
+            r2_env.unlink()
+        print('QA_APP_DATA_SECRET=created name=' + r2_lease_secret_name(box) + ' bucket=' + SCOPED_FIXTURE_BUCKET + ' signer=' + r2_fp)
     if extra:
         print('QA_EXTRA_MODAL_SECRET names='+','.join(extra)+' secret='+updates['MODAL_API_KEY_SECRET_NAME'])
 
@@ -2417,7 +2693,7 @@ def _mint_session(paths, actions, ttl_s):
         raise RuntimeError('QA_SCOPED_R2_REFUSED: mint only on trusted host')
     parent = runpy.run_path(str(Path(__file__).with_name('remote-qa-r2.py')))['qa_values']()
     account, access, secret = (parent['R2_' + k] for k in ('ACCOUNT_ID', 'ACCESS_KEY_ID', 'SECRET_ACCESS_KEY'))
-    if hashlib.sha256(access.encode()).hexdigest()[:16] != '9b8c9f309b38da1f':
+    if hashlib.sha256(access.encode()).hexdigest()[:16] != RUN9_SIGNER_FP:
         raise RuntimeError('QA_SCOPED_R2_REFUSED: signer does not match the verified Run 9 parent')
     register_secret(secret)
     now = int(time.time())
@@ -2449,9 +2725,11 @@ def mint_exact_sessions(kind, ids, manifest):
     ledgers = [ids['box_key'], ids['attempt_key']]
     if kind == 'proxy':
         specs = {'read': (['fixtures/llm/v2/', stage], ['GetObject']),
-                 'write': ([stage] + ledgers, ['GetObject', 'PutObject'])}
+                 'write': ([stage] + ledgers + [ids['run_key']], ['GetObject', 'PutObject'])}
     elif kind == 'report':
         specs = {'report': ([stage] + sorted(manifest['entries']) + ledgers, ['ListObjectsV2', 'GetObject', 'PutObject'])}
+    elif kind == 'custody':  # trusted host only: bind legacy + QA custody into the two ledger objects (nothing else)
+        specs = {'custody': (ledgers, ['GetObject', 'PutObject'])}
     else:
         raise ValueError('unknown session kind')
     rows = {}
@@ -2461,6 +2739,90 @@ def mint_exact_sessions(kind, ids, manifest):
         rows[name] = {'kind': name, 'bucket': bucket, 'account': account, 'access': access, 'secret': secret, 'token': token,
                       'exp': exp, 'manifest_digest': manifest['digest'], 'lease': ids['lease']}
     return rows
+
+
+LEGACY_BUCKET = 'heydonna-fixtures'
+LEGACY_ENV_DEFAULT = '/Users/rajiv/Downloads/projects/heydonna-app/.env.local'
+
+
+def _env_names(path, names):
+    """Parse ONLY the named entries of an env file inside this process; values are never printed, logged or put in a message."""
+    found = {}
+    for line in Path(path).read_text().splitlines():
+        key, sep, value = line.removeprefix('export ').partition('=')
+        if sep and key.strip() in names:
+            parts = shlex.split(value, comments=True)
+            if len(parts) == 1:
+                found[key.strip()] = parts[0]
+    return found
+
+
+def _is_missing(error):
+    return getattr(error, 'response', {}).get('Error', {}).get('Code') in ('NoSuchKey', '404', 'NotFound')
+
+
+def legacy_reader(env_path):
+    """Trusted host only: exact-key GetObject on the legacy ledger bucket with the app's read key. Exposes ONLY get(); the key is
+    never mounted into a box and nothing is written. Returns (raw, etag), None for an authoritative absence; anything else raises."""
+    import boto3
+    from botocore.config import Config
+    values = _env_names(env_path, ('R2_ACCOUNT_ID', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'))
+    if len(values) != 3 or not re.fullmatch(r'[0-9a-f]{32}', values['R2_ACCOUNT_ID']):
+        raise RuntimeError('QA_CUSTODY_UNCERTAIN: legacy read credentials unavailable')
+    register_secret(values['R2_SECRET_ACCESS_KEY'])
+    client = boto3.client('s3', endpoint_url='https://' + values['R2_ACCOUNT_ID'] + '.r2.cloudflarestorage.com',
+                          aws_access_key_id=values['R2_ACCESS_KEY_ID'], aws_secret_access_key=values['R2_SECRET_ACCESS_KEY'],
+                          region_name='auto', config=Config(retries={'total_max_attempts': 2}, read_timeout=15, connect_timeout=10))
+    def get(key):
+        if not re.fullmatch(r'qa-capture-ledgers/onmiss/(?:box|attempt)-[0-9a-f]{16}\.json', key):
+            raise RuntimeError('QA_CUSTODY_UNCERTAIN: not an on-miss ledger key')
+        try:
+            obj = client.get_object(Bucket=LEGACY_BUCKET, Key=key)
+            return obj['Body'].read(), obj.get('ETag')
+        except Exception as error:
+            if _is_missing(error):
+                return None
+            raise RuntimeError('QA_CUSTODY_UNCERTAIN: legacy ledger lookup failed (' + type(error).__name__ + ')') from None
+    return get
+
+
+def qa_ledger_access(row):
+    """QA ledger get/put with the derived custody session only: CAS-style (If-None-Match create / If-Match update)."""
+    import boto3
+    from botocore.config import Config
+    client = boto3.client('s3', endpoint_url='https://' + row['account'] + '.r2.cloudflarestorage.com', aws_access_key_id=row['access'],
+                          aws_secret_access_key=row['secret'], aws_session_token=row['token'], region_name='auto',
+                          config=Config(retries={'total_max_attempts': 1}, read_timeout=15, connect_timeout=10))
+    condition = {}
+    client.meta.events.register_first('before-sign.s3.PutObject', lambda request, **kw: [request.headers.__setitem__(k, v) for k, v in condition.items()])
+    def get(key):
+        try:
+            obj = client.get_object(Bucket=SCOPED_FIXTURE_BUCKET, Key=key)
+            return obj['Body'].read(), obj.get('ETag')
+        except Exception as error:
+            if _is_missing(error):
+                return None
+            raise RuntimeError('QA_CUSTODY_UNCERTAIN: QA ledger lookup failed (' + type(error).__name__ + ')') from None
+    def put(key, body, etag):
+        condition.clear()
+        condition.update({'If-Match': etag} if etag else {'If-None-Match': '*'})
+        try:
+            client.put_object(Bucket=SCOPED_FIXTURE_BUCKET, Key=key, Body=body, ContentType='application/json')
+        except Exception as error:
+            raise RuntimeError('QA_CUSTODY_CONFLICT: QA ledger write refused (' + type(error).__name__ + ')') from None
+    return get, put
+
+
+def reconcile_custody_cli(box, head, spend_box, manifest_path, output, read_only, legacy_env):
+    manifest = load_exact_manifest(manifest_path, head)
+    ids = derive_exact_ids(box, head, spend_box)
+    row = mint_exact_sessions('custody', ids, manifest)['custody']
+    qa_get, qa_put = qa_ledger_access(row)
+    receipt = reconcile_custody(ids, manifest, legacy_reader(legacy_env), qa_get, None if read_only else qa_put)
+    Path(output).write_text(json.dumps(receipt, indent=2, sort_keys=True) + '\n')
+    print('QA_CUSTODY status=' + receipt['status'] + ' allowance_usd=' + str(receipt['allowance_usd']) + ' bound=' + str(receipt['bound']).lower())
+    if receipt['refusals']:
+        raise RuntimeError('QA_CUSTODY_REFUSED: ' + ','.join(sorted({r['code'] for r in receipt['refusals']})))
 
 
 def arm_exact_sessions(box, manifest_path):
@@ -2694,7 +3056,8 @@ def ready():
 def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('command',choices=['register','credentials','check-credentials','finish','stop','reap','overlay','prepare','resolve','ready','provider-ready','capture-report','scoped-report-canary','tool-policy','route-check',
-                                            'check-exact-manifest','check-canary-receipt','mint-session','arm-session'])
+                                            'check-exact-manifest','check-canary-receipt','mint-session','arm-session','check-exact-ids',
+                                            'reconcile-custody','check-grant-receipt','check-app-data','check-app-mounts','verify-join'])
     parser.add_argument('--box')
     parser.add_argument('--ttl',type=int,default=2700)
     parser.add_argument('--root',type=Path)
@@ -2718,7 +3081,15 @@ def main():
                         'its full hashes may dispatch live, every other miss is a typed refusal with zero provider I/O')
     parser.add_argument('--ids-out',type=Path,help='overlay --exact-manifest: write the non-secret run identities here')
     parser.add_argument('--ids',type=Path,help='mint-session: the non-secret run identities file')
-    parser.add_argument('--kind',choices=['proxy','report','check'],help='mint-session')
+    parser.add_argument('--kind',choices=['proxy','report','custody','check'],help='mint-session')
+    parser.add_argument('--spend-box',help='trusted-host physical box identity (pool server name; the box itself for an ephemeral box)')
+    parser.add_argument('--dry-check',action='store_true',help='overlay --exact-manifest: authoritative-miss dry-check, never prices, claims, reserves or dispatches')
+    parser.add_argument('--read-only',action='store_true',help='reconcile-custody: read both buckets, write nothing')
+    parser.add_argument('--env',type=Path,help='check-app-data: the .env.local to read back')
+    parser.add_argument('--legacy-env',type=Path,default=Path(LEGACY_ENV_DEFAULT),help='reconcile-custody: app env file holding the legacy-bucket read key (names only; never printed)')
+    parser.add_argument('--report',type=Path,help='verify-join')
+    parser.add_argument('--trace',type=Path,help='verify-join: the run-local spec langsmith-trace.json (optional)')
+    parser.add_argument('--run-id',help='verify-join: the controller run id')
     parser.add_argument('--session-file',type=Path,help='capture-report --exact-manifest: controller-piped report session (deleted after use)')
     parser.add_argument('--receipt',type=Path,help='check-canary-receipt')
     parser.add_argument('--head',help='check-exact-manifest: required checkout head')
@@ -2732,8 +3103,11 @@ def main():
         parser.error('--on-miss and --capture are exclusive')
     if a.exact_manifest and a.command in ('register','overlay','prepare','capture-report') and not a.on_miss:
         parser.error('--exact-manifest requires --on-miss')
-    if a.exact_manifest and a.command not in ('register','overlay','prepare','capture-report','check-exact-manifest','mint-session','arm-session'):
+    if a.exact_manifest and a.command not in ('register','overlay','prepare','capture-report','check-exact-manifest','mint-session','arm-session',
+                                              'check-exact-ids','reconcile-custody','verify-join'):
         parser.error('--exact-manifest is not valid for this command')
+    if a.dry_check and a.command != 'overlay':
+        parser.error('--dry-check is only valid with overlay')
     if a.command in ('register','credentials','finish','stop','prepare'):
         identity(a.box or '')
     if a.command=='route-check': route_check(a.capture); raise SystemExit(0)
@@ -2749,7 +3123,7 @@ def main():
     elif a.command=='finish': finish(a.box)
     elif a.command=='stop': stop(a.box,a.remote)
     elif a.command=='reap': reap()
-    elif a.command=='overlay': overlay(a.root,a.box,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss,a.exact_manifest,a.ids_out)
+    elif a.command=='overlay': overlay(a.root,a.box,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss,a.exact_manifest,a.ids_out,a.dry_check)
     elif a.command=='prepare': prepare(a.box,a.root,a.config,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss,
                                        a.extra_secret,a.convex_helper,a.convex_root,a.exact_manifest)
     elif a.command=='capture-report': capture_report(a.box,a.root,a.output,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss,
@@ -2758,7 +3132,8 @@ def main():
         if not a.exact_manifest:
             parser.error('check-exact-manifest requires --exact-manifest')
         manifest = load_exact_manifest(a.exact_manifest, a.head)
-        print('QA_EXACT_MANIFEST ok digest=' + manifest['digest'] + ' head=' + manifest['head'] + ' hashes=' + str(len(manifest['entries']))
+        print('QA_EXACT_MANIFEST ok digest=' + manifest['digest'] + ' head=' + manifest['head'] + ' product_pin=' + manifest['product_pin']
+              + ' max_reserve_usd=' + str(manifest['max_reserve_usd']) + ' hashes=' + str(len(manifest['entries']))
               + ' approval_ref=' + manifest['approval_ref'])
     elif a.command=='check-canary-receipt':
         if not a.receipt:
@@ -2769,10 +3144,59 @@ def main():
         if a.kind=='check':
             _mint_session(['fixtures/llm/v2/'], ['GetObject'], 60)
             print('QA_SCOPED_MINT=ok')
-        elif a.kind in ('proxy','report') and a.ids and a.exact_manifest:
-            print(json.dumps(mint_exact_sessions(a.kind, load_exact_ids(a.ids), load_exact_manifest(a.exact_manifest))))
+        elif a.kind in ('proxy','report','custody') and a.box and a.head and a.exact_manifest:
+            # Scope is derived HERE from the trusted lease, physical-box identity and exact head. A box-written ids file is only
+            # CHECKED against it (DENIED on any difference); it never selects a path.
+            manifest = load_exact_manifest(a.exact_manifest, a.head)
+            ids = derive_exact_ids(a.box, a.head, a.spend_box)
+            if a.ids:
+                check_exact_ids(ids, load_exact_ids(a.ids), manifest)
+            print(json.dumps(mint_exact_sessions(a.kind, ids, manifest)))
         else:
-            parser.error('mint-session needs --kind check, or --kind proxy|report with --ids and --exact-manifest')
+            parser.error('mint-session needs --kind check, or --kind proxy|report|custody with --box, --head, --spend-box and --exact-manifest')
+    elif a.command=='check-exact-ids':
+        if not (a.box and a.head and a.ids and a.exact_manifest):
+            parser.error('check-exact-ids requires --box, --head, --spend-box, --ids and --exact-manifest')
+        manifest = load_exact_manifest(a.exact_manifest, a.head)
+        ids = derive_exact_ids(a.box, a.head, a.spend_box)
+        check_exact_ids(ids, load_exact_ids(a.ids), manifest)
+        print('QA_EXACT_IDS ok lease=' + ids['lease'] + ' spend_box=' + ids['spend_box'] + ' head=' + ids['head'][:12])
+    elif a.command=='reconcile-custody':
+        if not (a.box and a.head and a.exact_manifest and a.output):
+            parser.error('reconcile-custody requires --box, --head, --spend-box, --exact-manifest and --output')
+        reconcile_custody_cli(a.box, a.head, a.spend_box, a.exact_manifest, a.output, a.read_only, a.legacy_env)
+    elif a.command=='check-grant-receipt':
+        if not a.receipt:
+            parser.error('check-grant-receipt requires --receipt')
+        print('QA_GRANT_RECEIPT ok sha256=' + check_grant_receipt(a.receipt))
+    elif a.command=='check-app-data':
+        if not a.env:
+            parser.error('check-app-data requires --env')
+        _values, fingerprint = app_data_values(a.env.read_text())
+        print('QA_APP_DATA_READBACK bucket=' + SCOPED_FIXTURE_BUCKET + ' signer=' + fingerprint + ' public_url=none ok')
+    elif a.command=='check-app-mounts':
+        if not a.root:
+            parser.error('check-app-mounts requires --root')
+        remaining = shared_mounts_remaining(a.root)
+        print('QA_APP_MOUNTS shared_mount_remaining=' + str(len(remaining)) + (' files=' + ','.join(remaining[:5]) if remaining else ''))
+        if remaining:
+            raise RuntimeError('QA_APP_MOUNTS_SHARED_REMAIN: a leased runtime would mount the shared R2 secret')
+    elif a.command=='verify-join':
+        if not (a.report and a.exact_manifest and a.run_id and a.output):
+            parser.error('verify-join requires --report, --exact-manifest, --run-id and --output')
+        manifest = load_exact_manifest(a.exact_manifest)
+        def _load(path):
+            try:
+                return json.loads(Path(path).read_text()) if path else None
+            except (OSError, ValueError):
+                return None
+        report, trace = _load(a.report), _load(a.trace)
+        status = exact_join_status(report, trace, a.run_id, manifest)
+        rows = (report or {}).get('join') or []
+        keep = ('request_id', 'run_id', 'trace_id', 'project', 'project_session_id', 'transcript_id', 'created_transcript_id', 'draft_sha256', 'aligned_slice_sha256')
+        a.output.write_text(json.dumps({'status': status, 'proxy': rows, 'langsmith': {k: trace.get(k) for k in keep} if isinstance(trace, dict) else None,
+                                        'expected': {'project': 'qa-m15-' + a.run_id, **manifest['langsmith']}}, indent=2, sort_keys=True) + '\n')
+        print('QA_ONMISS_JOIN_RESULT status=' + status + ' dispatches=' + str(len(rows)))
     elif a.command=='arm-session':
         if not a.exact_manifest or not a.box:
             parser.error('arm-session requires --box and --exact-manifest')

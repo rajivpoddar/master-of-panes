@@ -65,6 +65,17 @@
 #   run-local spec writes /root/qa/out/langsmith-trace.json {request_id, run_id, trace_id, project, transcript_id}. --canary-receipt = the
 #   passed scoped-report-canary receipt of THIS deployed controller (<=48 h old). Label: ON_MISS_CAPTURED only with readback_match>=1 and
 #   join COMPLETE; else lane-fail reason=QA_ONMISS_*.
+#   CTO REVISE 1795306033.832689 (pel-mwr051ua-91fb8062): (1) the trusted host DERIVES every scoped path (lease, ledger objects, staging
+#   prefix) from its own box receipt, the physical-box identity (POOL_BOX, or the box itself) and --head before minting; the box-written
+#   ids file is only checked against it (DENIED on any difference). Exact mode also requires an EXPLICIT scoped app-data selection
+#   (QA_R2_SCOPED=1), --grant-receipt (the Run 9 object-only grant), and on the launch path: the box env readback (bucket heydonna-qa,
+#   signer 9b8c9f309b38da1f), every shared R2 mount replaced by a lease-only QA secret, and the approved product pin (manifest
+#   product_pin; the launch head may differ from it only by the run-local spec). (2) Before any session exists the trusted host reconciles
+#   the LEGACY (heydonna-fixtures) and QA ledgers for the physical box AND the exact head (prior claims for the approved hash, halts, UNKNOWN
+#   exposure, combined allowance >= manifest max_reserve_usd) and binds the result into the QA ledgers (carry rows + custody marker); the
+#   proxy refuses every reservation without it and any priced bound above max_reserve_usd. (3) The join verifies the native LangSmith
+#   project, transcript and aligned draft the approval pinned. --exact-dry-check bakes an authoritative-miss dry-check: the proxy proves
+#   the miss on the scoped path and never prices, claims, reserves or dispatches (custody reconcile is then read-only).
 # Never prod, never push: the mutation exists only in the box worktree and is reverse-applied + sha256-verified after RED.
 set -euo pipefail
 umask 077
@@ -75,6 +86,7 @@ rtb="$HOME/.claude/scripts/remote-test-box.sh"
 source "$HOME/.claude/scripts/remote-qa-ownership.sh"   # qa_emit_ownership_receipt (shared with capture mode)
 llm_onmiss='' stripe_test_env='' pre_write_check='' extra_secrets=() extra_args_remote='' extra_box_env='' requires_modal='' run_id="qa-spec-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 exact_manifest='' canary_receipt='' exact_digest='' arm_pid='' exact_args='' exact_overlay_args='' onmiss_stock=''
+grant_receipt='' exact_dry='' product_pin='' exact_spend_box=''
 # Label of the requested LLM mode (follows llm_onmiss, which the controller clears if it disables on-miss).
 llm_label() { if [ -z "$llm_onmiss" ]; then echo strict; elif [ -n "$exact_manifest" ]; then echo capture-on-miss-exact; else echo capture-on-miss; fi; }
 modal_helper="${QA_MODAL_HELPER:-$HOME/.claude/scripts/remote-qa-modal.py}"
@@ -100,6 +112,8 @@ while [ $# -gt 0 ]; do
     --on-miss) llm_onmiss=--on-miss; onmiss_stock=1; shift;; # opt-in capture-on-miss (see header); never inferred
     --on-miss-exact) exact_manifest="${2:?--on-miss-exact needs an approval manifest}"; llm_onmiss=--on-miss; shift 2;; # M15 scoped exact-hash capture (see header)
     --canary-receipt) canary_receipt="${2:?--canary-receipt needs a receipt file}"; shift 2;; # passed scoped publish/readback canary (see header)
+    --grant-receipt) grant_receipt="${2:?--grant-receipt needs the Run 9 parent grant receipt}"; shift 2;; # verified object-only grant (see header)
+    --exact-dry-check) exact_dry=1; shift;; # authoritative-miss dry-check: the proxy never prices, claims, reserves or dispatches (see header)
     --stripe-test-env) stripe_test_env=--stripe-test-env; shift;; # opt-in Stripe TEST env on the disposable deployment (see header)
     --extra-secret) extra_secrets+=("${2:?--extra-secret needs NAME=generate}"); shift 2;; # opt-in box-generated dev-only secret (see header)
     *) echo "Unknown spec argument: $1" >&2; exit 2;;
@@ -148,13 +162,16 @@ if [ -n "$exact_manifest" ]; then
   [ -z "$onmiss_stock" ] || { echo '--on-miss-exact replaces --on-miss; do not pass both (stock on-miss is not scoped)' >&2; exit 2; }
   [ -r "$exact_manifest" ] && [ ! -L "$exact_manifest" ] || { echo '--on-miss-exact manifest unreadable' >&2; exit 2; }
   [ -n "$canary_receipt" ] || { echo '--on-miss-exact requires --canary-receipt (passed scoped publish/readback canary of the deployed controller)' >&2; exit 2; }
+  [ -n "$grant_receipt" ] || { echo '--on-miss-exact requires --grant-receipt (the verified Run 9 object-only grant on heydonna-qa)' >&2; exit 2; }
   exact_line=$(python3 -I "$modal_helper" check-exact-manifest --exact-manifest "$exact_manifest" --head "$head") || { echo 'QA_EXACT_MANIFEST_REFUSED' >&2; exit 2; }
   exact_digest=$(printf '%s' "$exact_line" | sed -n 's/^QA_EXACT_MANIFEST ok digest=\([0-9a-f]\{64\}\) .*/\1/p')
   [[ "$exact_digest" =~ ^[0-9a-f]{64}$ ]] || { echo 'QA_EXACT_MANIFEST_REFUSED (digest)' >&2; exit 2; }
+  product_pin=$(printf '%s' "$exact_line" | sed -n 's/.* product_pin=\([0-9a-f]\{40\}\) .*/\1/p')
+  [[ "$product_pin" =~ ^[0-9a-f]{40}$ ]] || { echo 'QA_EXACT_MANIFEST_REFUSED (product pin)' >&2; exit 2; }
   exact_args=' --exact-manifest /root/qa/exact-manifest.json'
-  exact_overlay_args="$exact_args --ids-out /root/qa/onmiss-ids.json"
+  exact_overlay_args="$exact_args --ids-out /root/qa/onmiss-ids.json${exact_dry:+ --dry-check}"
 else
-  [ -z "$canary_receipt" ] || { echo '--canary-receipt is only valid with --on-miss-exact' >&2; exit 2; }
+  [ -z "$canary_receipt$grant_receipt$exact_dry" ] || { echo '--canary-receipt, --grant-receipt and --exact-dry-check are only valid with --on-miss-exact' >&2; exit 2; }
 fi
 [ "$allow_seed" = 1 ] || { echo 'Canonical preflight replaces seed tables: --allow-seed-replace requires ownership of the selected dev deployment.' >&2; exit 2; }
 legs=GREEN
@@ -192,6 +209,11 @@ trap 'rc=$?; printf "QA_SPEC_ERROR: command failed at line %s (rc=%s)\n" "$LINEN
 env_file="${env_file:-$HOME/Downloads/projects/heydonna-app-3005/.env.local}"
 [ -r "$env_file" ] || { echo 'Env file unreadable' >&2; exit 2; }
 val() { grep -E "^$1=" "$env_file" | head -1 | cut -d= -f2- | tr -d "\"'" | awk '{print $1}'; }
+if [ -n "$exact_manifest" ]; then
+  # Explicit scoped app-data selection: the default QA storage is the CI-parity base env (production-parity bucket). An exact run never
+  # inherits it; the base env (or the caller) must select the Run 9 scoped heydonna-qa app-data storage on purpose.
+  [ "${QA_R2_SCOPED:-$(val QA_R2_SCOPED || true)}" = 1 ] || { echo 'QA_APP_DATA_SCOPE_REQUIRED: set QA_R2_SCOPED=1 (env or --env-file) to select the Run 9 scoped heydonna-qa app-data storage' >&2; exit 2; }
+fi
 disposable_cleanup() {
   [ -n "$managed_dir" ] || return 0
   python3 -I "$convex_helper" destroy --root "$managed_dir"
@@ -231,6 +253,7 @@ python3 -I "$modal_helper" check-credentials   # strict replay needs the box's o
 if [ -n "$exact_manifest" ]; then
   # Arming prerequisites, before any lease, box or spend: a passed publish/readback canary of THIS controller file, and a working
   # trusted-host session mint (a missing mint would otherwise surface only as a proxy that waits and fails closed).
+  python3 -I "$modal_helper" check-grant-receipt --receipt "$grant_receipt" || { echo 'QA_GRANT_RECEIPT_REFUSED' >&2; exit 2; }
   python3 -I "$modal_helper" check-canary-receipt --receipt "$canary_receipt" || { echo 'QA_SCOPED_CANARY_REQUIRED: run scoped-report-canary on the deployed controller first' >&2; exit 2; }
   python3 -I "$modal_helper" mint-session --kind check || { echo 'QA_SCOPED_MINT_UNAVAILABLE' >&2; exit 2; }
 fi
@@ -347,7 +370,7 @@ cleanup() {
         if [ -n "$exact_manifest" ]; then
           # Report container: ONLY a freshly minted prefix-scoped five-minute session, piped to a mode-600 box file that the
           # controller deletes on read (no shared secret mount, no fallback). Minted now, after the leg, never at launcher startup.
-          python3 -I "$modal_helper" mint-session --kind report --ids "$out/onmiss-ids.json" --exact-manifest "$exact_manifest" \
+          python3 -I "$modal_helper" mint-session --kind report --box "$box" --head "$head" --spend-box "$exact_spend_box" --ids "$out/onmiss-ids.json" --exact-manifest "$exact_manifest" \
             | qa_rsh "umask 077; cat > /root/qa/scoped-report-session.json" >"$out/llm-report-session.log" 2>&1 || { rc=1; echo 'QA_SCOPED_REPORT_SESSION_FAILED' >>"$out/llm-report-session.log"; }
           qa_rsh "set -e; source /root/qa/modal.env; export REMOTE_BOX=1; python3 -I /root/qa/modal-lane.py capture-report --box '$box' --root '$remote' --output /root/qa/out/llm-ledger.json $llm_onmiss$exact_args --session-file /root/qa/scoped-report-session.json" >"$out/llm-report.log" 2>&1 || rc=1
           qa_rsh "rm -f /root/qa/scoped-report-session.json" >/dev/null 2>&1
@@ -359,40 +382,11 @@ cleanup() {
       local fetch_rc=0
       qa_spec_fetch >>"$out/fetch.log" 2>&1 || fetch_rc=$?
       if [ -n "$exact_manifest" ]; then
-        # Join: ingress request id <-> provider dispatch id (recorded by the proxy on the durable claim) <-> the run-local spec's
-        # LangSmith evidence (<out>/out/langsmith-trace.json: request_id, run_id, trace_id, project, transcript_id). Matched by
-        # request id, never by timestamp; anything missing is reported by name, never guessed.
-        python3 -I - "$out" >"$out/llm-join.txt" 2>&1 <<'JOIN'
-import json, os, sys
-out = sys.argv[1]
-def load(name):
-    try:
-        with open(os.path.join(out, name)) as handle:
-            return json.load(handle)
-    except Exception:
-        return None
-report, trace = load('out/llm-ledger.json'), load('out/langsmith-trace.json')
-rows = (report or {}).get('join') or []
-status = 'NO_REPORT' if report is None else 'NO_DISPATCH' if not rows else 'COMPLETE'
-result = {'proxy': rows, 'langsmith': None}
-if rows:
-    ingress = {row.get('ingress_request_id') for row in rows if row.get('ingress_request_id')}
-    if not ingress:
-        status = 'INGRESS_ID_MISSING'
-    elif not all(isinstance(row.get('provider_dispatch'), dict) and row['provider_dispatch'].get('provider_response_ids') for row in rows):
-        status = 'PROVIDER_DISPATCH_ID_MISSING'
-    elif not isinstance(trace, dict) or trace.get('request_id') not in ingress or not trace.get('run_id') or not trace.get('trace_id'):
-        status = 'LANGSMITH_UNJOINED'
-    else:
-        result['langsmith'] = {k: trace.get(k) for k in ('request_id', 'run_id', 'trace_id', 'project', 'transcript_id')}
-result['status'] = status
-try:
-    with open(os.path.join(out, 'out/llm-join.json'), 'w') as handle:
-        json.dump(result, handle, indent=2, sort_keys=True)
-except OSError:
-    pass
-print('QA_ONMISS_JOIN_RESULT status=' + status + ' dispatches=' + str(len(rows)))
-JOIN
+        # Join, VERIFIED (not merely present): the proxy's ingress request id + provider dispatch id (durable claim) against the run-local
+        # spec's native LangSmith evidence (<out>/out/langsmith-trace.json). The helper checks the project (qa-m15-<this run id>), that the
+        # LangSmith transcript is the one the spec created, and that the persisted draft and the aligned alternate block equal the digests
+        # the approval pinned. Anything missing or different is a named status, never a pass.
+        python3 -I "$modal_helper" verify-join --report "$out/out/llm-ledger.json" --trace "$out/out/langsmith-trace.json" --run-id "$run_id" --exact-manifest "$exact_manifest" --output "$out/out/llm-join.json" >"$out/llm-join.txt" 2>&1
         cat "$out/llm-join.txt"
       fi
       # Preserve the Playwright lane.rc and any earlier failure; media-only incompleteness is rc 3.
@@ -561,7 +555,16 @@ fi
 qa_put "$HOME/.claude/scripts/remote-qa-ui-capture.patch" /root/qa/ui-only.patch
 qa_rsh "set -e; cd '$remote'; if ! grep -q '^UI_CAPTURE_ONLY=' scripts/e2e/local-repro-preflight.sh; then cp scripts/e2e/local-repro-preflight.sh scripts/e2e/local-repro-preflight.sh.next; git apply --check /root/qa/ui-only.patch; git apply /root/qa/ui-only.patch; bash -n scripts/e2e/local-repro-preflight.sh.next; mv scripts/e2e/local-repro-preflight.sh.next scripts/e2e/local-repro-preflight.sh; fi" >"$out/tooling-overlay.log" 2>&1
 qa_put "$modal_helper" /root/qa/modal-lane.py
-if [ -n "$exact_manifest" ]; then qa_put "$exact_manifest" /root/qa/exact-manifest.json; qa_rsh "chmod 444 /root/qa/exact-manifest.json"; fi
+if [ -n "$exact_manifest" ]; then
+  qa_put "$exact_manifest" /root/qa/exact-manifest.json; qa_rsh "chmod 444 /root/qa/exact-manifest.json"
+  # The approved PRODUCT pin is preserved: the launch head may differ from it only by the run-local spec file.
+  qa_rsh "set -e; cd '$remote'; git cat-file -e '$product_pin^{commit}'; git merge-base --is-ancestor '$product_pin' HEAD; [ -z \"\$(git diff --name-only '$product_pin' HEAD | grep -v -x -F '$spec' || true)\" ]" >"$out/product-pin.log" 2>&1 || { echo "QA_PRODUCT_PIN_REFUSED: head $head differs from product pin $product_pin by more than the run-local spec" | tee -a "$out/lane.txt" >&2; exit 1; }
+  echo "QA_PRODUCT_PIN ok product_pin=$product_pin head=$head spec_only=true" | tee -a "$out/lane.txt"
+  # Run 9 effective-storage readback on the exact launch path: the box/Next env must be the verified scoped heydonna-qa identity.
+  qa_rsh "python3 -I /root/qa/modal-lane.py check-app-data --env '$remote/.env.local'" >"$out/app-data-readback.log" 2>&1 || { echo 'QA_APP_DATA_UNSCOPED: box app-data storage is not the Run 9 scoped identity' | tee -a "$out/lane.txt" >&2; exit 1; }
+  cat "$out/app-data-readback.log" | tee -a "$out/lane.txt"
+  exact_spend_box="${pool_box:-$box}"
+fi
 python3 -I "$modal_helper" credentials --box "$box" | qa_rsh 'umask 077; cat > /root/qa/modal.env'
 remote_ready=1
 if [ -n "$pre_write_check" ]; then
@@ -593,11 +596,16 @@ if [ -n "$llm_onmiss" ]; then
       # The proxy was baked with THIS manifest digest and the box wrote its non-secret run identities; bind both before any session exists.
       grep -q "^QA_ONMISS_EXACT_PREPARED digest=$exact_digest approved=" "$out/modal-prepare.log" || { echo 'QA_ONMISS_EXACT_UNBOUND: prepare did not bind this manifest digest' | tee -a "$out/lane.txt" >&2; exit 1; }
       qa_rsh "cat /root/qa/onmiss-ids.json" >"$out/onmiss-ids.json" 2>/dev/null || { echo 'QA_ONMISS_IDS_MISSING' | tee -a "$out/lane.txt" >&2; exit 1; }
-      python3 -I - "$out/onmiss-ids.json" "$exact_digest" <<'IDSCHECK' || { echo 'QA_ONMISS_IDS_MISMATCH' | tee -a "$out/lane.txt" >&2; exit 1; }
-import json, sys
-ids = json.load(open(sys.argv[1]))
-assert ids.get('manifest_digest') == sys.argv[2] and ids.get('canonical_keys') and ids.get('stage_run')
-IDSCHECK
+      # The box-written identities are only CHECKED against the trusted derivation (lease, physical box, exact head); DENIED on any difference.
+      python3 -I "$modal_helper" check-exact-ids --box "$box" --head "$head" --spend-box "$exact_spend_box" --ids "$out/onmiss-ids.json" --exact-manifest "$exact_manifest" | tee -a "$out/lane.txt" || { echo 'QA_ONMISS_IDS_DENIED: box-written identities differ from the trusted derivation' | tee -a "$out/lane.txt" >&2; exit 1; }
+      # Run 9 mount readback: no leased runtime may still mount the shared R2 secret.
+      qa_rsh "python3 -I /root/qa/modal-lane.py check-app-mounts --root '$remote'" 2>&1 | tee -a "$out/lane.txt"
+      [ "$(grep -c 'shared_mount_remaining=0' "$out/lane.txt")" -ge 1 ] || { echo 'QA_APP_MOUNTS_SHARED_REMAIN' | tee -a "$out/lane.txt" >&2; exit 1; }
+      # Spend custody BEFORE any session exists: legacy (heydonna-fixtures) + QA (heydonna-qa) ledgers for the physical box AND the exact head,
+      # prior claims for the approved hashes, halts and the combined allowance, bound into the QA ledgers (carry rows + custody marker) so the
+      # proxy refuses every reservation without it. Trusted host only: the legacy read key never reaches a box.
+      "${QA_UV:-$HOME/.local/bin/uv}" run --no-project --python 3.13 --with boto3==1.35.99 python "$modal_helper" reconcile-custody --box "$box" --head "$head" --spend-box "$exact_spend_box" --exact-manifest "$exact_manifest" --output "$out/custody-reconcile.json" ${exact_dry:+--read-only} 2>&1 | tee -a "$out/lane.txt"
+      [ "$(grep -c '^QA_CUSTODY status=RECONCILED' "$out/lane.txt")" -ge 1 ] || { echo 'QA_CUSTODY_REFUSED: see custody-reconcile.json' | tee -a "$out/lane.txt" >&2; exit 1; }
       echo "QA_ONMISS_EXACT_BOUND manifest_sha256=$exact_digest ids=$out/onmiss-ids.json fixture_session_ttl_s=300 refresh_s=100 no_shared_secret=true" | tee -a "$out/lane.txt"
     fi
   fi
@@ -615,7 +623,7 @@ lane_rc=0
 scoped_arm_loop() {
   local n=0
   while :; do
-    if python3 -I "$modal_helper" mint-session --kind proxy --ids "$out/onmiss-ids.json" --exact-manifest "$exact_manifest" \
+    if python3 -I "$modal_helper" mint-session --kind proxy --box "$box" --head "$head" --spend-box "$exact_spend_box" --ids "$out/onmiss-ids.json" --exact-manifest "$exact_manifest" \
         | qa_rsh "set -e; source /root/qa/modal.env; export REMOTE_BOX=1; python3 -I /root/qa/modal-lane.py arm-session --box '$box' --exact-manifest /root/qa/exact-manifest.json" >>"$out/scoped-arm.log" 2>&1; then
       n=$((n + 1)); echo "QA_SCOPED_ARM n=$n at=$(date -u +%FT%TZ)" >>"$out/scoped-arm.log"
     else
