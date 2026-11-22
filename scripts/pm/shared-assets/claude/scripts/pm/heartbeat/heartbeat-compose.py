@@ -1468,36 +1468,56 @@ def ci_expected_shards(matrix: set[int] | None, receipts_of: set[int]) -> tuple[
     return (expected, "") if expected else (None, "expected shards unknown")
 
 
+def ci_job_is_bound(job: dict, entry: dict) -> bool:
+    return (type(job.get("id")) is int and job["id"] > 0 and str(job.get("run_id")) == str(entry["id"])
+            and str(job.get("run_attempt")) == str(entry["attempt"]) and job.get("head_sha") == entry["head"])
+
+
+def ci_is_noop(entry: dict, jobs: list) -> bool:
+    """Only positive evidence of a successful verifier-only attempt may hide a run."""
+    if entry.get("conclusion") != "success":
+        return False
+    by_name = {}
+    for job in jobs:  # attempt_jobs() has already checked the page is complete
+        if not isinstance(job, dict) or not ci_job_is_bound(job, entry) or job.get("status") != "completed":
+            return False
+        name = job.get("name")
+        if not isinstance(name, str) or not name or name in by_name:
+            return False
+        by_name[name] = job
+    verifiers = {CI_GATE_JOB, "classify-change-scope"}
+    # A missing matrix is not evidence of a skip. GitHub emits an unexpanded
+    # unit-tests record for this shape; all other non-verifier jobs must agree.
+    if not (verifiers | {"unit-tests"}) <= by_name.keys():
+        return False
+    if any(job.get("conclusion") != ("success" if name in verifiers else "skipped") for name, job in by_name.items()):
+        return False
+    steps = by_name[CI_GATE_JOB].get("steps")
+    gate = [s for s in steps if isinstance(s, dict) and s.get("name") == CI_GATE_STEP] if isinstance(steps, list) else []
+    return len(gate) == 1 and gate[0].get("status") == "completed" and gate[0].get("conclusion") == "skipped"
+
+
 def ci_classify_jobs(entry: dict, jobs: list) -> list[tuple[int, int, bool]]:
     """Fill entry["shards"] / entry["group_skipped"] from ONE attempt's jobs.
 
-    Returns the (shard, job id, failed) logs still to read. Raises CiSelectionError when a unit-tests job
-    does not carry exactly this run id, attempt and head, so a foreign record can never count as coverage.
-    A run whose `test` job skipped its "Require all CI phases" step was never admitted (the label was not ci-head:<sha>):
-    it is marked entry["noop"] and has no shards to read. Anything short of that exact, bound, completed signal is not a
-    noop, so an unexpected jobs shape falls back to the normal shard rendering rather than hiding a real run.
+    Returns the (shard, job id, failed) logs still to read. Raises CiSelectionError when a verifier
+    or unit-tests job is not bound to this attempt, so foreign records never count as coverage.
     """
-    for job in jobs:
-        if isinstance(job, dict) and job.get("name") == CI_GATE_JOB:
-            if (type(job.get("id")) is not int or job["id"] <= 0 or str(job.get("run_id")) != str(entry["id"])
-                    or str(job.get("run_attempt")) != str(entry["attempt"]) or job.get("head_sha") != entry["head"]):
-                raise CiSelectionError("job is not of this run attempt and head")
-            steps = job.get("steps") if job.get("status") == "completed" else None
-            gate = [s for s in steps if isinstance(s, dict) and s.get("name") == CI_GATE_STEP] if isinstance(steps, list) else []
-            if len(gate) == 1 and gate[0].get("conclusion") == "skipped":
-                entry["noop"] = True
-                return []
+    if ci_is_noop(entry, jobs):
+        entry["noop"] = True
+        return []
     by_shard: dict[int, list[dict]] = {}
     for job in jobs:
         if not isinstance(job, dict):
             raise CiSelectionError("invalid jobs page")
         name = str(job.get("name"))
         match = _UNIT_SHARD_JOB.match(name)
-        if not match and name != "unit-tests":
+        if not match and name not in {"unit-tests", CI_GATE_JOB, "classify-change-scope"}:
             continue
-        if (type(job.get("id")) is not int or job["id"] <= 0 or str(job.get("run_id")) != str(entry["id"])
-                or str(job.get("run_attempt")) != str(entry["attempt"]) or job.get("head_sha") != entry["head"]):
+        if not ci_job_is_bound(job, entry):
             raise CiSelectionError("job is not of this run attempt and head")
+        if name in {CI_GATE_JOB, "classify-change-scope"}:
+            continue
         if match:
             by_shard.setdefault(int(match.group(1)), []).append(job)
         elif job.get("status") == "completed" and job.get("conclusion") == "skipped":
@@ -1516,8 +1536,9 @@ def ci_classify_jobs(entry: dict, jobs: list) -> list[tuple[int, int, bool]]:
         elif job.get("conclusion") == "skipped":
             entry["shards"][shard] = {"state": "skipped"}
         elif job.get("conclusion") in ("success", "failure"):
-            entry["shards"][shard] = {"state": "unreadable"}  # replaced once the shard's row is read
-            to_read.append((shard, job["id"], job["conclusion"] == "failure"))
+            failed = job["conclusion"] == "failure"
+            entry["shards"][shard] = {"state": "unreadable", "failed": failed}  # log not read yet
+            to_read.append((shard, job["id"], failed))
         else:
             entry["shards"][shard] = {"state": "unreadable"}
     return to_read
@@ -1544,7 +1565,7 @@ def ci_coverage(run: dict) -> dict:
     rows = [s["row"] for s in shards.values() if s["state"] == "ok"]
     grouped = bool(run.get("group_skipped"))
     cov = {**ident, "expected": len(expected), "ok": len(rows),
-           "failed": sum(1 for s in shards.values() if s["state"] == "ok" and s.get("failed")),
+           "failed": sum(1 for s in shards.values() if s.get("failed")),
            "cancelled": states.count("cancelled"),
            "skipped": len(expected) if grouped else states.count("skipped"),
            "missing": 0 if grouped else len(expected - set(shards)),
@@ -1604,7 +1625,7 @@ def _ci_segment(cov: dict, width: int, reasons: bool, detail: bool, head: bool =
         return f"{name}: coverage UNKNOWN{why}"
     body = ("PARTIAL " if cov["status"] == "PARTIAL" else "") + f"{cov['ok']}/{cov['expected']} shards"
     if not detail:
-        return f"{name}: {body}"
+        return f"{name}: {body}" + (f" ({cov['failed']} failed)" if cov.get("failed") else "")
     body += _ci_notes(cov)
     if cov["ok"]:
         if cov["files"] is None:
@@ -1642,7 +1663,7 @@ def render_ci_selection(runs: list[dict]) -> str:
         line = prefix + " | ".join([*(_ci_segment(cov, width, reasons, detail) for cov in covs), *tail])
         if len(line) <= CI_SELECTION_MAX_CHARS:
             return line
-    kept = [cov for cov in covs if cov["status"] != "COMPLETE"]
+    kept = [cov for cov in covs if cov["status"] != "COMPLETE" or cov.get("failed")]
     omitted = len(covs) - len(kept)
     for head in (True, False):
         parts = [_ci_segment(cov, 0, False, False, head) for cov in kept]
@@ -1708,13 +1729,12 @@ def ci_selection_line(run=subprocess.run, timeout: int = COLLECTOR_TIMEOUTS["ci-
         entries = []
         for r in candidates:
             entry = {"id": int(r["databaseId"]), "branch": str(r.get("headBranch") or "?"),
-                     "head": r.get("headSha"), "attempt": r.get("attempt"), "shards": {}}
+                     "head": r.get("headSha"), "attempt": r.get("attempt"), "conclusion": r.get("conclusion"), "shards": {}}
             if not (isinstance(entry["head"], str) and _SHA.fullmatch(entry["head"])
                     and type(entry["attempt"]) is int and entry["attempt"] > 0):
                 entry["error"] = "run attempt or head unknown"
             entries.append(entry)
-        # Walk newest first in waves of "admitted runs still wanted": a run whose classify-change-scope job was skipped is a
-        # noop (never admitted) and does not use one of the CI_SELECTION_RUNS slots, so the next candidate is read instead.
+        # A proven verifier-only noop does not use one of the CI_SELECTION_RUNS slots; read the next candidate instead.
         runs, pending, admitted, cursor = [], [], 0, 0
         while admitted < CI_SELECTION_RUNS and cursor < len(entries):
             wave = entries[cursor:cursor + CI_SELECTION_RUNS - admitted]
@@ -1743,7 +1763,7 @@ def ci_selection_line(run=subprocess.run, timeout: int = COLLECTOR_TIMEOUTS["ci-
                 try:
                     entry["shards"][n] = {"state": "ok", "failed": failed, "row": wait(future)}
                 except CiSelectionError:
-                    entry["shards"][n] = {"state": "unreadable"}
+                    entry["shards"][n] = {"state": "unreadable", "failed": failed}
         return render_ci_selection(runs)
     except CiSelectionError as exc:
         return f"*CI selection:* unavailable ({exc})"
@@ -2662,48 +2682,6 @@ def compact_report(lines: list[str], limit: int, cadence: str | None = None) -> 
             expanded.append(row)
         spaced = expanded
     return "\n".join(spaced)
-
-
-def one_native_table(lines: list[str]) -> list[str]:
-    """Keep ONE pipe table per post; rewrite every later one as plain rows.
-
-    slack-send.sh turns each unfenced pipe table into a native Slack table block, and Slack accepts ONE table block per
-    message (only_one_table_allowed fails the whole post, which makes the hourly HOURLY_POST_UNCERTAIN). The Pace table sits
-    directly under the *Hourly line and keeps the slot; the Burn and OpenCode Go tables that follow would be a second and
-    third block. Same remedy as cto_slack_rest._later_tables_as_mrkdwn: the first table stays native, a later table becomes
-    one plain row per data line, "lead — Header: value · Header: value", the header and separator rows dropped. The rewritten
-    row starts with the account/model name, so it is never a fold prefix of compact_report (no bullet, "- ", two spaces, "*"
-    or "|"), and a "—" or empty cell is left out. Rows that are not part of a table pass through untouched."""
-    rows = [row for line in lines for row in line.splitlines()]
-    out: list[str] = []
-    seen_table = False
-    header: list[str] | None = None
-    in_table = False
-    for row in rows:
-        if not row.lstrip().startswith("|"):
-            in_table = False
-            header = None
-            out.append(row)
-            continue
-        if not in_table:
-            in_table = True
-            header = None
-            if not seen_table:
-                seen_table = True
-                out.append(row)
-                continue
-            header = [c.strip() for c in row.strip().strip("|").split("|")]
-            continue  # the header row itself is dropped
-        if not seen_table or header is None:
-            out.append(row)  # a row of the first (native) table
-            continue
-        cells = [c.strip() for c in row.strip().strip("|").split("|")]
-        if all(re.fullmatch(r"[-:\s]*", c) for c in cells):
-            continue  # separator row
-        lead = cells[0] if cells else ""
-        rest = [f"{h}: {c}" for h, c in zip(header[1:], cells[1:]) if c and c != "—"]
-        out.append(f"{lead} — " + " · ".join(rest) if rest else lead)
-    return out
 
 
 def composer_release_sha(current: Path | None = None, source: Path | None = None) -> str:
@@ -3891,8 +3869,7 @@ def compose(
     memory_lines = [memory] if (memory and mode == "1h") else []
     opencode_lines = opencode.splitlines() if (opencode and mode == "1h") else []
     lines = [first, *pace_lines, *memory_lines, *(burn_line.splitlines() if burn_line else []), *opencode_lines, *body]
-    # Pace, Burn and OpenCode Go are all pipe tables, but Slack takes one native table per message: the first stays native.
-    lines = one_native_table(lines)
+    # Keep the pipe tables intact for slack-send.sh: native Pace first, then monospace Burn and OpenCode Go.
     if asks:
         lines += ["", "*Asks:* " + " | ".join(asks)]
     pm_actions = [] if mode == "3h" else [a for r in (prs or []) for a in r.get("actions") or []]

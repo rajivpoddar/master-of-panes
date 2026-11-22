@@ -80,8 +80,17 @@ def gate_job(run_id, attempt, skipped, **over):
     job = {'id': 9, 'name': 'test', 'status': 'completed', 'conclusion': 'success',
            'run_id': run_id, 'run_attempt': attempt, 'head_sha': head_of(run_id),
            'steps': [{'name': 'Set up job', 'conclusion': 'success'},
-                     {'name': 'Require all CI phases', 'conclusion': 'skipped' if skipped else 'success'}]}
+                     {'name': 'Require all CI phases', 'status': 'completed',
+                      'conclusion': 'skipped' if skipped else 'success'}]}
     return {**job, **over}
+
+
+def verifier_only_jobs(run_id, attempt):
+    def job(job_id, name, conclusion):
+        return {'id': job_id, 'name': name, 'status': 'completed', 'conclusion': conclusion,
+                'run_id': run_id, 'run_attempt': attempt, 'head_sha': head_of(run_id)}
+    return [gate_job(run_id, attempt, skipped=True), job(4, 'classify-change-scope', 'success'),
+            job(1, 'typescript', 'skipped'), job(2, 'unit-tests-isolated', 'skipped'), job(3, 'unit-tests', 'skipped')]
 
 
 def noop_run(run_id, branch, attempt=1):
@@ -108,13 +117,13 @@ class Fake:
         jobs = [{'id': s['id'], 'name': f"unit-tests ({s['n']})", 'status': 'completed', 'conclusion': s['conclusion'],
                  'run_id': run['id'], 'run_attempt': run.get('job_attempt', run['attempt']),
                  'head_sha': run.get('job_head', head_of(run['id']))} for s in run['shards']]
+        if run.get('noop'):
+            verifier_jobs = verifier_only_jobs(run['id'], run['attempt'])
+            return verifier_jobs[:-1] + jobs if jobs else verifier_jobs
         jobs += [{'id': 1, 'name': 'typescript', 'status': 'completed', 'conclusion': 'success'},
                  {'id': 2, 'name': 'unit-tests-isolated', 'status': 'completed', 'conclusion': 'success'}]
-        if 'noop' in run:  # opt-in: ci.yml's `test` job, whose "Require all CI phases" step is skipped on a noop run
-            jobs.append(gate_job(run['id'], run['attempt'], skipped=run['noop']))
-            if run['noop']:
-                jobs.append({'id': 3, 'name': 'unit-tests', 'status': 'completed', 'conclusion': 'skipped',
-                             'run_id': run['id'], 'run_attempt': run['attempt'], 'head_sha': head_of(run['id'])})
+        if 'noop' in run:
+            jobs.append(gate_job(run['id'], run['attempt'], skipped=False))
         return jobs
 
     def __call__(self, cmd, **kw):
@@ -211,23 +220,27 @@ class CiSelectionTests(unittest.TestCase):
         line = m.ci_selection_line(run=Fake([noop_run(701, 'fix/a'), noop_run(702, 'fix/b')]))
         self.assertEqual(line, '*CI selection:* no admitted ci-head run found; noop (not admitted) ×2')
 
-    def test_noop_signal_is_the_test_jobs_gate_step_and_nothing_looser(self):
-        def entry():
-            return {'id': 801, 'attempt': 1, 'head': head_of(801), 'branch': 'fix/x'}
+    def test_noop_needs_successful_bound_verifiers_and_affirmative_paid_skips(self):
+        entry = {'id': 801, 'attempt': 1, 'head': head_of(801), 'conclusion': 'success', 'shards': {}}
+        gate, scope, typescript, isolated, unit = verifier_only_jobs(801, 1)
+        self.assertTrue(m.ci_is_noop(entry, [gate, scope, typescript, isolated, unit]))
+        for jobs in ([gate], [gate, scope], [gate, scope, typescript, isolated], [scope, typescript, isolated, unit],
+                     [dict(gate, steps=None), scope, typescript, isolated, unit],
+                     [dict(gate, conclusion='failure'), scope, typescript, isolated, unit],
+                     [gate, scope, dict(typescript, conclusion='success'), isolated, unit],
+                     [gate, scope, dict(typescript, run_attempt=2), isolated, unit]):
+            self.assertFalse(m.ci_is_noop(entry, jobs))
+        self.assertFalse(m.ci_is_noop(dict(entry, conclusion='failure'), [gate, scope, typescript, isolated, unit]))
+        with self.assertRaises(m.CiSelectionError):
+            m.ci_classify_jobs(entry, [dict(gate, run_attempt=2), scope, typescript, isolated, unit])
 
-        def classify(job):
-            e = entry()
-            m.ci_classify_jobs(e, [job] if job else [])
-            return bool(e.get('noop'))
-        self.assertTrue(classify(gate_job(801, 1, skipped=True)))
-        self.assertFalse(classify(gate_job(801, 1, skipped=False)))
-        self.assertFalse(classify(None))  # no `test` job: not a noop
-        self.assertFalse(classify(gate_job(801, 1, skipped=True, status='in_progress')))  # not finished: not a noop
-        self.assertFalse(classify(gate_job(801, 1, skipped=True, steps=None)))
-        self.assertFalse(classify(gate_job(801, 1, skipped=True, steps=[{'name': 'Set up job', 'conclusion': 'skipped'}])))
-        self.assertFalse(classify(gate_job(801, 1, skipped=True, name='classify-change-scope')))  # scope job is not the signal
-        with self.assertRaises(m.CiSelectionError):  # a job of another attempt can not mark this run a noop
-            classify(gate_job(801, 1, skipped=True, run_attempt=2))
+    def test_skipped_gate_does_not_hide_a_failed_paid_shard_even_with_unreadable_logs(self):
+        red = noop_run(803, 'fix/paid-red')  # even a misleading successful run conclusion cannot hide the red job
+        red['shards'] = [dict(leg(803, 1, conclusion='failure'), log_rc=1)]
+        line = m.ci_selection_line(run=Fake([noop_run(802, 'fix/noop'), red]))
+        self.assertIn(seg(803, 1, 'fix/paid-red', 'PARTIAL 0/5 shards (1 failed, 4 missing, 1 unreadable)'), line)
+        self.assertNotIn('802#', line)
+        self.assertIn('noop (not admitted) ×1', line)
 
     def test_unknown_expected_shard_set_is_coverage_unknown(self):
         cancelled = full_run(401, 'fix/c')

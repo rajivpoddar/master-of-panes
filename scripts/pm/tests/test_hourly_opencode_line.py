@@ -514,15 +514,9 @@ def test_compose_places_the_section_under_the_burn_block_on_1h_only():
     assert "*OpenCode Go:*" not in composer.compose("1h", now, {"events": 0}, {}, [])
 
 
-def test_compose_keeps_one_native_table_and_turns_the_opencode_table_into_plain_rows():
+def test_compose_preserves_opencode_cells_for_the_sender():
     now = datetime.now(timezone.utc)
     section = render(now, ps_text=ps(), environ={}, root=Path("/nonexistent/runs"), log=Path("/nonexistent/muse.log"))
-    out = composer.compose("1h", now, {"events": 0}, {}, [], opencode=section).splitlines()
-    # With no Burn table above it, the OpenCode table is the first table in the post and stays native.
-    assert "| " + " | ".join(composer.OPENCODE_TABLE_HEADER) + " |" in out
-    pace = ["| Account | Used |", "|---|---|", "| a | 1% |"]
-    rewritten = composer.one_native_table([*pace, *section.splitlines()])
-    assert rewritten[:3] == pace
-    assert not any(row.startswith("|") for row in rewritten[3:])  # Slack allows one native table block per message
-    assert any(row.startswith(f"{POOL} — Live now: 0") for row in rewritten)
-    assert any(row.startswith(f"{HY4} — Live now: 0") for row in rewritten)
+    pace = "| Account | Used |\n|---|---|\n| a | 1% |"
+    out = composer.compose("1h", now, {"events": 0}, {}, [], pace=pace, opencode=section)
+    assert pace in out and section in out

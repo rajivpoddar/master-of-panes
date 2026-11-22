@@ -816,7 +816,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "c948da44652967493562ed70ded312ff5633389db397fa951a7a9e6973ac8b07",
+      "sha256": "989caa42dbedc9893454b87e3a930b27d83a260dcca83fdf90ea10ed32d4aa9c",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -1581,7 +1581,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-slack-sender",
-      "sha256": "c81835319dbc1575d753f16618ebf0bba4cc00fabfc1856f5f3d34a46300296c",
+      "sha256": "733a0f5641665cc042846d12618ca0cb1c07e5bdfa04d6abc2947338efcfb70a",
       "source_path": "claude/skills/slack-message/scripts/slack-send.sh"
     },
     {
