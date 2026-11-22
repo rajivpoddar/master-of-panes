@@ -957,6 +957,24 @@
       "source_path": "claude/scripts/ready_pool_select.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/remote-qa-convex-prod-base-env.test.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-qa-tooling",
+      "sha256": "b054522fdfc384c00057ffb853be2c8293faf8f9c10df6bae38d3470fca50db9",
+      "source_path": "claude/scripts/remote-qa-convex-prod-base-env.test.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/remote-qa-convex.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-qa-tooling",
+      "sha256": "235fbc776dfb2107da676e5dd291029baf98a38475f3369d3d1e01d2e58be0ed",
+      "source_path": "claude/scripts/remote-qa-convex.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/remote-qa-modal.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -973,6 +991,15 @@
       "ownership_class": "shared-claude-qa-tooling",
       "sha256": "041f249e94a4568cbe8b0bea8ead6890d9c0de218262983d16b860e27f4f5209",
       "source_path": "claude/scripts/remote-qa-onmiss-stub.test.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/remote-qa-r2.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-qa-tooling",
+      "sha256": "185cdd4f04a1b81068b0bbefcb6c76b4829cc060f8c893e6f7267516db4d20cb",
+      "source_path": "claude/scripts/remote-qa-r2.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/remote-qa-spec-fetch.py",
@@ -2031,7 +2058,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 222,
+    "selected_count": 225,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
