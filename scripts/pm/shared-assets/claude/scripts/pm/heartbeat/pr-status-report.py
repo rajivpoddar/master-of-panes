@@ -41,6 +41,14 @@ _REVIEW_GATE_SPEC = importlib.util.spec_from_file_location(
 _REVIEW_GATE = importlib.util.module_from_spec(_REVIEW_GATE_SPEC)
 _REVIEW_GATE_SPEC.loader.exec_module(_REVIEW_GATE)
 
+try:  # exact-head copy-only receipts (#13451); a load failure keeps full CI/E2E required, never crashes the report
+    _COPY_ONLY_SPEC = importlib.util.spec_from_file_location(
+        'copy_only_evidence_report', Path(__file__).resolve().parents[2] / 'ci/copy_only_evidence.py')
+    _COPY_ONLY = importlib.util.module_from_spec(_COPY_ONLY_SPEC)
+    _COPY_ONLY_SPEC.loader.exec_module(_COPY_ONLY)
+except Exception:
+    _COPY_ONLY = None
+
 
 def stamp(value):
     if not value:
@@ -229,16 +237,24 @@ def hold_reason(pr, obligations):
     return None
 
 
-def classifier_e2e_required(number, head):
-    """change_scope.py classifier (main copy); fail closed to True."""
-    script = HOME / 'Downloads/projects/heydonna-app/scripts/ci/change_scope.py'
+def e2e_exemption(number, head):
+    """(e2e_required, reason) from an exact-head receipt (ci/copy_only_evidence.py, #13451).
+
+    The pinned origin/main classifier plus its copy-only content check run at this exact head; a path-only
+    classification never grants copy-only. Missing, stale, malformed or unavailable evidence, or a missing
+    helper, keeps full CI/E2E required (fail closed), with the reason shown in the report line.
+    """
+    if _COPY_ONLY is None:
+        return True, 'full-required: copy-only receipt helper unavailable'
     try:
-        out = subprocess.run([sys.executable, str(script), '--repo', REPO, '--pr', str(number),
-                              '--expected-head', head], capture_output=True, text=True, timeout=90,
-                             cwd=script.parent.parent.parent, check=True).stdout
-        return bool(json.loads(out).get('e2e_required', True))
-    except Exception:
-        return True
+        return _COPY_ONLY.e2e_required_for(number, head, repo=REPO)
+    except Exception as exc:  # the helper never raises; this guards an unexpected defect
+        return True, f'full-required: receipt check failed ({type(exc).__name__})'
+
+
+def classifier_e2e_required(number, head):
+    """Bool view of e2e_exemption(); fail closed to True."""
+    return e2e_exemption(number, head)[0]
 
 
 def merge_gate(pr, runs, obligations, e2e_required=None):
@@ -252,9 +268,10 @@ def merge_gate(pr, runs, obligations, e2e_required=None):
     admitted = f'ci-head:{head}' in labels
     checks = latest_checks(runs or [], head)
     ci, e2e = checks.get('test', 'MISSING'), checks.get('e2e', 'MISSING')
+    e2e_reason = None
     if ci == 'SUCCESS' and e2e in ('MISSING', 'SKIPPED', 'NEUTRAL'):
         if e2e_required is None:
-            e2e_required = classifier_e2e_required(number, head)
+            e2e_required, e2e_reason = e2e_exemption(number, head)
         if not e2e_required:
             e2e = 'NOT_REQUIRED'
     hold = hold_reason(pr, obligations)
@@ -280,7 +297,7 @@ def merge_gate(pr, runs, obligations, e2e_required=None):
         gate, action = 'CI running', 'await terminal' if 'PENDING' in (ci, e2e) else 'reconcile missing gates'
     if mergeable == 'CONFLICTING' and not action.startswith('resolve conflicts'):
         action = 'resolve conflicts; ' + action
-    return gate, action, {'ci': ci, 'e2e': e2e, 'admitted': admitted}
+    return gate, action, {'ci': ci, 'e2e': e2e, 'admitted': admitted, 'e2e_reason': e2e_reason}
 
 
 def pending_ci(head):
@@ -318,6 +335,8 @@ def classify(pr, runs, slots, obligations, prior, now):
     admission = 'matches' if admitted else ('stale' if any(x.startswith('ci-head:') for x in labels) else 'missing')
     gate, action, g = merge_gate(pr, runs, obligations)
     ci, e2e = g['ci'], g['e2e']
+    if g.get('e2e_reason'):
+        e2e = f'{e2e} ({g["e2e_reason"]})'  # why the exact-head receipt did or did not exempt E2E
     blocked = hold_reason(pr, obligations)
     proxy_owner, review = report_annotations(pr)
     owner = proxy_owner

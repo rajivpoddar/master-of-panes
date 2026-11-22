@@ -201,7 +201,8 @@ def test_pool_count_uses_batched_native_lookup(monkeypatch):
     issues = [_pool_todo(n) for n in range(1, 121)] + [_pool_todo(500, ("slot:3",))]
     assert bt.clean_ready_pool_todo_count(issues, set()) == 120
     assert seen["serial"] == []
-    assert [len(b) for b in seen["batches"]] == [50, 50, 20]  # 120 issues, 3 round trips
+    # 120 issues, 3 round trips; prefetch_native runs batches on a thread pool, so arrival order is not fixed
+    assert sorted(len(b) for b in seen["batches"]) == [20, 50, 50]
     assert 500 not in {n for b in seen["batches"] for n in b}  # non-claimable never looked up
     assert not any("_dependency_comments" in i for i in issues)  # caller's dicts untouched
 

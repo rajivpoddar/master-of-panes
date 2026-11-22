@@ -870,7 +870,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "e81ae87f51a8aaf585ecf2e2daac53fddbd5916e95ef8d963eecabbf85d6278a",
+      "sha256": "de710ffb138b2c08465f04d88cbb7402486eb0b6ba02f2121eb0fba7a1613b51",
       "source_path": "claude/scripts/pm/heartbeat/pr-status-report.py"
     },
     {
@@ -1115,7 +1115,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage-tests",
-      "sha256": "bdbc2f9c0a430035be08cea5a1558b1ebe08ce951f644b6d4023235201444061",
+      "sha256": "f6faa835fc87c66c61562e030144b474be7c32ad33a0184e2a55ca6c9b4f4666",
       "source_path": "claude/scripts/tests/test_backlog_runnability.py"
     },
     {
