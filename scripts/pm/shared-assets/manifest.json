@@ -681,7 +681,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-mop-cli",
-      "sha256": "3a2f911a87e2b9cae6f850844a0aac6c8aeac6a27a358abee9416427a0e399f3",
+      "sha256": "5e2fc08146c7f28f804284aa8a1a8eda448b4be1ffc4fa7b838e3a27e29648ad",
       "source_path": "claude/scripts/mop.py"
     },
     {
