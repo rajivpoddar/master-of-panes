@@ -1734,7 +1734,7 @@ proxy_agent_pick_tier() {
     # Local Spark health gate: /metrics carries the served model's quoted name without the credentials required by /v1/models.
     # During the Ornith alias transition vLLM reports only its first name, which may still be the legacy Qwen id.
     if [[ "$id" == ornith-1.5-35b-a3b || "$id" == qwen3.8-flash-next || "$id" == inkling-2-mini ]]; then
-      if [[ "$id" == inkling-2-mini ]]; then _spark_url="${INKLING_HEALTH_URL:-http://192.168.68.113:18120/metrics}"; else _spark_url="${QWEN_HEALTH_URL:-http://192.168.68.113:18120/metrics}"; fi
+      if [[ "$id" == inkling-2-mini ]]; then _spark_url="${INKLING_HEALTH_URL:-http://192.168.68.114:18120/metrics}"; else _spark_url="${QWEN_HEALTH_URL:-http://192.168.68.114:18120/metrics}"; fi
       # ONE retry before declaring the host down: the LAN occasionally drops a single probe under load (measured 4/20 then 0/80 on the same
       # endpoint minutes apart), and a spurious host_down silently routes the lane to a PAID model, which is the exact cost this tier exists to
       # avoid. Worst case is 2 x 3 s for a genuinely dead host, and a real outage still fails both attempts.
