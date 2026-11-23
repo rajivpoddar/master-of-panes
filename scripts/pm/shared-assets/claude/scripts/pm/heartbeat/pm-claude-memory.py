@@ -74,7 +74,7 @@ CLAUDE_RE = re.compile(r"(^|/)(claude|openclaude)(\s|$)")
 PX_NAME_RE = re.compile(r"(?:^|\s)--name(?:=|\s+)(px-[\w.-]+)(?=\s|$)")
 CONTINUATION = (
     "PM Claude RSS crossed the memory threshold and MoP armed exit-pending. "
-    "Read memory/MEMORY-session-handoff-current.md and data/pm-continuation-note.md. "
+    "Run Skill(pm-handoff) mode boot first: follow ~/.claude/state/handoffs/pm-boot.md (GOAL, LESSONS, HANDOFF, pm-ops.py obligation-list --actionable, then a 2-line restate in the PM thread), then read memory/MEMORY-session-handoff-current.md and data/pm-continuation-note.md. "
     "Resume from the canonical ledger. Reconcile live background agents before relaunching any; "
     "do not duplicate running work."
 )

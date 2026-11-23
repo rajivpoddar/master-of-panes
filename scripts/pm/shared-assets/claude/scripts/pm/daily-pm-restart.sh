@@ -269,7 +269,7 @@ def perform():
         raise RuntimeError('PM owner changed before writing the checkpoint')
     text = ('---\nname: pm-resume-prompt-' + day + '-0400\ndescription: Daily 04:00 IST PM continuation; live snapshots and agent owners.\n---\n\n'
         '# PM RESUME PROMPT: ' + day + ' 04:00 IST\n\n'
-        'Read MEMORY-session-handoff-current.md too. pm-ops.db is authoritative; snapshots are not permission to mutate ownership. '
+        'Run Skill(pm-handoff) mode boot first: follow ~/.claude/state/handoffs/pm-boot.md (GOAL, LESSONS, HANDOFF, pm-ops.py obligation-list --actionable, then a 2-line restate in the PM thread), then read memory/MEMORY-session-handoff-current.md and data/pm-continuation-note.md. Read MEMORY-session-handoff-current.md too. pm-ops.db is authoritative; snapshots are not permission to mutate ownership. '
         'Reconcile live state before resuming work. Never assume a background agent finished.\n\n'
         '## Background agent owners to reconcile and relaunch\n' + '\n'.join('- ' + owner for owner in owners) + '\n\n'
         'Relaunch only actual stopped background agents with still-open work; PM, CTO, Rajiv and slots are owners, not agent launch names. '

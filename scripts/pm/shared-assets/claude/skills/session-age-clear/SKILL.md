@@ -44,6 +44,7 @@ Policy:
   otherwise use `/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/mop-clear-slot.sh pm`.
 - Never inject `/clear` directly and never use respawn as the stale-session fix.
 - PM is never auto-cleared by this skill.
+- Before PM clears itself, run `Skill(pm-handoff)» mode `checkpoint» first (rewrites the PM session handoff note). It is a checkpoint only: it never gates input and never delays the clear past the next Stop (rule 50).
 - Do not use `mop clear --slot all` from this skill because it clears PM
   too early and can interrupt the caller before proof is written.
 - PM self-clear is a nag/manual-ack transition: heartbeat creates/updates
