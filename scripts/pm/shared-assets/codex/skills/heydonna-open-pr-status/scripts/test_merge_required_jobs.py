@@ -51,6 +51,9 @@ class World:
         self.commands = []
         self.reads = []
         self.runs = None
+        # Trusted ci.yml bytes at the classifier's workflow sha. None = unproven (the default):
+        # a run is then never treated as a legacy static three-shard matrix.
+        self.ci_yml = None
 
     def receipt(self, **updates):
         lines = self.log.splitlines()
@@ -73,6 +76,8 @@ class World:
             return {"parents": [{"sha": sha} for sha in self.parents]}
         if path in self.blobs:
             body = self.rules.encode() if "rules.json?" in path else b"unused blob body"
+            if "workflows/ci.yml?ref=" in path and self.ci_yml is not None:
+                body = self.ci_yml.encode()
             return {"sha": self.blobs[path], "content": base64.b64encode(body).decode()}
         raise AssertionError(f"Unexpected API: {path}")
 
@@ -197,6 +202,25 @@ def add_ts(w):
                  steps=[{"name":"Unit tests", "status":"completed", "conclusion":"success"}])
         w.jobs.append(j)
 
+
+# The legacy ci.yml shape: one static `unit-tests` job with a literal three-shard matrix and no
+# selector jobs. Only a trusted workflow like this may keep the fixed three-shard requirement.
+LEGACY_CI_YML = """\
+name: CI
+jobs:
+  typescript:
+    runs-on: ubuntu-latest
+  unit-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - run: echo unit
+  unit-tests-isolated:
+    runs-on: ubuntu-latest
+"""
 
 OTHER = "f" * 40
 STAMP = "2026-11-23T18:48:28.0088459Z"
@@ -393,6 +417,151 @@ def test_attestation_contradicted_by_the_job_inventory_refuses(contradiction):
         w.evaluate()
 
 
+STALE_ATTESTATIONS = ["receipt_other_attempt", "receipt_other_head", "receipt_other_run",
+                      "receipt_attempt_missing", "event_other_head"]
+
+
+@pytest.mark.parametrize("stale", STALE_ATTESTATIONS)
+def test_three_of_five_with_a_stale_attestation_refuses_instead_of_falling_back(stale):
+    # The selector claimed five shards; shards 4 and 5 have no job records. A receipt from
+    # another attempt/head/run used to be discarded, dropping the requirement to shards 1-3,
+    # which the incomplete inventory satisfies. It must refuse.
+    w = World()
+    add_ts(w)
+    set_unit_matrix(w, 5, **FOREIGN_OR_INVALID_RECEIPTS[stale])
+    for missing in (4, 5):
+        w.jobs.remove(w.job(f"unit-tests ({missing})"))
+    with pytest.raises(RuntimeError, match="UNIT_ATTESTATION_REQUIRED"):
+        w.evaluate()
+
+
+def test_three_of_five_with_the_matching_attempt_still_refuses_for_the_missing_shards():
+    w = World()
+    add_ts(w)
+    set_unit_matrix(w, 5)
+    for missing in (4, 5):
+        w.jobs.remove(w.job(f"unit-tests ({missing})"))
+    with pytest.raises(RuntimeError):
+        w.evaluate()
+
+
+# A red shard is refused by the generic job-green guard; a skipped one passes that guard and is
+# refused by the attestation/required-job checks. Either way the run never reads as mergeable.
+SCHEDULED_RED_REFUSALS = r"JOB_NOT_GREEN_OR_UNBOUND|UNIT_ATTESTATION_REQUIRED|REQUIRED_JOB_NOT_GREEN"
+
+
+@pytest.mark.parametrize("state", ["failure", "skipped"])
+@pytest.mark.parametrize("stale", STALE_ATTESTATIONS)
+def test_scheduled_red_with_a_stale_attestation_refuses(stale, state):
+    w = World()
+    add_ts(w)
+    set_unit_matrix(w, 3, **FOREIGN_OR_INVALID_RECEIPTS[stale])
+    w.job("unit-tests (2)")["conclusion"] = state
+    with pytest.raises(RuntimeError, match=SCHEDULED_RED_REFUSALS):
+        w.evaluate()
+
+
+@pytest.mark.parametrize("state", ["failure", "skipped"])
+def test_scheduled_red_with_the_matching_attempt_refuses(state):
+    w = World()
+    add_ts(w)
+    set_unit_matrix(w, 3)
+    w.job("unit-tests (2)")["conclusion"] = state
+    with pytest.raises(RuntimeError, match=SCHEDULED_RED_REFUSALS):
+        w.evaluate()
+
+
+@pytest.mark.parametrize("gate", ["missing", "no_step", "empty_log", "garbage_log"])
+def test_dynamic_selector_run_without_a_valid_attestation_refuses(gate):
+    # Missing or invalid attestation: shards 1-3 are all green, yet the selector jobs prove the
+    # run is dynamic, so the fixed three-shard fallback must not apply.
+    w = World()
+    add_ts(w)
+    job = set_unit_matrix(w, 3, gate=gate != "missing")
+    if gate == "missing":
+        w.jobs.append(dict(w.job("unit-tests (1)"), id=max(j["id"] for j in w.jobs) + 1, name="unit-select"))
+    elif gate == "no_step":
+        job["steps"] = []
+    elif gate == "empty_log":
+        w.job_logs[str(job["id"])] = ""
+    else:
+        w.job_logs[str(job["id"])] = f"{STAMP} nothing useful\n"
+    with pytest.raises(RuntimeError, match="UNIT_ATTESTATION_REQUIRED"):
+        w.evaluate()
+
+
+@pytest.mark.parametrize("second", ["unit-tests", "unit-tests (${{ matrix.other }})"])
+def test_attested_zero_with_multiple_skipped_placeholders_refuses(second):
+    # Job names are unique per run, so a second placeholder carries a different name. The old
+    # `all(placeholder)` predicate accepted the pair; attested zero is exactly ONE native job.
+    w = World()
+    add_ts(w)
+    set_unit_matrix(w, 0)
+    w.jobs.append(dict(w.job(PLACEHOLDER), id=max(j["id"] for j in w.jobs) + 1, name=second))
+    with pytest.raises(RuntimeError, match="UNIT_JOBS_CONTRADICT_ATTESTATION"):
+        w.evaluate()
+
+
+@pytest.mark.parametrize("placeholder", ["unit-tests", "unit-tests (${{ matrix.other }})"])
+def test_attested_zero_requires_the_exact_native_placeholder_name(placeholder):
+    w = World()
+    add_ts(w)
+    set_unit_matrix(w, 0)
+    w.job(PLACEHOLDER)["name"] = placeholder
+    with pytest.raises(RuntimeError, match="UNIT_JOBS_CONTRADICT_ATTESTATION"):
+        w.evaluate()
+
+
+def test_attested_zero_placeholder_that_ran_steps_refuses():
+    w = World()
+    add_ts(w)
+    set_unit_matrix(w, 0)
+    w.job(PLACEHOLDER)["steps"] = [{"name": "Unit tests", "status": "completed", "conclusion": "skipped"}]
+    with pytest.raises(RuntimeError, match="UNIT_JOBS_CONTRADICT_ATTESTATION"):
+        w.evaluate()
+
+
+def test_legacy_static_matrix_is_proved_only_by_the_trusted_workflow():
+    w = World()
+    add_ts(w)
+    w.ci_yml = LEGACY_CI_YML
+    assert w.evaluate()[0]["status"] == "READY_TO_MERGE"
+
+
+@pytest.mark.parametrize("workflow", [
+    None,  # the workflow bytes prove nothing
+    LEGACY_CI_YML.replace("[1, 2, 3]", "[1, 2, 3, 4, 5]"),
+    LEGACY_CI_YML.replace("shard: [1, 2, 3]", "shard: ${{ fromJSON(needs.unit-select.outputs.matrix) }}"),
+    LEGACY_CI_YML + "  unit-gate:\n    runs-on: ubuntu-latest\n",
+    LEGACY_CI_YML.replace("  unit-tests:", "  unit-prechecks:\n    runs-on: ubuntu-latest\n  unit-tests:"),
+])
+def test_legacy_three_shard_fallback_refuses_when_the_workflow_does_not_prove_a_static_matrix(workflow):
+    w = World()
+    add_ts(w)
+    w.ci_yml = workflow
+    with pytest.raises(RuntimeError, match="UNIT_ATTESTATION_REQUIRED"):
+        w.evaluate()
+
+
+def test_legacy_static_matrix_with_selector_jobs_in_the_run_refuses():
+    # The trusted workflow looks legacy, but the run itself reports a selector job: dynamic CI.
+    w = World()
+    add_ts(w)
+    w.ci_yml = LEGACY_CI_YML
+    w.jobs.append(dict(w.job("unit-tests (1)"), id=max(j["id"] for j in w.jobs) + 1, name="unit-select"))
+    with pytest.raises(RuntimeError, match="UNIT_ATTESTATION_REQUIRED"):
+        w.evaluate()
+
+
+def test_legacy_static_matrix_with_a_missing_shard_refuses():
+    w = World()
+    add_ts(w)
+    w.ci_yml = LEGACY_CI_YML
+    w.jobs.remove(w.job("unit-tests (3)"))
+    with pytest.raises(RuntimeError):
+        w.evaluate()
+
+
 @pytest.mark.parametrize("name", ["typescript", "unit-tests-isolated"])
 def test_attested_zero_shards_never_excuse_the_other_required_ts_jobs(name):
     w = World()
@@ -421,12 +590,14 @@ def test_python_only_template_named_placeholder_beside_real_shards_refuses():
 def test_mixed_required_python_and_ts_are_both_proved():
     w = World()
     add_ts(w)
+    w.ci_yml = LEGACY_CI_YML
     assert w.evaluate()[0]["status"] == "READY_TO_MERGE"
 
 
 def test_required_ts_passes_with_explicitly_unrequired_python_skipped():
     w = World()
     add_ts(w)
+    w.ci_yml = LEGACY_CI_YML
     w.receipt(python_changed=False)
     for job in w.jobs:
         if job["name"].startswith("python"):
@@ -438,6 +609,7 @@ def test_required_ts_passes_with_explicitly_unrequired_python_skipped():
 def test_required_ts_family_skips_refuse(name):
     w = World()
     add_ts(w)
+    w.ci_yml = LEGACY_CI_YML
     w.job(name)["conclusion"] = "skipped"
     with pytest.raises(RuntimeError):
         w.evaluate()

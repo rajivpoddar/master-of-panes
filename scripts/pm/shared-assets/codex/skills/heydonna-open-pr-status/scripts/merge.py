@@ -818,11 +818,59 @@ def unit_family(name):
     return name == "unit-tests" or name.startswith("unit-tests (")
 
 
-def unit_placeholder(job):
-    """A skipped matrix is reported as one non-expanded job, never as shards."""
-    name = job["name"]
-    return (unit_family(name) and (name == "unit-tests" or "{{" in name)
-            and job.get("status") == "completed" and job.get("conclusion") == "skipped")
+UNIT_NATIVE_PLACEHOLDER = "unit-tests (${{ matrix.shard }})"
+UNIT_SELECTOR_JOBS = ("unit-select", "unit-prechecks", "unit-gate")
+UNIT_DYNAMIC_MARKERS = UNIT_SELECTOR_JOBS + ("UNIT_SCHEDULE",)
+LEGACY_UNIT_SHARDS = ("unit-tests (1)", "unit-tests (2)", "unit-tests (3)")
+
+
+def native_unit_placeholder(job):
+    """The one job a skipped dynamic matrix reports: the unexpanded template name, skipped, no steps."""
+    return (job["name"] == UNIT_NATIVE_PLACEHOLDER and job.get("status") == "completed"
+            and job.get("conclusion") == "skipped" and not job.get("steps"))
+
+
+def workflow_job_block(text, job):
+    """Body lines of one top-level workflow job, or None unless it is defined exactly once."""
+    lines = text.splitlines()
+    starts = [i for i, line in enumerate(lines) if re.fullmatch(rf"  {re.escape(job)}:\s*", line)]
+    if len(starts) != 1:
+        return None
+    block = []
+    for line in lines[starts[0] + 1:]:
+        if re.match(r"  [A-Za-z0-9_][A-Za-z0-9_-]*:\s*$", line) or re.match(r"[^\s#]", line):
+            break
+        block.append(line)
+    return block
+
+
+def legacy_static_unit_matrix(jobs, required_set):
+    """True only when the trusted ci.yml itself proves the legacy static three-shard unit matrix.
+
+    The workflow bytes are the ones ci_required_set_proof bound (same blob at base and at the
+    classifier's workflow sha). A run is legacy-static only if no selector job reported, the unit
+    family is exactly shards 1..3, and that workflow defines `unit-tests` once with a literal
+    `shard: [1, 2, 3]` matrix and none of the selector markers. Any doubt is "not legacy".
+    """
+    if any(job["name"] in UNIT_SELECTOR_JOBS for job in jobs):
+        return False
+    if {job["name"] for job in jobs if unit_family(job["name"])} != set(LEGACY_UNIT_SHARDS):
+        return False
+    try:
+        selected = contents_identity(".github/workflows/ci.yml", required_set["workflow_sha"])
+    except (Refusal, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+        return False
+    if selected is None:
+        return False
+    text = selected[1].decode("utf-8", "replace")
+    block = workflow_job_block(text, "unit-tests")
+    # A literal matrix is a mapping (`matrix:` alone on its line); an expression-valued matrix
+    # (`matrix: ${{ fromJSON(...) }}`) is the dynamic selector's.
+    if (block is None or any(marker in text for marker in UNIT_DYNAMIC_MARKERS)
+            or any(re.search(r"\bmatrix:\s*\S", line) for line in block)):
+        return False
+    literal = re.compile(r"\s+shard:\s*\[\s*1\s*,\s*2\s*,\s*3\s*\]\s*")
+    return sum(bool(literal.fullmatch(line)) for line in block) == 1
 
 
 def unit_gate_log_facts(lines):
@@ -868,8 +916,9 @@ def unit_gate_attested_count(run, jobs, required_set):
     """Shard count the unit gate attested for THIS head, run and attempt, else None.
 
     Mirrors the gate's own validation of its schedule receipt. A receipt for another
-    head, run or attempt, a failed or missing gate, or any doubt returns None, so the
-    caller keeps the strict legacy shard requirement (fail closed).
+    head, run or attempt, a failed or missing gate, or any doubt returns None. None is
+    never an attestation: on dynamic-selector CI the caller refuses, and only a workflow
+    that proves a legacy static three-shard matrix keeps the fixed shard requirement.
     """
     head, run_id = required_set["head"], str(run["id"])
     gates = [job for job in jobs if job["name"] == "unit-gate"]
@@ -933,17 +982,24 @@ def verify_ci_required_jobs(run, jobs, required_set):
                 or job.get("conclusion") not in ("success", "skipped")
                 or job.get("status") != "completed"):
             raise Refusal(f"JOB_NOT_GREEN_OR_UNBOUND job={job['name']} run={run['id']}")
-    # Unattested: the legacy strict shard set. Attested by this attempt's unit gate: exactly
-    # the scheduled shards (0..5), and an unscheduled matrix must be only a skipped placeholder.
+    # Dynamic-selector CI requires THIS attempt's unit-gate attestation: exactly the scheduled
+    # shards (0..5), and an unscheduled matrix is exactly one native skipped placeholder. A
+    # missing, stale (other head/run/attempt) or invalid attestation refuses; it never falls
+    # back to the legacy shard set. Only a workflow that proves a legacy static 1..3 matrix
+    # keeps the fixed three-shard requirement.
     ts_shards = {f"unit-tests ({i})": "Unit tests" for i in (1, 2, 3)}
     if required_set["ts_changed"]:
         declared = unit_gate_attested_count(run, jobs, required_set)
-        if declared is not None:
+        if declared is None:
+            if not legacy_static_unit_matrix(jobs, required_set):
+                raise Refusal(f"UNIT_ATTESTATION_REQUIRED run={run['id']}")
+        else:
             expected = [f"unit-tests ({n})" for n in range(1, declared + 1)]
             family = [job for job in jobs if unit_family(job["name"])]
             if declared == 0:
-                # Zero scheduled: the matrix is exactly one skipped placeholder, never real shards.
-                contradicts = not family or not all(unit_placeholder(job) for job in family)
+                # Zero scheduled: the matrix is exactly one native skipped placeholder, never
+                # real shards and never several placeholders.
+                contradicts = len(family) != 1 or not native_unit_placeholder(family[0])
             else:
                 # N scheduled: only shards 1..N may exist; the required-job loop proves each one.
                 contradicts = any(job["name"] not in expected for job in family)
