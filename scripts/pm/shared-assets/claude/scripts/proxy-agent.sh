@@ -1958,7 +1958,10 @@ proxy_agent_pick_tier() {
       last="$id"
     fi
     if proxy_agent_is_capped "$TYPE" && [[ "$id" == claude-* && "${claude_live:-0}" -ge "$PROXY_AGENT_CLAUDE_CAP" ]]; then
-      printf 'proxy-agent: telemetry claude_cap (%s live >= %s)\n' "$claude_live" "$PROXY_AGENT_CLAUDE_CAP" >&2
+      # ENFORCED (Rajiv C0ALZJHGE49 thread 1795437841.011459, ts 1795439210.427769 "reduce the calude proxy cap"; was telemetry-only).
+      printf 'proxy-agent: claude_cap skip model=%s (%s live >= %s)\n' "$id" "$claude_live" "$PROXY_AGENT_CLAUDE_CAP" >&2
+      skipped="${skipped:+$skipped,}$id:claude_cap"
+      continue
     fi
     # Burn decision runs BEFORE the usability probe: a refused pool never sends a provider request.
     if proxy_agent_burn_refused "$id"; then
@@ -2807,7 +2810,9 @@ if proxy_agent_is_capped "$TYPE"; then
   if [[ "$MODEL_ID" == claude-* ]]; then
     _live_claude="$(proxy_agent_live_count claude)"
     if [[ "${_live_claude:-999}" -ge "$PROXY_AGENT_CLAUDE_CAP" ]]; then
-      printf 'proxy-agent: telemetry claude_cap (%s live >= %s).\n' "$_live_claude" "$PROXY_AGENT_CLAUDE_CAP" >&2
+      # ENFORCED for an explicit claude --model (Rajiv ts 1795439210.427769): refuse rc 75 so the launcher queues CAPACITY_WAIT.
+      printf 'PROXY_AGENT_REFUSED reason=claude_cap model=%s (%s live >= %s)\n' "$MODEL_ID" "$_live_claude" "$PROXY_AGENT_CLAUDE_CAP" >&2
+      exit 75
     fi
   fi
 fi

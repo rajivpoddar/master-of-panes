@@ -39,7 +39,7 @@ def count_processes(processes, root, claude_only=False):
 def main():
     try:
         root = Path(os.environ.get('PROXY_AGENT_RUN_STATE_DIR', str(Path.home() / '.local/state/proxy-agent-runs')))
-        output = subprocess.check_output(['/bin/ps', '-axo', 'command='], text=True)
+        output = subprocess.check_output(['/bin/ps', '-axo', 'command='], text=True, errors='replace')  # a non-UTF-8 argv made ps output undecodable → UnicodeDecodeError → caps unreadable (23 Nov)
         print(count_processes(output, root, sys.argv[1] == 'claude'))
     except (OSError, ValueError, IndexError, subprocess.SubprocessError) as exc:
         print('proxy-agent: cap metadata unavailable: ' + type(exc).__name__, file=sys.stderr)
