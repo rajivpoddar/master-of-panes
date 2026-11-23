@@ -147,8 +147,10 @@ def launch_spec(name, typ, brief, argv):
 def lane_pid(name):
     """Pid of the live `claude -p --name <name>` child (the same process shape the cap counters match), else None."""
     try:
+        # encoding/errors pinned: a lane command line carries brief text (non-ASCII, or cut mid-character by ps), and a decode error here
+        # surfaced as PROXY_AGENT_STATE_UNAVAILABLE reason=UnicodeDecodeError so the lane never reached `running`.
         out = subprocess.run(['/bin/ps', '-axww', '-o', 'pid=,command='], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                             text=True, timeout=10).stdout
+                             encoding='utf-8', errors='replace', timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         return None
     for line in out.splitlines():

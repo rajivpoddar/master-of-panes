@@ -996,7 +996,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "80058bdf8bb1d88b15bfa82ebaa1426e4def76e8a325d0f517068b641842ff5f",
+      "sha256": "b6d3ea2af84be15d013d49eb0d7a62c2d212dff33b968711fe39bd9ecbcd9ae2",
       "source_path": "claude/scripts/proxy-run-state.py"
     },
     {
