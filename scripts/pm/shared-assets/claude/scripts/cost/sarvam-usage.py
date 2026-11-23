@@ -29,13 +29,27 @@ yet (in flight, or killed first) has no verified usage; it is reported as such a
 
 Time comes from the completion itself. A `result` event has no clock of its own, so a completion is placed at its own
 `timestamp` when the record carries one, else at the timestamp of the newest assistant/user event of the same
-`session_id` written before it (the completion's last message). The transcript mtime is never used for placement: it is
-the end time of the LAST completion and would drag every earlier one into the newest window and month. A completion
-with no trusted time keeps its tokens but is marked untimed: month-to-date and, while it could still be inside the
-window, the 3h burn are UNAVAILABLE with that reason, never estimated.
+`session_id` written before it (the completion's last message). That message time is a one-shot witness: EVERY distinct
+result of the session consumes it, including a result that carries its own timestamp, so a later result can never reuse
+an earlier completion's message; with no new trustworthy time it stays untimed. The transcript mtime is never used for
+placement: it is the end time of the LAST completion and would drag every earlier one into the newest window and month.
+A completion with no trusted time keeps its tokens but is marked untimed: month-to-date and, while it could still be
+inside the window, the 3h burn are UNAVAILABLE with that reason, never estimated.
+
+The month and the trailing window are separate questions. A completion counts toward month-to-date only when it falls in
+the current IST month, and toward the 3h burn whenever it falls in the trailing window, even when that window reaches
+back across the month boundary (00:30 IST on the 1st still burns on 21:30-00:30 of the last month). The transcript scan
+floor is the earlier of the month start and the window start for the same reason.
 
 Counters are verified, never coerced: an entry needs all four counters as non-negative integers. A missing, malformed
 or empty usage object is excluded and reported (unverified), never turned into a priced zero row.
+
+Unresolved usage gaps (a lane with no verified usage yet, empty or malformed counters, or cumulative usage with an unknown
+invocation boundary) are STATE, not a property of one scan. With --record each scanned lane's current gap set is appended
+to the ledger (`{"v":3,"gap":{"lane","seen","kinds"}}`, last record per lane wins, an empty `kinds` records that the lane
+resolved), so an unchanged lane that the scan watermark no longer re-reads still keeps its gap. A gap is dated by the
+affected completion's own time when known, else by the lane's last write (an upper bound). It keeps the 3h burn n/a while
+its time is inside the trailing window, and stays in the month-to-date notes for the rest of its month.
 
 Never invents a number, and never prints a bare zero for a missing input. Each gap is reported with its reason:
   - no verified usage at all but Sarvam lanes exist (in flight, unpriced route, or an unregistered alias/upstream id):
@@ -80,6 +94,7 @@ SCHEMA = 3
 ALIAS_PREFIX = "sarvam-"
 LOG_HEAD_BYTES = 65536
 COUNTERS = ("inputTokens", "cacheReadInputTokens", "cacheCreationInputTokens", "outputTokens")
+GAP_KINDS = ("unverified", "malformed", "unbounded")
 
 # One registered route per CLIProxyAPI gateway alias: the upstream id the provider reports back in message.model, and
 # rupees per 1M tokens (input, cached input, output), ex-GST. Source: Sarvam Token Factory published price list (pulled
@@ -177,8 +192,56 @@ def _merge(rows: dict, row: dict) -> None:
         old["seen"] = row["seen"]
 
 
-def read_ledger(path: Path):
-    """(rows by id, newest scan watermark epoch or None, exists). Tolerates torn, foreign and pre-v3 lines."""
+def _note_gap(book: dict, alias: str, stamp) -> None:
+    """Record a usage gap on `alias`: the newest time known for an affected completion. An unknown time (None) wins,
+    because the gap could then be anywhere up to the lane's last write."""
+    if alias not in book:
+        book[alias] = stamp
+    elif book[alias] is not None:
+        book[alias] = None if stamp is None else max(book[alias], stamp)
+
+
+def _clean_gap(data):
+    """A persisted lane gap as {"seen": iso|None, "kinds": {kind: {alias: iso|None}}}; None for a torn record."""
+    if not isinstance(data, dict) or not isinstance(data.get("lane"), str):
+        return None
+    kinds: dict = {}
+    raw = data.get("kinds")
+    for kind, book in (raw.items() if isinstance(raw, dict) else ()):
+        if kind in GAP_KINDS and isinstance(book, dict):
+            clean = {alias: (at if isinstance(at, str) else None) for alias, at in book.items() if isinstance(alias, str)}
+            if clean:
+                kinds[kind] = clean
+    seen = data.get("seen")
+    return {"seen": seen if isinstance(seen, str) else None, "kinds": kinds}
+
+
+def _gap_in(state: dict, at, keep) -> bool:
+    """Could this gap's missing usage fall where `keep` (a predicate over a datetime) asks? Dated by the affected
+    completion's own time, else by the lane's last write; a record with neither is kept everywhere (conservative)."""
+    moment = _parse_ts(at) or _parse_ts(state.get("seen"))
+    return moment is None or keep(moment)
+
+
+def gap_view(gaps: dict, keep) -> dict:
+    """Lane counts and routes per gap kind over lane gap states, limited to entries whose time satisfies `keep`."""
+    view: dict = {}
+    for kind in GAP_KINDS:
+        lanes, routes = 0, set()
+        for state in gaps.values():
+            hit = {alias for alias, at in state["kinds"].get(kind, {}).items() if _gap_in(state, at, keep)}
+            if hit:
+                lanes += 1
+                routes |= hit
+        view[kind] = lanes
+        view[f"{kind}_routes"] = sorted(routes)
+    return view
+
+
+def read_ledger(path: Path, gaps: dict | None = None):
+    """(rows by id, newest scan watermark epoch or None, exists). Tolerates torn, foreign and pre-v3 lines.
+
+    When `gaps` is a dict it is filled with each lane's latest persisted gap state (an empty record resolves the lane)."""
     rows: dict = {}
     watermark = None
     try:
@@ -191,6 +254,14 @@ def read_ledger(path: Path):
         except ValueError:
             continue
         if not isinstance(data, dict) or data.get("v") != SCHEMA:
+            continue
+        if "gap" in data:
+            state = _clean_gap(data["gap"])
+            if state is not None and gaps is not None:
+                if state["kinds"]:
+                    gaps[data["gap"]["lane"]] = state
+                else:
+                    gaps.pop(data["gap"]["lane"], None)  # a later record says the lane's gap resolved
             continue
         if isinstance(data.get("scan_at"), (int, float)):
             watermark = max(watermark or 0.0, float(data["scan_at"]))
@@ -227,7 +298,9 @@ def scan_lane(manifest, data: bytes):
     maximum. A result with only cumulative `modelUsage` is differenced against what its (session_id, route) chain has
     already counted; with no session_id, or a counter that goes backwards, the boundary is unknown and the usage is
     reported in `unbounded` (never summed). Each result row carries `ts`, the completion's own time (see the module
-    docstring), or None when it cannot be recovered. `malformed` is a registered route whose result usage had missing,
+    docstring), or None when it cannot be recovered. `gaps` is {kind: {alias: iso|None}} for the same three gap kinds
+    (unverified / malformed / unbounded), each alias dated by the newest affected completion's own time (None = unknown,
+    so the lane's last write bounds it); it is what the ledger persists. `malformed` is a registered route whose result usage had missing,
     non-integer, negative or empty counters (excluded, never a zero row). `unverified` is a registered route whose
     requests were seen but never reported usage. `unattributed` is a lane whose manifest/init alias is `sarvam-*` yet
     unregistered, or whose registered route produced only unregistered upstream ids. `foreign_usage` flags a foreign
@@ -243,7 +316,8 @@ def scan_lane(manifest, data: bytes):
     seen: set = set()  # ids of assistant messages on a registered model (routed lanes only)
     others: set = set()  # other non-synthetic upstream ids seen (routed lanes only)
     foreign_usage = False
-    stamps: dict = {}  # session_id -> newest unconsumed assistant/user event time
+    stamps: dict = {}  # session_id -> newest unconsumed assistant/user event time (a one-shot witness)
+    gaps: dict = {kind: {} for kind in GAP_KINDS}  # kind -> {alias: iso|None}: newest affected completion time
     chains: dict = {}  # (session_id, alias) -> [in, cin, out] already counted for that invocation
     broken: set = set()  # chains whose cumulative boundary turned out to be unknown
     done: set = set()  # (uuid, alias) already counted in this file
@@ -277,10 +351,13 @@ def scan_lane(manifest, data: bytes):
             sid = event.get("session_id")
             sid = sid if isinstance(sid, str) and sid else None
             # The completion's own time: a timestamp on the result record, else the newest message of the same session
-            # written before it, consumed so a later result can never borrow it. Never the transcript mtime.
+            # written before it. That message time is a one-shot witness consumed by EVERY result, including one that
+            # carries its own timestamp, so a later untimed result can never borrow an earlier completion's message and
+            # lands untimed when no new trustworthy time exists. Never the transcript mtime.
+            witness = stamps.pop(sid, None) if sid is not None else None
             moment = _parse_ts(event.get("timestamp"))
-            if moment is None and sid is not None:
-                moment = stamps.pop(sid, None)
+            if moment is None:
+                moment = witness
             stamp = _iso(moment) if moment is not None else None
             usage = event.get("model_usage_since_last_result")
             if isinstance(usage, dict) and usage:
@@ -292,6 +369,7 @@ def scan_lane(manifest, data: bytes):
                 entries, cumulative = {}, False
                 if route is not None:
                     malformed.add(route)  # a completion that reported no usage at all is unverified, not zero
+                    _note_gap(gaps["malformed"], route, stamp)
             uuid = event.get("uuid")
             if not isinstance(uuid, str) or not uuid:
                 uuid = f"ord{ordinal}"
@@ -305,6 +383,7 @@ def scan_lane(manifest, data: bytes):
                 got = _counters(usage_row)
                 if got is None:
                     malformed.add(alias)
+                    _note_gap(gaps["malformed"], alias, stamp)
                     continue
                 if (uuid, alias) in done:
                     continue  # the same completion written twice
@@ -313,11 +392,13 @@ def scan_lane(manifest, data: bytes):
                 if cumulative:
                     if sid is None or chain in broken:
                         unbounded.add(alias)
+                        _note_gap(gaps["unbounded"], alias, stamp)
                         continue
                     delta = [g - c for g, c in zip(got, chains.get(chain, [0, 0, 0]))]
                     if any(d < 0 for d in delta):
                         broken.add(chain)  # the counter went backwards: a reset or a foreign counter, boundary unknown
                         unbounded.add(alias)
+                        _note_gap(gaps["unbounded"], alias, stamp)
                         continue
                     chains[chain] = list(got)
                     verified.setdefault(alias, [0, 0, 0])
@@ -342,6 +423,8 @@ def scan_lane(manifest, data: bytes):
             elif isinstance(model, str) and model and not model.startswith("<"):
                 others.add(model)
     unverified = sorted({alias for alias, _ in seen if alias not in verified})
+    for alias in unverified:
+        gaps["unverified"][alias] = None  # requests with no result yet: no completion time, bounded by the last write
     unattributed = []
     if route is None and isinstance(declared, str) and declared.startswith(ALIAS_PREFIX):
         unattributed.append(declared)  # a sarvam-* alias nobody registered
@@ -349,7 +432,7 @@ def scan_lane(manifest, data: bytes):
         unattributed.extend(sorted(others))  # routed, but every upstream id it printed is unregistered
     return {"route": route, "verified": verified, "results": results, "unverified": unverified,
             "malformed": sorted(malformed), "unbounded": sorted(unbounded), "unattributed": unattributed,
-            "foreign_usage": foreign_usage}
+            "foreign_usage": foreign_usage, "gaps": {kind: book for kind, book in gaps.items() if book}}
 
 
 def scan_transcripts(root: Path, since_epoch: float, deadline: float):
@@ -357,7 +440,8 @@ def scan_transcripts(root: Path, since_epoch: float, deadline: float):
 
     Returns (rows by id, info): info has error (str|None), partial (bool), files (int), unverified (int lanes),
     unattributed (int lanes), unattributed_models (sorted list), unverified_routes, malformed / unbounded (int lanes,
-    with their *_routes) and foreign_usage (int lanes).
+    with their *_routes), foreign_usage (int lanes) and lane_gaps ({lane stem: {"seen", "kinds"}} for EVERY routed lane
+    scanned, an empty `kinds` meaning the lane has no gap now) so a caller can persist and later resolve each lane's gap.
     Each row is one lane COMPLETION (lane-stem:route:result-uuid) stamped with that completion's own time, so
     continuations count once each, land in their true window and month, and a re-scan of an unchanged lane dedupes to
     the same rows. A completion whose time cannot be recovered keeps ts None plus `seen` (the file's last write). A file is only parsed
@@ -368,7 +452,7 @@ def scan_transcripts(root: Path, since_epoch: float, deadline: float):
     rows: dict = {}
     info = {"error": None, "partial": False, "files": 0, "unverified": 0, "unattributed": 0,
             "unattributed_models": [], "unverified_routes": [], "malformed": 0, "malformed_routes": [],
-            "unbounded": 0, "unbounded_routes": [], "foreign_usage": 0}
+            "unbounded": 0, "unbounded_routes": [], "foreign_usage": 0, "lane_gaps": {}}
     models: set = set()
     routes: set = set()
     bad_routes: set = set()
@@ -407,6 +491,7 @@ def scan_transcripts(root: Path, since_epoch: float, deadline: float):
             continue  # foreign lane: registered-alias bytes are not Sarvam usage, whatever ids its events print
         stem = entry.name[:-len(".jsonl")]
         seen_at = _iso(datetime.fromtimestamp(stat.st_mtime, timezone.utc))  # an upper bound only, never a placement
+        info["lane_gaps"][stem] = {"seen": seen_at, "kinds": lane["gaps"]}
         for res in lane["results"]:
             tokens_in, tokens_cached, tokens_out = res["delta"]
             row = {"id": f"{stem}:{res['alias']}:{res['uuid']}", "ts": res["ts"], "route": res["alias"],
@@ -462,10 +547,13 @@ def lane_cost(row: dict):
 
 
 def summarize(rows: dict, now: datetime, window_h: float) -> dict:
-    """Month-to-date and trailing-window cost from rows placed by their own completion time. A priced row with no
+    """Month-to-date and trailing-window cost from rows placed by their own completion time. The two are independent
+    questions: a row counts toward month-to-date only inside the current IST month, and toward the window whenever it
+    falls inside the trailing window, even a window that reaches back across the month boundary. A priced row with no
     trusted time (ts None) is never placed by guesswork: unless its last-write bound rules it out of this month, it
     makes month-to-date UNAVAILABLE (`untimed`, by route), and the trailing-window burn too when its last write is
-    inside that window (`untimed_recent`), instead of being summed or dropped."""
+    inside that window (`untimed_recent`, even if the bound is in the previous month), instead of being summed or
+    dropped."""
     month = _month_key(now)
     cutoff = now - timedelta(hours=window_h)
     used = window_cost = 0.0
@@ -475,26 +563,31 @@ def summarize(rows: dict, now: datetime, window_h: float) -> dict:
     untimed_recent = 0
     tokens = {"in": 0, "cin": 0, "out": 0}
     for row in rows.values():
+        cost = lane_cost(row)
         moment = _parse_ts(row.get("ts"))
         if moment is None:
             bound = _parse_ts(row.get("seen"))
-            if bound is not None and _month_key(bound) != month:
-                continue  # last written outside this month: the completion cannot belong to it
-            if lane_cost(row) is not None:
-                untimed[row["route"]] = untimed.get(row["route"], 0) + 1
-                if bound is None or bound >= cutoff:
-                    untimed_recent += 1  # it could still be inside the burn window
+            in_month = bound is None or _month_key(bound) == month  # a last write outside it cannot belong to it
+            recent = bound is None or bound >= cutoff  # it could still be inside the burn window
+            if cost is not None:
+                if in_month:
+                    untimed[row["route"]] = untimed.get(row["route"], 0) + 1
+                if recent:
+                    untimed_recent += 1
                 continue
-        elif _month_key(moment) != month:
+            if in_month:
+                unpriced[row["route"]] = unpriced.get(row["route"], 0) + 1
             continue
-        cost = lane_cost(row)
+        in_month = _month_key(moment) == month
         if cost is None:
-            unpriced[row["route"]] = unpriced.get(row["route"], 0) + 1
+            if in_month:
+                unpriced[row["route"]] = unpriced.get(row["route"], 0) + 1
             continue
-        used += cost
-        priced += 1
-        for key in tokens:
-            tokens[key] += row[key]
+        if in_month:
+            used += cost
+            priced += 1
+            for key in tokens:
+                tokens[key] += row[key]
         if cutoff <= moment <= now:
             window_cost += cost
     return {"month": month, "used_inr": used, "window_inr": window_cost, "priced_lanes": priced,
@@ -623,9 +716,14 @@ def reconcile_ledger(path: Path, now: datetime) -> dict:
 def collect(now: datetime, root: Path = TRANSCRIPTS, ledger: Path = LEDGER, caps: Path = CAPS, environ=None,
             window_h: float = WINDOW_H, deadline_s: float = SCAN_DEADLINE_S, record: bool = False) -> dict:
     environ = os.environ if environ is None else environ
-    rows, watermark, ledger_exists = read_ledger(ledger)
+    persisted: dict = {}  # lane stem -> gap state recorded by earlier scans
+    rows, watermark, ledger_exists = read_ledger(ledger, persisted)
     scan_started = now.timestamp()  # the scan runs at `now`; it is also the watermark a --record run stores
-    since = max(_month_start_epoch(now), (watermark - SCAN_OVERLAP_S) if watermark else 0.0)
+    # The source scan reads back to whichever starts earlier, the month or the trailing window, so a bootstrap just
+    # after the month turns still sees the last window's transcripts (a file untouched since before both bounds cannot
+    # hold a completion in either).
+    floor = min(_month_start_epoch(now), scan_started - window_h * 3600)
+    since = max(floor, (watermark - SCAN_OVERLAP_S) if watermark else 0.0)
     fresh, info = scan_transcripts(root, since, time.monotonic() + deadline_s)
     allowance, allowance_reason = read_allowance(environ, caps)
     if info["error"] and not ledger_exists:
@@ -640,6 +738,14 @@ def collect(now: datetime, root: Path = TRANSCRIPTS, ledger: Path = LEDGER, caps
         if before is None or any(before[k] != after[k] for k in ("in", "cin", "out")):
             new_rows += 1
     summary = summarize(rows, now, window_h)
+    # Usage gaps are state, not a property of one scan: a lane the watermark no longer re-reads keeps the gap recorded
+    # when it was last scanned, and a lane scanned now replaces its record (a lane that resolved drops out).
+    scanned = info["lane_gaps"]
+    gaps = {lane: state for lane, state in persisted.items() if lane not in scanned}
+    gaps.update({lane: state for lane, state in scanned.items() if state["kinds"]})
+    cutoff = now - timedelta(hours=window_h)
+    month_gaps = gap_view(gaps, lambda moment: _month_key(moment) == summary["month"])
+    window_gaps = gap_view(gaps, lambda moment: moment >= cutoff)
     # Burn is only trustworthy when a scan actually covered the window: a failed scan on a stale ledger would read as
     # a quiet hour and understate real spend.
     last_scan = scan_started if not info["error"] else watermark
@@ -648,12 +754,12 @@ def collect(now: datetime, root: Path = TRANSCRIPTS, ledger: Path = LEDGER, caps
         burn_reason = f"no lane-transcript scan in the last {window_h:g}h"
     elif info["partial"]:
         burn_reason = "scan hit its deadline"
-    elif info["unverified"]:
+    elif window_gaps["unverified"]:
         burn_reason = "in-flight lanes report usage when they end"
-    elif info["malformed"] or info["unbounded"]:
+    elif window_gaps["malformed"] or window_gaps["unbounded"]:
         burn_reason = "some lane usage is unavailable"
-    line = format_line(summary, info, allowance, allowance_reason, window_h, burn_reason, info["partial"],
-                       info["files"], bool(rows))
+    line = format_line(summary, {**info, **month_gaps}, allowance, allowance_reason, window_h, burn_reason,
+                       info["partial"], info["files"], bool(rows))
     recorded = 0
     if record and not info["error"] and not info["partial"]:
         batch = []
@@ -661,6 +767,10 @@ def collect(now: datetime, root: Path = TRANSCRIPTS, ledger: Path = LEDGER, caps
             kept = rows[row["id"]]
             keys = ("id", "ts", "route", "in", "cin", "out") + (("seen",) if kept.get("seen") else ())
             batch.append(json.dumps({"v": SCHEMA, **{k: kept[k] for k in keys}}, separators=(",", ":")))
+        for lane, state in scanned.items():
+            if state != persisted.get(lane) and (state["kinds"] or lane in persisted):
+                gap = {"lane": lane, "seen": state["seen"], "kinds": state["kinds"]}  # empty kinds = resolved
+                batch.append(json.dumps({"v": SCHEMA, "gap": gap}, separators=(",", ":")))
         batch.append(json.dumps({"v": SCHEMA, "scan_at": scan_started}, separators=(",", ":")))
         ledger.parent.mkdir(parents=True, exist_ok=True)
         with open(ledger, "a") as fh:
@@ -670,7 +780,7 @@ def collect(now: datetime, root: Path = TRANSCRIPTS, ledger: Path = LEDGER, caps
             "new_rows": new_rows, "summary": summary, "allowance": allowance, "files_scanned": info["files"],
             "unverified_lanes": info["unverified"], "unattributed_lanes": info["unattributed"],
             "malformed_lanes": info["malformed"], "unbounded_lanes": info["unbounded"],
-            "foreign_usage_lanes": info["foreign_usage"]}
+            "foreign_usage_lanes": info["foreign_usage"], "gaps": {"month": month_gaps, "window": window_gaps}}
 
 
 def main(argv=None) -> int:

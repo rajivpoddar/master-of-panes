@@ -799,6 +799,117 @@ class Reconcile(Sandbox):
         self.assertEqual((report["reconciled"], report["dropped"]), (True, 1))
 
 
+class FinalRoundProbe(Sandbox):
+    """CTO 4th REVISE probe: month boundary, timestamped-result then untimed-result, next hourly with an open gap.
+
+    Run alone: python3 -I tests/test_sarvam_usage.py FinalRoundProbe -v
+    """
+
+    UP = su.ROUTES[GLM]["upstream"]
+    BOUNDARY = datetime(2026, 11, 30, 19, 0, tzinfo=timezone.utc)  # 00:30 IST on Dec 1: window 21:30 IST Nov 30 -> now
+
+    def million(self, uuid, when=None):
+        """A result event worth 1M GLM input tokens (126 rupees), with its own timestamp when `when` is given."""
+        extra = {"timestamp": fmt(when)} if when is not None else {}
+        return raw_result(uuid, {GLM: counters((1_000_000, 0, 0))}, **extra)
+
+    def boundary_lanes(self):
+        nov = self.BOUNDARY - timedelta(hours=2)  # 22:30 IST Nov 30: inside the window, in the previous month
+        dec1, dec2 = self.BOUNDARY - timedelta(minutes=20), self.BOUNDARY - timedelta(minutes=10)
+        self.lane("nov", init(GLM), asst("n1", self.UP, when=nov - timedelta(minutes=1)), self.million("rn", nov),
+                  launch_alias=GLM, mtime=nov)
+        self.lane("dec", init(GLM), asst("d1", self.UP, when=dec1 - timedelta(minutes=1)), self.million("r1", dec1),
+                  asst("d2", self.UP, when=dec2 - timedelta(minutes=1)), self.million("r2", dec2),
+                  launch_alias=GLM, mtime=dec2)
+
+    # 1. The month filter and the trailing-window filter are separate questions.
+    def test_bootstrap_scan_reaches_back_across_the_month_boundary(self):
+        self.boundary_lanes()
+        out = self.run_collect(now=self.BOUNDARY)  # no ledger: the source scan itself must reach the November lane
+        self.assertAlmostEqual(out["summary"]["window_inr"], 3 * priced(GLM, 1_000_000), places=6)  # 378: Nov + Dec
+        self.assertAlmostEqual(out["summary"]["used_inr"], 2 * priced(GLM, 1_000_000), places=6)  # month: Dec only
+        self.assertIn(f"burn ₹{3 * priced(GLM, 1_000_000) / 3:,.2f}/h (3h avg)", out["line"])
+
+    def test_last_months_ledger_rows_still_count_in_the_window_but_not_the_month(self):
+        nov = self.BOUNDARY - timedelta(hours=2)
+        self.ledger.parent.mkdir(parents=True)
+        self.ledger.write_text(
+            json.dumps({"v": su.SCHEMA, "id": f"nov:{GLM}:rn", "ts": su._iso(nov), "route": GLM, "in": 1_000_000,
+                        "cin": 0, "out": 0}) + "\n"
+            + json.dumps({"v": su.SCHEMA, "scan_at": (self.BOUNDARY - timedelta(hours=1)).timestamp()}) + "\n")
+        self.boundary_lanes()  # the November lane is older than the watermark, so only the ledger can supply it
+        out = self.run_collect(now=self.BOUNDARY)
+        self.assertAlmostEqual(out["summary"]["window_inr"], 3 * priced(GLM, 1_000_000), places=6)
+        self.assertAlmostEqual(out["summary"]["used_inr"], 2 * priced(GLM, 1_000_000), places=6)
+
+    def test_untimed_row_last_written_last_month_blocks_the_burn_not_month_to_date(self):
+        stamp = self.BOUNDARY - timedelta(hours=1)  # last write 23:30 IST Nov 30, no recoverable completion time
+        rows = {f"u:{GLM}:r": {"id": f"u:{GLM}:r", "ts": None, "route": GLM, "in": 1_000_000, "cin": 0, "out": 0,
+                               "seen": su._iso(stamp)}}
+        summary = su.summarize(rows, self.BOUNDARY, 3.0)
+        self.assertEqual((summary["untimed"], summary["untimed_recent"]), ({}, 1))
+
+    # 2. A result that carries its own timestamp still consumes the earlier message's time.
+    def test_timestamped_result_consumes_the_message_stamp_so_the_next_untimed_result_stays_untimed(self):
+        first, own = NOW - timedelta(minutes=50), NOW - timedelta(minutes=30)
+        events = [init(GLM), asst("m1", self.UP, when=first), self.million("r1", own), self.million("r2")]
+        lane = su.scan_lane(GLM, ("\n".join(events) + "\n").encode())
+        by_uuid = {res["uuid"]: res["ts"] for res in lane["results"]}
+        self.assertEqual(by_uuid["r1"], su._iso(own))
+        self.assertIsNone(by_uuid["r2"])  # not the first message's time, which would place it before r1
+        self.lane("a", *events, launch_alias=GLM)
+        out = self.run_collect()
+        self.assertEqual(out["summary"]["untimed"], {GLM: 1})
+        self.assertIn("UNAVAILABLE (1 completion on sarvam-glm-5.3 with no recoverable per-completion timestamp",
+                      out["line"])
+
+    def test_a_new_message_after_the_timestamped_result_is_a_fresh_witness_for_the_next_one(self):
+        own, later = NOW - timedelta(minutes=30), NOW - timedelta(minutes=20)
+        events = [init(GLM), asst("m1", self.UP, when=NOW - timedelta(minutes=50)), self.million("r1", own),
+                  asst("m2", self.UP, when=later), self.million("r2")]
+        lane = su.scan_lane(GLM, ("\n".join(events) + "\n").encode())
+        self.assertEqual({res["uuid"]: res["ts"] for res in lane["results"]}, {"r1": su._iso(own), "r2": su._iso(later)})
+
+    # 3. A gap outlives the scan that saw it, for as long as the interval it affects.
+    def hourly(self, hours, **kw):
+        return self.run_collect(now=NOW + timedelta(hours=hours), record=True, **kw)
+
+    def test_unresolved_malformed_gap_survives_the_watermark_into_the_next_hourly_scans(self):
+        self.sarvam_lane("ok", usage=(1_000_000, 0, 0), minutes_ago=40)  # a real completion keeps the estimate available
+        key = GLM.replace("-", "_")
+        self.lane("gap", init(GLM), asst("g1", self.UP, when=NOW - timedelta(minutes=40)),
+                  result(uuid="g-r0", since_last={key: (1_000_000, 0, 0)}, **{key: (1_000_000, 0, 0)}),
+                  asst("g2", self.UP, when=NOW - timedelta(minutes=36)),
+                  raw_result("g-r1", {}, timestamp=fmt(NOW - timedelta(minutes=35))), launch_alias=GLM, minutes_ago=30)
+        first = self.hourly(0)
+        self.assertIn("burn n/a (some lane usage is unavailable)", first["line"])
+        for hours in (1, 2):  # the unchanged lane is now older than the watermark: no scan re-reads it
+            out = self.hourly(hours)
+            self.assertEqual(out["files_scanned"], 0, hours)
+            self.assertIn("burn n/a (some lane usage is unavailable)", out["line"], hours)
+            self.assertEqual(out["gaps"]["window"]["malformed"], 1)
+        out = self.hourly(4)  # the completion the gap belongs to has left the trailing window
+        self.assertNotIn("burn n/a", out["line"])
+        self.assertEqual((out["gaps"]["window"]["malformed"], out["gaps"]["month"]["malformed"]), (0, 1))
+        self.assertIn("reported empty or malformed usage counters", out["line"])  # still disclosed for the month
+
+    def test_in_flight_gap_is_recorded_then_resolved_when_the_lane_reports_usage(self):
+        self.sarvam_lane("ok", usage=(1_000_000, 0, 0), minutes_ago=40)
+        flight = [init(GLM), asst("f1", self.UP, when=NOW - timedelta(minutes=20))]
+        self.lane("fly", *flight, launch_alias=GLM, minutes_ago=20)
+        self.assertIn("burn n/a (in-flight lanes report usage when they end)", self.hourly(0)["line"])
+        ended = NOW + timedelta(minutes=10)
+        self.lane("fly", *flight, self.million("f-r", ended), launch_alias=GLM, mtime=ended)
+        out = self.hourly(1)
+        self.assertNotIn("burn n/a", out["line"])
+        self.assertEqual(out["gaps"]["window"]["unverified"], 0)
+        gap_lines = [json.loads(line)["gap"] for line in self.ledger.read_text().splitlines() if '"gap"' in line]
+        self.assertEqual([g["kinds"] for g in gap_lines if g["lane"] == "fly"], [{"unverified": {GLM: None}}, {}])
+        persisted: dict = {}
+        su.read_ledger(self.ledger, persisted)
+        self.assertEqual(persisted, {})
+
+
 class LauncherWiring(unittest.TestCase):
     """Structural, no hand-kept list (rule 60): every Sarvam alias the launcher can route to has a registered route."""
 

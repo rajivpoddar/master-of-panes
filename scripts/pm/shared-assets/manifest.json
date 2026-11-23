@@ -510,7 +510,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "dafac5d3b65f27b8ae35d03086f3c361afbfdf284c8363559466eb2a3cfa4465",
+      "sha256": "21815a6737e06aeb488abd4da5fa26369cb3d46b8e32aa021dcec3ee8cb2629d",
       "source_path": "claude/scripts/cost/sarvam-usage.py"
     },
     {
@@ -519,7 +519,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "49830a95bad8a73ed93c9f502fa24e24fec4db05a92d82fe0420e46f29253051",
+      "sha256": "078250e4f319445fa04691b63a9ff2940d87e09cf625c45d3c90e5e28e137423",
       "source_path": "claude/scripts/cost/tests/test_sarvam_usage.py"
     },
     {
