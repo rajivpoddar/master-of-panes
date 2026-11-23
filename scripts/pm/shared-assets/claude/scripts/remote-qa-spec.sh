@@ -207,7 +207,10 @@ if [ -n "$strict_manifest" ]; then
     [ -n "$config" ] && python3 -I -c 'import json,sys; sys.exit(json.load(open(sys.argv[1])).get("SUPPORTING_DOCUMENT_UPLOADS_ENABLED")!="true")' "$config" 2>/dev/null \
       || sr 'predicate=m15_convex_flag_config (--config must set SUPPORTING_DOCUMENT_UPLOADS_ENABLED=true)'
     [ -n "$pre_write_check" ] || sr 'predicate=m15_overlay_pre_write_check (--pre-write-check carries the pinned observation overlay)'
-    m15_overlay_sha=$(printf '%s' "$pre_write_check" | shasum -a 256 | cut -c1-64)
+    # Pinned observation overlay = the approved Run 11 capture's pre-write-check (<out>/pre-write-check.cmd bytes, CTO GO ts 1795408974.778089).
+    m15_overlay_sha=$(printf '%s\n' "$pre_write_check" | shasum -a 256 | cut -c1-64)
+    [ "$m15_overlay_sha" = "${QA_M15_OVERLAY_SHA256:-dabd39664f79a2a0a5a9aabfb35580b1009eed451760dd2c5144b498125c45ae}" ] \
+      || sr "predicate=m15_overlay_digest (overlay sha256=$m15_overlay_sha is not the pinned observation overlay)"
   fi
   strict_args=' --strict-manifest /root/qa/strict-manifest.json'
   app_data=ci-parity app_data_bucket=heydonna-uploads
@@ -268,7 +271,7 @@ fi
 # The relay lease is registered with the box TTL and must outlive the whole lane run (modal logs are read until the end).
 [ "$ttl_seconds" -ge 60 ] && [ "$ttl_seconds" -le 10800 ] || { echo '--ttl must be 60s..3h (QA Modal lease limit)' >&2; exit 2; }
 [ "$timeout_secs" -le $(( ttl_seconds - 600 )) ] || { echo '--timeout must leave 600s of --ttl for setup/teardown (lease covers the lane only within --ttl)' >&2; exit 2; }
-if [ "$dry_run" = yes ]; then echo "DRY_RUN slot=$slot head=$head spec=$spec legs=$legs test_line=${test_line:-} project=${project:-} with_deps=$with_deps prod_build=$prod_build trace=$trace timeout_secs=$timeout_secs pool=${pool_lane:-0} priority=${pool_priority:-} disposable_convex=${disposable_convex:-0} pre_write_check=$([ -n "$pre_write_check" ] && echo yes || echo no) stripe_test_env=$([ -n "$stripe_test_env" ] && echo yes || echo no) llm_mode=$(llm_label)${strict_manifest:+ strict_digest=$strict_digest strict_fixtures=2 strict_bucket=heydonna-qa forwarding=off product_pin=$product_pin app_data=$app_data app_data_bucket=$app_data_bucket m15_staged=$([ -n "$m15_draft" ] && echo yes || echo no)}"; exit 0; fi
+if [ "$dry_run" = yes ]; then echo "DRY_RUN slot=$slot head=$head spec=$spec legs=$legs test_line=${test_line:-} project=${project:-} with_deps=$with_deps prod_build=$prod_build trace=$trace timeout_secs=$timeout_secs pool=${pool_lane:-0} priority=${pool_priority:-} disposable_convex=${disposable_convex:-0} pre_write_check=$([ -n "$pre_write_check" ] && echo yes || echo no) stripe_test_env=$([ -n "$stripe_test_env" ] && echo yes || echo no) llm_mode=$(llm_label)${strict_manifest:+ strict_digest=$strict_digest strict_fixtures=2 strict_bucket=heydonna-qa forwarding=off product_pin=$product_pin app_data=$app_data app_data_bucket=$app_data_bucket m15_staged=$([ -n "$m15_draft" ] && echo yes || echo no)}${m15_overlay_sha:+ m15_overlay_sha256=$m15_overlay_sha m15_convex_flag=config m15_next_flags=spec_env m15_observer_gate=before_browser}"; exit 0; fi
 # Report unexpected failures without exposing command arguments or environment values.
 trap 'rc=$?; printf "QA_SPEC_ERROR: command failed at line %s (rc=%s)\n" "$LINENO" "$rc" >&2' ERR
 # Shared slot Convex may still use production storage; never start a QA box against it.
@@ -720,6 +723,15 @@ if [ -n "$pre_write_check" ]; then
     echo 1 >"$out/lane.rc"; exit 1
   fi
   echo "PRE_WRITE_CHECK_OK" | tee -a "$out/lane.txt"
+  if [ -n "$strict_manifest" ] && [ -n "${m15_overlay_sha:-}" ]; then
+    # Bind the overlay to the product pin: every anchor matched exactly once, and its diff is taken against product_pin itself.
+    grep -q '^QA_M15_PREWRITE_LEASE_OK ' "$out/pre-write-check.log" && ! grep -q 'count=[^1]' <(grep '^QA_M15_ANCHOR ' "$out/pre-write-check.log") \
+      && [ "$(grep -c '^QA_M15_ANCHOR .* count=1$' "$out/pre-write-check.log")" -ge 1 ] \
+      || { echo 'QA_STRICT_REPLAY_STOPPED predicate=m15_overlay_anchors (see pre-write-check.log)' | tee -a "$out/lane.txt" >&2; echo 1 >"$out/lane.rc"; exit 1; }
+    qa_rsh "set -e; cd '$remote'; git diff --binary '$product_pin' -- . ':(exclude)$spec'" >"$out/m15-overlay.diff" 2>"$out/m15-overlay-diff.err" \
+      || { echo 'QA_STRICT_REPLAY_STOPPED predicate=m15_overlay_diff' | tee -a "$out/lane.txt" >&2; echo 1 >"$out/lane.rc"; exit 1; }
+    echo "QA_M15_OVERLAY ok overlay_sha256=$m15_overlay_sha product_pin=$product_pin overlay_diff_sha256=$(shasum -a 256 <"$out/m15-overlay.diff" | cut -c1-64) files=$(grep -c '^diff --git ' "$out/m15-overlay.diff" || true) anchors=$(grep -c '^QA_M15_ANCHOR ' "$out/pre-write-check.log")" | tee -a "$out/lane.txt"
+  fi
 fi
 qa_rsh "set -e; source /root/qa/modal.env; export REMOTE_BOX=1; python3 -I /root/qa/modal-lane.py overlay --root '$remote' --box '$box' $llm_onmiss$exact_overlay_args$strict_args; ${extra_box_env}python3 -I /root/qa/modal-lane.py prepare --box '$box' --root '$remote' --config /root/qa/config.json $llm_onmiss$exact_args$strict_args$extra_args_remote" >"$out/modal-prepare.log" 2>&1
 if [ -n "$strict_manifest" ]; then
