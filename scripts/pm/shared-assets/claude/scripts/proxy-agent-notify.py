@@ -299,7 +299,7 @@ def notify(args: argparse.Namespace) -> None:
 # A lane ends with ONE block placed BEFORE its final DONE:/BLOCKED:/HANDOFF: marker line (the marker contract is unchanged):
 #   RESULT_BEGIN
 #   {"lane": ..., "type": ..., "issue": ..., "pr": ..., "head": "<40 hex>", "verdict": "DONE|BLOCKED|FAILED|HANDOFF",
-#    "proof_links": [...], "next_stage": ..., "notes": ...}
+#    "proof_links": [...], "next_stage": ..., "notes": ..., "handoff": "<abs path of issue-<N>.md, optional>"}
 #   RESULT_END
 # Missing or invalid -> UNSTRUCTURED: today's result line is kept and the head is derived from git ls-remote (PR head ref) instead.
 RESULT_BEGIN = re.compile(r"^\s*\**\s*RESULT_BEGIN\s*\**\s*$")
@@ -308,6 +308,57 @@ VERDICTS = ("DONE", "BLOCKED", "FAILED", "HANDOFF")
 SCHEMA_KEYS = ("lane", "type", "issue", "pr", "head", "verdict", "proof_links", "next_stage", "notes")
 HEX40_FULL = re.compile(r"^[0-9a-f]{40}$")
 MESSAGE_JSON_CHARS = 1400
+
+# ---- Per-issue handoff field (Rajiv D0AMF0XE6TS thread 1795441948.588769, ts 1795443398.969229) -------------------------------------------
+# The RESULT block may carry "handoff": the absolute path of the issue's HANDOFF file (~/.claude/state/handoffs/issue-<N>.md). It is OPTIONAL in the
+# schema (older lanes stay STRUCTURED). A path outside that directory is dropped (handoff_invalid). handoff_status records what PM can rely on:
+# ok (file exists and passes proxy-handoff.py validate), missing, invalid, invalid_path, unchecked (helper unavailable) or n/a (not an hd-* role).
+HANDOFF_FILE_RE = re.compile(r"^issue-\d{3,7}\.md$")
+
+
+def _handoff_dir() -> Path:
+    return Path(os.environ.get("PROXY_HANDOFF_DIR") or (HOME / ".claude/state/handoffs"))
+
+
+def _handoff_field(value) -> str | None:
+    """The block's handoff path when it names issue-<N>.md directly under the handoffs directory, else None."""
+    if not isinstance(value, str) or not value.strip() or len(value) > 300:
+        return None
+    try:
+        resolved = Path(os.path.expanduser(value.strip())).resolve()
+        directory = _handoff_dir().resolve()
+    except OSError:
+        return None
+    return str(resolved) if HANDOFF_FILE_RE.match(resolved.name) and resolved.parent == directory else None
+
+
+def _handoff_helper():
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("proxy_handoff", Path(__file__).with_name("proxy-handoff.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception:  # fail open: an unavailable helper never changes the result
+        return None
+
+
+def handoff_status(block: dict) -> str:
+    if block.get("type") not in ROLES:
+        return "n/a"
+    if block.get("handoff_invalid"):
+        return "invalid_path"
+    path = block.get("handoff")
+    if not path:
+        return "missing"
+    helper = _handoff_helper()
+    if helper is None:
+        return "unchecked"
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError:
+        return "missing"
+    return "invalid" if helper.validate_text(text) else "ok"
 
 
 def extract_block(text: str) -> str | None:
@@ -380,6 +431,10 @@ def validate_block(body: str, name: str = "") -> tuple[dict | None, str]:
              "head": head, "verdict": verdict, "proof_links": [_clean(x.strip(), 500) for x in links],
              "next_stage": _clean(stage.strip(), 100) if isinstance(stage, str) and stage.strip() else None,
              "notes": _clean((notes or "").strip(), 2000)}
+    raw_handoff = data.get("handoff")
+    clean["handoff"] = _handoff_field(raw_handoff)
+    if raw_handoff not in (None, "") and clean["handoff"] is None:
+        clean["handoff_invalid"] = True
     if name and clean["lane"] != name:
         clean["lane_declared"] = clean["lane"]
         clean["lane"] = name
@@ -416,6 +471,7 @@ def structured_result(text: str, name: str, brief: str, cwd: str, jsonl: str) ->
     body = extract_block(text)
     clean, reason = (None, "no_result_block") if body is None else validate_block(body, name)
     if clean:
+        clean["handoff_status"] = handoff_status(clean)
         return {"status": "STRUCTURED", "block": clean, "head": clean["head"], "reason": "", "verdict": clean["verdict"]}
     reason = reason if reason == "no_result_block" else "invalid:" + reason
     return {"status": "UNSTRUCTURED", "block": None, "head": derive_head(brief, cwd, jsonl, text), "reason": reason, "verdict": ""}

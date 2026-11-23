@@ -915,7 +915,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-notify",
-      "sha256": "e5fbb678d7628b7a0c06537c60ccbbaad21df77fb833ae8fa32af2726185f2f7",
+      "sha256": "06e410a920ec5d6aeec0f6dd0667ca45a7e444055834755516d69975e651bfc7",
       "source_path": "claude/scripts/proxy-agent-notify.py"
     },
     {
