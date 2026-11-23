@@ -35,6 +35,7 @@ class World:
             "name": "Require exemption or exact-head real CI success",
             "status": "completed", "conclusion": "skipped"})
         self.log = FIXTURE["log"]
+        self.job_logs = {}  # job id -> log text; any other job reads the classifier log
         self.files = copy.deepcopy(FIXTURE["files"])
         self.parents = FIXTURE["parents"][:]
         self.blobs = copy.deepcopy(FIXTURE["blob_shas"])
@@ -90,7 +91,7 @@ class World:
     def command(self, *args):
         self.commands.append(args)
         if args[:2] == ("gh", "api") and args[-1].endswith("/logs"):
-            return self.log
+            return self.job_logs.get(args[-1].split("/")[-2], self.log)
         if args[:2] == ("gh", "api") and "/files?" in args[-1]:
             return json.dumps([self.files])
         raise AssertionError(f"Mutation or unexpected transport: {args}")
@@ -195,6 +196,226 @@ def add_ts(w):
         j.update(id=unit["id"]+i, name=f"unit-tests ({i})", conclusion="success",
                  steps=[{"name":"Unit tests", "status":"completed", "conclusion":"success"}])
         w.jobs.append(j)
+
+
+OTHER = "f" * 40
+STAMP = "2026-11-23T18:48:28.0088459Z"
+GATE_STEP = "Validate unit lane and scheduled jobs"
+PLACEHOLDER = "unit-tests (${{ matrix.shard }})"
+
+
+def unit_gate_log(run, count, env=None, receipt=None, event=None, extra=()):
+    """The unit gate's real log shape: timestamped env lines, multi-line UNIT_SCHEDULE, one event.
+
+    A None override deletes that key, so each negative control edits exactly one fact.
+    """
+    run_id, attempt, skip = str(run["id"]), str(run.get("run_attempt", 1)), count == 0
+    rec = {"skip_matrix": skip, "scheduled_count": count, "mode": "zero" if skip else "targeted",
+           "zero_proof": "non_ts_rows_only" if skip else None, "reason": "zero_proof" if skip else "selected",
+           "predicted_s": [], "head": HEAD, "run_id": run_id, "run_attempt": attempt}
+    facts = {"CI_EXECUTION_SHA": HEAD, "CI_EVENT_NAME": "pull_request", "TS_CHANGED": "true",
+             "UNIT_SELECT_RESULT": "success", "UNIT_PRECHECKS_RESULT": "success",
+             "UNIT_TESTS_RESULT": "skipped" if skip else "success", "UNIT_SCHEDULED_COUNT": str(count),
+             "EXPECTED_RUN_ID": run_id, "ACTIONS_READ_TOKEN": "***", "UNIT_JOB_HEAD_SHA": HEAD}
+    ev = {"event": "unit_jobs_verified", "run_id": run_id, "head_sha": HEAD, "declared_count": count,
+          "observed_jobs": [f"unit-tests ({n})" for n in range(1, count + 1)]}
+    for target, changes in ((rec, receipt), (facts, env), (ev, event)):
+        for key, value in (changes or {}).items():
+            target.pop(key, None) if value is None else target.__setitem__(key, value)
+    body = json.dumps(rec, indent=2).splitlines()
+    lines = [f"{STAMP} env:"]
+    lines += [f"{STAMP}   {k}: {facts[k]}" for k in list(facts)[:6] if k in facts]
+    lines += [f"{STAMP}   UNIT_SCHEDULE: {body[0]}"] + body[1:]  # only the first line is timestamped
+    lines += [f"{STAMP}   {k}: {facts[k]}" for k in list(facts)[6:] if k in facts]
+    lines += [f"{STAMP} ##[endgroup]", f"{STAMP} " + json.dumps(ev, separators=(",", ":")), *extra]
+    return "\n".join(lines) + "\n"
+
+
+def set_unit_matrix(w, count, gate=True, **log):
+    """Replace the unit shards with what the gate attests: count shards, or ONE skipped placeholder."""
+    template = copy.deepcopy(next(j for j in w.jobs if j["name"] == "unit-tests (1)"))
+    w.jobs[:] = [j for j in w.jobs if not j["name"].startswith("unit-tests (")]
+    base = max(j["id"] for j in w.jobs)
+    if count == 0:
+        w.jobs.append(dict(template, id=base + 1, name=PLACEHOLDER, conclusion="skipped", steps=[]))
+    for n in range(1, count + 1):
+        w.jobs.append(dict(template, id=base + 1 + n, name=f"unit-tests ({n})"))
+    if not gate:
+        return None
+    job = dict(template, id=base + 10, name="unit-gate", conclusion="success",
+               steps=[{"name": GATE_STEP, "status": "completed", "conclusion": "success"}])
+    w.jobs.append(job)
+    w.job_logs[str(job["id"])] = unit_gate_log(w.run, count, **log)
+    return job
+
+
+def test_attested_zero_scheduled_shards_with_skipped_placeholder_allows():
+    w = World()
+    add_ts(w)
+    gate = set_unit_matrix(w, 0)
+    assert w.evaluate()[0]["status"] == "READY_TO_MERGE"
+    assert any(args[-1].endswith(f"/jobs/{gate['id']}/logs") for args in w.commands)
+
+
+def test_attested_uncertain_zero_schedule_allows():
+    w = World()
+    add_ts(w)
+    set_unit_matrix(w, 0, receipt={"mode": "uncertain", "zero_proof": None, "reason": "selector_unavailable"})
+    assert w.evaluate()[0]["status"] == "READY_TO_MERGE"
+
+
+@pytest.mark.parametrize("count", [1, 2, 3, 4, 5])
+def test_attested_scheduled_shards_all_green_allow(count):
+    w = World()
+    add_ts(w)
+    set_unit_matrix(w, count)
+    assert w.evaluate()[0]["status"] == "READY_TO_MERGE"
+
+
+@pytest.mark.parametrize("count,shard", [(3, 1), (3, 3), (5, 5)])
+@pytest.mark.parametrize("state", ["failure", "cancelled", "timed_out", "skipped"])
+def test_scheduled_shard_red_or_skipped_refuses(count, shard, state):
+    w = World()
+    add_ts(w)
+    set_unit_matrix(w, count)
+    w.job(f"unit-tests ({shard})")["conclusion"] = state
+    with pytest.raises(RuntimeError):
+        w.evaluate()
+
+
+@pytest.mark.parametrize("count,missing", [(2, 2), (4, 4), (5, 3)])
+def test_scheduled_shard_missing_refuses(count, missing):
+    w = World()
+    add_ts(w)
+    set_unit_matrix(w, count)
+    w.jobs.remove(w.job(f"unit-tests ({missing})"))
+    with pytest.raises(RuntimeError):
+        w.evaluate()
+
+
+def test_skipped_matrix_without_any_unit_gate_refuses():
+    w = World()
+    add_ts(w)
+    set_unit_matrix(w, 0, gate=False)
+    with pytest.raises(RuntimeError):
+        w.evaluate()
+
+
+@pytest.mark.parametrize("break_gate", ["red", "no_step", "step_skipped", "empty_log", "garbage_log",
+                                        "foreign_head", "foreign_run", "foreign_attempt", "duplicate"])
+def test_skipped_matrix_with_untrusted_unit_gate_refuses(break_gate):
+    w = World()
+    add_ts(w)
+    gate = set_unit_matrix(w, 0)
+    if break_gate == "red":
+        gate["conclusion"] = "failure"
+    elif break_gate == "no_step":
+        gate["steps"] = []
+    elif break_gate == "step_skipped":
+        gate["steps"][0]["conclusion"] = "skipped"
+    elif break_gate == "empty_log":
+        w.job_logs[str(gate["id"])] = ""
+    elif break_gate == "garbage_log":
+        w.job_logs[str(gate["id"])] = f"{STAMP} nothing useful\n"
+    elif break_gate == "foreign_head":
+        gate["head_sha"] = OTHER
+    elif break_gate == "foreign_run":
+        gate["run_id"] += 1
+    elif break_gate == "foreign_attempt":
+        gate["run_attempt"] = 0
+    else:
+        w.jobs.append(dict(gate, id=gate["id"] + 1))
+    with pytest.raises(RuntimeError):
+        w.evaluate()
+
+
+FOREIGN_OR_INVALID_RECEIPTS = {
+    "receipt_other_head": {"receipt": {"head": OTHER}},
+    "receipt_other_run": {"receipt": {"run_id": "1"}},
+    "receipt_other_attempt": {"receipt": {"run_attempt": "2"}},
+    "receipt_attempt_missing": {"receipt": {"run_attempt": None}},
+    "env_other_head": {"env": {"CI_EXECUTION_SHA": OTHER}},
+    "env_other_job_head": {"env": {"UNIT_JOB_HEAD_SHA": OTHER}},
+    "env_other_run": {"env": {"EXPECTED_RUN_ID": "1"}},
+    "env_fact_missing": {"env": {"UNIT_PRECHECKS_RESULT": None}},
+    "env_count_differs": {"env": {"UNIT_SCHEDULED_COUNT": "1"}},
+    "matrix_reported_success": {"env": {"UNIT_TESTS_RESULT": "success"}},
+    "event_other_head": {"event": {"head_sha": OTHER}},
+    "event_other_run": {"event": {"run_id": "1"}},
+    "event_declared_differs": {"event": {"declared_count": 1}},
+    "event_observed_differs": {"event": {"observed_jobs": ["unit-tests (1)"]}},
+    "event_missing": {"event": {"event": "unit_gate_failed"}},
+    "event_duplicated": {"extra": (f'{STAMP} {{"event":"unit_jobs_verified","run_id":"1"}}',)},
+    "zero_mode_without_proof": {"receipt": {"zero_proof": ""}},
+    "uncertain_with_proof": {"receipt": {"mode": "uncertain", "zero_proof": "x"}},
+    "uncertain_reason_is_zero_proof": {"receipt": {"mode": "uncertain", "zero_proof": None}},
+    "uncertain_bad_reason": {"receipt": {"mode": "uncertain", "zero_proof": None, "reason": "Not Snake"}},
+    "unknown_skip_mode": {"receipt": {"mode": "targeted"}},
+}
+
+
+@pytest.mark.parametrize("name", sorted(FOREIGN_OR_INVALID_RECEIPTS))
+def test_receipt_for_another_head_run_or_attempt_or_unattested_never_counts(name):
+    w = World()
+    add_ts(w)
+    set_unit_matrix(w, 0, **FOREIGN_OR_INVALID_RECEIPTS[name])
+    with pytest.raises(RuntimeError):
+        w.evaluate()
+
+
+def test_foreign_receipt_cannot_excuse_a_scheduled_failure():
+    w = World()
+    add_ts(w)
+    set_unit_matrix(w, 3, receipt={"head": OTHER})
+    w.job("unit-tests (2)")["conclusion"] = "failure"
+    with pytest.raises(RuntimeError):
+        w.evaluate()
+
+
+@pytest.mark.parametrize("contradiction", ["real_shard_beside_zero", "placeholder_not_skipped",
+                                           "no_placeholder", "extra_shard_beyond_count"])
+def test_attestation_contradicted_by_the_job_inventory_refuses(contradiction):
+    w = World()
+    add_ts(w)
+    if contradiction == "extra_shard_beyond_count":
+        set_unit_matrix(w, 2)
+        w.jobs.append(dict(w.job("unit-tests (1)"), id=max(j["id"] for j in w.jobs) + 1, name="unit-tests (3)"))
+    else:
+        set_unit_matrix(w, 0)
+        if contradiction == "real_shard_beside_zero":
+            w.jobs.append(dict(w.job("unit-gate"), id=max(j["id"] for j in w.jobs) + 1, name="unit-tests (1)",
+                               steps=[{"name": "Unit tests", "status": "completed", "conclusion": "success"}]))
+        elif contradiction == "placeholder_not_skipped":
+            w.job(PLACEHOLDER)["conclusion"] = "success"
+        else:
+            w.jobs.remove(w.job(PLACEHOLDER))
+    with pytest.raises(RuntimeError):
+        w.evaluate()
+
+
+@pytest.mark.parametrize("name", ["typescript", "unit-tests-isolated"])
+def test_attested_zero_shards_never_excuse_the_other_required_ts_jobs(name):
+    w = World()
+    add_ts(w)
+    set_unit_matrix(w, 0)
+    w.job(name)["conclusion"] = "skipped"
+    with pytest.raises(RuntimeError):
+        w.evaluate()
+
+
+def test_python_only_template_named_skipped_matrix_allows():
+    w = World()
+    w.job("unit-tests")["name"] = PLACEHOLDER
+    assert w.evaluate()[0]["status"] == "READY_TO_MERGE"
+
+
+def test_python_only_template_named_placeholder_beside_real_shards_refuses():
+    w = World()
+    unit = w.job("unit-tests")
+    unit["name"] = PLACEHOLDER
+    w.jobs.append(dict(unit, id=max(j["id"] for j in w.jobs) + 1, name="unit-tests (1)", conclusion="success"))
+    with pytest.raises(RuntimeError):
+        w.evaluate()
 
 
 def test_mixed_required_python_and_ts_are_both_proved():

@@ -806,6 +806,119 @@ def ci_required_set_proof(pr, run, scope):
             **{key: receipt[key] for key in flags}}
 
 
+UNIT_GATE_STEP = "Validate unit lane and scheduled jobs"
+UNIT_GATE_ENV = ("CI_EXECUTION_SHA", "UNIT_SELECT_RESULT", "UNIT_PRECHECKS_RESULT",
+                 "UNIT_TESTS_RESULT", "UNIT_SCHEDULED_COUNT", "EXPECTED_RUN_ID",
+                 "UNIT_JOB_HEAD_SHA")
+UNIT_ENV_LINE = re.compile(r"^  ([A-Z][A-Z_]*): ?(.*)$")
+
+
+def unit_family(name):
+    """Every job the unit matrix can report: shards, the plain name, a template-named placeholder."""
+    return name == "unit-tests" or name.startswith("unit-tests (")
+
+
+def unit_placeholder(job):
+    """A skipped matrix is reported as one non-expanded job, never as shards."""
+    name = job["name"]
+    return (unit_family(name) and (name == "unit-tests" or "{{" in name)
+            and job.get("status") == "completed" and job.get("conclusion") == "skipped")
+
+
+def unit_gate_log_facts(lines):
+    """Unique env facts, the one UNIT_SCHEDULE object and the one verified event of the gate step."""
+    facts, schedules, events = {}, [], []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        match = UNIT_ENV_LINE.match(line)
+        if match and match.group(1) == "UNIT_SCHEDULE":
+            if match.group(2).strip() != "{":
+                return None
+            body = [match.group(2).strip()]
+            i += 1
+            while i < len(lines) and lines[i].rstrip() != "}":
+                body.append(lines[i])
+                i += 1
+            if i >= len(lines):
+                return None
+            body.append("}")
+            try:
+                schedules.append(json.loads("\n".join(body)))
+            except ValueError:
+                return None
+        elif match and match.group(1) in UNIT_GATE_ENV:
+            if match.group(1) in facts:
+                return None
+            facts[match.group(1)] = match.group(2).strip()
+        elif line.strip().startswith("{"):
+            try:
+                obj = json.loads(line.strip())
+            except ValueError:
+                obj = None
+            if isinstance(obj, dict) and obj.get("event") == "unit_jobs_verified":
+                events.append(obj)
+        i += 1
+    if len(schedules) != 1 or len(events) != 1 or set(facts) != set(UNIT_GATE_ENV):
+        return None
+    return facts, schedules[0], events[0]
+
+
+def unit_gate_attested_count(run, jobs, required_set):
+    """Shard count the unit gate attested for THIS head, run and attempt, else None.
+
+    Mirrors the gate's own validation of its schedule receipt. A receipt for another
+    head, run or attempt, a failed or missing gate, or any doubt returns None, so the
+    caller keeps the strict legacy shard requirement (fail closed).
+    """
+    head, run_id = required_set["head"], str(run["id"])
+    gates = [job for job in jobs if job["name"] == "unit-gate"]
+    if len(gates) != 1:
+        return None
+    gate = gates[0]
+    if (not successful(gate) or gate.get("run_id") != run["id"]
+            or gate.get("run_attempt") != run.get("run_attempt", 1)
+            or gate.get("head_sha") != head
+            or not any(successful(s) and s["name"] == UNIT_GATE_STEP for s in gate.get("steps", []))):
+        return None
+    try:
+        parsed = unit_gate_log_facts(strip_log_framing(job_log(gate["id"])))
+    except (Refusal, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+        return None
+    if parsed is None:
+        return None
+    facts, receipt, event = parsed
+    skip = str(receipt.get("skip_matrix", "")).lower()
+    count = str(receipt.get("scheduled_count", ""))
+    mode, reason, proof = receipt.get("mode"), receipt.get("reason"), receipt.get("zero_proof")
+    if (facts["CI_EXECUTION_SHA"] != head or facts["UNIT_JOB_HEAD_SHA"] != head
+            or facts["EXPECTED_RUN_ID"] != run_id or receipt.get("head") != head
+            or str(receipt.get("run_id")) != run_id
+            or str(receipt.get("run_attempt")) != str(run.get("run_attempt", 1))
+            or facts["UNIT_SCHEDULED_COUNT"] != count
+            or facts["UNIT_SELECT_RESULT"] != "success"
+            or facts["UNIT_PRECHECKS_RESULT"] != "success"
+            or facts["UNIT_TESTS_RESULT"] != ("skipped" if skip == "true" else "success")):
+        return None
+    if skip == "true":
+        if mode == "zero":
+            attested = isinstance(proof, str) and bool(proof.strip())
+        else:
+            attested = (mode == "uncertain" and not proof and isinstance(reason, str)
+                        and reason != "zero_proof"
+                        and re.fullmatch(r"[a-z][a-z0-9_]*", reason) is not None)
+        if count != "0" or not attested:
+            return None
+    elif count not in ("1", "2", "3", "4", "5"):
+        return None
+    declared = int(count)
+    if (str(event.get("run_id")) != run_id or event.get("head_sha") != head
+            or event.get("declared_count") != declared
+            or event.get("observed_jobs") != [f"unit-tests ({n})" for n in range(1, declared + 1)]):
+        return None
+    return declared
+
+
 def verify_ci_required_jobs(run, jobs, required_set):
     """Mirror the trusted CI language families; wrappers alone never prove execution."""
     if (len({job["name"] for job in jobs}) != len(jobs)
@@ -820,9 +933,26 @@ def verify_ci_required_jobs(run, jobs, required_set):
                 or job.get("conclusion") not in ("success", "skipped")
                 or job.get("status") != "completed"):
             raise Refusal(f"JOB_NOT_GREEN_OR_UNBOUND job={job['name']} run={run['id']}")
+    # Unattested: the legacy strict shard set. Attested by this attempt's unit gate: exactly
+    # the scheduled shards (0..5), and an unscheduled matrix must be only a skipped placeholder.
+    ts_shards = {f"unit-tests ({i})": "Unit tests" for i in (1, 2, 3)}
+    if required_set["ts_changed"]:
+        declared = unit_gate_attested_count(run, jobs, required_set)
+        if declared is not None:
+            expected = [f"unit-tests ({n})" for n in range(1, declared + 1)]
+            family = [job for job in jobs if unit_family(job["name"])]
+            if declared == 0:
+                # Zero scheduled: the matrix is exactly one skipped placeholder, never real shards.
+                contradicts = not family or not all(unit_placeholder(job) for job in family)
+            else:
+                # N scheduled: only shards 1..N may exist; the required-job loop proves each one.
+                contradicts = any(job["name"] not in expected for job in family)
+            if contradicts:
+                raise Refusal(f"UNIT_JOBS_CONTRADICT_ATTESTATION count={declared} run={run['id']}")
+            ts_shards = {name: "Unit tests" for name in expected}
     groups = {
         "ts_changed": {"typescript": "Typecheck", "unit-tests-isolated": "Isolated unit tests",
-                       **{f"unit-tests ({i})": "Unit tests" for i in (1, 2, 3)}},
+                       **ts_shards},
         "python_changed": {"python": "Modal shared unit tests",
                            "python-docx": "Modal docx unit tests",
                            "python-contracts": "CI parallel workflow contracts",
@@ -847,6 +977,13 @@ def verify_ci_required_jobs(run, jobs, required_set):
                 names.append(matrix)
                 if any(name.startswith(matrix + " (") for name in by_name):
                     raise Refusal(f"AMBIGUOUS_JOB_IDENTITY job={matrix} run={run['id']}")
+            elif flag == "ts_changed":
+                # The same skipped matrix can also be reported as a template-named placeholder.
+                holders = [name for name in by_name if unit_family(name) and "{{" in name]
+                if holders:
+                    if any(unit_family(name) and "{{" not in name for name in by_name):
+                        raise Refusal(f"AMBIGUOUS_JOB_IDENTITY job={matrix} run={run['id']}")
+                    names = [name for name in names if not name.startswith("unit-tests (")] + holders
             for name in names:
                 job = by_name.get(name, {})
                 if not (successful(job) or (job.get("status") == "completed"
