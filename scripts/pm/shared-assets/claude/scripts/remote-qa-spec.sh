@@ -24,12 +24,17 @@
 #   never supplied by the caller, printed or logged.
 #   --timeout SECS: outer watchdog on the box-side lane run only (setup/teardown excluded). Default 3600s per leg (GREEN=3600, GREEN,RED,GREEN=10800),
 #   capped to the box TTL minus 600s. It is a harness watchdog, NOT a Playwright/CI budget (rule 03); recorded as timeout_secs in lane.txt.
-#   --on-miss (OPT-IN ONLY; Rajiv D0AMF0XE6TS thread 1793524869.957399 ev 1793528200.649109, CTO option A C0ALZJHGE49 1793524845.153109):
-#   capture-on-miss through the SAME controller as the capture lane (remote-qa-modal.py register/overlay/prepare/capture-report
+#   DEFAULT (Rajiv D0AMF0XE6TS thread 1795186826.943049 ts 1795445281.923019: "we should have capture on miss by default enabled
+#   and auto approve a $3 budget for remote qa boxes"; earlier CTO option A C0ALZJHGE49 1793524845.153109): every spec run defaults
+#   to stock capture-on-miss through the SAME controller as the capture lane (remote-qa-modal.py register/overlay/prepare/capture-report
 #   --on-miss): replay first; ONE eligible priced miss per exact request goes live behind a pre-dispatch reservation in the shared
-#   R2 ledgers ($3 per physical box lifetime AND per QA attempt/head, cumulative with capture mode); payloads box-local only, zero
-#   canonical fixture writes; UNKNOWN never resent. Needs --disposable-convex; GREEN legs only (no --mutate-patch). Never set by
-#   default or by CI. Labels: a run with >=1 live capture ends `REMOTE_SPEC verdict=ON_MISS_CAPTURED` (never lane-ok/strict PASS);
+#   R2 ledgers ($3 per physical box lifetime AND per QA attempt/head, cumulative with capture mode; the auto-approved budget, no
+#   approval list and no Rajiv/CTO approval step on this default path); payloads box-local only; every VALID response is published
+#   canonical PUT-if-absent to heydonna-fixtures (S161, never overwriting; invalid/UNKNOWN never published); UNKNOWN never resent.
+#   Needs --disposable-convex (mandatory for all spec runs anyway); GREEN legs only (RED/mutation runs fall back to strict replay).
+#   --strict-replay is the explicit opt-out; the default is disabled by CI (CI=1) and on any RED/mutation leg. Fixture reads and
+#   on-miss publication both use heydonna-fixtures (rule 65 amendment, heydonna-qa retired); app data stays heydonna-uploads.
+#   Labels: a run with >=1 live capture ends `REMOTE_SPEC verdict=ON_MISS_CAPTURED` (never lane-ok/strict PASS);
 #   all-replayed = `lane-ok-onmiss-replay-only`; a QA_ONMISS_* terminal = lane-fail reason=QA_ONMISS_*. Written to lane.txt + stdout.
 #   --stripe-test-env (OPT-IN; needs --disposable-convex; #11552 AC-3 CTO procedure, #11552 comment 6697907189): use a private
 #   mode-600 --env-file (full QA base env + the Stripe TEST pair + the subscriptionQuotes.ts:34-42 config). remote-qa-convex.py
@@ -127,7 +132,7 @@ while [ $# -gt 0 ]; do
     --trace) trace=yes; shift;; # box-local playwright.config trace:'on'; trace.zip + video land in <out>/leg*/test-results
     --dry-run) dry_run=yes; shift;;
     --pre-write-check) pre_write_check="${2:?--pre-write-check needs a command}"; shift 2;;
-    --on-miss) llm_onmiss=--on-miss; onmiss_stock=1; shift;; # opt-in capture-on-miss (see header); never inferred
+    --on-miss) llm_onmiss=--on-miss; onmiss_stock=1; shift;; # explicit capture-on-miss (also the DEFAULT; see header); never inferred
     --on-miss-exact) exact_manifest="${2:?--on-miss-exact needs an approval manifest}"; llm_onmiss=--on-miss; shift 2;; # M15 scoped exact-hash capture (see header)
     --canary-receipt) canary_receipt="${2:?--canary-receipt needs a receipt file}"; shift 2;; # passed scoped publish/readback canary (see header)
     --grant-receipt) grant_receipt="${2:?--grant-receipt needs the Run 9 parent grant receipt}"; shift 2;; # verified object-only grant (see header)
@@ -171,6 +176,12 @@ if [ ${#extra_secrets[@]} -gt 0 ]; then
   done
   unset _es
   extra_args_remote="$extra_args_remote --convex-helper /root/qa/convex-lane.py --convex-root /root/qa/convex-root"
+fi
+if [ -z "$llm_onmiss$strict_manifest$exact_manifest" ] && [ -z "$patch$legs_override" ] && [ "${CI:-0}" != 1 ]; then
+  # DEFAULT capture-on-miss (Rajiv D0AMF0XE6TS ts 1795445281.923019): every GREEN spec run gets stock --on-miss with the
+  # auto-approved $3 cap unless the caller opts out. Opt-outs: --strict-replay, --on-miss-exact, a RED/mutation leg (stays
+  # strict replay) and CI (never from CI). The existing bounds block below then enforces disposable-convex for the default.
+  llm_onmiss=--on-miss; onmiss_stock=1
 fi
 if [ -n "$llm_onmiss" ]; then
   # CTO bounds: synthetic data only (throwaway dev Convex seeded from the synthetic preview seed), GREEN-only (RED-on-revert stays strict).
@@ -271,7 +282,7 @@ fi
 # The relay lease is registered with the box TTL and must outlive the whole lane run (modal logs are read until the end).
 [ "$ttl_seconds" -ge 60 ] && [ "$ttl_seconds" -le 10800 ] || { echo '--ttl must be 60s..3h (QA Modal lease limit)' >&2; exit 2; }
 [ "$timeout_secs" -le $(( ttl_seconds - 600 )) ] || { echo '--timeout must leave 600s of --ttl for setup/teardown (lease covers the lane only within --ttl)' >&2; exit 2; }
-if [ "$dry_run" = yes ]; then echo "DRY_RUN slot=$slot head=$head spec=$spec legs=$legs test_line=${test_line:-} project=${project:-} with_deps=$with_deps prod_build=$prod_build trace=$trace timeout_secs=$timeout_secs pool=${pool_lane:-0} priority=${pool_priority:-} disposable_convex=${disposable_convex:-0} pre_write_check=$([ -n "$pre_write_check" ] && echo yes || echo no) stripe_test_env=$([ -n "$stripe_test_env" ] && echo yes || echo no) llm_mode=$(llm_label)${strict_manifest:+ strict_digest=$strict_digest strict_fixtures=3 strict_bucket=heydonna-qa forwarding=off product_pin=$product_pin app_data=$app_data app_data_bucket=$app_data_bucket m15_staged=$([ -n "$m15_draft" ] && echo yes || echo no)}${m15_overlay_sha:+ m15_overlay_sha256=$m15_overlay_sha m15_convex_flag=config m15_next_flags=spec_env m15_observer_gate=before_browser}"; exit 0; fi
+if [ "$dry_run" = yes ]; then echo "DRY_RUN slot=$slot head=$head spec=$spec legs=$legs test_line=${test_line:-} project=${project:-} with_deps=$with_deps prod_build=$prod_build trace=$trace timeout_secs=$timeout_secs pool=${pool_lane:-0} priority=${pool_priority:-} disposable_convex=${disposable_convex:-0} pre_write_check=$([ -n "$pre_write_check" ] && echo yes || echo no) stripe_test_env=$([ -n "$stripe_test_env" ] && echo yes || echo no) llm_mode=$(llm_label)${llm_onmiss:+ onmiss_cap_usd=3 onmiss_fixture_bucket=heydonna-fixtures onmiss_scope=box-lifetime+attempt app_data=ci-parity app_data_bucket=heydonna-uploads}${strict_manifest:+ strict_digest=$strict_digest strict_fixtures=3 strict_bucket=heydonna-qa forwarding=off product_pin=$product_pin app_data=$app_data app_data_bucket=$app_data_bucket m15_staged=$([ -n "$m15_draft" ] && echo yes || echo no)}${m15_overlay_sha:+ m15_overlay_sha256=$m15_overlay_sha m15_convex_flag=config m15_next_flags=spec_env m15_observer_gate=before_browser}"; exit 0; fi
 # Report unexpected failures without exposing command arguments or environment values.
 trap 'rc=$?; printf "QA_SPEC_ERROR: command failed at line %s (rc=%s)\n" "$LINENO" "$rc" >&2' ERR
 # Shared slot Convex may still use production storage; never start a QA box against it.
@@ -292,12 +303,14 @@ fi
 env_file="${env_file:-$HOME/Downloads/projects/heydonna-app-3005/.env.local}"
 [ -r "$env_file" ] || { echo 'Env file unreadable' >&2; exit 2; }
 val() { grep -E "^$1=" "$env_file" | head -1 | cut -d= -f2- | tr -d "\"'" | awk '{print $1}'; }
+# Rule 65 (Rajiv D0AMF0XE6TS ts 1795316993.447349): heydonna-qa is retired as a QA app-data store. The DEFAULT route and every
+# exact run resolve CI-parity app data (heydonna-uploads with the one CI key); QA_R2_SCOPED (from the caller env OR the base env
+# file) is neutralized here so remote-qa-convex.py/r2.py cannot resolve the scoped bucket on any default-route run. The scoped
+# fixture identity survives only inside the explicit --strict-replay/--on-miss-exact opt-ins, which pin their own heydonna-qa
+# manifest bucket (M15 Run 11 pending; deleting the bucket needs a separate Rajiv OK).
+unset QA_R2_SCOPED
 if [ -n "$exact_manifest" ]; then
-  # App-data binding, explicit and recorded on every run. remote-qa-r2.py selects the Run 9 scoped heydonna-qa storage ONLY when QA_R2_SCOPED=1;
-  # any other value (0 or unset) is the CI-parity base env: heydonna-uploads with the CI key, like CI. Rajiv chose that (option A, C0ALZJHGE49
-  # thread 1794677380.515009 ts 1795311474.240329: "outcome takes precdence"). Either way the fixture, staging, ledger and report clients stay
-  # on prefix-scoped sessions; only the application's own data runtimes follow the selected binding.
-  if [ "${QA_R2_SCOPED:-$(val QA_R2_SCOPED || true)}" = 1 ]; then app_data=scoped app_data_bucket=heydonna-qa; else app_data=ci-parity app_data_bucket=heydonna-uploads; fi
+  app_data=ci-parity app_data_bucket=heydonna-uploads
   exact_args="$exact_args --app-data $app_data"; exact_overlay_args="$exact_overlay_args --app-data $app_data"
   echo "QA_APP_DATA mode=$app_data" >&2
 fi

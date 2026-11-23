@@ -42,7 +42,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "49f3dcaa8ae5ec4d36e8ce4fc5fba9c0cfff4a2b6b3de3ba0a34b3c1a23050e8",
+      "sha256": "2e5138474ee9357b6f07980b25d0860483b70acb83b0ee0452d8bc6582846007",
       "source_path": "claude/agents/remote-qa-runner.md"
     },
     {
@@ -375,7 +375,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-buddhi",
-      "sha256": "1923e40e1a7de9fd9d75b17894dfd135626a3bfa92475be71ef6a12f3412db2c",
+      "sha256": "cefcba94d7399040ac36d6b86a5e29a452860e7efc7fe8360ad7da6f344e320c",
       "source_path": "claude/rules/20-buddhi-pm.md"
     },
     {
@@ -933,7 +933,7 @@
       "dependency_status": "closed",
       "mode": 448,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "b3de9a64e7aff4eaf44eb4e5f418af0f647ed92a21da2f4fc7d2d7cb6a100f5c",
+      "sha256": "ec70a2ac5bc5c1b7383bac5e2dc14abdfbdd7d3fcbb801b0e269a2c3283f403d",
       "source_path": "claude/scripts/proxy-agent-stop.sh"
     },
     {
@@ -951,7 +951,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "8f737f90cfb0a48c7d9e26201e323a1fd173299233dba109ae2bb381131e3243",
+      "sha256": "7ea83cd7ab29e68aa542002400b4e83e0818f74b895b5ec73457088340e3099c",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -1023,7 +1023,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "6badf7fbdcdb28b2a8ce161625edb977c2e78e3d8f67701cec8ae711a88e2c42",
+      "sha256": "72195e40d899002e243922659b6968f803e160883594b8269ee22f8cb071f2c0",
       "source_path": "claude/scripts/proxy-run-state.py"
     },
     {
@@ -1124,7 +1124,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "185cdd4f04a1b81068b0bbefcb6c76b4829cc060f8c893e6f7267516db4d20cb",
+      "sha256": "0d1137d90a16eb2e34cba17bf351f5ffb949d343471deb59e5189aac3ace88a0",
       "source_path": "claude/scripts/remote-qa-r2.py"
     },
     {
@@ -1142,7 +1142,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "82ee45d38f1d7e6b5d89c7981693d50df6ee699ab2bb3e751e46610116b4c6e9",
+      "sha256": "c4800063b693abb5777f8fd0ac40edeb6c52c4ae1e20bd3086a6c42f01b789c3",
       "source_path": "claude/scripts/remote-qa-spec-onmiss-stub.test.py"
     },
     {
@@ -1151,7 +1151,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "7d3126713be3951035597dd2a304a33949251d583aedc49b40ecb02932dfa5c7",
+      "sha256": "83d0275cd3ade490db6b0c6ecd2f0846cda800096f77bef39606f01264942477",
       "source_path": "claude/scripts/remote-qa-spec.sh"
     },
     {

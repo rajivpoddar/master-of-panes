@@ -170,7 +170,7 @@ def ref_args(data):
     if data.get('pr'): extra += ['--pr', str(data['pr'])]
     return extra
 
-def relaunch_row(name, spec, data, why, cmd=''):
+def relaunch_row(name, spec, data, why, cmd='', low=''):
     """Persist the pm-ops proxy_relaunch CAPACITY_WAIT row for a refused launch. True only when the ledger accepted it."""
     extra = []
     for key in ('issue', 'pr'):
@@ -179,8 +179,10 @@ def relaunch_row(name, spec, data, why, cmd=''):
     cmd = cmd or spec.get('cmd') or ''
     relaunch = {'state': 'CAPACITY_WAIT', 'name': name, 'type': spec.get('type') or data.get('type') or '', 'brief': spec.get('brief') or data.get('brief') or '',
                 'argv': spec.get('argv') or [], 'env': spec.get('env') or {}, 'model_args': spec.get('model_args') or [], 'cwd': spec.get('cwd') or '', 'cmd': cmd}
+    if low: relaunch['reason'] = 'disk_low'
     evidence = {'relaunch': relaunch, 'refused_at': data.get('finished_at') or now_iso(), 'refused_rc': data.get('exit_rc') or data.get('rc') or '',
                 'reason': why, 'model': data.get('model') or ''}
+    if low: evidence['disk_low'] = True
     return ledger(['obligation-upsert', '--kind', 'proxy_relaunch', '--severity', 'high', '--target-type', 'proxy', '--target-id', name,
                    '--owner', 'pm', '--horizon', 'hourly', '--title', 'Relaunch refused proxy ' + name,
                    '--action', 'Relaunch ' + name + ' (' + relaunch['type'] + ') when capacity frees: ' + cmd,
@@ -215,6 +217,8 @@ def main():
     p.add_argument('--head', default='')
     # queue: the launcher's original argv (one --orig-arg=VALUE per word) so a refusal can be re-queued exactly; running: poll window.
     p.add_argument('--orig-arg', action='append', default=[])
+    # abandon: the launcher refused this launch because free space on / was below the start threshold (reason=disk_low).
+    p.add_argument('--disk-low', default='0')
     p.add_argument('--wait-s', default='0')
     p.add_argument('--pm-role', default='0')
     # Escalation lineage (Rajiv D0AMF0XE6TS ts 1794641763.847759): role + rung + inherited lane clock per run.
@@ -339,11 +343,16 @@ def main():
             if owned:
                 atomic(base / 'manifest.json', json.dumps(data) + '\n')
             upsert(a.name, data, now)
-            why = 'launch refused rc=75 (pool cap, burn gate or no usable model; see launcher stderr)'
-            if refused and (relaunch_row(a.name, spec, data, why) or relaunch_row(a.name, spec, data, why)):  # one retry: the row is the only record of the refusal
+            # --disk-low names the refusal so the relaunch row says what actually blocked the launch (Rajiv C0ALZJHGE49 thread
+            # 1795448835.183169); the state and kind stay CAPACITY_WAIT / proxy_relaunch so every existing reader is unchanged.
+            low = 'disk_low' if a.disk_low == '1' else ''
+            why = ('launch refused rc=75: disk_low (free space on / below the start threshold; nothing deleted; '
+                   'free space, then relaunch - see launcher stderr)') if low else \
+                  'launch refused rc=75 (pool cap, burn gate or no usable model; see launcher stderr)'
+            if refused and (relaunch_row(a.name, spec, data, why, low=low) or relaunch_row(a.name, spec, data, why, low=low)):  # one retry: the row is the only record of the refusal
                 ledger(['obligation-resolve', '--kind', 'proxy_run', '--target-type', 'proxy', '--target-id', a.name, *ref_args(data),
-                        '--reason', 'refused rc=75: relaunch queued as proxy_relaunch CAPACITY_WAIT',
-                        '--external-state', json.dumps({'state': 'refused', 'rc': '75'})])
+                        '--reason', 'refused rc=75: relaunch queued as proxy_relaunch CAPACITY_WAIT' + (' (disk_low)' if low else ''),
+                        '--external-state', json.dumps({'state': 'refused', 'rc': '75', **({'reason': 'disk_low'} if low else {})})])
         unlock(base, a.token)
         return
     if a.cmd == 'resume':

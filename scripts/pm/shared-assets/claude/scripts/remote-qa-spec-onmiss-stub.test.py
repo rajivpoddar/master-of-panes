@@ -41,9 +41,12 @@ def dry(*extra, head=h40, spec=None):
                        capture_output=True, text=True, env=dict(os.environ, QA_MODAL_HELPER=str(SCRIPTS / 'remote-qa-modal.py')))
     return r.returncode, (r.stdout + r.stderr).strip()
 rc, o = dry('--disposable-convex', '--dry-run')
-check('spec default (no flag) resolves llm_mode=strict', rc == 0 and o.endswith('llm_mode=strict'), o[-40:])
+check('spec default (no flag) resolves llm_mode=capture-on-miss with the auto-approved $3 cap (Rajiv ts 1795445281.923019)',
+      rc == 0 and o.endswith('llm_mode=capture-on-miss onmiss_cap_usd=3 onmiss_fixture_bucket=heydonna-fixtures onmiss_scope=box-lifetime+attempt app_data=ci-parity app_data_bucket=heydonna-uploads'), o[-90:])
 rc, o = dry('--disposable-convex', '--on-miss', '--dry-run')
-check('spec --on-miss resolves llm_mode=capture-on-miss', rc == 0 and o.endswith('llm_mode=capture-on-miss'), o[-40:])
+ONMISS_TAIL = ('llm_mode=capture-on-miss onmiss_cap_usd=3 onmiss_fixture_bucket=heydonna-fixtures '
+               'onmiss_scope=box-lifetime+attempt app_data=ci-parity app_data_bucket=heydonna-uploads')
+check('spec --on-miss resolves llm_mode=capture-on-miss', rc == 0 and o.endswith(ONMISS_TAIL), o[-100:])
 rc, o = dry('--on-miss', '--dry-run')
 check('--on-miss without --disposable-convex refused (synthetic-only bound)', rc == 2 and 'requires --disposable-convex' in o, o)
 pf = Path(tempfile.mkdtemp()) / 'm.patch'; pf.write_text('diff --git a/tests/e2e/a.ts b/tests/e2e/a.ts\n--- a/tests/e2e/a.ts\n+++ b/tests/e2e/a.ts\n')
@@ -63,7 +66,9 @@ def manifest(**over):
     return str(p)
 good = manifest()
 rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
-check('spec --on-miss-exact resolves llm_mode=capture-on-miss-exact', rc == 0 and o.endswith('llm_mode=capture-on-miss-exact'), o[-60:])
+EXACT_TAIL = ('llm_mode=capture-on-miss-exact onmiss_cap_usd=3 onmiss_fixture_bucket=heydonna-fixtures '
+              'onmiss_scope=box-lifetime+attempt app_data=ci-parity app_data_bucket=heydonna-uploads')
+check('spec --on-miss-exact resolves llm_mode=capture-on-miss-exact', rc == 0 and o.endswith(EXACT_TAIL), o[-100:])
 rc, o = dry('--disposable-convex', '--on-miss', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
 check('--on-miss-exact replaces stock --on-miss (never both)', rc == 2 and 'replaces --on-miss' in o, o[-80:])
 rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--dry-run')
@@ -71,7 +76,7 @@ check('--on-miss-exact refused without --canary-receipt', rc == 2 and 'requires 
 rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--dry-run')
 check('--on-miss-exact refused without --grant-receipt (the Run 9 object-only grant)', rc == 2 and 'requires --grant-receipt' in o, o[-80:])
 rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--exact-dry-check', '--dry-run')
-check('--exact-dry-check resolves llm_mode=capture-on-miss-exact', rc == 0 and o.endswith('llm_mode=capture-on-miss-exact'), o[-60:])
+check('--exact-dry-check resolves llm_mode=capture-on-miss-exact', rc == 0 and o.endswith(EXACT_TAIL), o[-100:])
 rc, o = dry('--disposable-convex', '--on-miss', '--exact-dry-check', '--dry-run')
 check('--exact-dry-check is only valid with --on-miss-exact', rc == 2 and 'only valid with --on-miss-exact' in o, o[-80:])
 bad_pin = manifest(product_pin='e' * 12)
@@ -100,7 +105,7 @@ def pmanifest(**over):
     return str(p)
 RECEIPTS = ('--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
 rc, o = dry('--disposable-convex', '--on-miss-exact', pmanifest(), *RECEIPTS, head=P14HEAD, spec=P14SPEC)
-check('PR 14414 profile: the pinned head + pinned spec + approved hash resolve llm_mode=capture-on-miss-exact', rc == 0 and o.endswith('llm_mode=capture-on-miss-exact'), o[-80:])
+check('PR 14414 profile: the pinned head + pinned spec + approved hash resolve llm_mode=capture-on-miss-exact', rc == 0 and o.endswith(EXACT_TAIL), o[-100:])
 for why, kwargs, manifest_path in (('another spec', dict(head=P14HEAD, spec=M15SPEC), pmanifest()), ('another head', dict(head='b' * 40, spec=P14SPEC), pmanifest(head='b' * 40, product_pin='b' * 40)),
                                    ('another hash', dict(head=P14HEAD, spec=P14SPEC), pmanifest(hashes=[{'hash': HX, 'provider': 'gemini_vertex', 'model': 'gemini-3.1-flash-lite', 'operation': 'stream', 'canonical_key': KX}])),
                                    ('a langsmith block (no provenance toggle: the shape is fixed per profile)', dict(head=P14HEAD, spec=P14SPEC), pmanifest(langsmith={'draft_sha256': '1' * 64, 'aligned_slice_sha256': '2' * 64})),
@@ -124,7 +129,7 @@ pinned = manifest(langsmith={'draft_sha256': hashlib.sha256((m15dir / 'draft.txt
                              'aligned_slice_sha256': '3d5adf320e3e151cffd1a1b66d510ebdab7ccd098174c40be75cb61b2ed62a76'})
 M15 = lambda d, o: ('--m15-draft', str(m15dir / d), '--m15-observer', str(m15dir / o))
 rc, o = dry('--disposable-convex', '--on-miss-exact', pinned, *M15('draft.txt', 'observe.sh'), *RECEIPTS)
-check('M15 stage: the manifest-pinned draft + an observer resolve llm_mode=capture-on-miss-exact', rc == 0 and o.endswith('llm_mode=capture-on-miss-exact'), o[-80:])
+check('M15 stage: the manifest-pinned draft + an observer resolve llm_mode=capture-on-miss-exact', rc == 0 and o.endswith(EXACT_TAIL), o[-100:])
 for why, args, manifest_path in (('a draft that is not the manifest-pinned bytes', M15('other.txt', 'observe.sh'), pinned),
                                  ('a symlinked draft', M15('link.txt', 'observe.sh'), pinned),
                                  ('an empty observer', M15('draft.txt', 'empty.sh'), pinned),
@@ -139,8 +144,8 @@ rc, o = dry('--disposable-convex', *M15('draft.txt', 'observe.sh'), '--dry-run')
 check('M15 stage flags are only valid with --on-miss-exact', rc == 2 and 'only valid with --on-miss-exact' in o, o[-80:])
 rc, o = dry('--disposable-convex', '--on-miss-exact', pmanifest(), *M15('draft.txt', 'observe.sh'), *RECEIPTS, head=P14HEAD, spec=P14SPEC)
 check('M15 stage flags are refused for any profile but m15-langsmith', rc == 2 and 'only valid with the m15-langsmith profile' in o, o[-80:])
-check('spec env: the controller records the app-data mode AND the bucket it selected from that mode, never echoed back from R2_BUCKET_NAME',
-      'app_data=scoped app_data_bucket=heydonna-qa' in SPEC_SH and 'app_data=ci-parity app_data_bucket=heydonna-uploads' in SPEC_SH
+check('spec env: the controller records the CI-parity app-data mode and bucket it selected (rule 65: heydonna-qa retired as app data; QA_R2_SCOPED selects nothing), never echoed back from R2_BUCKET_NAME',
+      'app_data=scoped app_data_bucket=heydonna-qa' not in SPEC_SH and 'app_data=ci-parity app_data_bucket=heydonna-uploads' in SPEC_SH
       and 'spec_env="QA_APP_DATA=$app_data QA_APP_DATA_BUCKET=$app_data_bucket"' in SPEC_SH and 'val R2_BUCKET_NAME' not in SPEC_SH)
 check('spec env: written to the .env.local.next copy BEFORE the install (the pool-reset byte-hash covers it) and must match the box readback',
       SPEC_SH.index('QA_APP_DATA_BUCKET=$app_data_bucket"') < SPEC_SH.index("mv '$remote/.env.local.next'")
@@ -153,10 +158,12 @@ check('M15 stage: fixed box paths, digest re-verified on the box, exported to th
 check('exact wiring: the profile spec BLOB is verified on the box; capture is reported separate from the spec AC1 PASS',
       'QA_SPEC_BLOB ok' in SPEC_SH and 'spec_ac_pass=NOT_ASSESSED' in SPEC_SH and 'EXACT_PROFILE name=' in SPEC_SH
       and not any(s in SPEC_SH for s in ('--skip-provenance', '--no-langsmith', '--no-join', 'skip_provenance')))
-check('llm_onmiss starts empty and is set ONLY by the --on-miss / --on-miss-exact flags',
+check('llm_onmiss starts empty; set by the --on-miss/--on-miss-exact flags or the DEFAULT fill (GREEN, non-CI, no strict/exact/RED); CI never sets it',
       "llm_onmiss='' stripe_test_env='' pre_write_check=''" in SPEC_SH
       and len(re.findall(r'^\s+--on-miss[a-z-]*\) .*llm_onmiss=--on-miss', SPEC_SH, re.M)) == 2
-      and '--on-miss) llm_onmiss=--on-miss; onmiss_stock=1; shift;;' in SPEC_SH)
+      and '--on-miss) llm_onmiss=--on-miss; onmiss_stock=1; shift;;' in SPEC_SH
+      and 'if [ -z "$llm_onmiss$strict_manifest$exact_manifest" ]' in SPEC_SH
+      and '"${CI:-0}" != 1' in SPEC_SH)
 si = {name: SPEC_SH.find(name) for name in ('QA_ONMISS_EXACT_BOUND', 'scoped_arm_loop & arm_pid=$!', 'mint-session --kind report', 'qa_spec_fetch >>"$out/fetch.log"')}
 cs, ce = SPEC_SH.index('cleanup() {'), SPEC_SH.index('trap cleanup EXIT')
 check('exact wiring: sessions armed only after prepare bound the manifest digest, report session minted in cleanup (after the leg), no shared secret anywhere',

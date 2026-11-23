@@ -43,6 +43,14 @@ reason=""
 if python3 -I "$HOME/.claude/scripts/proxy-run-state.py" quota --out "$out" --log "${PROXY_AGENT_STOP_LOG:-}" --jsonl "${PROXY_AGENT_STOP_JSONL:-}"; then
   reason=quota
 fi
+# Disk-watchdog stop (Rajiv C0ALZJHGE49 thread 1795448835.183169). The watchdog writes a tiny marker file next to the lane log;
+# read THAT, never grep a multi-GB log. Only set when quota did not fire, so an existing reason wording is untouched.
+stop_why=""
+if [[ -n "${PROXY_AGENT_STOP_LOG:-}" && -s "${PROXY_AGENT_STOP_LOG}.disk_low" ]]; then
+  # Marker body is "disk_low free_kib=<n> low_kib=<n>"; fields 2-3 carry their own keys.
+  stop_why="$(cut -d' ' -f2,3 "${PROXY_AGENT_STOP_LOG}.disk_low" 2>/dev/null) action=stopped_wip_preserved"
+  [[ -n "$reason" ]] || reason=disk_low
+fi
 details="$(python3 -I "$HOME/.claude/scripts/proxy-observe.py" --stop-info "${PROXY_AGENT_STOP_JSONL:-}" 2>/dev/null)" || details='elapsed_seconds=UNKNOWN last_pushed_head=UNKNOWN'
 message="PROXY_STOP name=$name rc=$rc out=$out $details $display${frag:+ $frag}"
 # Surface every proxy end in the combined pane log (Rajiv D0AMF0XE6TS ts 1794638003.427449).
@@ -50,10 +58,12 @@ message="PROXY_STOP name=$name rc=$rc out=$out $details $display${frag:+ $frag}"
 if [[ -n "$reason" ]]; then
   message="$message reason=$reason model=${PROXY_AGENT_STOP_MODEL:-UNAVAILABLE}"
 fi
+[[ -z "$stop_why" ]] || message="$message $stop_why"
 # Automatic rung escalation (Rajiv D0AMF0XE6TS ts 1794641763.847759). Fail open: a helper failure leaves the stop message unchanged.
-# Runs before `finish`, so the writer fence sees this run as still live and excludes its own name.
+# Runs before `finish`, so the writer fence sees this run as still live and excludes its own name. A disk_low stop is excluded:
+# relaunching a lane on a higher rung while / is still below the threshold would immediately refill the disk.
 esc=''
-if [[ "$reason" != quota && -f "$HOME/.claude/scripts/proxy-escalate.py" ]]; then
+if [[ "$reason" != quota && "$reason" != disk_low && -f "$HOME/.claude/scripts/proxy-escalate.py" ]]; then
   esc="$(python3 -I "$HOME/.claude/scripts/proxy-escalate.py" --name "${PROXY_AGENT_RUN_NAME:-$name}" --rc "$rc" --out "$out" \
     --jsonl "${PROXY_AGENT_STOP_JSONL:-}" --model "${PROXY_AGENT_STOP_MODEL:-}" --details "$details" --result "$result" 2>/dev/null)" || esc=''
 fi

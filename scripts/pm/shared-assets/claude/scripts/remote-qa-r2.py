@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""QA storage selection: base env (CI parity) by default; QA_R2_SCOPED=1 opts into scoped.
+"""QA storage selection: CI parity (heydonna-uploads) always. heydonna-qa is retired (rule 65, Rajiv
+D0AMF0XE6TS ts 1795316993.447349); the scoped app-data path was removed with the 2026-11-23 on-miss
+default repair. The private scoped-key file and its guard stay loadable for the explicit opt-in modes
+(remote-qa-modal.py scoped fixture sessions), but the env-driven QA_R2_SCOPED switch selects nothing.
 
 Values never appear in diagnostics or command arguments.
 """
@@ -122,22 +125,21 @@ def isolated(original, values=None):
 
 
 def selected(original):
-    """Base (CI-parity) storage by default; QA_R2_SCOPED=1 opts into scoped QA storage.
+    """CI-parity (heydonna-uploads) storage always; QA_R2_SCOPED selects nothing (rule 65 retirement).
 
     Rajiv C0ALZJHGE49 thread 1794295319.738879, ts 1794372014.378099:
     "Qa also has to use heydonna uploads r2 bucket like ci does."
+    Scoped app data was removed with the 2026-11-23 on-miss default repair (heydonna-qa retired).
     """
-    scoped = os.environ.get('QA_R2_SCOPED', parse(original).get('QA_R2_SCOPED', '0')) == '1'
-    rendered = isolated(original) if scoped else original
-    if not scoped:
-        # Uploads CORS admits CI's exact localhost:3099 origin, not proxy port 3009.
-        # Remote boxes have isolated networking; the checkout's host port is irrelevant.
-        parsed = parse(rendered)
-        parsed.update(PORT='3099', BASE_URL='http://localhost:3099',
-                      NEXT_PUBLIC_BASE_URL='http://localhost:3099')
-        rendered = ''.join(k + '=' + shlex.quote(v) + '\n' for k, v in parsed.items())
-    values = {k: v for k, v in parse(rendered).items()
-              if (STORAGE.search(k) if scoped else k.startswith('R2_'))}
+    scoped = False
+    rendered = original
+    # Uploads CORS admits CI's exact localhost:3099 origin, not proxy port 3009.
+    # Remote boxes have isolated networking; the checkout's host port is irrelevant.
+    parsed = parse(rendered)
+    parsed.update(PORT='3099', BASE_URL='http://localhost:3099',
+                  NEXT_PUBLIC_BASE_URL='http://localhost:3099')
+    rendered = ''.join(k + '=' + shlex.quote(v) + '\n' for k, v in parsed.items())
+    values = {k: v for k, v in parse(rendered).items() if k.startswith('R2_')}
     return rendered, values, scoped
 
 

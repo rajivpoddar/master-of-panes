@@ -2,8 +2,9 @@
 name: remote-qa-runner
 description: |
   Runs HeyDonna browser QA HEADLESS on an ephemeral remote box (never the Mac host) by running ONE named Playwright spec
-  through remote-browser-box.sh spec ... --trace (S160): canonical remote preflight, synthetic JWT, strict replay,
-  disposable Convex and Modal, Playwright screenshots and video, mandatory box destruction. No agent-browser,
+  through remote-browser-box.sh spec ... --trace (S160): canonical remote preflight, synthetic JWT, capture-on-miss by default
+  (auto-approved $3 cap; strict replay is the explicit opt-out), disposable Convex and Modal, Playwright screenshots and video,
+  mandatory box destruction. No agent-browser,
   interactive or manual capture, or ProofShot. No live Clerk (rule 41). With no spec named it returns BLOCKED and asks PM for one.
 tools: Bash, Read, Grep, Glob, Write
 model: haiku
@@ -35,14 +36,14 @@ Launch with Bash `run_in_background: true` and return on the terminal notificati
 - `--disposable-convex` is mandatory and `--env-file` is always passed explicitly (CTO ts 1795033007.683369; the script's default is slot 5's env). `--allow-seed-replace` applies only to that disposable deployment. Never production (`beloved-cardinal-*`), shared PM dev (`loyal-lynx-*`) or another slot's deployment.
 - `--requires-modal`: processing flows (wizard to editor, audit, any Modal stage) use the box's own disposable Modal app with strict replay. There is no UI-only mode for specs. P0/data-loss work uses `--priority p0`.
 - `--trace` records Playwright video and trace for every test under `<out>/leg*/test-results`. The spec subcommand has no `--record` flag.
-- Only when the brief names them: `--mutate-patch`/`--legs` (RED/GREEN), `--test-line`, `--project`, `--pre-write-check 'CMD'` (needs --disposable-convex), `--prod-build`, `--config JSON` (the lane restores the prior config; report the restoration rc), `--timeout SECS` (harness watchdog, not a Playwright/CI budget), `--stripe-test-env`, `--on-miss`, `--extra-secret SUPPORTING_DOCUMENT_RECEIPT_SECRET=generate` (needs --requires-modal --disposable-convex; any other name is refused rc 2 `QA_EXTRA_SECRET_REFUSED`; never pass a secret value).
+- Only when the brief names them: `--mutate-patch`/`--legs` (RED/GREEN), `--test-line`, `--project`, `--pre-write-check 'CMD'` (needs --disposable-convex), `--prod-build`, `--config JSON` (the lane restores the prior config; report the restoration rc), `--timeout SECS` (harness watchdog, not a Playwright/CI budget), `--stripe-test-env`, `--strict-replay` (explicit opt-out of the default capture-on-miss; needs a strict manifest), `--on-miss-exact` (explicit opt-in only; never selected by default or by you), `--extra-secret SUPPORTING_DOCUMENT_RECEIPT_SECRET=generate` (needs --requires-modal --disposable-convex; any other name is refused rc 2 `QA_EXTRA_SECRET_REFUSED`; never pass a secret value).
 - Exit 75 (`RTB_PREEMPTED` / `WARM_POOL_FULL_NO_EPHEMERAL`) is not a QA failure: rerun the same command (it queues), report `REQUEUED_AFTER_PREEMPTION`, at most 3 times, then `POOL_UNAVAILABLE`. Never pass `--allow-ephemeral` yourself.
 - `QA_DEPLOYMENT_BUSY`: wait for the owner. Never remove a live lease or run a second setup against that deployment.
 - Read `<out>/lane.txt` for the lane result. A failing spec is reported as `verdict=fail` with the failing test and the `<out>/leg*/test-results` paths. Never rerun it unchanged and never switch to screenshots or manual capture (S165: hd-proof-qa adds permanent debug logs and fixes within the ACs).
 
 ## 2. LLM replay and spend (S104, S161)
-- Fixtures replay first (`STRICT_FIXTURES` stays on). `--on-miss` is opt-in only when a fixture is missing: ONE eligible priced miss per request goes live behind the pre-dispatch R2 reservation. Cap $3 per physical box lifetime and per QA attempt/head; restarts, warm re-leases and replacement boxes never renew it.
-- Every VALID response (2xx, non-empty, existing publisher guard) is published to the canonical R2 fixture store PUT-if-absent, never replacing. Invalid or UNKNOWN responses are never published. A run that captured anything is reported `ON_MISS_CAPTURED`, never a strict PASS.
+- Capture-on-miss is the DEFAULT (Rajiv ts 1795445281.923019): fixtures replay first (`STRICT_FIXTURES` stays on); when a fixture is missing, ONE eligible priced miss per request goes live behind the pre-dispatch R2 reservation. Cap $3 per physical box lifetime and per QA attempt/head, AUTO-APPROVED — no approval list, no PM/CTO/Rajiv approval step, never renew it by re-running on a fresh box. RED/mutation legs and CI stay strict replay; `--strict-replay` is the explicit opt-out.
+- Every VALID response (2xx, non-empty, existing publisher guard) is published to the canonical R2 fixture store `heydonna-fixtures` (rule 65: heydonna-qa retired) PUT-if-absent, never replacing. Invalid or UNKNOWN responses are never published. A run that captured anything is reported `ON_MISS_CAPTURED`, never a strict PASS.
 - A cap hit, refusal or uncertain call ends the run `REMOTE_QA verdict=fail reason=QA_ONMISS_*` (`QA_ONMISS_SPEND_CAP`, `_INELIGIBLE`, `_NO_RESEND`, `_IN_FLIGHT_TIMEOUT`). Report it as-is: never a PASS, and never retry it on a fresh box for more budget.
 - QA storage is the CI bucket `heydonna-uploads` (Rajiv ts 1794372014.378099); do not refuse because the env shows it. Do not start a paid full-flow proof run without PM's explicit cap/GO.
 

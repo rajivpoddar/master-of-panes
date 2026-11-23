@@ -103,6 +103,24 @@ if [[ "$FREE_SCOPE_FLAG_IGNORED" == 1 ]]; then
 fi
 case "$RUNG" in ''|1|2|3) ;; *) printf 'PROXY_AGENT_FAILED reason=invalid_rung value=%s (use 1, 2 or 3)\n' "$RUNG" >&2; exit 2;; esac
 
+# Disk guard (Rajiv C0ALZJHGE49 thread 1795448835.183169; incident 23 Nov 21:00-21:28 IST): proxy-hd-proof-qa-14675b ran
+# `zip -FF` on a truncated trace, its log grew to 76 GB, the Mac disk hit 0 bytes free and every command and hook failed
+# for ~30 min. A lane never STARTS below PROXY_AGENT_DISK_MIN_FREE_KIB (default 20 GiB free on /) and the per-lane watchdog
+# inside run.sh stops it below PROXY_AGENT_DISK_LOW_KIB (default 10 GiB). Both are read-only checks: nothing is deleted.
+# Fail open: an unusable df result never blocks or stops a lane, it only warns.
+PROXY_AGENT_DISK_MIN_FREE_KIB="${PROXY_AGENT_DISK_MIN_FREE_KIB:-20971520}"   # 20 GiB at start
+PROXY_AGENT_DISK_LOW_KIB="${PROXY_AGENT_DISK_LOW_KIB:-10485760}"             # 10 GiB while running
+case "$PROXY_AGENT_DISK_MIN_FREE_KIB" in ''|*[!0-9]*) PROXY_AGENT_DISK_MIN_FREE_KIB=20971520;; esac
+case "$PROXY_AGENT_DISK_LOW_KIB" in ''|*[!0-9]*) PROXY_AGENT_DISK_LOW_KIB=10485760;; esac
+
+# Free KiB on / (the boot volume every lane writes to), or non-zero when df is unusable.
+proxy_agent_disk_free_kib() {
+  local out
+  out="$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4; exit}')" || return 1
+  case "$out" in ''|*[!0-9]*) return 1;; esac
+  printf '%s\n' "$out"
+}
+
 STATE_HELPER="$HOME/.claude/scripts/proxy-run-state.py"
 unset PROXY_RESUME_ORIGINAL
 if [[ -n "$RESUME_NAME" ]]; then
@@ -120,7 +138,7 @@ if [[ "${PROXY_AGENT_DRY_RUN:-}" != 1 ]]; then
   export PROXY_AGENT_RUN_TOKEN="$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
   python3 -I "$STATE_HELPER" acquire --name "$PROXY_AGENT_RUN_NAME" --token "$PROXY_AGENT_RUN_TOKEN" || exit 2
   RUN_LOCK_PARENT=1
-  trap 'pa_exit_rc=$?; if [[ "${RUN_LOCK_PARENT:-0}" == 1 ]]; then python3 -I "$STATE_HELPER" abandon --name "$PROXY_AGENT_RUN_NAME" --token "$PROXY_AGENT_RUN_TOKEN" --rc "$pa_exit_rc" || true; fi; exit "$pa_exit_rc"' EXIT
+  trap 'pa_exit_rc=$?; if [[ "${RUN_LOCK_PARENT:-0}" == 1 ]]; then python3 -I "$STATE_HELPER" abandon --name "$PROXY_AGENT_RUN_NAME" --token "$PROXY_AGENT_RUN_TOKEN" --rc "$pa_exit_rc" --disk-low "${PA_DISK_LOW:-0}" || true; fi; exit "$pa_exit_rc"' EXIT
   if [[ -n "$RESUME_NAME" ]]; then
     RESUME_ASSIGNMENTS="$(python3 -I "$STATE_HELPER" resume --name "$PROXY_AGENT_RUN_NAME" --token "$PROXY_AGENT_RUN_TOKEN")" || exit 2
     eval "$RESUME_ASSIGNMENTS"
@@ -133,6 +151,19 @@ if [[ "${PROXY_AGENT_DRY_RUN:-}" != 1 ]]; then
   _pa_q=(); for _pa_a in ${PA_ORIG_ARGV[@]+"${PA_ORIG_ARGV[@]}"}; do _pa_q+=("--orig-arg=$_pa_a"); done
   python3 -I "$STATE_HELPER" queue --name "$PROXY_AGENT_RUN_NAME" --token "$PROXY_AGENT_RUN_TOKEN" --type "$TYPE" \
     --brief "${PROXY_RESUME_ORIGINAL:-$PROMPT_FILE}" ${_pa_q[@]+"${_pa_q[@]}"} || echo "PROXY_AGENT_WARN reason=run_state_queue_failed" >&2
+  # Disk guard at START (Rajiv C0ALZJHGE49 thread 1795448835.183169). Runs AFTER the queue step so the refusal has a proxy_run
+  # row and a launch spec, exactly like a capacity refusal: exit 75 -> EXIT trap -> `abandon --rc 75` -> proxy_relaunch row.
+  # A copy-on-write job that cannot fit is queued, not lost. Fail open: no usable df reading never refuses a launch.
+  if _pa_free="$(proxy_agent_disk_free_kib)"; then
+    if [[ "$_pa_free" -lt "$PROXY_AGENT_DISK_MIN_FREE_KIB" ]]; then
+      PA_DISK_LOW=1
+      printf 'PROXY_AGENT_REFUSED reason=disk_low free_kib=%s min_kib=%s (free up / then relaunch; nothing was deleted)\n' \
+        "$_pa_free" "$PROXY_AGENT_DISK_MIN_FREE_KIB" >&2
+      exit 75
+    fi
+  else
+    echo 'PROXY_AGENT_WARN reason=disk_free_unavailable' >&2
+  fi
 fi
 # P0 launches no longer bypass pool caps or burn gates (Rajiv C0ALZJHGE49 thread 1795437841.011459, ts 1795439359.022079: "drop the P0 override rule.
 # preempt the lowest priority agent and use that instead."). PROXY_AGENT_CAP_OVERRIDE=P0:<issue> is now only an IDENTITY marker: read once here,
@@ -1738,6 +1769,12 @@ proxy_agent_tier_models() {
     for _m in $models; do [[ "$_m" == gpt-* ]] || _kept="${_kept:+$_kept }$_m"; done
     models="$_kept"
   fi
+  # Ornith (Spark) is ops-only: no builder / QA / training / planning lanes (Rajiv D0AMF0XE6TS thread 1795447123.664959, ts 1795447582.126499 "ok",
+  # approving PM review ts 1795447142: 7/7 ops lanes DONE, 1/10 long build/QA/training lanes clean, 5 stalled). Admission, cleanup, batches, triage, investigators keep it.
+  case "${TYPE:-}" in hd-builder|hd-proof-qa|pm-hotfix|pm-proof-qa|superproofer|hd-planner|hd-investigator)
+    _kept=""; for _m in $models; do case "$_m" in ornith-1.5-35b-a3b|qwen3.8-flash-next) ;; *) _kept="${_kept:+$_kept }$_m";; esac; done
+    models="$_kept";;
+  esac
   printf '%s\n' "$models"
 }
 # Emergency Muse gate (CTO REVISE 2026-11-17, C0ALZJHGE49 thread 1794931098.013929, ts 1794932145.795929): Muse is emergency-only
@@ -2964,6 +3001,71 @@ REVIEW_ROUND_TOKEN="$(proxy_agent_review_cap reserve)" || exit $?
   printf 'exit "$rc"; }\n'
   printf "trap complete EXIT\ntrap 'exit 130' INT\ntrap 'exit 143' TERM\ntrap 'exit 129' HUP\n"
   printf 'cd %q || exit 2\n' "$CWD"
+  # Per-lane disk watchdog (Rajiv C0ALZJHGE49 thread 1795448835.183169). Every PROXY_AGENT_DISK_WATCH_S seconds (default 60) it
+  # checks free space on / and the size of this lane's own out dir and job dir; below PROXY_AGENT_DISK_LOW_KIB it stops this lane
+  # with PROXY_STOP reason=disk_low. It NEVER deletes anything: the lane tree, out/log/jsonl and any WIP stay on disk, so the lane
+  # is resumable. It signals ONLY the runner's process group (negative pgid), which holds this lane and nothing else: the watchdog
+  # itself is moved into its own session/group first, so it cannot kill itself mid-kill, and the launcher (tmux's parent) and the
+  # other lanes are in different groups. Never matches on a process name.
+  # A group signal is required, not a pid signal: bash defers a trapped TERM until the current foreground pipeline ends, so a
+  # runaway child (the 76 GB `zip -FF`) must receive TERM itself. The kill therefore TERMs the whole group, SIGKILLs it 10 s later
+  # if anything in it survived, and the runner's own deferred TERM trap then runs its normal completion path.
+  # WHY a separate script file: inside run.sh, `$$` in a subshell `( ... & )` is the LAUNCHER's pid and `$(sh -c 'echo $PPID')` is
+  # an already-reaped child's pid, so neither could be trusted as the runner's. A standalone script's `$$` is its real pid, and
+  # python setpgid(0,0) moves it out of the runner's group before it starts watching. Fail open: an unusable df only logs a warn.
+  # PROXY_AGENT_DISK_WATCH=0 switches it off.
+  PA_WATCH="$JOB_DIR/disk-watch.sh"
+  {
+    printf '#!/bin/bash\nset +e\n'
+    # runner_pid comes from PA_RUNNER_PID, exported by run.sh as its own $$ (the runner). Never baked in here: the launcher
+    # does not know the runner's pid, and a value evaluated in this generator would be the launcher's.
+    printf 'runner_pid="${PA_RUNNER_PID:-}" low_kib=%q every=%q max_ticks=%q out_dir=%q job_dir=%q log=%q name=%q\n' \
+      "$PROXY_AGENT_DISK_LOW_KIB" "${PROXY_AGENT_DISK_WATCH_S:-60}" \
+      "${PROXY_AGENT_DISK_WATCH_MAX_TICKS:-1440}" "$OUT_DIR" "$JOB_DIR" "$LOG" "$NAME"
+    cat <<'PA_WATCH_BODY'
+pgid="$(ps -o pgid= -p "$runner_pid" 2>/dev/null | tr -d ' ')"
+case "$pgid" in ''|*[!0-9]*) printf 'PROXY_AGENT_WARN reason=disk_watch_no_pgid\n' >>"$log"; exit 0;; esac
+tick=0
+while [[ "$tick" -lt "$max_ticks" ]]; do
+  sleep "$every" 2>/dev/null || sleep 60
+  kill -0 "$runner_pid" 2>/dev/null || exit 0
+  tick=$((tick + 1))
+  if free_kib="$(df -Pk / 2>/dev/null | awk 'NR==2 {print $4; exit}')" && [[ -n "$free_kib" && "$free_kib" -ge 0 ]] 2>/dev/null; then
+    if [[ "$free_kib" -lt "$low_kib" ]]; then
+      printf 'PROXY_AGENT_DISK_LOW free_kib=%s low_kib=%s action=stop_lane reason=disk_low\n' "$free_kib" "$low_kib" >>"$log"
+      printf 'PROXY_STOP name=%s reason=disk_low free_kib=%s low_kib=%s action=stop_lane (lane stopped by the disk watchdog; WIP preserved, nothing deleted)\n' \
+        "$name" "$free_kib" "$low_kib" >&2
+      printf 'PROXY_AGENT_STOP_REASON=disk_low\n' >>"$log"
+      # Marker for proxy-agent-stop.sh: the stop relay must tell PM WHY this lane died. A marker file, never a grep of $log:
+      # in the 23 Nov incident that log was 76 GB, so reading it back is exactly what must not happen again.
+      printf 'disk_low free_kib=%s low_kib=%s\n' "$free_kib" "$low_kib" > "${log}.disk_low" 2>/dev/null
+      kill -TERM -"$pgid" 2>/dev/null
+      for _ in 1 2 3 4 5 6 7 8 9 10; do sleep 1; kill -0 "$runner_pid" 2>/dev/null || exit 0; done
+      kill -KILL -"$pgid" 2>/dev/null
+      exit 0
+    fi
+  else
+    printf 'PROXY_AGENT_WARN reason=disk_free_unavailable\n' >>"$log" 2>/dev/null
+  fi
+  sizes=""
+  for d in "$out_dir" "$job_dir"; do
+    [[ -d "$d" ]] || continue
+    sizes="$sizes $(du -sk "$d" 2>/dev/null | awk 'NR==1 {print $1}')"
+  done
+  printf '[%s] PROXY_AGENT_DISK free_kib=%s out_kib=%s\n' "$(date -u +%FT%TZ)" "${free_kib:-UNAVAILABLE}" "${sizes# }" >>"$log"
+done
+PA_WATCH_BODY
+  } > "$PA_WATCH"
+  chmod 700 "$PA_WATCH"
+  # Escape the runner's process group BEFORE watching, so the group kill above cannot take the watchdog with it. PA_RUNNER_PID is
+  # expanded by run.sh at run time from run.sh's own $$ = the runner (its process-group leader in tmux).
+  printf 'PA_RUNNER_PID=$$\n'
+  printf 'PA_WATCH=%q\n' "$PA_WATCH"
+  # Drop any marker left by an earlier run of this lane name (a resume reuses the log path); a stale marker must never make a
+  # later quit look like a disk stop.
+  printf 'rm -f %q 2>/dev/null\n' "$LOG.disk_low"
+  printf 'if [[ %q != 0 ]]; then PA_RUNNER_PID="$PA_RUNNER_PID" python3 -I -c '"'"'import os,sys; os.setpgid(0,0); os.execv("/bin/bash", ["bash"]+sys.argv[1:])'"'"' "$PA_WATCH" </dev/null >/dev/null 2>>%q & fi\n' \
+    "${PROXY_AGENT_DISK_WATCH:-1}" "$LOG"
   # GH_TOKEN is resolved by the runner, outside the sandbox, at run time (keyring access is blocked inside it).
   # The token is never written to this file or logged; an explicit GH_TOKEN already in the environment wins.
   printf 'if [[ -z "${GH_TOKEN:-}" ]]; then GH_TOKEN="$(gh auth token 2>/dev/null || true)"; fi\n'
