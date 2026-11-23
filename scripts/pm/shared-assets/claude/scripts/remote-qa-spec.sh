@@ -202,6 +202,12 @@ if [ -n "$strict_manifest" ]; then
     m15_draft_sha=$(printf '%s' "$m15_line" | sed -n 's/.* draft_sha256=\([0-9a-f]\{64\}\).*/\1/p')
     m15_observer_sha=$(printf '%s' "$m15_line" | sed -n 's/.* observer_sha256=\([0-9a-f]\{64\}\).*/\1/p')
     [[ "$m15_draft_sha" =~ ^[0-9a-f]{64}$ && "$m15_observer_sha" =~ ^[0-9a-f]{64}$ ]] || sr 'predicate=m15_stage_digest_unparsed'
+    # Run 11 attempt 2 (CTO ts 1795408974.778089): the observer's six flags need the approved capture lane's setup. Convex flag comes
+    # from --config (applied to the disposable deployment by prepare); the Modal readiness signal from the overlay pre-write-check.
+    [ -n "$config" ] && python3 -I -c 'import json,sys; sys.exit(json.load(open(sys.argv[1])).get("SUPPORTING_DOCUMENT_UPLOADS_ENABLED")!="true")' "$config" 2>/dev/null \
+      || sr 'predicate=m15_convex_flag_config (--config must set SUPPORTING_DOCUMENT_UPLOADS_ENABLED=true)'
+    [ -n "$pre_write_check" ] || sr 'predicate=m15_overlay_pre_write_check (--pre-write-check carries the pinned observation overlay)'
+    m15_overlay_sha=$(printf '%s' "$pre_write_check" | shasum -a 256 | cut -c1-64)
   fi
   strict_args=' --strict-manifest /root/qa/strict-manifest.json'
   app_data=ci-parity app_data_bucket=heydonna-uploads
@@ -604,7 +610,13 @@ if [ -n "$exact_manifest$strict_manifest" ]; then
   # The box readback below must report this same bucket for the selected mode, else the run aborts before Playwright.
   spec_env="QA_APP_DATA=$app_data QA_APP_DATA_BUCKET=$app_data_bucket"
   [ -z "$m15_draft" ] || spec_env="$spec_env QA_M15_DRAFT_PATH=/root/qa/m15/draft.txt QA_M15_OBSERVER_PATH=/root/qa/m15/observe.sh QA_M15_OBSERVER_LOG=/root/qa/m15/modal.raw"
-  qa_rsh "set -e; f='$remote/.env.local.next'; sed -i '/^QA_APP_DATA=/d; /^QA_APP_DATA_BUCKET=/d; /^QA_M15_DRAFT_PATH=/d; /^QA_M15_OBSERVER_PATH=/d; /^QA_M15_OBSERVER_LOG=/d' \"\$f\"; [ -z \"\$(tail -c1 \"\$f\")\" ] || echo >>\"\$f\"; printf '%s\\n' $spec_env >>\"\$f\"; grep -qx 'QA_APP_DATA=$app_data' \"\$f\"; grep -qx 'QA_APP_DATA_BUCKET=$app_data_bucket' \"\$f\"" \
+  # Strict M15: both Next supporting-document flags land in .env.local BEFORE preflight builds/starts Next (observer nextServer/nextBuild).
+  m15_next_check=''
+  if [ -n "$strict_manifest" ] && [ -n "$m15_draft" ]; then
+    spec_env="$spec_env SUPPORTING_DOCUMENT_UPLOADS_ENABLED=true NEXT_PUBLIC_SUPPORTING_DOCUMENT_UPLOADS=true"
+    m15_next_check="; grep -qx 'SUPPORTING_DOCUMENT_UPLOADS_ENABLED=true' \"\$f\"; grep -qx 'NEXT_PUBLIC_SUPPORTING_DOCUMENT_UPLOADS=true' \"\$f\""
+  fi
+  qa_rsh "set -e; f='$remote/.env.local.next'; sed -i '/^QA_APP_DATA=/d; /^QA_APP_DATA_BUCKET=/d; /^QA_M15_DRAFT_PATH=/d; /^QA_M15_OBSERVER_PATH=/d; /^QA_M15_OBSERVER_LOG=/d${m15_next_check:+; /^SUPPORTING_DOCUMENT_UPLOADS_ENABLED=/d; /^NEXT_PUBLIC_SUPPORTING_DOCUMENT_UPLOADS=/d}' \"\$f\"; [ -z \"\$(tail -c1 \"\$f\")\" ] || echo >>\"\$f\"; printf '%s\\n' $spec_env >>\"\$f\"; grep -qx 'QA_APP_DATA=$app_data' \"\$f\"; grep -qx 'QA_APP_DATA_BUCKET=$app_data_bucket' \"\$f\"$m15_next_check" \
     || { echo 'QA_SPEC_ENV_FAILED: could not record the controller-selected spec env' | tee -a "$out/lane.txt" >&2; exit 1; }
   echo "QA_SPEC_ENV names=$(printf '%s' "$spec_env" | tr ' ' '\n' | cut -d= -f1 | paste -sd, -) app_data=$app_data bucket=$app_data_bucket (controller-selected)" | tee -a "$out/lane.txt"
 fi

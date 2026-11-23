@@ -1296,7 +1296,14 @@ fi
         # dispatch and a 424 known-absent probe BEFORE Playwright starts; any failed predicate exits here with its name.
         text = replace(text, '  python3 -I /root/qa/modal-lane.py provider-ready --root "$REPO_ROOT" || exit 3\n',
                        '  python3 -I /root/qa/modal-lane.py provider-ready --root "$REPO_ROOT" || exit 3\n'
-                       '  python3 -I /root/qa/modal-lane.py strict-ready || { echo "QA_STRICT_REPLAY_STOPPED before browser"; exit 3; }\n')
+                       '  python3 -I /root/qa/modal-lane.py strict-ready || { echo "QA_STRICT_REPLAY_STOPPED before browser"; exit 3; }\n'
+                       # Run 11 attempt 2 (CTO ts 1795408974.778089): strict M15 runs the pinned observer's own six-flag check on this
+                       # lease BEFORE Playwright, then stops its log streams so the spec's own `observer start` re-checks and streams fresh.
+                       '  if [ -f /root/qa/m15/observe.sh ]; then\n'
+                       '    bash /root/qa/m15/observe.sh start || { echo "QA_STRICT_REPLAY_STOPPED predicate=m15_observer_flags before browser"; exit 3; }\n'
+                       '    for k in convex modal; do [ ! -f /root/qa/m15/$k.pid ] || kill "$(cat /root/qa/m15/$k.pid)" 2>/dev/null || true; rm -f /root/qa/m15/$k.pid; done\n'
+                       '    echo "QA_M15_OBSERVER_FLAGS ok before_browser=true"\n'
+                       '  fi\n')
     # 2026-10-25: a cold first push of the full schema + functions to a fresh disposable deployment legitimately exceeds 60s.
     # Bounded wait (default 300s) with ONE bounded retry on timeout, elapsed logged; also dedupe .env.local keys (the Convex CLI
     # refuses to update a file with duplicate NEXT_PUBLIC_CONVEX_URL / _SITE_URL entries). Fails closed if the anchor drifts.
