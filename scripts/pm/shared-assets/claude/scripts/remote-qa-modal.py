@@ -217,6 +217,170 @@ def check_m15_stage(manifest, draft, observer):
             'observer_sha256': hashlib.sha256(blobs['observer']).hexdigest(), 'observer_bytes': len(blobs['observer'])}
 
 
+
+# ---- M15 strict replay (CTO GO C0ALZJHGE49 thread 1794677380.515009 ts 1795401768.237669). Opt-in ONLY through --strict-replay /
+# --strict-manifest; it never prices, claims, reserves, captures, publishes or forwards. The proxy replays ONLY the manifest's two
+# canonical objects, read from the run-local fixture bucket (heydonna-qa) through a controller-armed READ-ONLY scoped session and
+# verified by sha256 + size; every other request is a 424 fixture_miss. App data stays on heydonna-uploads (ci-parity, rule 65). ----
+STRICT_PROFILE = 'm15-strict-replay'
+STRICT_FIXTURE_COUNT = 2
+STRICT_FIXTURE_MAX_BYTES = 8 * 1024 * 1024
+STRICT_SESSION_ACTIONS = ['GetObject']
+STRICT_KEY_RE = (r'fixtures/llm/v2/[a-z0-9_]{3,40}/[a-z0-9.-]{1,120}/[A-Za-z0-9._-]{3,80}\.[a-z0-9_]{3,20}/([0-9a-f]{64})\.bin')
+
+
+def load_strict_manifest(path, head=None):
+    """Strict-replay manifest. Pure and fail-closed. Shape: {version:1, profile:"m15-strict-replay", head, product_pin, approval_ref,
+    bucket:"heydonna-qa", fixtures:[{canonical_key, sha256, bytes}] x2, langsmith:{draft_sha256, aligned_slice_sha256}, observer_sha256}.
+    Each key is a full canonical v2 key (no prefix or wildcard); the two keys differ. The digest is sha256 of the raw file."""
+    p = Path(path)
+    if p.is_symlink() or not p.is_file() or p.stat().st_size > EXACT_MANIFEST_MAX_BYTES:
+        raise ValueError('QA_STRICT_MANIFEST_INVALID: unreadable, symlink or too large')
+    raw = p.read_bytes()
+    try:
+        data = json.loads(raw.decode('utf-8'))
+    except ValueError:
+        raise ValueError('QA_STRICT_MANIFEST_INVALID: not JSON') from None
+    hex64 = lambda v: isinstance(v, str) and re.fullmatch(r'[0-9a-f]{64}', v) is not None
+    if (not isinstance(data, dict)
+            or set(data) != {'version', 'profile', 'head', 'product_pin', 'approval_ref', 'bucket', 'fixtures', 'langsmith', 'observer_sha256'}
+            or data['version'] != 1 or data['profile'] != STRICT_PROFILE or data['bucket'] != SCOPED_FIXTURE_BUCKET
+            or not isinstance(data['head'], str) or not re.fullmatch(r'[0-9a-f]{40}', data['head'])
+            or not isinstance(data['product_pin'], str) or not re.fullmatch(r'[0-9a-f]{40}', data['product_pin'])
+            or not isinstance(data['approval_ref'], str) or not re.fullmatch(r'[A-Za-z0-9._:/@-]{8,200}', data['approval_ref'])
+            or not isinstance(data['langsmith'], dict) or set(data['langsmith']) != {'draft_sha256', 'aligned_slice_sha256'}
+            or not all(hex64(v) for v in data['langsmith'].values()) or not hex64(data['observer_sha256'])
+            or not isinstance(data['fixtures'], list) or len(data['fixtures']) != STRICT_FIXTURE_COUNT):
+        raise ValueError('QA_STRICT_MANIFEST_INVALID: shape')
+    if head is not None and data['head'] != head:
+        raise ValueError('QA_STRICT_MANIFEST_HEAD_MISMATCH')
+    entries = {}
+    for row in data['fixtures']:
+        if not isinstance(row, dict) or set(row) != {'canonical_key', 'sha256', 'bytes'}:
+            raise ValueError('QA_STRICT_MANIFEST_INVALID: fixture shape')
+        key, sha, size = row['canonical_key'], row['sha256'], row['bytes']
+        if (not isinstance(key, str) or not re.fullmatch(STRICT_KEY_RE, key) or not hex64(sha)
+                or isinstance(size, bool) or not isinstance(size, int) or not 0 < size <= STRICT_FIXTURE_MAX_BYTES or key in entries):
+            raise ValueError('QA_STRICT_MANIFEST_INVALID: fixture')
+        entries[key] = {'sha256': sha, 'bytes': size}
+    return {'digest': hashlib.sha256(raw).hexdigest(), 'profile': STRICT_PROFILE, 'head': data['head'], 'product_pin': data['product_pin'],
+            'approval_ref': data['approval_ref'], 'bucket': data['bucket'], 'langsmith': dict(data['langsmith']),
+            'observer_sha256': data['observer_sha256'], 'entries': entries}
+
+
+def strict_absent_key(manifest):
+    """A deterministic canonical key in the first fixture's directory that is NOT on the manifest (the known-absent probe)."""
+    first = sorted(manifest['entries'])[0]
+    key = first.rsplit('/', 1)[0] + '/' + hashlib.sha256(('qa-strict-absent/' + manifest['digest']).encode()).hexdigest() + '.bin'
+    assert key not in manifest['entries']
+    return key
+
+
+def check_m15_stage_strict(manifest, draft, observer):
+    """Strict-replay staging (independent of --on-miss-exact): the draft AND the observer must be the manifest-pinned bytes."""
+    import stat as stat_mod
+    blobs = {}
+    for label, path, limit in (('draft', draft, M15_STAGE_DRAFT_MAX_BYTES), ('observer', observer, M15_STAGE_OBSERVER_MAX_BYTES)):
+        p = Path(path) if path else None
+        try:
+            info = p.lstat() if p else None
+            blobs[label] = p.read_bytes() if info and stat_mod.S_ISREG(info.st_mode) and 0 < info.st_size <= limit else None
+        except OSError:
+            blobs[label] = None
+        if blobs[label] is None:
+            raise ValueError('QA_STRICT_STAGE_REFUSED: the ' + label + ' is unreadable, not a regular file, empty or over ' + str(limit) + ' bytes')
+    out = {'draft_sha256': hashlib.sha256(blobs['draft']).hexdigest(), 'draft_bytes': len(blobs['draft']),
+           'observer_sha256': hashlib.sha256(blobs['observer']).hexdigest(), 'observer_bytes': len(blobs['observer'])}
+    if out['draft_sha256'] != manifest['langsmith']['draft_sha256']:
+        raise ValueError('QA_STRICT_STAGE_REFUSED: the draft is not the digest-pinned aligned ASR draft of this manifest')
+    if out['observer_sha256'] != manifest['observer_sha256']:
+        raise ValueError('QA_STRICT_STAGE_REFUSED: the observer is not the digest-pinned observer of this manifest')
+    return out
+
+
+def strict_overlay_source(strict):
+    """Bake the strict-replay proxy source for ONE box: manifest digest, run-local bucket, this lease's Dict and the verified entries."""
+    if (not isinstance(strict, dict) or strict.get('bucket') != SCOPED_FIXTURE_BUCKET or not re.fullmatch(r'[0-9a-f]{64}', str(strict.get('digest', '')))
+            or not re.fullmatch(r'[0-9a-f]{12}', str(strict.get('lease', ''))) or strict.get('dict') != 'heydonna-qa-onmiss-' + str(strict.get('lease'))
+            or not isinstance(strict.get('entries'), dict) or len(strict['entries']) != STRICT_FIXTURE_COUNT
+            or any(not re.fullmatch(STRICT_KEY_RE, k) or set(v) != {'sha256', 'bytes'} for k, v in strict['entries'].items())):
+        raise ValueError('QA_STRICT_REPLAY_REFUSED: invalid strict overlay identity')
+    baked = {'digest': strict['digest'], 'bucket': strict['bucket'], 'dict': strict['dict'], 'lease': strict['lease'],
+             'entries': {k: {'sha256': v['sha256'], 'bytes': int(v['bytes'])} for k, v in strict['entries'].items()}}
+    return QA_STRICT_READ_SOURCE.replace('__STRICT__', repr(baked)).replace('__STRICT_WAIT_S__', repr(EXACT_SESSION_WAIT_S))
+
+
+def strict_identity(box, manifest):
+    return {**manifest, 'lease': identity(box), 'dict': onmiss_dict_name(box)}
+
+
+def mint_strict_session(box, manifest, keys=None, ttl_s=EXACT_SESSION_TTL_S):
+    """Trusted host only: a READ-ONLY (GetObject) session whose prefix paths are exactly the manifest's canonical keys (plus, for the
+    preflight only, the known-absent key). Nothing else in the bucket is reachable and nothing can be written."""
+    paths = sorted(manifest['entries']) if keys is None else list(keys)
+    env, exp = _mint_session(paths, STRICT_SESSION_ACTIONS, ttl_s)
+    bucket, account, access, secret, token = (env[n] for n in SCOPED_FIXTURE_R2_ENV)
+    return {'kind': 'strict-read', 'bucket': bucket, 'account': account, 'access': access, 'secret': secret, 'token': token,
+            'exp': exp, 'manifest_digest': manifest['digest'], 'lease': identity(box) if box else None}
+
+
+def strict_preflight(manifest, client=None, bucket=None):
+    """Pre-browser readback (trusted host): both canonical objects are read with the scoped read session and must match the
+    manifest sha256 + size; the known-absent key must be an authoritative NoSuchKey. Any other outcome raises the exact predicate.
+    Returns the non-secret readback receipt. client/bucket are injectable for tests."""
+    if client is None:
+        absent = strict_absent_key(manifest)
+        env, _ = _mint_session(sorted(manifest['entries']) + [absent], STRICT_SESSION_ACTIONS, 60)
+        try:
+            client, bucket = scoped_fixture_client(env)
+        except Exception as error:
+            raise RuntimeError('QA_STRICT_READ_DENIED client_unavailable (' + type(error).__name__ + ')') from None
+    receipt = {'bucket': bucket, 'fixtures': {}}
+    for key, entry in sorted(manifest['entries'].items()):
+        try:
+            data = bytes(client.get_object(Bucket=bucket, Key=key)['Body'].read())
+        except Exception as error:
+            code = getattr(error, 'response', {}).get('Error', {}).get('Code', type(error).__name__)
+            raise RuntimeError('QA_STRICT_READ_DENIED fixture=' + key.rsplit('/', 1)[-1][:16] + ' code=' + str(code)) from None
+        got = hashlib.sha256(data).hexdigest()
+        if got != entry['sha256'] or len(data) != entry['bytes']:
+            raise RuntimeError('QA_STRICT_PREFLIGHT_FAILED predicate=fixture_checksum fixture=' + key.rsplit('/', 1)[-1][:16]
+                               + ' sha256=' + got + ' bytes=' + str(len(data)))
+        receipt['fixtures'][key.rsplit('/', 1)[-1][:16]] = {'sha256': got, 'bytes': len(data)}
+    absent = strict_absent_key(manifest)
+    try:
+        client.get_object(Bucket=bucket, Key=absent)
+        raise RuntimeError('QA_STRICT_PREFLIGHT_FAILED predicate=absent_key_present')
+    except RuntimeError:
+        raise
+    except Exception as error:
+        if not _is_missing(error):
+            code = getattr(error, 'response', {}).get('Error', {}).get('Code', type(error).__name__)
+            raise RuntimeError('QA_STRICT_PREFLIGHT_FAILED predicate=absent_key_not_authoritative code=' + str(code)) from None
+    receipt['absent'] = 'NoSuchKey'
+    return receipt
+
+
+def arm_strict_session(box, manifest_path):
+    """Box side: put the controller-minted strict-read session (JSON on stdin) in THIS box's Modal Dict (deleted by stop())."""
+    manifest = load_strict_manifest(manifest_path)
+    row = json.loads(sys.stdin.read(16384))
+    now = time.time()
+    if (not isinstance(row, dict) or row.get('kind') != 'strict-read' or row.get('bucket') != SCOPED_FIXTURE_BUCKET
+            or row.get('manifest_digest') != manifest['digest'] or row.get('lease') != identity(box)
+            or not re.fullmatch(r'[0-9a-f]{32}', str(row.get('account', '')))
+            or any(not isinstance(row.get(f), str) or not row[f] for f in ('access', 'secret', 'token'))
+            or not isinstance(row.get('exp'), int) or not now + 30 < row['exp'] <= now + EXACT_SESSION_TTL_S + 30):
+        raise ValueError('QA_STRICT_ARM_INVALID')
+    register_secret(row['secret'])
+    register_secret(row['token'])
+    os.environ.pop('MODAL_PROFILE', None)
+    os.environ.update(modal_env(True))
+    import modal
+    modal.Dict.from_name(onmiss_dict_name(box), create_if_missing=True).put('scoped-session/strict-read', row)
+    print('QA_STRICT_ARM kind=strict-read expires_in_s=' + str(int(row['exp'] - now)))
+
+
 def derive_exact_ids(box, head, spend_box):
     """TRUSTED-HOST derivation of everything a scoped credential is bound to: the lease (from the controller's own box receipt), the
     physical-box identity (from the controller's pool/ephemeral receipt) and the exact head. Nothing the box wrote is used; a
@@ -987,11 +1151,15 @@ def tool_policy(allow_billable_tools=False, tool_spend_cap_usd=2.0):
             'cap_policy': 'soft cap: final call may overshoot by its actual search usage'}
 
 
-def ledger_source(box, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmiss=None):
+def ledger_source(box, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmiss=None, strict=None):
     tool_policy(allow_billable_tools, tool_spend_cap_usd)
     source = (QA_PROXY_LEDGER_SOURCE.replace('__RUN__', repr('remote-qa-'+identity(box)))
               .replace('__ALLOW_BILLABLE_TOOLS__', repr(allow_billable_tools))
               .replace('__TOOL_SPEND_CAP_USD__', repr(tool_spend_cap_usd)))
+    if strict is not None:
+        if onmiss or allow_billable_tools:
+            raise ValueError('QA_STRICT_REPLAY_REFUSED: strict replay is exclusive with capture-on-miss and paid tools')
+        return source + QA_ONMISS_OFF_SOURCE + strict_overlay_source(strict)
     if not onmiss:
         return source + QA_ONMISS_OFF_SOURCE
     if allow_billable_tools:
@@ -1020,10 +1188,25 @@ def ledger_source(box, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmis
                      + (QA_ONMISS_EXACT_SOURCE if exact_source else ''))
 
 
+def strict_mode_check(strict_manifest, capture, onmiss, exact, allow_billable_tools, app_data, box):
+    """Fail-closed admission for --strict-manifest; None when strict replay is not requested (default lanes unchanged)."""
+    if not strict_manifest:
+        return None
+    for bad, predicate in ((capture, 'capture'), (onmiss, 'on-miss'), (exact, 'exact-manifest'), (allow_billable_tools, 'billable-tools')):
+        if bad:
+            raise ValueError('QA_STRICT_REPLAY_REFUSED: strict replay is exclusive with ' + predicate)
+    if app_data not in (None, 'ci-parity'):
+        raise ValueError('QA_STRICT_REPLAY_REFUSED: app data must stay ci-parity (heydonna-uploads, rule 65)')
+    if not box:
+        raise ValueError('QA_STRICT_REPLAY_REFUSED: strict replay needs the owned QA box identity')
+    return strict_identity(box, load_strict_manifest(strict_manifest))
+
+
 def overlay(root, box=None, capture=False, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmiss=False, exact=None,
-            ids_out=None, dry=False, app_data=None):
+            ids_out=None, dry=False, app_data=None, strict_manifest=None):
     if onmiss and capture:
         raise ValueError('--on-miss and --capture are exclusive')
+    strict = strict_mode_check(strict_manifest, capture, onmiss, exact, allow_billable_tools, app_data, box)
     if exact and not onmiss:
         raise ValueError('--exact-manifest requires --on-miss')
     # Deployed tooling overlay, like the existing UI-only overlay. Persisted app sync follows proof.
@@ -1108,6 +1291,12 @@ set +u
   MODAL_DOCX_URL="$MODAL_DOCX_ENDPOINT_URL"
 fi
 # A remote shell export cannot change the flags baked into the reused Modal app.''')
+    if strict:
+        # Strict replay (opt-in): the deployed proxies must prove strict mode, forwarding off, this manifest digest, zero upstream
+        # dispatch and a 424 known-absent probe BEFORE Playwright starts; any failed predicate exits here with its name.
+        text = replace(text, '  python3 -I /root/qa/modal-lane.py provider-ready --root "$REPO_ROOT" || exit 3\n',
+                       '  python3 -I /root/qa/modal-lane.py provider-ready --root "$REPO_ROOT" || exit 3\n'
+                       '  python3 -I /root/qa/modal-lane.py strict-ready || { echo "QA_STRICT_REPLAY_STOPPED before browser"; exit 3; }\n')
     # 2026-10-25: a cold first push of the full schema + functions to a fresh disposable deployment legitimately exceeds 60s.
     # Bounded wait (default 300s) with ONE bounded retry on timeout, elapsed logged; also dedupe .env.local keys (the Convex CLI
     # refuses to update a file with duplicate NEXT_PUBLIC_CONVEX_URL / _SITE_URL entries). Fails closed if the anchor drifts.
@@ -1346,7 +1535,10 @@ echo "QA_MODAL_DEPLOY_SECONDS=$((SECONDS-qa_deploy_started)) parallel=true"
                 record['manifest_digest'] = ids['exact']['digest']
                 record['canonical_keys'] = sorted(ids['exact']['entries'])
                 Path(ids_out).write_text(json.dumps(record, indent=2) + '\n')
-        changes[proxy] = overlay_proxy(proxy.read_text(), box, capture, allow_billable_tools, tool_spend_cap_usd, ids)
+        if strict is not None:
+            print('QA_STRICT_REPLAY digest=' + strict['digest'] + ' fixtures=' + str(len(strict['entries'])) + ' bucket=' + strict['bucket']
+                  + ' forwarding=off store=' + strict['dict'] + ' app_data=ci-parity')
+        changes[proxy] = overlay_proxy(proxy.read_text(), box, capture, allow_billable_tools, tool_spend_cap_usd, ids, strict)
     if exact and app_data not in APP_DATA_MODES:
         raise ValueError('QA_APP_DATA_MODE_INVALID: exact mode needs an explicit --app-data scoped|ci-parity')
     if exact and box and app_data == 'scoped':
@@ -1372,10 +1564,12 @@ echo "QA_MODAL_DEPLOY_SECONDS=$((SECONDS-qa_deploy_started)) parallel=true"
     print('QA_MODAL_OVERLAY=applied files=' + str(len(staged)))
 
 
-def overlay_proxy(text, box, capture=False, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmiss=None):
+def overlay_proxy(text, box, capture=False, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmiss=None, strict=None):
     """Patch modal/shared/llm_proxy_server.py text for one owned QA box. Pure (text in, text out) so the stub proof
     exercises the exact deployed bytes. capture-on-miss keeps STRICT_FIXTURES=true for every non-proxy path."""
-    source = ledger_source(box, allow_billable_tools, tool_spend_cap_usd, onmiss)
+    if strict is not None and (capture or onmiss):
+        raise ValueError('QA_STRICT_REPLAY_REFUSED: strict replay is exclusive with capture and capture-on-miss')
+    source = ledger_source(box, allow_billable_tools, tool_spend_cap_usd, onmiss, strict)
     if True:  # moved verbatim from overlay(); original indentation kept on purpose
         if capture:
             source += QA_OPENROUTER_SOURCE
@@ -1437,6 +1631,17 @@ def overlay_proxy(text, box, capture=False, allow_billable_tools=False, tool_spe
                    '            if capture_enabled:\n                record_capture_attempt(request_hash, upstream_resp.status_code, False, _proxy_request_id)\n')
     text = replace(text, '                    "capture_run_id": capture_run_id,\n',
                    '                    "capture_run_id": capture_run_id,\n                    **_qa_onmiss_health(),\n')
+    if strict is not None:
+        # Strict replay: count every miss, refuse (never send) anything that reaches the forward block, and count a POST dispatch
+        # at the one place a provider URL is built, so the health counter proves zero upstream dispatch.
+        text = replace(text, '        if _strict_fixtures() and _qa_onmiss_ticket is None:\n',
+                       '        if _strict_fixtures() and _qa_onmiss_ticket is None:\n            _qa_strict_note_miss(provider, model, key)\n')
+        text = replace(text, '        # Deployed QA overlay: reserve BEFORE any billed upstream call.\n',
+                       '        if _QA_STRICT:\n            return _qa_strict_refuse_forward(provider, model, key)\n'
+                       '        # Deployed QA overlay: reserve BEFORE any billed upstream call.\n')
+        text = replace(text, '        upstream_url = _build_upstream_url(upstream_base, path, request.url.query)\n\n        forward_headers = _filter_request_headers(headers)\n',
+                       '        upstream_url = _build_upstream_url(upstream_base, path, request.url.query)\n        _qa_strict_bump("upstream_dispatch")\n\n'
+                       '        forward_headers = _filter_request_headers(headers)\n')
     if onmiss and onmiss.get('exact'):
         # Exact mode: the ingress identity reaches admission, and the dispatch identity is recorded BEFORE settlement.
         text = replace(text, '_qa_onmiss_admit(provider, model, path, key, body_bytes)',
@@ -1684,6 +1889,192 @@ def _qa_onmiss_health():
 
 def _qa_onmiss_mark(key, new_state, reason=""):
     return None
+'''
+
+
+QA_STRICT_READ_SOURCE = r'''
+# ---- strict replay (CTO GO C0ALZJHGE49 thread 1794677380.515009 ts 1795401768.237669): replay ONLY the manifest's canonical
+# objects, read from the run-local fixture bucket with the controller-armed READ-ONLY scoped session, each verified by sha256 and
+# size before it is served. Any other key is a miss with zero R2 I/O; every miss is a 424; nothing is written; nothing is forwarded.
+_QA_STRICT = __STRICT__  # {"digest", "bucket", "dict", "lease", "entries": {canonical_key: {"sha256", "bytes"}}}
+_QA_STRICT_WAIT_S = __STRICT_WAIT_S__
+_QA_STRICT_STATE = {"upstream_dispatch": 0, "forward_refused": 0, "strict_misses": 0, "verified_reads": 0,
+                    "refused_writes": 0, "mismatches": 0, "absent_probe": None}
+_QA_STRICT_LOCK = threading.Lock()
+
+
+def _strict_fixtures() -> bool:  # strict replay is server-baked for this box: no env flip can relax it
+    return True
+
+
+def _capture_mode() -> bool:
+    return False
+
+
+def _qa_strict_bump(name, n=1):
+    with _QA_STRICT_LOCK:
+        _QA_STRICT_STATE[name] += n
+
+
+def _qa_strict_thread(fn, *args):
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(1) as pool:
+        return pool.submit(fn, *args).result()
+
+
+def _qa_strict_session():
+    """The read-only strict-read session the controller armed in THIS box's Modal Dict. Missing, expired, wrong-run or
+    wrong-lease rows fail closed after a bounded wait; there is no fallback to the application R2 signer."""
+    import re as _re
+    import modal
+    def get():
+        try:
+            return modal.Dict.from_name(_QA_STRICT["dict"], create_if_missing=True).get("scoped-session/strict-read")
+        except Exception:
+            return None
+    deadline = time.time() + _QA_STRICT_WAIT_S
+    while True:
+        row = _qa_strict_thread(get)
+        if (isinstance(row, dict) and row.get("kind") == "strict-read" and row.get("bucket") == _QA_STRICT["bucket"]
+                and row.get("manifest_digest") == _QA_STRICT["digest"] and row.get("lease") == _QA_STRICT["lease"]
+                and _re.fullmatch(r"[0-9a-f]{32}", str(row.get("account", "")))
+                and all(isinstance(row.get(f), str) and row.get(f) for f in ("access", "secret", "token"))
+                and isinstance(row.get("exp"), int) and row["exp"] > time.time() + 15):
+            return row
+        if time.time() >= deadline:
+            raise RuntimeError("QA_STRICT_READ_DENIED session_unavailable; no fallback to application credentials")
+        time.sleep(2)
+
+
+_QA_STRICT_CACHE = {}
+
+
+def _qa_strict_s3():
+    row = _QA_STRICT_CACHE.get("row")
+    if row is None or row["exp"] <= time.time() + 45:
+        row = _QA_STRICT_CACHE["row"] = _qa_strict_session()
+        _QA_STRICT_CACHE.pop("client", None)
+    if "client" not in _QA_STRICT_CACHE:
+        import boto3 as _b3
+        from botocore.config import Config as _Cfg
+        _QA_STRICT_CACHE["client"] = _b3.client(
+            "s3", endpoint_url="https://" + row["account"] + ".r2.cloudflarestorage.com", region_name="auto",
+            aws_access_key_id=row["access"], aws_secret_access_key=row["secret"], aws_session_token=row["token"],
+            config=_Cfg(retries={"total_max_attempts": 2}, read_timeout=30, connect_timeout=10))
+    return _QA_STRICT_CACHE["client"]
+
+
+class _QaStrictMissing(Exception):
+    """Shaped like a botocore NoSuchKey so load_fixture_record_r2 returns its canonical (None, {}) miss."""
+    response = {"Error": {"Code": "NoSuchKey"}}
+
+
+class _QaStrictClient:
+    """Stands in for the fixture store's S3 client. Reads ONLY allowlisted canonical keys, ONLY from the run-local bucket,
+    and returns the bytes only after their sha256 and size match the manifest. Writes are refused."""
+    def get_object(self, Bucket=None, Key=None, **_kw):
+        import hashlib as _hl
+        import io as _io
+        entry = _QA_STRICT["entries"].get(Key)
+        if entry is None:
+            raise _QaStrictMissing(Key)  # not on the replay manifest: a miss, zero R2 I/O
+        resp = _qa_strict_s3().get_object(Bucket=_QA_STRICT["bucket"], Key=Key)
+        data = bytes(resp["Body"].read())
+        if len(data) != entry["bytes"] or _hl.sha256(data).hexdigest() != entry["sha256"]:
+            _qa_strict_bump("mismatches")
+            raise RuntimeError("QA_STRICT_FIXTURE_MISMATCH key=" + Key.rsplit("/", 1)[-1][:16] + " bytes=" + str(len(data)))
+        _qa_strict_bump("verified_reads")
+        return {**resp, "Body": _io.BytesIO(data)}
+
+    def put_object(self, **_kw):
+        _qa_strict_bump("refused_writes")
+        raise RuntimeError("QA_STRICT_REPLAY_NO_WRITE")
+
+
+def _qa_strict_ensure_client(self, *, for_write=False):
+    if for_write:
+        _qa_strict_bump("refused_writes")
+        raise RuntimeError("QA_STRICT_REPLAY_NO_WRITE")
+    return _QaStrictClient()
+
+
+def _qa_strict_put(self, key, body, metadata=None, **_kw):
+    _qa_strict_bump("refused_writes")
+    _log_action("qa_strict_replay_no_write", key_hash=str(key).rsplit("/", 1)[-1][:12])
+    return False
+
+
+R2FixtureStore._ensure_client = _qa_strict_ensure_client
+R2FixtureStore.put = _qa_strict_put
+
+
+def _qa_strict_note_miss(provider, model, key):
+    _qa_strict_bump("strict_misses")
+
+
+def _qa_strict_refuse_forward(provider, model, key):
+    """Belt and braces: control can only reach the forward block if strict mode were bypassed. Refuse, count, never send."""
+    _qa_strict_bump("forward_refused")
+    return JSONResponse({"error": "QA_STRICT_REPLAY_NO_FORWARD", "key": key, "provider": provider, "model": model,
+                         "terminal": True}, status_code=424, headers={"x-heydonna-qa-strict": "no-forward"})
+
+
+def _qa_strict_absent_probe():
+    """One request whose canonical key is NOT on the manifest, sent to this proxy itself. Proves on the box that an absent key is
+    a 424 fixture_miss with zero upstream dispatch and zero R2 reads (the proxy never forwards in strict replay)."""
+    _QA_STRICT_CACHE["probe_inflight"] = True
+    try:
+        before = dict(_QA_STRICT_STATE)
+        body = json.dumps({"contents": [{"role": "user", "parts": [{"text": "qa-strict-replay-absent-probe/" + _QA_STRICT["digest"]}]}]})
+        r = httpx.post("http://127.0.0.1:" + str(_proxy_port())
+                       + "/v1/projects/qa-strict-probe/locations/global/publishers/google/models/gemini-3.1-flash-lite:generateContent",
+                       content=body.encode(), timeout=30,
+                       headers={"X-Upstream-Base": "https://aiplatform.googleapis.com", "Authorization": "Bearer qa-strict-probe",
+                                "Content-Type": "application/json", "x-heydonna-request-id": "qa-strict-absent-probe"})
+        try:
+            err = r.json().get("error")
+        except Exception:
+            err = None
+        result = {"status": r.status_code, "error": err,
+                  "dispatch_delta": _QA_STRICT_STATE["upstream_dispatch"] - before["upstream_dispatch"],
+                  "forward_refused_delta": _QA_STRICT_STATE["forward_refused"] - before["forward_refused"],
+                  "verified_reads_delta": _QA_STRICT_STATE["verified_reads"] - before["verified_reads"]}
+    except Exception as e:
+        result = {"status": 0, "error": "probe_failed:" + type(e).__name__}
+    finally:
+        _QA_STRICT_CACHE["probe_inflight"] = False
+    result["ok"] = (result.get("status") == 424 and result.get("error") == "fixture_miss"
+                    and result.get("dispatch_delta") == 0 and result.get("forward_refused_delta") == 0
+                    and result.get("verified_reads_delta") == 0)
+    _QA_STRICT_STATE["absent_probe"] = result
+
+
+_qa_strict_ledger_log_action = _log_action
+
+
+def _log_action(action, **fields):
+    """The absent-key probe is a preflight, not a pipeline request: its ONE strict miss stays in the proxy log but is kept out of
+    the per-run ledger, so the run report never counts it as a replay miss. Every other event goes through the ledger unchanged."""
+    if (action == "llm_proxy_miss_strict" and fields.get("request_id") == "qa-strict-absent-probe"
+            and _QA_STRICT_CACHE.get("probe_inflight") and not _QA_STRICT_CACHE.get("probe_miss_skipped")):
+        _QA_STRICT_CACHE["probe_miss_skipped"] = True
+        return _qa_original_log_action(action, **fields)
+    return _qa_strict_ledger_log_action(action, **fields)
+
+
+_qa_onmiss_health_off = _qa_onmiss_health
+
+
+def _qa_onmiss_health():
+    if _QA_STRICT_STATE["absent_probe"] is None and not _QA_STRICT_CACHE.get("probe_started"):
+        _QA_STRICT_CACHE["probe_started"] = True
+        threading.Thread(target=_qa_strict_absent_probe, name="qa-strict-probe", daemon=True).start()
+    return {**_qa_onmiss_health_off(), "qa_strict_replay": True, "forwarding": False,
+            "strict_manifest_digest": _QA_STRICT["digest"], "strict_bucket": _QA_STRICT["bucket"],
+            "strict_fixtures": len(_QA_STRICT["entries"]),
+            **{k: _QA_STRICT_STATE[k] for k in ("upstream_dispatch", "forward_refused", "strict_misses", "verified_reads",
+                                                "refused_writes", "mismatches")},
+            "absent_probe": _QA_STRICT_STATE["absent_probe"] or "pending"}
 '''
 
 
@@ -2517,8 +2908,9 @@ def provision_extra_secrets(names, convex_helper, convex_root, run=subprocess.ru
 
 
 def prepare(box, root, config_path, capture=False, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmiss=False,
-            extra_secrets=(), convex_helper=None, convex_root=None, exact=None, app_data=None):
+            extra_secrets=(), convex_helper=None, convex_root=None, exact=None, app_data=None, strict_manifest=None):
     extra_names = parse_extra_secrets(extra_secrets, convex_helper, convex_root)  # fail closed before any write
+    strict = strict_mode_check(strict_manifest, capture, onmiss, exact, allow_billable_tools, app_data, box)
     if exact and not onmiss:
         raise ValueError('--exact-manifest requires --on-miss')
     exact_ids = onmiss_effective(root, box, onmiss, exact)  # an invalid exact manifest refuses here, before any write
@@ -2553,6 +2945,11 @@ def prepare(box, root, config_path, capture=False, allow_billable_tools=False, t
                'LLM_PROXY_FIXTURE_CAPTURE': 'true' if capture else 'false',
                'LLM_PROXY_CAPTURE_RUN_ID': 'remote-qa-'+box_id,
                'QA_LLM_ONMISS': '1' if onmiss else '0'}
+    if strict is not None:
+        updates['QA_STRICT_REPLAY'] = '1'
+        updates['QA_STRICT_DIGEST'] = strict['digest']
+        print('LLM_MODE=strict-replay strict_fixtures=true forwarding=off fixtures=' + str(len(strict['entries']))
+              + ' bucket=' + strict['bucket'] + ' app_data=ci-parity digest=' + strict['digest'])
     if onmiss:
         print('LLM_MODE=capture-on-miss strict_fixtures=true cap_usd=' + str(ONMISS_CAP_USD)
               + ' scope=box-lifetime+attempt payloads=box-local')
@@ -3134,6 +3531,65 @@ def emit_report(report, run_id):
         raise RuntimeError('QA capture halted or has uncertain provider spend; see charged upper bound')
 
 
+STRICT_PROBE_WAIT_S = 120
+
+
+def strict_readiness_verdict(data, digest):
+    """Pure: None when the relayed proxy health proves strict replay (strict mode, forwarding off, this manifest, zero upstream
+    dispatch and the known-absent probe answered 424 fixture_miss with zero dispatch); 'pending' while the probe runs; else the
+    exact failed predicate."""
+    if data.get('mode') != 'strict':
+        return 'strict_mode_off'
+    if data.get('qa_strict_replay') is not True:
+        return 'strict_overlay_missing'
+    if data.get('forwarding') is not False:
+        return 'forwarding_enabled'
+    if data.get('qa_onmiss'):
+        return 'capture_on_miss_enabled'
+    if not digest or data.get('strict_manifest_digest') != digest:
+        return 'manifest_digest_mismatch'
+    if data.get('strict_fixtures') != STRICT_FIXTURE_COUNT or data.get('strict_bucket') != SCOPED_FIXTURE_BUCKET:
+        return 'manifest_fixtures_mismatch'
+    if data.get('upstream_dispatch') != 0 or data.get('forward_refused') != 0:
+        return 'upstream_dispatch_nonzero'
+    probe = data.get('absent_probe')
+    if probe == 'pending' or probe is None:
+        return 'pending'
+    if not isinstance(probe, dict) or probe.get('ok') is not True or probe.get('status') != 424:
+        return 'absent_probe_failed'
+    return None
+
+
+def strict_readiness(label, data, url):
+    digest = os.environ.get('QA_STRICT_DIGEST', '')
+    deadline = time.time() + STRICT_PROBE_WAIT_S
+    while True:
+        verdict = strict_readiness_verdict(data, digest)
+        if verdict is None:
+            break
+        if verdict != 'pending' or time.time() >= deadline:
+            raise RuntimeError('QA_STRICT_READINESS_FAILED endpoint=' + label.lower() + ' predicate='
+                               + ('absent_probe_timeout' if verdict == 'pending' else verdict))
+        time.sleep(3)
+        req = urllib.request.Request(url, headers={'X-API-Key': os.environ['MODAL_API_KEY']})
+        with urllib.request.urlopen(req, timeout=90) as response:
+            data = json.load(response)
+    print('QA_STRICT_READINESS endpoint=' + label.lower() + ' forwarding=off absent_probe=424 dispatch=0 digest=' + digest[:16])
+    return data
+
+
+def strict_ready():
+    """Strict-replay gate run inside the patched preflight before the browser: AUDIO and DOCX proxies only."""
+    if os.environ.get('QA_STRICT_REPLAY') != '1' or not re.fullmatch(r'[0-9a-f]{64}', os.environ.get('QA_STRICT_DIGEST', '')):
+        raise RuntimeError('QA_STRICT_READINESS_FAILED endpoint=env predicate=strict_env_missing')
+    for label in ('AUDIO', 'DOCX'):
+        url = os.environ['MODAL_'+label+'_ENDPOINT_URL'].rstrip('/')+'/llm-proxy-readiness'
+        req = urllib.request.Request(url, headers={'X-API-Key': os.environ['MODAL_API_KEY']})
+        with urllib.request.urlopen(req, timeout=90) as response:
+            data = json.load(response)
+        strict_readiness(label, data, url)
+
+
 def ready():
     for label in ('AUDIO','DOCX'):
         url = os.environ['MODAL_'+label+'_ENDPOINT_URL'].rstrip('/')+'/llm-proxy-readiness'
@@ -3157,6 +3613,8 @@ def ready():
             print('QA_ONMISS_HEALTH endpoint='+label.lower()+' '+json.dumps(diagnostic, sort_keys=True),
                   file=sys.stderr, flush=True)
             raise RuntimeError('QA '+label+' capture-on-miss mode mismatch; expected '+str(onmiss).lower())
+        if os.environ.get('QA_STRICT_REPLAY') == '1':
+            data = strict_readiness(label, data, url)
         print('QA_MODAL_READINESS endpoint='+label.lower()+' mode='+expected+' onmiss='+str(onmiss).lower())
     # The review and chat-tools apps expose no /llm-proxy-readiness route; ownership and hostname are
     # already validated at resolve time, so they are reported as skipped rather than probed.
@@ -3201,7 +3659,8 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('command',choices=['register','credentials','check-credentials','finish','stop','reap','overlay','prepare','resolve','ready','provider-ready','capture-report','scoped-report-canary','tool-policy','route-check',
                                             'check-exact-manifest','check-canary-receipt','mint-session','arm-session','check-exact-ids',
-                                            'reconcile-custody','check-grant-receipt','check-app-data','check-app-mounts','verify-join','check-m15-stage'])
+                                            'reconcile-custody','check-grant-receipt','check-app-data','check-app-mounts','verify-join','check-m15-stage',
+                                            'check-strict-manifest','strict-preflight','strict-ready'])
     parser.add_argument('--box')
     parser.add_argument('--ttl',type=int,default=2700)
     parser.add_argument('--root',type=Path)
@@ -3225,7 +3684,9 @@ def main():
                         'its full hashes may dispatch live, every other miss is a typed refusal with zero provider I/O')
     parser.add_argument('--ids-out',type=Path,help='overlay --exact-manifest: write the non-secret run identities here')
     parser.add_argument('--ids',type=Path,help='mint-session: the non-secret run identities file')
-    parser.add_argument('--kind',choices=['proxy','report','custody','check'],help='mint-session')
+    parser.add_argument('--kind',choices=['proxy','report','custody','check','strict-read'],help='mint-session')
+    parser.add_argument('--strict-manifest',type=Path,help='M15 strict replay (opt-in): replay ONLY the manifest\'s two canonical objects from '
+                        'the run-local fixture bucket via a read-only scoped session; no capture, on-miss, forwarding or publishing')
     parser.add_argument('--spend-box',help='trusted-host physical box identity (pool server name; the box itself for an ephemeral box)')
     parser.add_argument('--dry-check',action='store_true',help='overlay --exact-manifest: authoritative-miss dry-check, never prices, claims, reserves or dispatches')
     parser.add_argument('--read-only',action='store_true',help='reconcile-custody: read both buckets, write nothing')
@@ -3256,6 +3717,17 @@ def main():
         parser.error('--exact-manifest is not valid for this command')
     if a.exact_manifest and a.command in ('overlay','prepare','capture-report') and not a.app_data:
         parser.error('--exact-manifest requires an explicit --app-data scoped|ci-parity')
+    if a.strict_manifest:
+        if a.command not in ('overlay','prepare','check-strict-manifest','strict-preflight','check-m15-stage','mint-session','arm-session'):
+            parser.error('--strict-manifest is not valid for this command')
+        for bad, flag in ((a.capture,'--capture'),(a.on_miss,'--on-miss'),(a.exact_manifest,'--exact-manifest'),
+                          (a.allow_billable_tools,'--allow-billable-tools'),(a.dry_check,'--dry-check')):
+            if bad:
+                parser.error('QA_STRICT_REPLAY_REFUSED: --strict-manifest is exclusive with ' + flag)
+        if a.app_data not in (None, 'ci-parity'):
+            parser.error('QA_STRICT_REPLAY_REFUSED: --strict-manifest keeps app data on ci-parity')
+    if a.kind == 'strict-read' and not a.strict_manifest:
+        parser.error('mint-session --kind strict-read requires --strict-manifest')
     if a.dry_check and a.command != 'overlay':
         parser.error('--dry-check is only valid with overlay')
     if a.command in ('register','credentials','finish','stop','prepare'):
@@ -3273,9 +3745,25 @@ def main():
     elif a.command=='finish': finish(a.box)
     elif a.command=='stop': stop(a.box,a.remote)
     elif a.command=='reap': reap()
-    elif a.command=='overlay': overlay(a.root,a.box,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss,a.exact_manifest,a.ids_out,a.dry_check,a.app_data)
+    elif a.command=='overlay': overlay(a.root,a.box,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss,a.exact_manifest,a.ids_out,a.dry_check,a.app_data,
+                                       a.strict_manifest)
     elif a.command=='prepare': prepare(a.box,a.root,a.config,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss,
-                                       a.extra_secret,a.convex_helper,a.convex_root,a.exact_manifest,a.app_data)
+                                       a.extra_secret,a.convex_helper,a.convex_root,a.exact_manifest,a.app_data,a.strict_manifest)
+    elif a.command=='check-strict-manifest':
+        if not a.strict_manifest:
+            parser.error('check-strict-manifest requires --strict-manifest')
+        m = load_strict_manifest(a.strict_manifest, a.head)
+        print('QA_STRICT_MANIFEST ok digest=' + m['digest'] + ' head=' + m['head'] + ' product_pin=' + m['product_pin'] + ' profile=' + m['profile']
+              + ' fixtures=' + str(len(m['entries'])) + ' bucket=' + m['bucket'] + ' approval_ref=' + m['approval_ref']
+              + ' absent_key=' + strict_absent_key(m).rsplit('/', 1)[-1][:16])
+    elif a.command=='strict-preflight':
+        if not a.strict_manifest:
+            parser.error('strict-preflight requires --strict-manifest')
+        m = load_strict_manifest(a.strict_manifest, a.head)
+        receipt = strict_preflight(m)
+        print('QA_STRICT_PREFLIGHT ok digest=' + m['digest'] + ' bucket=' + receipt['bucket'] + ' fixtures=' + str(len(receipt['fixtures']))
+              + ' ' + ' '.join(k + ':sha256=' + v['sha256'] + ',bytes=' + str(v['bytes']) for k, v in receipt['fixtures'].items())
+              + ' absent=' + receipt['absent'])
     elif a.command=='capture-report': capture_report(a.box,a.root,a.output,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss,
                                                      False,a.exact_manifest,a.session_file,a.app_data)
     elif a.command=='check-exact-manifest':
@@ -3288,6 +3776,11 @@ def main():
               + ' profile=' + manifest['profile'] + ' spec_blob=' + str(EXACT_PROFILES[manifest['profile']]['spec_blob'] or 'none')
               + ' max_reserve_usd=' + str(manifest['max_reserve_usd']) + ' hashes=' + str(len(manifest['entries']))
               + ' approval_ref=' + manifest['approval_ref'])
+    elif a.command=='check-m15-stage' and a.strict_manifest:
+        if not (a.draft and a.observer):
+            parser.error('check-m15-stage --strict-manifest requires --draft and --observer')
+        staged = check_m15_stage_strict(load_strict_manifest(a.strict_manifest, a.head), a.draft, a.observer)
+        print('QA_M15_STAGE ok mode=strict-replay ' + ' '.join(k + '=' + str(v) for k, v in staged.items()))
     elif a.command=='check-m15-stage':
         if not (a.exact_manifest and a.draft and a.observer):
             parser.error('check-m15-stage requires --exact-manifest, --draft and --observer')
@@ -3302,6 +3795,11 @@ def main():
         if a.kind=='check':
             _mint_session(['fixtures/llm/v2/'], ['GetObject'], 60)
             print('QA_SCOPED_MINT=ok')
+        elif a.kind=='strict-read':
+            if not a.box:
+                parser.error('mint-session --kind strict-read requires --box')
+            identity(a.box)
+            print(json.dumps(mint_strict_session(a.box, load_strict_manifest(a.strict_manifest, a.head))))
         elif a.kind in ('proxy','report','custody') and a.box and a.head and a.exact_manifest:
             # Scope is derived HERE from the trusted lease, physical-box identity and exact head. A box-written ids file is only
             # CHECKED against it (DENIED on any difference); it never selects a path.
@@ -3362,6 +3860,10 @@ def main():
                                                      {'approved_hash': next(iter(manifest['entries'].values()))['hash'], 'stage': EXACT_PROFILES[manifest['profile']]['stage']})},
                                        indent=2, sort_keys=True) + '\n')
         print('QA_ONMISS_JOIN_RESULT status=' + status + ' dispatches=' + str(len(rows)) + ' profile=' + manifest['profile'])
+    elif a.command=='arm-session' and a.strict_manifest:
+        if not a.box:
+            parser.error('arm-session --strict-manifest requires --box')
+        arm_strict_session(a.box, a.strict_manifest)
     elif a.command=='arm-session':
         if not a.exact_manifest or not a.box:
             parser.error('arm-session requires --box and --exact-manifest')
@@ -3372,6 +3874,7 @@ def main():
         scoped_report_canary(a.root, a.output)
     elif a.command=='resolve': resolve(a.box,a.root,a.config,a.verify)
     elif a.command=='ready': ready()
+    elif a.command=='strict-ready': strict_ready()
     elif a.command=='provider-ready': provider_ready(a.root)
 
 if __name__=='__main__':

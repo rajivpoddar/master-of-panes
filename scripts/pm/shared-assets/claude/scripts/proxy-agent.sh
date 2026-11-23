@@ -1713,8 +1713,8 @@ proxy_agent_type_level() {
 proxy_agent_tier_models() {
   local models _m _kept=""
   case "$1" in
-    LOW) models="inkling-2-mini gpt-6-luna claude-haiku-5-5 muse-spark-1.3-contributor";;
-    MID) models="inkling-2-mini deepseek-v4.1-flash glm-5.3 hy4-flash-free sarvam-glm-5.3 sarvam-deepseek-v4.1-flash sarvam-105b sarvam-gemma4 claude-sonnet-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
+    LOW) models="ornith-1.5-35b-a3b gpt-6-luna claude-haiku-5-5 muse-spark-1.3-contributor";;  # Spark (free) stays first for LOW: OpenCode monthly burn 0.35 vs 0.10 %/h budget (23 Nov 08:30)
+    MID) models="deepseek-v4.1-flash glm-5.3 hy4-flash-free ornith-1.5-35b-a3b sarvam-glm-5.3 sarvam-deepseek-v4.1-flash sarvam-105b sarvam-gemma4 claude-sonnet-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;
     TOP) models="grok-4.7 sarvam-kimi-k3 claude-opus-5-5 claude-fable-5-2 gpt-6.2-sol muse-spark-1.3-contributor";;
     *) return 1;;
   esac
@@ -2232,6 +2232,16 @@ proxy_agent_select() {
   local requested="$MODEL" tier="RAW" rung="${RUNG:-1}" max_rung=0 base_level="" idx=1
   local -a levels=(LOW MID TOP)
   case "$TYPE" in hd-builder) max_rung=3;; hd-proof-qa) max_rung=2;; esac
+  # OpenCode-first pin downgrade (Rajiv C0ALZJHGE49 thread 1795401861.605899, ts 1795402350.568009: "why is the opencode pool still underused?
+  # fix th proxy agent script inplace."). Most routine launches carried an exact claude-sonnet-5-5 pin (tier=RAW), which skipped the MID
+  # picker and so the OpenCode pool. A routine Sonnet pin now resolves as the MID tier (OpenCode first, Sonnet still in the list).
+  # Kept on the pin: judgment/P0 lanes, hd-proof-qa (needs image input; glm-5.3/Sarvam reject images), unfenced non-builder lanes
+  # (launch-agent: unfenced = GPT/Claude only, builders excepted) and PROXY_AGENT_PIN_STRICT=1.
+  if [[ "$requested" == claude-sonnet-5-5 && "${PROXY_AGENT_PIN_STRICT:-0}" != 1 && "$TYPE" != hd-proof-qa ]] && ! proxy_agent_is_judgment_lane \
+     && { [[ "${PROXY_AGENT_SANDBOX:-1}" != 0 ]] || [[ "$TYPE" == hd-builder ]]; }; then
+    printf 'proxy-agent: pin claude-sonnet-5-5 -> MID tier (OpenCode first; PROXY_AGENT_PIN_STRICT=1 keeps the pin)\n' >&2
+    requested=sonnet
+  fi
   case "$requested" in
     auto)
       # The type's level (proxy_agent_type_level; unlisted = MID). Rung 1 stays on it; each higher rung (--rung N, the S131 escalation lever) moves one level up, capped at TOP.

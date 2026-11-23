@@ -104,8 +104,9 @@ llm_onmiss='' stripe_test_env='' pre_write_check='' extra_secrets=() extra_args_
 exact_manifest='' canary_receipt='' exact_digest='' arm_pid='' exact_args='' exact_overlay_args='' onmiss_stock=''
 grant_receipt='' exact_dry='' product_pin='' exact_spend_box='' exact_profile='' spec_blob='' app_data=''
 app_data_bucket='' m15_draft='' m15_observer='' m15_draft_sha='' m15_observer_sha=''
+strict_manifest='' strict_digest='' strict_args='' strict_pid='' strict_preflight_line=''
 # Label of the requested LLM mode (follows llm_onmiss, which the controller clears if it disables on-miss).
-llm_label() { if [ -z "$llm_onmiss" ]; then echo strict; elif [ -n "$exact_manifest" ]; then echo capture-on-miss-exact; else echo capture-on-miss; fi; }
+llm_label() { if [ -n "$strict_manifest" ]; then echo strict-replay; elif [ -z "$llm_onmiss" ]; then echo strict; elif [ -n "$exact_manifest" ]; then echo capture-on-miss-exact; else echo capture-on-miss; fi; }
 modal_helper="${QA_MODAL_HELPER:-$HOME/.claude/scripts/remote-qa-modal.py}"
 runtime="${QA_SPEC_RUNTIME:-$HOME/.claude/scripts/remote-qa-spec-runtime.sh}"
 fetch_helper="$HOME/.claude/scripts/remote-qa-spec-fetch.py"
@@ -132,6 +133,7 @@ while [ $# -gt 0 ]; do
     --grant-receipt) grant_receipt="${2:?--grant-receipt needs the Run 9 parent grant receipt}"; shift 2;; # verified object-only grant (see header)
     --m15-draft) m15_draft="${2:?--m15-draft needs the aligned ASR draft file}"; shift 2;; # M15 spec inputs staged by the controller (see header)
     --m15-observer) m15_observer="${2:?--m15-observer needs the observer script}"; shift 2;;
+    --strict-replay) strict_manifest="${2:?--strict-replay needs the strict-replay manifest}"; shift 2;; # opt-in fail-closed M15 strict replay (2 pinned fixtures, forwarding off)
     --exact-dry-check) exact_dry=1; shift;; # authoritative-miss dry-check: the proxy never prices, claims, reserves or dispatches (see header)
     --stripe-test-env) stripe_test_env=--stripe-test-env; shift;; # opt-in Stripe TEST env on the disposable deployment (see header)
     --extra-secret) extra_secrets+=("${2:?--extra-secret needs NAME=generate}"); shift 2;; # opt-in box-generated dev-only secret (see header)
@@ -175,6 +177,35 @@ if [ -n "$llm_onmiss" ]; then
   [ "$disposable_convex" = 1 ] || { echo '--on-miss requires --disposable-convex (synthetic seed in a throwaway dev Convex only)' >&2; exit 2; }
   [ -z "$patch$legs_override" ] || { echo '--on-miss is GREEN-only: RED/mutation proof stays strict replay (no --mutate-patch/--legs)' >&2; exit 2; }
 fi
+if [ -n "$strict_manifest" ]; then
+  # Opt-in strict replay (CTO GO C0ALZJHGE49 thread 1794677380.515009 ts 1795401768.237669): replay ONLY the manifest's two canonical
+  # objects read from heydonna-qa through a controller-minted GetObject-only session, provider forwarding off, app data CI-parity
+  # (heydonna-uploads). Never combined with capture/on-miss; every refusal names its predicate and exits before any lease or spend.
+  sr() { echo "QA_STRICT_REPLAY_REFUSED: $1" >&2; exit 2; }
+  [ -z "$llm_onmiss$onmiss_stock" ] || sr 'predicate=on_miss (strict replay never captures)'
+  [ -z "$exact_manifest" ] || sr 'predicate=on_miss_exact (strict replay never captures)'
+  [ -z "$canary_receipt" ] || sr 'predicate=canary_receipt (capture-only input)'
+  [ -z "$grant_receipt" ] || sr 'predicate=grant_receipt (capture-only input)'
+  [ -z "$exact_dry" ] || sr 'predicate=exact_dry_check (capture-only input)'
+  [ "$disposable_convex" = 1 ] || sr 'predicate=disposable_convex_required'
+  [ "$requires_modal" = 1 ] || sr 'predicate=requires_modal_required'
+  [ -z "$patch$legs_override" ] || sr 'predicate=mutate_or_legs (strict replay is GREEN-only over the two pinned fixtures)'
+  [ "${QA_R2_SCOPED:-0}" != 1 ] || sr 'predicate=app_data_scoped (app data stays CI-parity heydonna-uploads)'
+  [ -r "$strict_manifest" ] && [ ! -L "$strict_manifest" ] || sr 'predicate=manifest_unreadable'
+  strict_line=$(python3 -I "$modal_helper" check-strict-manifest --strict-manifest "$strict_manifest" --head "$head") || sr 'predicate=manifest_invalid'
+  strict_digest=$(printf '%s' "$strict_line" | sed -n 's/^QA_STRICT_MANIFEST ok digest=\([0-9a-f]\{64\}\) .*/\1/p')
+  product_pin=$(printf '%s' "$strict_line" | sed -n 's/.* product_pin=\([0-9a-f]\{40\}\) .*/\1/p')
+  [[ "$strict_digest" =~ ^[0-9a-f]{64}$ && "$product_pin" =~ ^[0-9a-f]{40}$ ]] || sr 'predicate=manifest_digest_unparsed'
+  if [ -n "$m15_draft$m15_observer" ]; then
+    [ -n "$m15_draft" ] && [ -n "$m15_observer" ] || sr 'predicate=m15_inputs_incomplete (--m15-draft and --m15-observer go together)'
+    m15_line=$(python3 -I "$modal_helper" check-m15-stage --strict-manifest "$strict_manifest" --head "$head" --draft "$m15_draft" --observer "$m15_observer") || sr 'predicate=m15_stage_digest'
+    m15_draft_sha=$(printf '%s' "$m15_line" | sed -n 's/.* draft_sha256=\([0-9a-f]\{64\}\).*/\1/p')
+    m15_observer_sha=$(printf '%s' "$m15_line" | sed -n 's/.* observer_sha256=\([0-9a-f]\{64\}\).*/\1/p')
+    [[ "$m15_draft_sha" =~ ^[0-9a-f]{64}$ && "$m15_observer_sha" =~ ^[0-9a-f]{64}$ ]] || sr 'predicate=m15_stage_digest_unparsed'
+  fi
+  strict_args=' --strict-manifest /root/qa/strict-manifest.json'
+  app_data=ci-parity app_data_bucket=heydonna-uploads
+fi
 if [ -n "$exact_manifest" ]; then
   # Scoped exact-hash mode: never default, never combined with stock --on-miss, never without the canary receipt. The manifest is
   # validated by the SAME helper code the box and the proxy use (full 64-hex hashes only, exact head, canonical key shape).
@@ -205,7 +236,7 @@ if [ -n "$exact_manifest" ]; then
     [[ "$m15_draft_sha" =~ ^[0-9a-f]{64}$ && "$m15_observer_sha" =~ ^[0-9a-f]{64}$ ]] || { echo 'QA_M15_STAGE_REFUSED (digests)' >&2; exit 2; }
   fi
 else
-  [ -z "$canary_receipt$grant_receipt$exact_dry$m15_draft$m15_observer" ] || { echo '--canary-receipt, --grant-receipt, --exact-dry-check, --m15-draft and --m15-observer are only valid with --on-miss-exact' >&2; exit 2; }
+  [ -z "$canary_receipt$grant_receipt$exact_dry" ] && { [ -n "$strict_manifest" ] || [ -z "$m15_draft$m15_observer" ]; } || { echo '--canary-receipt, --grant-receipt, --exact-dry-check are only valid with --on-miss-exact; --m15-draft/--m15-observer need --on-miss-exact or --strict-replay' >&2; exit 2; }
 fi
 [ "$allow_seed" = 1 ] || { echo 'Canonical preflight replaces seed tables: --allow-seed-replace requires ownership of the selected dev deployment.' >&2; exit 2; }
 legs=GREEN
@@ -231,11 +262,20 @@ fi
 # The relay lease is registered with the box TTL and must outlive the whole lane run (modal logs are read until the end).
 [ "$ttl_seconds" -ge 60 ] && [ "$ttl_seconds" -le 10800 ] || { echo '--ttl must be 60s..3h (QA Modal lease limit)' >&2; exit 2; }
 [ "$timeout_secs" -le $(( ttl_seconds - 600 )) ] || { echo '--timeout must leave 600s of --ttl for setup/teardown (lease covers the lane only within --ttl)' >&2; exit 2; }
-if [ "$dry_run" = yes ]; then echo "DRY_RUN slot=$slot head=$head spec=$spec legs=$legs test_line=${test_line:-} project=${project:-} with_deps=$with_deps prod_build=$prod_build trace=$trace timeout_secs=$timeout_secs pool=${pool_lane:-0} priority=${pool_priority:-} disposable_convex=${disposable_convex:-0} pre_write_check=$([ -n "$pre_write_check" ] && echo yes || echo no) stripe_test_env=$([ -n "$stripe_test_env" ] && echo yes || echo no) llm_mode=$(llm_label)"; exit 0; fi
+if [ "$dry_run" = yes ]; then echo "DRY_RUN slot=$slot head=$head spec=$spec legs=$legs test_line=${test_line:-} project=${project:-} with_deps=$with_deps prod_build=$prod_build trace=$trace timeout_secs=$timeout_secs pool=${pool_lane:-0} priority=${pool_priority:-} disposable_convex=${disposable_convex:-0} pre_write_check=$([ -n "$pre_write_check" ] && echo yes || echo no) stripe_test_env=$([ -n "$stripe_test_env" ] && echo yes || echo no) llm_mode=$(llm_label)${strict_manifest:+ strict_digest=$strict_digest strict_fixtures=2 strict_bucket=heydonna-qa forwarding=off product_pin=$product_pin app_data=$app_data app_data_bucket=$app_data_bucket m15_staged=$([ -n "$m15_draft" ] && echo yes || echo no)}"; exit 0; fi
 # Report unexpected failures without exposing command arguments or environment values.
 trap 'rc=$?; printf "QA_SPEC_ERROR: command failed at line %s (rc=%s)\n" "$LINENO" "$rc" >&2' ERR
 # Shared slot Convex may still use production storage; never start a QA box against it.
 [ "$disposable_convex" = 1 ] || { echo 'QA_R2_REFUSED: --disposable-convex required for isolated storage' >&2; exit 2; }
+if [ -n "$strict_manifest" ]; then
+  # Trusted-host readback BEFORE any Convex, lease or box: both canonical objects through a 60 s GetObject-only session on exactly
+  # those keys plus one known-absent key (sha256 + size must match; the absent key must be NoSuchKey). Denial = stop, exact reason.
+  strict_preflight_line=$("${QA_UV:-$HOME/.local/bin/uv}" run --no-project --python 3.13 --with boto3==1.35.99 python -I "$modal_helper" strict-preflight --strict-manifest "$strict_manifest" --head "$head" 2>&1) \
+    || { printf '%s\n' "$strict_preflight_line" | grep -E '^(QA_STRICT_|ValueError|RuntimeError)' | tail -3 >&2; echo 'QA_STRICT_PREFLIGHT_FAILED (Run 11 stays pending)' >&2; exit 2; }
+  strict_preflight_line=$(printf '%s\n' "$strict_preflight_line" | grep '^QA_STRICT_PREFLIGHT ok ' | tail -1)
+  [ -n "$strict_preflight_line" ] || { echo 'QA_STRICT_PREFLIGHT_FAILED predicate=no_receipt' >&2; exit 2; }
+  echo "$strict_preflight_line" >&2
+fi
 # Default BASE env when --env-file is omitted: slot 5's dev env (CTO OK C0ALZJHGE49 ts 1795034415.355669; slot 2 is retired).
 # Deliberately NOT derived from --slot: --slot stays the run's assigned slot (box checkout name), the env file is only the
 # --disposable-convex base template. An explicit --env-file overrides. An unreadable default keeps the existing refusal (no fallback
@@ -298,6 +338,7 @@ fi
 mkdir -p "$out"; out=$(cd "$out" && pwd)
 printf 'deployment=%s\nspec=%s\nhead=%s\nlegs=%s\ntimeout_secs=%s\nllm_mode_requested=%s\nstripe_test_env=%s\n' "$dep" "$spec" "$head" "$legs" "$timeout_secs" "$(llm_label)" "$([ -n "$stripe_test_env" ] && echo yes || echo no)" >"$out/lane.txt"
 [ -z "$patch" ] || { cp "$patch" "$out/mutate.patch"; }
+[ -z "$strict_manifest" ] || { printf '%s\n' "${strict_line:-}" "$strict_preflight_line" ${m15_line:+"$m15_line"} >>"$out/lane.txt"; cp "$strict_manifest" "$out/strict-manifest.json"; }
 shasum -a 256 "$0" "$runtime" "$modal_helper" "$fetch_helper" "$HOME/.claude/scripts/remote-qa-ownership.sh" "$HOME/.claude/scripts/remote-qa-config.cjs" "$HOME/.claude/scripts/remote-qa-ui-capture.patch" ${patch:+"$patch"} >"$out/tooling.sha256"
 [ -z "$disposable_convex" ] || shasum -a 256 "$convex_helper" >>"$out/tooling.sha256"
 box='' ip='' known='' remote_ready='' cleanup_running='' modal_registered='' deployment_lease=''
@@ -557,7 +598,7 @@ qa_put "$pem" /root/qa/synth-private.pem
 qa_put "$HOME/.claude/scripts/remote-qa-config.cjs" /root/qa/config.cjs
 [ -z "$patch" ] || qa_put "$patch" /root/qa/mutate.patch
 if [ -n "$config" ]; then qa_put "$config" /root/qa/config.json; else qa_rsh "printf '{}' > /root/qa/config.json"; fi
-if [ -n "$exact_manifest" ]; then
+if [ -n "$exact_manifest$strict_manifest" ]; then
   # Spec env (controller-selected, NOT echoed back from R2_BUCKET_NAME): preflight sources .env.local into Playwright and prepare keeps
   # unknown lines. Written to the .env.local.next copy BEFORE the install below, so the byte-hash pool reset verifies already covers it.
   # The box readback below must report this same bucket for the selected mode, else the run aborts before Playwright.
@@ -634,6 +675,23 @@ if [ -n "$exact_manifest" ]; then
   fi
   exact_spend_box="${pool_box:-$box}"
 fi
+if [ -n "$strict_manifest" ]; then
+  qa_put "$strict_manifest" /root/qa/strict-manifest.json; qa_rsh "chmod 444 /root/qa/strict-manifest.json"
+  qa_rsh "set -e; cd '$remote'; git cat-file -e '$product_pin^{commit}'; git merge-base --is-ancestor '$product_pin' HEAD; [ -z \"\$(git diff --name-only '$product_pin' HEAD | grep -v -x -F '$spec' || true)\" ]" >"$out/product-pin.log" 2>&1 || { echo "QA_STRICT_REPLAY_STOPPED predicate=product_pin head=$head product_pin=$product_pin" | tee -a "$out/lane.txt" >&2; exit 1; }
+  echo "QA_PRODUCT_PIN ok product_pin=$product_pin head=$head spec_only=true mode=strict-replay" | tee -a "$out/lane.txt"
+  qa_rsh "python3 -I /root/qa/modal-lane.py check-app-data --env '$remote/.env.local' --app-data ci-parity" >"$out/app-data-readback.log" 2>&1 \
+    && grep -q "^QA_APP_DATA_READBACK mode=ci-parity bucket=heydonna-uploads " "$out/app-data-readback.log" \
+    || { echo 'QA_STRICT_REPLAY_STOPPED predicate=app_data_not_ci_parity' | tee -a "$out/lane.txt" >&2; exit 1; }
+  cat "$out/app-data-readback.log" | tee -a "$out/lane.txt"
+  if [ -n "$m15_draft" ]; then
+    qa_rsh "set -e; umask 077; mkdir -p /root/qa/m15; chmod 700 /root/qa/m15"
+    qa_put "$m15_draft" /root/qa/m15/draft.txt
+    qa_put "$m15_observer" /root/qa/m15/observe.sh
+    qa_rsh "set -e; [ \"\$(sha256sum </root/qa/m15/draft.txt | cut -c1-64)\" = '$m15_draft_sha' ]; [ \"\$(sha256sum </root/qa/m15/observe.sh | cut -c1-64)\" = '$m15_observer_sha' ]; bash -n /root/qa/m15/observe.sh; chmod 444 /root/qa/m15/draft.txt; chmod 555 /root/qa/m15/observe.sh" >"$out/m15-stage.log" 2>&1 \
+      || { echo 'QA_STRICT_REPLAY_STOPPED predicate=m15_staged_bytes (see m15-stage.log)' | tee -a "$out/lane.txt" >&2; exit 1; }
+    echo "QA_M15_STAGE ok mode=strict-replay draft=/root/qa/m15/draft.txt draft_sha256=$m15_draft_sha observer=/root/qa/m15/observe.sh observer_sha256=$m15_observer_sha (staged only; not run by the launcher)" | tee -a "$out/lane.txt"
+  fi
+fi
 python3 -I "$modal_helper" credentials --box "$box" | qa_rsh 'umask 077; cat > /root/qa/modal.env'
 remote_ready=1
 if [ -n "$pre_write_check" ]; then
@@ -651,7 +709,13 @@ if [ -n "$pre_write_check" ]; then
   fi
   echo "PRE_WRITE_CHECK_OK" | tee -a "$out/lane.txt"
 fi
-qa_rsh "set -e; source /root/qa/modal.env; export REMOTE_BOX=1; python3 -I /root/qa/modal-lane.py overlay --root '$remote' --box '$box' $llm_onmiss$exact_overlay_args; ${extra_box_env}python3 -I /root/qa/modal-lane.py prepare --box '$box' --root '$remote' --config /root/qa/config.json $llm_onmiss$exact_args$extra_args_remote" >"$out/modal-prepare.log" 2>&1
+qa_rsh "set -e; source /root/qa/modal.env; export REMOTE_BOX=1; python3 -I /root/qa/modal-lane.py overlay --root '$remote' --box '$box' $llm_onmiss$exact_overlay_args$strict_args; ${extra_box_env}python3 -I /root/qa/modal-lane.py prepare --box '$box' --root '$remote' --config /root/qa/config.json $llm_onmiss$exact_args$strict_args$extra_args_remote" >"$out/modal-prepare.log" 2>&1
+if [ -n "$strict_manifest" ]; then
+  grep -q "^QA_STRICT_REPLAY digest=$strict_digest fixtures=2 bucket=heydonna-qa forwarding=off " "$out/modal-prepare.log" \
+    && grep -q "^LLM_MODE=strict-replay strict_fixtures=true forwarding=off fixtures=2 bucket=heydonna-qa app_data=ci-parity digest=$strict_digest\$" "$out/modal-prepare.log" \
+    || { echo 'QA_STRICT_REPLAY_STOPPED predicate=overlay_unbound (overlay/prepare did not bake this manifest digest)' | tee -a "$out/lane.txt" >&2; exit 1; }
+  grep -m1 '^QA_STRICT_REPLAY digest=' "$out/modal-prepare.log" | tee -a "$out/lane.txt"
+fi
 if [ -n "$llm_onmiss" ]; then
   # The controller binds lease + exact head + request on the box; if it cannot (e.g. unverified pool hostname) it bakes the
   # strict OFF source and says QA_ONMISS_DISABLED: the run is then plain strict replay and is labelled so.
@@ -709,6 +773,24 @@ stop_scoped_arm() {
   [ -z "$arm_pid" ] || { pkill -P "$arm_pid" 2>/dev/null; kill "$arm_pid" 2>/dev/null; wait "$arm_pid" 2>/dev/null; arm_pid=''; echo 'QA_SCOPED_ARM_STOPPED' >>"$out/lane.txt"; }
   return 0
 }
+strict_arm_once() {
+  python3 -I "$modal_helper" mint-session --kind strict-read --box "$box" --head "$head" --strict-manifest "$strict_manifest" \
+    | qa_rsh "set -e; source /root/qa/modal.env; export REMOTE_BOX=1; python3 -I /root/qa/modal-lane.py arm-session --box '$box' --strict-manifest /root/qa/strict-manifest.json" >>"$out/strict-arm.log" 2>&1
+}
+strict_arm_loop() {
+  local n=1
+  while :; do
+    sleep 100
+    if strict_arm_once; then n=$((n + 1)); echo "QA_STRICT_ARM n=$n at=$(date -u +%FT%TZ)" >>"$out/strict-arm.log"; else echo "QA_STRICT_ARM_FAILED at=$(date -u +%FT%TZ)" >>"$out/strict-arm.log"; fi
+  done
+}
+if [ -n "$strict_manifest" ]; then
+  # GetObject-only session on exactly the two manifest keys, minted on this trusted host, re-armed every 100 s (TTL 300 s). The first
+  # arm must succeed before the browser; if the loop stops, reads fail closed as misses (424), never as provider calls.
+  strict_arm_once || { echo 'QA_STRICT_REPLAY_STOPPED predicate=strict_read_session_unarmed (see strict-arm.log)' | tee -a "$out/lane.txt" >&2; exit 1; }
+  strict_arm_loop & arm_pid=$!
+  echo "QA_STRICT_ARM_STARTED refresh_s=100 ttl_s=300 actions=GetObject keys=2 bucket=heydonna-qa forwarding=off" >>"$out/lane.txt"
+fi
 if [ -n "$exact_manifest" ]; then
   scoped_arm_loop & arm_pid=$!
   echo "QA_SCOPED_ARM_STARTED refresh_s=100 ttl_s=300 prefixes=fixtures/llm/v2/(read),staging+ledgers(write) shared_secret=none" >>"$out/lane.txt"

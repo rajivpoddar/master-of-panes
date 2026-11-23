@@ -2569,6 +2569,80 @@ def proxies_block(doc: dict | None) -> list[str]:
     return lines
 
 
+def _proxies_cell(value: str | None) -> str:
+    """One Slack table cell: no newlines, no pipe, no trailing space."""
+    return (value or "").replace("\n", " ").replace("|", "\\|").strip()
+
+
+def _proxies_duration(value) -> str:
+    if isinstance(value, int) and value >= 0:
+        return f"{value // 60}h{value % 60:02d}m"
+    return "?"
+
+
+def proxies_table(doc: dict | None) -> list[str]:
+    """Render the Proxies section as a markdown pipe table.
+
+    Columns: Lane | Model | Liveness | Elapsed | Issue/PR, one row per visible
+    proxy, same data as proxies_block(). slack-send.sh's convert_text_to_blocks
+    turns this into a native Block Kit 'table' block; the text block below is the
+    fallback for clients without table support. A missing/empty doc yields no
+    table rows (the caller keeps the plain text fallback).
+    """
+    if not doc or not doc.get("rows"):
+        return []
+    if doc.get("budget_exhausted"):
+        return []
+
+    def _dead(row: dict) -> bool:
+        return bool(row.get("dead") or row.get("state") in {"dead", "dead window"})
+
+    visible = [r for r in doc["rows"]
+               if r.get("state") not in {'finished', 'dead', 'dead window', 'left-over window'}
+               and not r.get('dead')]
+    def runtime(row):
+        return row.get('runtime_minutes') if row.get('runtime_minutes') is not None else row.get('age')
+    visible.sort(key=lambda row: (_dead(row), runtime(row) is None, -(runtime(row) or 0), row.get('name', '')))
+    if not visible:
+        return []
+
+    def _name(row: dict) -> str:
+        return row['name'].removeprefix('px-px-') if row['name'].startswith('px-px-') else row['name']
+
+    def _model(row: dict) -> str:
+        model = row.get('model') or 'UNAVAILABLE'
+        if model == 'UNAVAILABLE':
+            model += f" ({row.get('model_source', 'no model evidence')})"
+        return model
+
+    def _refs(row: dict) -> str:
+        refs = row.get('display_refs') or []
+        if not refs:
+            refs = [ref.split(':', 1)[1] for ref in (row.get('brief_refs') or [])
+                    if re.fullmatch(r'(?:issue|pr):\d+', str(ref))]
+        return ', '.join('#' + str(ref) for ref in refs) if refs else ''
+
+    def _liveness(row: dict) -> str:
+        if not _dead(row) and row.get('state') != 'left-over window':
+            return '? ' if row.get('state') == 'uncertain' else str(row.get('state') or 'running')
+        return str(row.get('state') or 'unknown')
+
+    lines = ["| Lane | Model | Liveness | Elapsed | Issue/PR |",
+             "| --- | --- | --- | --- | --- |"]
+    for row in visible[:99]:
+        cells = [
+            _proxies_cell(_name(row)),
+            _proxies_cell(_model(row)),
+            _proxies_cell(_liveness(row)),
+            _proxies_cell(_proxies_duration(runtime(row))),
+            _proxies_cell(_refs(row)),
+        ]
+        if _dead(row):
+            cells.append("dead " + _proxies_cell(row.get("state", "")))
+        lines.append("| " + " | ".join(cells) + " |")
+    return lines
+
+
 # Rajiv C0ALZJHGE49 thread 1794184422.765479, ts 1794186319.204389: the heartbeat
 # tracks these four accounts only. Antigravity/Gemini/Grok stay in the proxy quota
 # cache; they are not part of this report.
@@ -3905,6 +3979,9 @@ def compose(
     body += ["", *decision_block(decisions, now)]
     if mode == "1h":
         body += ["", *proxies_block(proxies)]
+        # Native Block Kit table (slack-send.sh converts the pipe table); the
+        # text block above is the fallback for clients without table support.
+        body += ["", *proxies_table(proxies)]
         ledger, github = pending_actions if pending_actions is not None else ({'error': 'collector not run'}, {'error': 'collector not run'})
         body += ["", *pending_actions_block(ledger, github, now)]
 

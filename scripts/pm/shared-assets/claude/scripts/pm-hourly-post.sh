@@ -237,3 +237,16 @@ if [ -n "$_AT" ]; then
   _REM=$(python3 /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/alerts-reminder/scripts/alerts-schedule.py --channel C0ALZJHGE49 --thread "$TS" --at "$_AT" --text "<@U0BNFGX2UAX> CTO review: please review all PM actions on this hourly with your hourly review skill (15-item checklist reply, Step 3 lane steering with send disposition and checkpoints, per-PR dispositions and STUCK owners, dead windows closed, caps)." 2>&1 | grep -E '^OK scheduled' | head -1)
 fi
 if [ "$_REM" = "disabled" ]; then echo "CTO_REVIEW_REMINDER disabled (Rajiv ts 1794837337.978459)"; elif [ -n "$_REM" ]; then echo "CTO_REVIEW_REMINDER $_REM anchor_ts=$TS"; else echo "CTO_REVIEW_REMINDER_FAILED ts=$TS (PM must post the CTO mention by hand)"; fi
+
+# PM processing reminder (Rajiv C0ALZJHGE49 thread 1795398411.851649, ts 1795400210.759519: "set an alerts reminder on each
+# hourly thread to remind you to run the hourly report processing skill correctly 5m after the report is posted. add it as the
+# last step in hourly report generation script."). Anchor = the POSTED parent ts + 300 s (ceil, so never early). LAST step.
+if [ -n "${TS:-}" ]; then
+  _PM_AT=$(python3 -c 'import math,sys,datetime; print(datetime.datetime.fromtimestamp(math.ceil(float(sys.argv[1]))+300, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$TS" 2>/dev/null)
+  if [ -n "$_PM_AT" ]; then
+    _PM_REM=$(python3 /Users/rajiv/Downloads/projects/heydonna-app/.claude/skills/alerts-reminder/scripts/alerts-schedule.py --channel C0ALZJHGE49 --thread "$TS" --at "$_PM_AT" --text "<@U0ALEAYCAUT> PM: run Skill(hourly-report-processing) for THIS thread now. Load the skill (don't hand-roll from memory) and work its checklist line by line, incl. 0 pace, 3a review-cap sweep, 3b tooling-blocked dual greens, 7 lane steering, 11/11a caps + account switch. Reply here with every line." 2>&1 | tail -1)
+    echo "PM_PROCESSING_REMINDER ${_PM_REM:-UNKNOWN} at=$_PM_AT anchor_ts=$TS"
+  else
+    echo "PM_PROCESSING_REMINDER FAILED: could not compute anchor from ts=$TS"
+  fi
+fi
