@@ -942,7 +942,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "9a59a52a2ac1ed987f9a79b55b5a4eab88e0039b68d205f0b8c0694af056c38a",
+      "sha256": "8312da82bbbde52538e80f1aeb2df8781a5d8d729cb20064eabeb1b1771a96af",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -978,7 +978,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "82eeefaf0e1d57268ca3d60fd1920b9b3dd316b1757d9a9e89e6658eabf7fb56",
+      "sha256": "78d718a0165357d69a79a66b2bbedd8a12767b47ac623768e6754680394084b6",
       "source_path": "claude/scripts/proxy-preempt.py"
     },
     {
@@ -1227,6 +1227,15 @@
       "source_path": "claude/scripts/tests/test_proxy_agent_tiers.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_proxy_claude_cap.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "4137fa5a9ec0ea17a685270c0d06a12820dc1ce6c2bb1ef9fcd3b828736a059c",
+      "source_path": "claude/scripts/tests/test_proxy_claude_cap.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_proxy_codex_primary.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1259,7 +1268,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "1925c431a3d113abcc1b626a1e3910969b490a802fc20541b5b5f74b9817bcaa",
+      "sha256": "9e3da245dee017be5a3ab4114ed0617c1624fbe51d1a11fc6226bf982c7d7d87",
       "source_path": "claude/scripts/tests/test_proxy_preempt.py"
     },
     {
@@ -2238,7 +2247,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 245,
+    "selected_count": 246,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
