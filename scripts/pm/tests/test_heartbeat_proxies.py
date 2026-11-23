@@ -367,3 +367,52 @@ def test_proxy_collector_budget_bounds_slow_ps_and_sqlite(monkeypatch):
             assert module.proxies_block(doc) == ['*Proxies:* unavailable (collector budget)']
         finally:
             release.set()
+
+
+def test_proxies_table_none_and_budget_empty():
+    assert module.proxies_table(None) == []
+    assert module.proxies_table({"budget_exhausted": True}) == []
+    assert module.proxies_table({"rows": []}) == []
+
+
+def test_proxies_table_builds_rows_from_data_no_hand_kept_list():
+    doc = {
+        "rows": [
+            {"name": "px-live-a", "state": "running", "model": "sonnet",
+             "runtime_minutes": 180, "display_refs": [4501]},
+            {"name": "px-live-b", "state": "uncertain", "model": "opus",
+             "runtime_minutes": 45, "display_refs": []},
+            {"name": "px-done", "state": "finished"},  # excluded
+            {"name": "px-dead", "state": "dead", "dead": True},  # excluded
+        ]
+    }
+    table = module.proxies_table(doc)
+    assert table[0] == "| Lane | Model | Liveness | Elapsed | Issue/PR |"
+    assert table[1] == "| --- | --- | --- | --- | --- |"
+
+    # Build expected live rows straight from doc["rows"] (no hand-kept list).
+    expected = []
+    for row in doc["rows"]:
+        if row.get("state") in {"finished", "dead", "dead window", "left-over window"} or row.get("dead"):
+            continue
+        model = (row.get("model") or "unknown").strip()
+        minutes = row.get("runtime_minutes")
+        elapsed = f"{minutes // 60}h{minutes % 60:02d}m" if isinstance(minutes, int) and minutes >= 0 else "?"
+        refs = ",".join("#" + str(r) for r in (row.get("display_refs") or []))
+        live = "?" if row.get("state") == "uncertain" else str(row.get("state"))
+
+        def cell(value):
+            return (value or "").replace("\n", " ").replace("|", "\\|").strip()
+
+        expected.append(f"| {cell(row['name'])} | {cell(model)} | {cell(live)} | {cell(elapsed)} | {cell(refs)} |")
+
+    assert table[2:] == expected
+    assert "px-done" not in table and "px-dead" not in table
+
+
+def test_proxies_table_text_block_still_present():
+    doc = {"rows": [{"name": "px-1", "state": "running", "model": "sonnet",
+                     "runtime_minutes": 60, "display_refs": [7]}]}
+    report = module.compose("1h", datetime(2026, 11, 23, 10, 0), None, {}, [],
+                            proxies=doc)
+    assert "px-1" in report
