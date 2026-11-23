@@ -223,16 +223,16 @@ def check_m15_stage(manifest, draft, observer):
 # canonical objects, read from the run-local fixture bucket (heydonna-qa) through a controller-armed READ-ONLY scoped session and
 # verified by sha256 + size; every other request is a 424 fixture_miss. App data stays on heydonna-uploads (ci-parity, rule 65). ----
 STRICT_PROFILE = 'm15-strict-replay'
-STRICT_FIXTURE_COUNT = 2
+STRICT_FIXTURE_COUNT = 3  # 2 proofread + 1 WhisperX STT (CTO GO C0ALZJHGE49 1794677380.515009 ts 1795413905.914639)
 STRICT_FIXTURE_MAX_BYTES = 8 * 1024 * 1024
 STRICT_SESSION_ACTIONS = ['GetObject']
-STRICT_KEY_RE = (r'fixtures/llm/v2/[a-z0-9_]{3,40}/[a-z0-9.-]{1,120}/[A-Za-z0-9._-]{3,80}\.[a-z0-9_]{3,20}/([0-9a-f]{64})\.bin')
+STRICT_KEY_RE = (r'fixtures/llm/v2/[a-z0-9_]{3,40}/[a-z0-9._-]{1,120}/[A-Za-z0-9._-]{3,80}\.[a-z0-9_]{3,20}/([0-9a-f]{64})\.bin')
 
 
 def load_strict_manifest(path, head=None):
     """Strict-replay manifest. Pure and fail-closed. Shape: {version:1, profile:"m15-strict-replay", head, product_pin, approval_ref,
-    bucket:"heydonna-qa", fixtures:[{canonical_key, sha256, bytes}] x2, langsmith:{draft_sha256, aligned_slice_sha256}, observer_sha256}.
-    Each key is a full canonical v2 key (no prefix or wildcard); the two keys differ. The digest is sha256 of the raw file."""
+    bucket:"heydonna-qa", fixtures:[{canonical_key, sha256, bytes}] x3, langsmith:{draft_sha256, aligned_slice_sha256}, observer_sha256}.
+    Each key is a full canonical v2 key (no prefix or wildcard); the keys differ. The digest is sha256 of the raw file."""
     p = Path(path)
     if p.is_symlink() or not p.is_file() or p.stat().st_size > EXACT_MANIFEST_MAX_BYTES:
         raise ValueError('QA_STRICT_MANIFEST_INVALID: unreadable, symlink or too large')

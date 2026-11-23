@@ -915,7 +915,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-notify",
-      "sha256": "9af52fd263d15365ec7f55ef7708e9369fbd3fa99535729251b780f42264a000",
+      "sha256": "e5fbb678d7628b7a0c06537c60ccbbaad21df77fb833ae8fa32af2726185f2f7",
       "source_path": "claude/scripts/proxy-agent-notify.py"
     },
     {
@@ -924,7 +924,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "f97f0989faf4e9192e75acb3900b0e13fbb3d8b045bdab9a655e3356447459d5",
+      "sha256": "1d21e3b9bededce04f893b7ff99e8ab072cca17fee348f126bc7dc2bcea2dc89",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -951,7 +951,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "811c5ac65779b5aec4e78beb1e494b532152285b605c4029475b98dcfe02f664",
+      "sha256": "82eeefaf0e1d57268ca3d60fd1920b9b3dd316b1757d9a9e89e6658eabf7fb56",
       "source_path": "claude/scripts/proxy-preempt.py"
     },
     {
@@ -1007,7 +1007,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-issue-triage",
-      "sha256": "b7872f36fd541590dafa08c3e782e3d1819349c9b0bbac84ce874a2e87fd7fa8",
+      "sha256": "08e21f3b20dba81706313d0ec93c9c9ab289eca59e7bf74ab81c6d8216fc64c5",
       "source_path": "claude/scripts/ready_pool_select.py"
     },
     {
@@ -1034,7 +1034,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "d24bb9023e1dcfd6dd346017982e59e7063ca8c0c811fc4e6dbd754e571f6af0",
+      "sha256": "190d902ec36b12f28793f419e6f82f2895f07994100a8a34fbc2475fde9810fe",
       "source_path": "claude/scripts/remote-qa-modal.py"
     },
     {
@@ -1079,7 +1079,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "5e34ac685cf53c8ee5c2845c2df0bc2e7890d521aef3c342a6857a82907fcf3e",
+      "sha256": "7d3126713be3951035597dd2a304a33949251d583aedc49b40ecb02932dfa5c7",
       "source_path": "claude/scripts/remote-qa-spec.sh"
     },
     {
@@ -1169,7 +1169,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "c98637230b997c2b4430584c84f524d805e7b05b7949ccdf1ef702cf75bcceed",
+      "sha256": "64ff39551bf888d62166a4babd87ad79647178e575f77f874b242a5766dfadee",
       "source_path": "claude/scripts/tests/test_proxy_agent_sarvam_pool.py"
     },
     {
@@ -1178,7 +1178,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "099afc6a8e550a8b1fb233ea713be897f4897d4bb0d5b5ac98eaa1cbf7bc7cdb",
+      "sha256": "ef524d812af2663f9828ea4a6eacd1041ee60e58c6e0abad32a4ad2af84acbb0",
       "source_path": "claude/scripts/tests/test_proxy_agent_tiers.py"
     },
     {
@@ -1187,7 +1187,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "295b37b98d8ce2c8e9bb0489f9ab81e8efc508f79835f6abbf38954395e49fef",
+      "sha256": "1925c431a3d113abcc1b626a1e3910969b490a802fc20541b5b5f74b9817bcaa",
       "source_path": "claude/scripts/tests/test_proxy_preempt.py"
     },
     {
@@ -1412,7 +1412,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "cfd17bab15b2b749c2f7d4b059c03916ab7530965e2403c7db32279028c7961e",
+      "sha256": "21fbcf480f2e7dfd326263177e1466e318094cbd39da9c4d552d7c1e81d9cb8c",
       "source_path": "claude/skills/hourly-report-processing/SKILL.md"
     },
     {
@@ -1574,7 +1574,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "d0188f502570ff7f5467495c826c38e1cab13bd3b9267650947bb925f18d4344",
+      "sha256": "fe892ade51fcf5a8399a2497dae3599528eabaf9149f5cced2ee4b9e5d5983f3",
       "source_path": "claude/skills/qa-brief/LESSONS.md"
     },
     {

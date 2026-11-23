@@ -271,7 +271,7 @@ fi
 # The relay lease is registered with the box TTL and must outlive the whole lane run (modal logs are read until the end).
 [ "$ttl_seconds" -ge 60 ] && [ "$ttl_seconds" -le 10800 ] || { echo '--ttl must be 60s..3h (QA Modal lease limit)' >&2; exit 2; }
 [ "$timeout_secs" -le $(( ttl_seconds - 600 )) ] || { echo '--timeout must leave 600s of --ttl for setup/teardown (lease covers the lane only within --ttl)' >&2; exit 2; }
-if [ "$dry_run" = yes ]; then echo "DRY_RUN slot=$slot head=$head spec=$spec legs=$legs test_line=${test_line:-} project=${project:-} with_deps=$with_deps prod_build=$prod_build trace=$trace timeout_secs=$timeout_secs pool=${pool_lane:-0} priority=${pool_priority:-} disposable_convex=${disposable_convex:-0} pre_write_check=$([ -n "$pre_write_check" ] && echo yes || echo no) stripe_test_env=$([ -n "$stripe_test_env" ] && echo yes || echo no) llm_mode=$(llm_label)${strict_manifest:+ strict_digest=$strict_digest strict_fixtures=2 strict_bucket=heydonna-qa forwarding=off product_pin=$product_pin app_data=$app_data app_data_bucket=$app_data_bucket m15_staged=$([ -n "$m15_draft" ] && echo yes || echo no)}${m15_overlay_sha:+ m15_overlay_sha256=$m15_overlay_sha m15_convex_flag=config m15_next_flags=spec_env m15_observer_gate=before_browser}"; exit 0; fi
+if [ "$dry_run" = yes ]; then echo "DRY_RUN slot=$slot head=$head spec=$spec legs=$legs test_line=${test_line:-} project=${project:-} with_deps=$with_deps prod_build=$prod_build trace=$trace timeout_secs=$timeout_secs pool=${pool_lane:-0} priority=${pool_priority:-} disposable_convex=${disposable_convex:-0} pre_write_check=$([ -n "$pre_write_check" ] && echo yes || echo no) stripe_test_env=$([ -n "$stripe_test_env" ] && echo yes || echo no) llm_mode=$(llm_label)${strict_manifest:+ strict_digest=$strict_digest strict_fixtures=3 strict_bucket=heydonna-qa forwarding=off product_pin=$product_pin app_data=$app_data app_data_bucket=$app_data_bucket m15_staged=$([ -n "$m15_draft" ] && echo yes || echo no)}${m15_overlay_sha:+ m15_overlay_sha256=$m15_overlay_sha m15_convex_flag=config m15_next_flags=spec_env m15_observer_gate=before_browser}"; exit 0; fi
 # Report unexpected failures without exposing command arguments or environment values.
 trap 'rc=$?; printf "QA_SPEC_ERROR: command failed at line %s (rc=%s)\n" "$LINENO" "$rc" >&2' ERR
 # Shared slot Convex may still use production storage; never start a QA box against it.
@@ -735,8 +735,8 @@ if [ -n "$pre_write_check" ]; then
 fi
 qa_rsh "set -e; source /root/qa/modal.env; export REMOTE_BOX=1; python3 -I /root/qa/modal-lane.py overlay --root '$remote' --box '$box' $llm_onmiss$exact_overlay_args$strict_args; ${extra_box_env}python3 -I /root/qa/modal-lane.py prepare --box '$box' --root '$remote' --config /root/qa/config.json $llm_onmiss$exact_args$strict_args$extra_args_remote" >"$out/modal-prepare.log" 2>&1
 if [ -n "$strict_manifest" ]; then
-  grep -q "^QA_STRICT_REPLAY digest=$strict_digest fixtures=2 bucket=heydonna-qa forwarding=off " "$out/modal-prepare.log" \
-    && grep -q "^LLM_MODE=strict-replay strict_fixtures=true forwarding=off fixtures=2 bucket=heydonna-qa app_data=ci-parity digest=$strict_digest\$" "$out/modal-prepare.log" \
+  grep -q "^QA_STRICT_REPLAY digest=$strict_digest fixtures=3 bucket=heydonna-qa forwarding=off " "$out/modal-prepare.log" \
+    && grep -q "^LLM_MODE=strict-replay strict_fixtures=true forwarding=off fixtures=3 bucket=heydonna-qa app_data=ci-parity digest=$strict_digest\$" "$out/modal-prepare.log" \
     || { echo 'QA_STRICT_REPLAY_STOPPED predicate=overlay_unbound (overlay/prepare did not bake this manifest digest)' | tee -a "$out/lane.txt" >&2; exit 1; }
   grep -m1 '^QA_STRICT_REPLAY digest=' "$out/modal-prepare.log" | tee -a "$out/lane.txt"
 fi
@@ -794,7 +794,8 @@ scoped_arm_loop() {
   done
 }
 stop_scoped_arm() {
-  [ -z "$arm_pid" ] || { pkill -P "$arm_pid" 2>/dev/null; kill "$arm_pid" 2>/dev/null; wait "$arm_pid" 2>/dev/null; arm_pid=''; echo 'QA_SCOPED_ARM_STOPPED' >>"$out/lane.txt"; }
+  # `wait` returns 143 for the TERM'd loop; under `set -e` that exited the lane before lane.rc (M15 Run 11 strict4: playwright_rc=0, verdict lane-fail).
+  [ -z "$arm_pid" ] || { pkill -P "$arm_pid" 2>/dev/null; kill "$arm_pid" 2>/dev/null; wait "$arm_pid" 2>/dev/null || :; arm_pid=''; echo 'QA_SCOPED_ARM_STOPPED' >>"$out/lane.txt"; }
   return 0
 }
 strict_arm_once() {

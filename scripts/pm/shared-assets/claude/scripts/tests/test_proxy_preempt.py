@@ -1,5 +1,10 @@
 """P0 preemption for proxy-agent.sh (proxy-preempt.py) and the Claude no-burn-gate contract of the launcher.
 
+UPDATE 23 Nov (Rajiv C0ALZJHGE49 thread 1795437841.011459, ts 1795439359.022079: "drop the P0 override rule. preempt the lowest priority agent and
+use that instead."): preemption is ON by default (PROXY_AGENT_PREEMPT=0 turns it off) and is the ONLY way a P0 gets a slot at cap: the launcher no longer
+launches a P0 over a pool cap or past a burn gate. It calls the helper with --pool-full; rc 0 = slot free, anything else = queued CAPACITY_WAIT.
+The CTO custody-before-signal tests below are unchanged.
+
 Rajiv C0ALZJHGE49 thread 1795369444.132999, ts 1795372352.279289 (23 Nov): "for P0's, preempt the lowest priority proxy agent" and
 "drop the P0 gate ... we don't have to track the burn rate for calude proxy accounts".
 CTO REVISE C0ALZJHGE49 thread 1795385404.941879, ts 1795385573.907659: the helper is packaged in the release manifest, stays OFF by
@@ -15,6 +20,7 @@ Run: /opt/homebrew/bin/pytest -q -p no:cacheprovider tests/test_proxy_preempt.py
 """
 import ast
 import hashlib
+import os
 import importlib.util
 import inspect
 import json
@@ -69,7 +75,7 @@ class World:
         self.stub = tmp / 'pm-ops-stub.py'
         self.stub.write_text(STUB % (str(tmp / 'obligations.jsonl'), str(tmp / 'stub-mode')))
         for attr, val in (('RUNS', tmp / 'runs'), ('STOP_DIR', tmp / 'stop'), ('LOG', tmp / 'preemptions.log'),
-                          ('CAPS_ENV', tmp / 'caps.env'), ('PM_OPS_CLI', str(self.stub)), ('RTB_ROOT', self.rtb)):
+                          ('CAPS_ENV', tmp / 'caps.env'), ('PM_OPS_CLI', str(self.stub)), ('RTB_ROOT', self.rtb), ('OVERRIDES_LOG', tmp / 'overrides.log')):
             monkeypatch.setattr(pp, attr, val)
 
     def caps(self, **kv):
@@ -113,6 +119,7 @@ class World:
         return d
 
     def box(self, box, state, owner, pool='pool', pid=None):
+        self.pool_dir(pool)  # a ledger with a box in it exists on disk (the helper only consults ledger dirs that exist)
         self.lists.setdefault(pool, []).append('\t'.join([box, state, owner, '-' if state == 'free' else '30', '-', '-' if state == 'free' else 'P2']))
         if pid is not None:
             (self.pool_dir(pool) / f'{box}.lease').write_text(json.dumps({'owner': owner, 'pid': pid, 'state': state, 'gen': 3}))
@@ -180,15 +187,21 @@ def fill_claude_pool(w, cap=3):
     w.caps(CLAUDE_PROXY_CAP=cap)
 
 
-# ---- paused by default ---------------------------------------------------------------------------------------------------
+# ---- on by default, with an off switch -----------------------------------------------------------------------------------
 
-@pytest.mark.parametrize('enabled', [None, '0', ''])
-def test_a_real_run_is_disabled_unless_preempt_is_switched_on(w, capsys, enabled):
+@pytest.mark.parametrize('enabled', ['0', ''])
+def test_a_real_run_is_disabled_only_by_the_off_switch(w, capsys, enabled):
     w.lane('a', brief='PRIORITY: P3\n')
     fill_claude_pool(w, 1)
     assert w.run(*P0, enabled=enabled) == 0
     assert 'PREEMPT disabled' in capsys.readouterr().out
     assert w.nothing_happened() and w.log_text() == '' and w.snapshots == 0  # not even the lease tooling was consulted
+
+
+def test_a_real_run_preempts_by_default_when_the_env_is_unset(w):
+    w.lane('a', brief='PRIORITY: P3\n')
+    fill_claude_pool(w, 1)
+    assert w.run(*P0, enabled=None) == 0 and len(w.signals) == 1
 
 
 def test_dry_run_still_plans_while_disabled_because_it_changes_nothing(w, capsys):
@@ -198,9 +211,9 @@ def test_dry_run_still_plans_while_disabled_because_it_changes_nothing(w, capsys
     assert 'PREEMPT_PLAN victim=lane-p3' in capsys.readouterr().out and w.nothing_happened()
 
 
-def test_the_launcher_default_is_off_and_this_helper_is_not_the_default_path():
-    assert 'if [[ "${PROXY_AGENT_PREEMPT:-0}" != 0 ]]; then' in LAUNCHER
-    assert not re.search(r'PROXY_AGENT_PREEMPT:-1|PROXY_AGENT_PREEMPT=1\b', LAUNCHER)
+def test_the_launcher_default_is_on_and_the_helper_is_called_only_at_pool_admission():
+    assert '"${PROXY_AGENT_PREEMPT:-1}" == 0' in LAUNCHER and 'PROXY_AGENT_PREEMPT:-0' not in LAUNCHER
+    assert LAUNCHER.count('proxy-preempt.py') >= 1 and LAUNCHER.count('--pool-full') >= 1
 
 
 # ---- selection (priority, scope, never-preempt classes) ---------------------------------------------------------------------
@@ -408,13 +421,13 @@ def test_pool_of_agrees_with_every_pool_the_launcher_maps_a_model_to():
     assert chain, 'launcher pool mapping not found (proxy_agent_pool_live changed shape: update proxy-preempt.py pool_of)'
     seen = {}
     for seg in chain.split(' else '):
-        kind = re.match(r'\s*(?:kind = )?"([a-z]*)"', seg).group(1)
+        kind = re.match(r'\s*(?:kind = )?"([a-z0-9]*)"', seg).group(1)
         if not kind or ' if ' not in seg:
             continue
         for literal in re.findall(r'"([a-z0-9][a-z0-9.\-]*)"', seg.split(' if ', 1)[1]):
             seen[literal] = kind
             assert pp.pool_of(literal) == kind, f'{literal}: launcher={kind} helper={pp.pool_of(literal)!r}'
-    assert {'claude', 'codex', 'grok', 'spark', 'inkling', 'opencode', 'sarvam'} <= set(seen.values())
+    assert {'claude', 'codex', 'grok', 'spark', 'inkling', 'hy4', 'opencode', 'sarvam'} <= set(seen.values())
     assert pp.pool_of('gpt-6.2-sol(xhigh)') == 'codex' and pp.pool_of('unheard-of') == ''
     assert set(pp.POOL_CAPS) == set(seen.values())  # every pool the launcher knows has a cap rule here
 
@@ -702,57 +715,125 @@ def bash(script, *args, env=None):
     return subprocess.run(['bash', '-c', script, *args], capture_output=True, text=True, env=env, timeout=30)
 
 
-HOOK = LAUNCHER[LAUNCHER.index('# P0 preemption (Rajiv C0ALZJHGE49 thread 1795369444.132999'):]
-HOOK = HOOK[:HOOK.index('ARGS=(-p --name')]
+# P0 admission wiring: the real functions are extracted BY NAME from the deployed launcher (rule 60: no hand-kept site list) and run in bash with
+# stubs for the live pool count and the helper. A P0 gets NO cap bypass: at cap it preempts through proxy-preempt.py --pool-full or it is queued.
+def fn(name):
+    return re.search(rf'^{name}\(\) \{{.*?^\}}$', LAUNCHER, re.S | re.M).group(0) + '\n'
 
 
-def hook_run(tmp_path, *, override='', brief_first=None, enabled='1', helper_rc=0, name=''):
-    """enabled: '1' switches preemption on, 0/'0' sets it off explicitly, None leaves it unset (the launcher's default)."""
+P0_FUNCS = ''.join(fn(n) for n in ('proxy_agent_router_identity', 'proxy_agent_pool_blocked', 'proxy_agent_is_p0_launch', 'proxy_agent_p0_preempt',
+                                    'proxy_agent_cap_exempt'))
+P0_STUBS = r'''
+proxy_agent_pool_live() { cat "$LIVE_FILE"; }
+'''
+
+
+def p0_pool(tmp_path, *, live=5, cap=5, model='claude-opus-5-5', ref='', brief_first='ordinary brief', helper_rc=0, frees=True, armed=True,
+            preempt=None, dry=False, role='hd-builder', cap_name='CLAUDE_PROXY_CAP'):
+    """Run proxy_agent_pool_blocked for one model. Returns (BLOCKED|FREE, helper args or None, PA_P0_WAIT, stderr)."""
     helper = tmp_path / 'helper.py'
     record = tmp_path / 'helper-args.json'
-    helper.write_text(f'import json, sys\nopen({str(record)!r}, "w").write(json.dumps(sys.argv[1:]))\nsys.exit({helper_rc})\n')
+    live_file = tmp_path / 'live'
+    live_file.write_text(f'{live}\n')
+    helper.write_text('import json, os, sys\n'
+                      f'open({str(record)!r}, "w").write(json.dumps(sys.argv[1:]))\n'
+                      + (f'open({str(live_file)!r}, "w").write("{max(live - 1, 0)}\\n")\n' if frees else '')
+                      + f'sys.exit({helper_rc})\n')
     brief = tmp_path / 'brief'
-    brief.write_text(brief_first if brief_first is not None else 'ordinary brief\n')
-    script = ('set -euo pipefail; unset PROXY_AGENT_NAME PROXY_AGENT_CAP_OVERRIDE PROXY_AGENT_PREEMPT; '  # never inherit the real lane's identity
-              + (f'PROXY_AGENT_NAME={name}; ' if name else '')
-              + 'TYPE=hd-builder; STAMP=s1; LAUNCH_MODEL=claude-opus-5-5; PROXY_AGENT_TOTAL_CAP=8; '
-              f'ROLE_BRIEF={brief}; PROXY_AGENT_CAP_OVERRIDE={override!r}; PROXY_AGENT_PREEMPT_HELPER={helper}; '
-              + (f'PROXY_AGENT_PREEMPT={enabled}; ' if enabled is not None else '') + HOOK + '\necho REACHED_ARGS')
-    done = bash(script)
+    brief.write_text(brief_first + '\n')
+    env = {**os.environ, 'HOME': str(tmp_path), 'LIVE_FILE': str(live_file), cap_name: str(cap)}
+    for k in ('PROXY_AGENT_PREEMPT', 'PROXY_AGENT_DRY_RUN', 'PROXY_AGENT_CAP_OVERRIDE', 'PROXY_AGENT_NAME'):
+        env.pop(k, None)
+    if preempt is not None:
+        env['PROXY_AGENT_PREEMPT'] = str(preempt)
+    if dry:
+        env['PROXY_AGENT_DRY_RUN'] = '1'
+    script = (f'set -u; TYPE={role}; ROLE_BRIEF={brief}; PA_P0_REF={ref!r}; PA_P0_WAIT=""; PROXY_AGENT_NAME=lane-under-test; '
+              f'PROXY_AGENT_PREEMPT_HELPER={helper}; {P0_STUBS}{P0_FUNCS}\n'
+              + 'if ' + ('PA_P0_ARMED=1 ' if armed else '') + f'proxy_agent_pool_blocked {model}; then echo BLOCKED; else echo FREE; fi\n'
+              'echo "WAIT=${PA_P0_WAIT}"')
+    done = bash(script, env=env)
+    out = done.stdout.split()
+    assert out, f'harness produced no output: rc={done.returncode} stderr={done.stderr}'
     called = json.loads(record.read_text()) if record.exists() else None
-    return done, called
+    return out[0], called, next((x[5:] for x in out if x.startswith('WAIT=')), ''), done.stderr
 
 
-def test_hook_calls_the_helper_for_a_p0_override_with_the_launch_facts(tmp_path):
-    done, called = hook_run(tmp_path, override='P0:14600')
-    assert done.returncode == 0 and 'REACHED_ARGS' in done.stdout
-    assert called == ['--launch-name', 'proxy-hd-builder-s1', '--model', 'claude-opus-5-5', '--override', 'P0:14600',
-                      '--brief', str(tmp_path / 'brief'), '--total-cap', '8']
+def test_a_p0_at_cap_preempts_in_its_own_pool_and_takes_the_slot(tmp_path):
+    state, called, wait, _ = p0_pool(tmp_path, ref='P0:14600')
+    assert state == 'FREE' and wait == ''
+    assert called == ['--launch-name', 'lane-under-test', '--model', 'claude-opus-5-5', '--pool-full', 'claude', '--override', 'P0:14600',
+                      '--brief', str(tmp_path / 'brief')]
 
 
-def test_hook_passes_the_launchers_own_lane_name_so_it_is_never_its_own_victim(tmp_path):
-    done, called = hook_run(tmp_path, override='P0:14600', name='proxy-ops-x')
-    assert done.returncode == 0 and called[called.index('--launch-name') + 1] == 'proxy-ops-x'
+def test_a_brief_first_line_p0_preempts_the_same_way(tmp_path):
+    state, called, _wait, _ = p0_pool(tmp_path, brief_first='PRIORITY: P0')
+    assert state == 'FREE' and called is not None and called[called.index('--override') + 1] == ''
 
 
-def test_hook_calls_the_helper_for_a_brief_first_line_p0(tmp_path):
-    done, called = hook_run(tmp_path, brief_first='PRIORITY: P0\nrest\n')
-    assert done.returncode == 0 and called is not None and called[called.index('--override') + 1] == ''
+@pytest.mark.parametrize('kwargs', [{}, {'brief_first': 'PRIORITY: P1'}, {'brief_first': 'x\nPRIORITY: P0'}])
+def test_a_non_p0_at_cap_is_blocked_and_never_calls_the_helper(tmp_path, kwargs):
+    state, called, wait, _ = p0_pool(tmp_path, **kwargs)
+    assert state == 'BLOCKED' and called is None and wait == ''
 
 
-@pytest.mark.parametrize('kwargs', [{}, {'override': 'rajiv:1795.1'}, {'brief_first': 'PRIORITY: P1\n'}, {'brief_first': 'x\nPRIORITY: P0\n'},
-                                    {'override': 'P0:9', 'enabled': 0}, {'override': 'P0:9', 'enabled': None},
-                                    {'brief_first': 'PRIORITY: P0\n', 'enabled': None}])
-def test_hook_skips_non_p0_the_off_switch_and_the_default_off(tmp_path, kwargs):
-    done, called = hook_run(tmp_path, **kwargs)
-    assert done.returncode == 0 and 'REACHED_ARGS' in done.stdout and called is None  # unset PROXY_AGENT_PREEMPT never reaches the helper
+@pytest.mark.parametrize('rc', [3, 4, 1, 2])
+def test_a_p0_with_nothing_preemptable_is_queued_never_launched_over_the_cap(tmp_path, rc):
+    state, called, wait, err = p0_pool(tmp_path, ref='P0:14600', helper_rc=rc, frees=False)
+    assert state == 'BLOCKED' and wait == 'claude' and called is not None
+    assert 'nothing preemptable' in err and 'not moved to another pool or tier' in err
 
 
-@pytest.mark.parametrize('rc', [3, 4, 1])
-def test_hook_never_stops_the_p0_launch_whatever_the_helper_returns(tmp_path, rc):
-    done, called = hook_run(tmp_path, override='P0:14600', helper_rc=rc)
-    assert done.returncode == 0 and 'REACHED_ARGS' in done.stdout and called is not None  # set -e did not abort the launcher
-    assert f'P0 preemption rc={rc} (launching the P0 anyway)' in done.stderr
+def test_a_victim_that_exits_but_leaves_the_pool_full_still_queues_the_p0(tmp_path):
+    state, _called, wait, err = p0_pool(tmp_path, ref='P0:14600', live=7, cap=5)  # over cap by two: one stop frees no slot
+    assert state == 'BLOCKED' and wait == 'claude' and 'still at cap' in err
+
+
+def test_the_off_switch_queues_the_p0_without_calling_the_helper(tmp_path):
+    state, called, wait, err = p0_pool(tmp_path, ref='P0:14600', preempt=0)
+    assert state == 'BLOCKED' and called is None and wait == 'claude' and 'preemption is unavailable' in err
+
+
+def test_preemption_is_on_by_default_and_only_for_the_armed_primary_pick(tmp_path):
+    assert p0_pool(tmp_path, ref='P0:1')[0] == 'FREE'                      # PROXY_AGENT_PREEMPT unset = on
+    (tmp_path / 'unarmed').mkdir()
+    state, called, wait, _ = p0_pool(tmp_path / 'unarmed', ref='P0:1', armed=False)  # nested alias picks / availability probes never preempt
+    assert state == 'BLOCKED' and called is None and wait == ''
+
+
+def test_a_pool_that_is_off_cap_zero_is_never_a_preemption_target(tmp_path):
+    state, called, _wait, _ = p0_pool(tmp_path, ref='P0:1', live=0, cap=0)
+    assert state == 'BLOCKED' and called is None
+
+
+def test_a_dry_run_passes_dry_run_and_trusts_the_plan_without_recounting(tmp_path):
+    state, called, _wait, _ = p0_pool(tmp_path, ref='P0:1', dry=True, frees=False)
+    assert state == 'FREE' and called[-1] == '--dry-run'
+
+
+def test_neither_the_override_nor_a_priority_p0_brief_exempts_a_role_from_a_cap(tmp_path):
+    script = (f'set -u; {P0_STUBS}{fn("proxy_agent_cap_exempt")}\n'
+              f'ROLE_BRIEF={tmp_path}/b; printf "PRIORITY: P0\\n" > $ROLE_BRIEF; PROXY_AGENT_CAP_OVERRIDE=P0:1\n'
+              'proxy_agent_cap_exempt hd-builder && echo EXEMPT || echo NOT_EXEMPT\nproxy_agent_cap_exempt ci-repair-agent && echo EXEMPT || echo NOT_EXEMPT')
+    assert bash(script).stdout.split() == ['NOT_EXEMPT', 'EXEMPT']  # only the unrelated role exemption survives
+
+
+def test_the_p0_override_is_read_once_as_identity_and_removed_from_the_environment():
+    block = LAUNCHER[LAUNCHER.index('PA_P0_REF=""; PA_P0_WAIT=""; PA_P0_ARMED=0'):]
+    block = block[:block.index('\n', block.index('unset PROXY_AGENT_CAP_OVERRIDE'))]
+    for override, kept in (('P0:14600', ''), ('rajiv:1795439359.022079', 'rajiv:1795439359.022079'), ('', '')):
+        done = bash(block + '\necho "REF=$PA_P0_REF KEPT=${PROXY_AGENT_CAP_OVERRIDE:-}"', env={**os.environ, 'PROXY_AGENT_CAP_OVERRIDE': override})
+        assert done.stdout.strip() == f"REF={override if override.startswith('P0:') else ''} KEPT={kept}", done.stdout
+
+
+def test_the_deepseek_total_cap_and_burn_gates_no_longer_accept_a_p0_override():
+    gates = [ln for ln in LAUNCHER.splitlines() if 'PROXY_AGENT_CAP_OVERRIDE' in ln and '=~' in ln and not ln.lstrip().startswith('#')]
+    assert gates and not any('P0:' in ln for ln in gates[1:]), gates  # discovered over every override check (the first is the one-time identity capture)
+    assert 'deepseek_requires_rajiv_override' in LAUNCHER and 'deepseek_requires_p0_override' not in LAUNCHER
+
+
+def test_the_old_post_selection_hook_that_launched_the_p0_over_the_cap_is_gone():
+    assert 'launching the P0 anyway' not in LAUNCHER and 'PROXY_AGENT_PREEMPT:-0' not in LAUNCHER and 'PROXY_AGENT_PREEMPT:-1' in LAUNCHER
 
 
 def burn_refused(tmp_path, model, gate='enforce'):
@@ -784,3 +865,249 @@ def test_shadow_script_reports_claude_cap_only_and_allows():
 def test_launcher_and_helper_parse():
     assert bash('bash -n "$1"', 'bash', str(SCRIPTS / 'proxy-agent.sh')).returncode == 0  # $0 is the 2nd word, the file is $1
     compile(HELPER_SRC, 'proxy-preempt.py', 'exec')
+
+
+# ---- P0 slot mode (--pool-full), relaunch spec, WIP preservation, audit log, last-5-minutes -----------------------------------------
+
+POOL_FULL = ('--model', 'claude-opus-5-5', '--override', 'P0:14600', '--pool-full', 'claude')
+
+
+def test_pool_full_mode_stops_the_lowest_priority_lane_of_that_pool_and_reports_a_free_slot(w, capsys):
+    w.lane('lane-p1', brief='PRIORITY: P1\n')
+    w.lane('lane-p2', brief='PRIORITY: P2\n')
+    pc = w.lane('lane-p3', brief='PRIORITY: P3\n')
+    other = w.lane('grok-p3', model='grok-4.7', brief='PRIORITY: P3\n')
+    fill_claude_pool(w, 3)
+    assert w.run(*POOL_FULL) == 0
+    assert w.signals == [(pc, signal.SIGTERM)] and other in w.alive  # same pool only, lowest priority only
+    assert 'PREEMPT victim=lane-p3' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('kwargs', [{'brief': 'PRIORITY: P0\n'}, {'type': 'pm-admission-reviewer', 'brief': 'PRIORITY: P3\n'}, {'brief': 'no priority\n'}])
+def test_pool_full_mode_with_nothing_preemptable_is_rc_3_with_no_signal_and_no_row(w, capsys, kwargs):
+    w.lane('only', **kwargs)
+    fill_claude_pool(w, 1)
+    assert w.run(*POOL_FULL) == 3
+    assert 'PREEMPT_REFUSED reason=nothing_preemptible' in capsys.readouterr().out and w.nothing_happened()
+
+
+def test_pool_full_mode_never_lets_a_non_p0_or_a_tooling_failure_or_the_off_switch_through(w, monkeypatch, capsys):
+    w.lane('a', brief='PRIORITY: P3\n')
+    fill_claude_pool(w, 1)
+    assert w.run('--model', 'claude-opus-5-5', '--pool-full', 'claude') == 3        # not a P0
+    assert w.run(*POOL_FULL, enabled='0') == 3                                       # off switch
+    monkeypatch.setattr(pp.subprocess, 'check_output', lambda *a, **k: (_ for _ in ()).throw(OSError('no ps')))
+    assert pp.main(['--launch-name', 'p0', *POOL_FULL], env={}, ps_text=None) == 3  # no ps: no bypass, the P0 queues
+    assert w.nothing_happened()
+
+
+def test_pool_full_mode_with_room_in_the_pool_is_already_a_free_slot(w, capsys):
+    w.lane('a', brief='PRIORITY: P3\n')
+    fill_claude_pool(w, 5)
+    assert w.run(*POOL_FULL) == 0 and 'PREEMPT not_needed' in capsys.readouterr().out and w.nothing_happened()
+
+
+def test_a_lane_inside_the_last_five_minutes_of_its_expected_window_is_never_preempted(w, capsys):
+    import datetime as dt
+    started = '2026-11-23T01:00:00Z'
+    now = 1_795_400_000.0
+    began = dt.datetime.fromisoformat(started.replace('Z', '+00:00')).timestamp()
+    w.lane('ending', brief='PRIORITY: P3\n', started=started)
+    mf = w.tmp / 'runs' / 'ending' / 'manifest.json'
+    data = json.loads(mf.read_text())
+    data['expected_minutes'] = (now - began + 200) / 60  # 200 s left
+    mf.write_text(json.dumps(data))
+    fill_claude_pool(w, 1)
+    assert w.run(*POOL_FULL, now=now) == 3
+    assert 'ending:last_5_min' in capsys.readouterr().out and w.nothing_happened()
+    data['expected_minutes'] = (now - began - 60) / 60  # already overdue: preemptable again
+    mf.write_text(json.dumps(data))
+    assert w.run(*POOL_FULL, now=now) == 0
+
+
+def test_the_relaunch_row_is_capacity_wait_and_carries_the_victims_launch_spec(w):
+    w.lane('lane-p2', brief='PRIORITY: P2\n', issue='14567', type='hd-builder')
+    active = w.tmp / 'runs' / 'lane-p2' / 'active'
+    active.mkdir()
+    spec = {'type': 'hd-builder', 'brief': '/briefs/x.md', 'argv': ['hd-builder', '/briefs/x.md', '--model', 'claude-sonnet-5-5'],
+            'env': {'PROXY_AGENT_PM_ROLE': '0'}, 'model_args': ['--model', 'claude-sonnet-5-5'], 'cwd': '/clone',
+            'cmd': 'env PROXY_AGENT_PM_ROLE=0 PROXY_AGENT_NAME=lane-p2 /x/proxy-agent.sh hd-builder /briefs/x.md --model claude-sonnet-5-5'}
+    (active / 'launch.json').write_text(json.dumps(spec))
+    fill_claude_pool(w, 1)
+    assert w.run(*POOL_FULL) == 0
+    (args,) = w.obligations()
+    pairs = dict(zip(args[1::2], args[2::2]))
+    assert pairs['--blocker'] == 'CAPACITY_WAIT: preempted for P0 14600; relaunch when its pool has a free slot'
+    relaunch = json.loads(pairs['--evidence-json'])['relaunch']
+    assert relaunch['state'] == 'CAPACITY_WAIT' and relaunch['cmd'] == spec['cmd'] and relaunch['env'] == spec['env']
+    assert relaunch['model_args'] == ['--model', 'claude-sonnet-5-5'] and relaunch['brief'] == '/briefs/x.md'
+    assert relaunch['resume_cmd'].endswith('--resume lane-p2 --model claude-sonnet-5-5')
+
+
+def test_a_victim_without_a_launch_spec_still_gets_a_relaunch_command_from_its_registry_row(w):
+    w.lane('old-lane', brief='PRIORITY: P2\n', type='hd-proof-qa')
+    fill_claude_pool(w, 1)
+    assert w.run(*POOL_FULL) == 0
+    relaunch = json.loads(dict(zip(w.obligations()[0][1::2], w.obligations()[0][2::2]))['--evidence-json'])['relaunch']
+    assert 'hd-proof-qa' in relaunch['cmd'] and 'old-lane.brief' in relaunch['cmd'] and '--model claude-sonnet-5-5' in relaunch['cmd']
+
+
+def test_every_preemption_is_logged_to_proxy_cap_overrides_log_only_once_the_lane_has_exited(w):
+    w.lane('lane-p3', brief='PRIORITY: P3\n')
+    fill_claude_pool(w, 1)
+    assert w.run(*POOL_FULL) == 0
+    line = (w.tmp / 'overrides.log').read_text().strip()
+    assert ' PREEMPTED lane-p3 for P0:14600 pool=claude model=claude-sonnet-5-5 launcher=p0-launch ' in line
+    w.exit_on_term = False
+    w.lane('stubborn', brief='PRIORITY: P3\n', started='2026-11-23T05:00:00Z')
+    assert w.run(*POOL_FULL) == 4
+    assert (w.tmp / 'overrides.log').read_text().count('PREEMPTED') == 1  # a lane that did not exit is not logged as preempted
+
+
+def test_hy4_is_its_own_pool_like_the_launcher_counts_it():
+    assert pp.pool_of('hy4-flash-free') == 'hy4' and pp.pool_of('glm-5.3') == 'opencode' and 'hy4' in pp.POOL_CAPS
+
+
+# WIP preservation: real git, a local bare "origin", a lane whose transcript names its lane-clone checkout.
+
+def git(*a, cwd=None):
+    return subprocess.run(['git', '-c', 'user.name=T', '-c', 'user.email=t@example.invalid', *a], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def lane_with_worktree(w, tmp_path, branch='fix/9-x', commits=1, dirty=False, push_first=True):
+    origin = tmp_path / 'origin.git'
+    git('init', '-q', '--bare', str(origin))
+    wt = tmp_path / 'wt'
+    git('init', '-q', '-b', branch, str(wt))
+    git('remote', 'add', 'origin', str(origin), cwd=wt)
+    (wt / 'f.txt').write_text('base\n')
+    git('add', 'f.txt', cwd=wt)
+    git('commit', '-q', '-m', 'base', cwd=wt)
+    if push_first:
+        git('push', '-q', 'origin', f'HEAD:refs/heads/{branch}', cwd=wt)
+    for i in range(commits):
+        (wt / f'c{i}.txt').write_text(f'{i}\n')
+        git('add', '.', cwd=wt)
+        git('commit', '-q', '-m', f'wip {i}', cwd=wt)
+    if dirty:
+        (wt / 'f.txt').write_text('dirty\n')
+    event = {'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'name': 'Bash',
+                                                           'input': {'command': f'~/.claude/scripts/lane-clone.sh clone {wt} origin/{branch}'}}]}}
+    w.lane('wip-lane', brief='PRIORITY: P3\n', jsonl=[event])
+    fill_claude_pool(w, 1)
+    return origin, wt
+
+
+def remote_tip(origin, branch):
+    return git('--git-dir', str(origin), 'rev-parse', f'refs/heads/{branch}')
+
+
+def test_clean_unpushed_commits_are_pushed_non_force_after_the_lane_exits(w, tmp_path):
+    origin, wt = lane_with_worktree(w, tmp_path, commits=2)
+    before = remote_tip(origin, 'fix/9-x')
+    assert w.run(*POOL_FULL) == 0
+    assert remote_tip(origin, 'fix/9-x') == git('rev-parse', 'HEAD', cwd=wt) != before
+    assert 'wip=pushed:' in w.log_text() and f'worktree={wt}' in w.log_text()
+    rows = [dict(zip(a[1::2], a[2::2])) for a in w.obligations()]
+    assert len(rows) == 2 and json.loads(rows[1]['--evidence-json'])['wip']['status'] == 'pushed'  # the relaunch row learns where the WIP is
+
+
+@pytest.mark.parametrize('why, kwargs', [('dirty_worktree', {'dirty': True}), ('nothing_unpushed', {'commits': 0})])
+def test_a_dirty_or_fully_pushed_worktree_is_left_exactly_as_it_is(w, tmp_path, why, kwargs):
+    origin, wt = lane_with_worktree(w, tmp_path, **kwargs)
+    before, status = remote_tip(origin, 'fix/9-x'), git('status', '--porcelain', cwd=wt)
+    assert w.run(*POOL_FULL) == 0
+    assert remote_tip(origin, 'fix/9-x') == before and git('status', '--porcelain', cwd=wt) == status
+    assert f'wip=left_intact:{why}' in w.log_text() and len(w.obligations()) == 1
+
+
+def test_a_protected_branch_and_a_missing_worktree_are_never_pushed(w, tmp_path):
+    origin, wt = lane_with_worktree(w, tmp_path, branch='main', commits=1)
+    before = remote_tip(origin, 'main')
+    assert w.run(*POOL_FULL) == 0
+    assert remote_tip(origin, 'main') == before and 'wip=left_intact:protected_or_detached_branch' in w.log_text()
+
+
+def test_no_worktree_in_the_transcript_leaves_everything_alone(w):
+    w.lane('plain', brief='PRIORITY: P3\n')
+    fill_claude_pool(w, 1)
+    assert w.run(*POOL_FULL) == 0 and 'wip=left_intact:no_worktree_found' in w.log_text()
+
+
+def test_a_push_the_remote_refuses_is_reported_and_never_forced(w, tmp_path):
+    origin, wt = lane_with_worktree(w, tmp_path, commits=1)
+    other = tmp_path / 'other'
+    git('clone', '-q', '-b', 'fix/9-x', str(origin), str(other))
+    (other / 'x.txt').write_text('x\n')
+    git('add', '.', cwd=other)
+    git('commit', '-q', '-m', 'someone else', cwd=other)
+    git('push', '-q', 'origin', 'HEAD:refs/heads/fix/9-x', cwd=other)  # the remote moved: our push is not a fast-forward
+    moved = remote_tip(origin, 'fix/9-x')
+    assert w.run(*POOL_FULL) == 0
+    assert remote_tip(origin, 'fix/9-x') == moved and 'wip=left_intact:' in w.log_text() and 'wip=pushed' not in w.log_text()  # unknown ahead-count: left alone
+
+
+def test_wip_preservation_never_forces_commits_stashes_or_resets():
+    fn_ast = ast.parse(inspect.getsource(pp.preserve_wip)).body[0]
+    code = ast.unparse(ast.Module(body=fn_ast.body[1:], type_ignores=[]))  # the docstring is prose, not behaviour
+    for banned in ("'--force'", "'-f'", "'--force-with-lease'", "'+HEAD'", "'commit'", "'stash'", "'reset'", "'checkout'", "'add'", "'rebase'", "'merge'"):
+        assert banned not in code, banned
+    assert "'push', 'origin'" in code
+
+
+# ---- the picker: a P0 queues instead of falling to another pool or tier ------------------------------------------------------------
+# The REAL proxy_agent_select / proxy_agent_pick_tier run with the tiers-test stubs (health probes, cooldowns, burn gate) but the REAL pool_blocked and p0 functions.
+
+_tiers_spec = importlib.util.spec_from_file_location('tiers_for_p0', SCRIPTS / 'tests' / 'test_proxy_agent_tiers.py')
+tiers = importlib.util.module_from_spec(_tiers_spec)
+_tiers_spec.loader.exec_module(tiers)
+
+
+def p0_route(tmp_path, role='hd-planner', *, p0=True, live=2, cap=2, helper_rc=3, frees=False, only_pool=None):
+    """Route one launch through the real picker. Every pool is at cap (live >= cap) unless only_pool names the single full pool."""
+    helper = tmp_path / 'helper.py'
+    record = tmp_path / 'helper-calls.jsonl'
+    live_file = tmp_path / 'live'
+    live_file.write_text(f'{live}\n')
+    helper.write_text('import json, sys\n'
+                      f'open({str(record)!r}, "a").write(json.dumps(sys.argv[1:]) + "\\n")\n'
+                      + (f'open({str(live_file)!r}, "w").write("{max(live - 1, 0)}\\n")\n' if frees else '')
+                      + f'sys.exit({helper_rc})\n')
+    brief = tmp_path / 'brief.txt'
+    brief.write_text('plan it\n')
+    extra = ''.join(fn(n) for n in ('proxy_agent_is_p0_launch', 'proxy_agent_p0_preempt'))
+    body = ('proxy_agent_pool_live() { if [[ -n "$ONLY_POOL" && "$1" != "$ONLY_POOL" ]]; then echo 0; else cat "$LIVE_FILE"; fi; }\n'
+            + extra + tiers.ROUTE_BODY)
+    env = tiers.base_env(tmp_path, REQUESTED='auto', ROLE=role, BRIEF=str(brief), RUNG='', UNAVAILABLE='', PROBEFAIL='', LIVE_FILE=str(live_file),
+                         ONLY_POOL=only_pool or '', PROXY_AGENT_PREEMPT_HELPER=str(helper), PROXY_AGENT_NAME='p0-lane',
+                         **{k: cap for k in ('CLAUDE_PROXY_CAP', 'CODEX_PROXY_CAP', 'GROK_PROXY_CAP', 'OPENCODE_PROXY_CAP', 'SARVAM_PROXY_CAP')})
+    env.pop('PROXY_AGENT_STUB_POOL_LIVE', None)
+    if p0:
+        env['PA_P0_REF'] = 'P0:77'
+    done = subprocess.run(['bash', '-c', tiers.PRELUDE + '\n' + body], env=env, text=True, capture_output=True)
+    fields = done.stdout.strip().split('|')
+    calls = [json.loads(x) for x in record.read_text().splitlines()] if record.exists() else []
+    return fields, calls, done.stderr
+
+
+def test_a_p0_whose_pool_is_at_cap_with_nothing_to_preempt_is_refused_75_and_never_reaches_sol(tmp_path):
+    fields, calls, err = p0_route(tmp_path)
+    assert fields[5] == '75' and fields[2] != 'gpt-6.2-sol'  # rc 75, no model: queued, not moved to the last (capped, forbidden) Sol entry
+    assert 'REFUSED P0 queued' in err and 'no bypass, no other pool or tier' in err
+    assert len(calls) == 1 and calls[0][calls[0].index('--pool-full') + 1] in ('grok', 'claude') and 'gpt-6.2-sol' not in calls[0]  # asked once, for the first full pool
+
+
+def test_a_p0_that_frees_a_slot_gets_its_pools_normal_model(tmp_path):
+    fields, calls, err = p0_route(tmp_path, helper_rc=0, frees=True, live=2, cap=2)
+    assert fields[5] == '0' and fields[2] == 'grok-4.7'  # TOP's first entry, in the pool that was just freed
+    assert len(calls) == 1 and calls[0][calls[0].index('--model') + 1] == 'grok-4.7' and calls[0][calls[0].index('--pool-full') + 1] == 'grok'
+
+
+def test_a_p0_whose_first_pool_has_room_never_calls_the_helper(tmp_path):
+    fields, calls, _ = p0_route(tmp_path, only_pool='claude', cap=2, live=2)  # grok has 0 live
+    assert fields[2] == 'grok-4.7' and calls == []
+
+
+def test_a_non_p0_at_cap_never_preempts_and_still_skips_to_the_next_model(tmp_path):
+    fields, calls, err = p0_route(tmp_path, p0=False, only_pool='grok', cap=2, live=2)
+    assert calls == [] and fields[2] != 'grok-4.7' and 'pool_cap skip model=grok-4.7' in err

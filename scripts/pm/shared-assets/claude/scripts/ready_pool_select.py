@@ -738,6 +738,14 @@ def dependency_satisfaction(node: dict | None) -> tuple[bool, str]:
         return bool(merged) and state == "MERGED", state
     if node.get("state") not in {"OPEN", "CLOSED"}:
         return False, "LOOKUP_FAILED"
+    # A closed predecessor resolves the dependency regardless of how many PRs were
+    # associated with it. The >1-PR ambiguity only concerns an OPEN predecessor,
+    # where the authoritative implementation PR is genuinely unclear (#14461:
+    # #14396 closed COMPLETED behind #14405 and #14463, both merged, but the old
+    # code still reported AMBIGUOUS_ASSOCIATED_PR). Body mentions and historical
+    # partial PRs cannot invent or reverse that relation.
+    if node.get("state") == "CLOSED":
+        return True, "CLOSED"
     links = node.get("closedByPullRequestsReferences")
     if not isinstance(links, dict) or not isinstance(links.get("nodes"), list):
         return False, "LOOKUP_FAILED"

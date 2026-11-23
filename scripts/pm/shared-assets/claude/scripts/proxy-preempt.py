@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """P0 preemption for proxy-agent.sh: free ONE proxy slot for a P0 launch by stopping the lowest-priority live lane.
 
-STATUS: PAUSED. proxy-agent.sh calls this only when PROXY_AGENT_PREEMPT is non-zero (default 0), and this helper refuses a real
-(non --dry-run) run unless PROXY_AGENT_PREEMPT is non-zero as well. The CTO re-reviews before the default is turned back on
-(C0ALZJHGE49 thread 1795385404.941879, ts 1795385573.907659). P0 launches continue without preemption meanwhile.
+STATUS: ON by default (Rajiv C0ALZJHGE49 thread 1795437841.011459, ts 1795439359.022079: "drop the P0 override rule. preempt the lowest
+priority agent and use that instead."). PROXY_AGENT_PREEMPT=0 switches it off. A P0 no longer bypasses a pool cap or burn gate: when the
+launcher finds the P0's pool at cap it calls this helper with --pool-full <pool>. rc 0 = a slot is free for the P0 (a victim exited, a dry
+run found one, or the pool already had room); rc 3 = nothing preemptable; rc 4 = the victim did not exit. Any rc but 0 means the P0
+is refused rc 75 and queued as a proxy_relaunch CAPACITY_WAIT row: it never falls to another pool or tier. The CTO's earlier custody
+requirement (C0ALZJHGE49 thread 1795385404.941879, ts 1795385573.907659) is unchanged: custody is persisted and re-read before any signal.
 
 Policy (Rajiv C0ALZJHGE49 thread 1795369444.132999, ts 1795372352.279289, 23 Nov: "for P0's, preempt the lowest priority proxy
 agent"). Behaviour:
@@ -22,7 +25,11 @@ agent"). Behaviour:
   * ORDER for the chosen victim: (1) persist the pm-ops `proxy_relaunch` obligation (--print-id) and require its id, (2) re-read
     custody, (3) write ~/.claude/state/proxy-stop-requests/<name>, (4) SIGTERM, wait up to --wait seconds, (5) log. A failure at (1)
     or (2) signals nothing and withdraws any obligation it created; a failed SIGTERM withdraws it too.
-  * Nothing preemptible -> log `PREEMPT_REFUSED`, rc 3. proxy-agent.sh still launches the P0 (a P0 is never blocked by a cap).
+  * Nothing preemptible -> log `PREEMPT_REFUSED`, rc 3. The P0 is NOT launched over the cap: it is queued (CAPACITY_WAIT).
+  * Also never preemptible: a lane inside the last ~5 minutes of its EXPECTED_MIN window (when the registry row carries one).
+  * After the victim exits, its WIP is preserved: a worktree that is clean with unpushed commits is pushed NON-force to its own branch;
+    anything else (dirty, nothing unpushed, protected/detached branch, no worktree found) is left exactly as it is. The relaunch row is
+    CAPACITY_WAIT with the victim's brief, type, env and model args (its launch spec), and a PREEMPTED line goes to proxy-cap-overrides.log.
 
 Never signals anything but the one chosen `claude -p --name <victim>` process. --dry-run selects and prints: it sends no signal and
 writes no stop file, log line or obligation (its lease-CLI reads are the tool's own list/queue/pending reads). The pm-ops CLI is
@@ -30,9 +37,11 @@ PROXY_AGENT_PM_OPS_CLI (same contract as proxy-run-state.py) and the lease CLI i
 """
 import argparse
 import datetime
+import importlib.util
 import json
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -45,6 +54,9 @@ STATE = HOME / '.claude/state'
 CAPS_ENV = Path(os.environ.get('PROXY_PREEMPT_CAPS_ENV', str(STATE / 'proxy-caps.env')))
 STOP_DIR = Path(os.environ.get('PROXY_PREEMPT_STOP_DIR', str(STATE / 'proxy-stop-requests')))
 LOG = Path(os.environ.get('PROXY_PREEMPT_LOG', str(STATE / 'proxy-preemptions.log')))
+OVERRIDES_LOG = Path(os.environ.get('PROXY_PREEMPT_OVERRIDES_LOG', str(STATE / 'proxy-cap-overrides.log')))
+NEAR_END_S = 300  # a lane this close to the end of its EXPECTED_MIN window is not preempted
+PROTECTED_BRANCHES = ('main', 'master', 'HEAD', '')
 PM_OPS_CLI = os.environ.get('PROXY_AGENT_PM_OPS_CLI', str(HOME / '.claude/scripts/pm-ops.py'))
 LEASE_CLI = os.environ.get('PROXY_PREEMPT_LEASE_CLI', str(HOME / '.claude/scripts/rtb-pool-lease.py'))
 RTB_ROOT = Path(os.environ.get('RTB_STATE') or str(HOME / '.cache/rtb-state'))
@@ -55,7 +67,7 @@ CAPPED = frozenset({'hd-planner', 'hd-builder', 'hd-proof-qa', 'pm-hotfix', 'pm-
 RANK = {'P0': 0, 'P1': 1, 'P2': 2, 'P3': 3}  # same order as ready_pool_select.PRIORITY_RANK; anything else is unknown
 # Pool -> (env vars in precedence order, default). The defaults are proxy-agent.sh's `${VAR:-default}` fallbacks.
 POOL_CAPS = {'claude': (('CLAUDE_PROXY_CAP', 'PROXY_AGENT_CLAUDE_CAP'), 5), 'codex': (('CODEX_PROXY_CAP',), 8),
-             'grok': (('GROK_PROXY_CAP',), 8), 'opencode': (('OPENCODE_PROXY_CAP',), 2), 'sarvam': (('SARVAM_PROXY_CAP',), 4),
+             'grok': (('GROK_PROXY_CAP',), 8), 'opencode': (('OPENCODE_PROXY_CAP',), 2), 'hy4': (('HY4_PROXY_CAP',), 3), 'sarvam': (('SARVAM_PROXY_CAP',), 4),
              'spark': (('SPARK_PROXY_CAP', 'QWEN_PROXY_CAP'), 6), 'inkling': (('INKLING_PROXY_CAP',), 8)}
 CAPS_ENV_KEYS = {k for names, _ in POOL_CAPS.values() for k in names}
 
@@ -92,7 +104,9 @@ def pool_of(model):
         return 'spark'
     if m == 'inkling-2-mini':
         return 'inkling'
-    if m in ('hy4-flash-free', 'deepseek-v4.1-flash', 'glm-5.3', 'muse-spark-1.3-contributor'):
+    if m == 'hy4-flash-free':
+        return 'hy4'  # its own cap, outside the OpenCode Go cap (launcher proxy_agent_pool_blocked)
+    if m in ('deepseek-v4.1-flash', 'glm-5.3', 'muse-spark-1.3-contributor'):
         return 'opencode'
     if m in ('sarvam-glm-5.3', 'sarvam-deepseek-v4.1-flash', 'sarvam-105b', 'sarvam-gemma4', 'sarvam-kimi-k3'):
         return 'sarvam'
@@ -346,6 +360,18 @@ def holds_for(victim, rows, tree):
     return holds
 
 
+def near_completion(manifest, now):
+    """True when the lane is inside the last NEAR_END_S seconds of its EXPECTED_MIN window. Not detectable (no window) = False."""
+    try:
+        started = datetime.datetime.fromisoformat(str(manifest['started_at']).replace('Z', '+00:00')).timestamp()
+        expected = float(manifest.get('expected_minutes') or 0) * 60
+    except (KeyError, ValueError, TypeError):
+        return False
+    if expected <= 0:
+        return False
+    return 0 <= started + expected - now <= NEAR_END_S
+
+
 def candidates(lanes, launch_name, scope_pool, labels_cmd, now, capped_only=False):
     """(ordered victim candidates, skipped). skipped = [(name, reason)]. Candidates are registered, live, in scope, de-duplicated
     by name, ordered worst priority first then youngest first. capped_only: only the total cap is full, so a victim must be a
@@ -383,6 +409,9 @@ def candidates(lanes, launch_name, scope_pool, labels_cmd, now, capped_only=Fals
         if lane['pid'] is None:
             skipped.append((name, 'no_pid'))
             continue
+        if near_completion(manifest, now):
+            skipped.append((name, 'last_5_min'))
+            continue
         try:
             fresh = now - (STOP_DIR / name).stat().st_mtime < 300
         except OSError:
@@ -410,14 +439,43 @@ def iso(now):
     return datetime.datetime.fromtimestamp(now, datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
+def append_line(path, text):
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, 'a') as fh:
+            fh.write(text + '\n')
+    except OSError:
+        pass  # an audit line that cannot be written never stops the preemption it describes
+
+
 def log_line(text):
     LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(LOG, 'a') as fh:
         fh.write(text + '\n')
 
 
+def relaunch_spec(victim):
+    """Everything needed to re-queue the victim: its launch spec (proxy-run-state.py queue stores it in the run's active/launch.json),
+    else a spec rebuilt from the registry row (brief, type, model). Env overrides and model args travel in it."""
+    mf = victim['manifest']
+    name = victim['name']
+    spec = _json_file(RUNS / name / 'active' / 'launch.json') or {}
+    launcher = os.environ.get('PROXY_AGENT_LAUNCHER') or str(Path.home() / '.claude/scripts/proxy-agent.sh')
+    if not spec.get('cmd'):
+        brief = str(mf.get('original_brief') or mf.get('brief') or '')
+        spec = {'type': victim['type'], 'brief': brief, 'argv': [victim['type'], brief, '--model', victim['model']], 'env': {},
+                'model_args': ['--model', victim['model']], 'cwd': str(mf.get('cwd') or ''),
+                'cmd': 'env PROXY_AGENT_NAME=' + shlex.quote(name) + ' ' + shlex.quote(launcher) + ' ' + ' '.join(
+                    shlex.quote(x) for x in (victim['type'], brief, '--model', victim['model']))}
+    spec = dict(spec)
+    spec['resume_cmd'] = 'env PROXY_AGENT_NAME=' + shlex.quote(name) + ' ' + shlex.quote(launcher) + ' --resume ' + shlex.quote(name) + \
+        ' --model ' + shlex.quote(victim['model'])
+    spec['state'] = 'CAPACITY_WAIT'
+    return spec
+
+
 def record_obligation(victim, launcher, p0, now):
-    """Persist the pm-ops `proxy_relaunch` obligation BEFORE any signal. Returns its integer id, or None when it was not persisted."""
+    """Persist the pm-ops `proxy_relaunch` CAPACITY_WAIT obligation BEFORE any signal. Returns its integer id, or None when it was not persisted."""
     mf = victim['manifest']
     extra = []
     if str(mf.get('issue') or '').isdigit():
@@ -426,10 +484,11 @@ def record_obligation(victim, launcher, p0, now):
         extra += ['--pr', str(mf['pr'])]
     evidence = {'preempted': victim['name'], 'type': victim['type'], 'model': victim['model'], 'priority': victim['priority'],
                 'brief': mf.get('brief') or mf.get('original_brief'), 'out': mf.get('out'), 'cwd': mf.get('cwd'),
-                'for_launch': launcher, 'p0': p0, 'at': iso(now)}
+                'for_launch': launcher, 'p0': p0, 'at': iso(now), 'relaunch': relaunch_spec(victim)}
     args = ['obligation-upsert', '--kind', 'proxy_relaunch', '--severity', 'high', '--target-type', 'proxy',
             '--target-id', victim['name'], '--owner', 'pm', '--horizon', 'hourly',
             '--title', 'Relaunch preempted proxy ' + victim['name'],
+            '--blocker', f'CAPACITY_WAIT: preempted for P0 {p0}; relaunch when its pool has a free slot',
             '--action', f"Relaunch {victim['name']} ({victim['type']}, {victim['priority']}) from its brief after P0 {p0} "
                         'is running: it was stopped for P0 preemption', *extra, '--evidence-json', json.dumps(evidence), '--print-id']
     try:
@@ -442,6 +501,59 @@ def record_obligation(victim, launcher, p0, now):
         if line.strip().isdigit():
             return int(line.strip())
     return None
+
+
+def record_wip(victim, wip):
+    """Add the pushed-WIP facts to the victim's relaunch row (only when something was pushed; other outcomes are in the logs)."""
+    mf = victim['manifest']
+    extra = []
+    if str(mf.get('issue') or '').isdigit():
+        extra += ['--issue', str(mf['issue'])]
+    if str(mf.get('pr') or '').isdigit():
+        extra += ['--pr', str(mf['pr'])]
+    try:
+        subprocess.run([sys.executable, PM_OPS_CLI, 'obligation-upsert', '--kind', 'proxy_relaunch', '--target-type', 'proxy',
+                        '--target-id', victim['name'], *extra, '--evidence-json', json.dumps({'wip': wip})],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _lease_mod():
+    try:
+        spec = importlib.util.spec_from_file_location('proxy_lease_check_for_preempt', Path(__file__).with_name('proxy-lease-check.py'))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:  # fail open: WIP preservation is best effort and never blocks the P0
+        return None
+
+
+def preserve_wip(victim):
+    """After the victim has exited: push its clean, unpushed commits NON-force to its own branch; otherwise leave the worktree exactly as is.
+    Never adds, commits, stashes, resets or force-pushes. Returns {status: pushed|left_intact, reason, worktree, branch, head, dirty, unpushed}."""
+    mod = _lease_mod()
+    if mod is None:
+        return {'status': 'left_intact', 'reason': 'wip_helper_unavailable'}
+    worktree = mod.find_worktree(victim['manifest'])
+    if not worktree:
+        return {'status': 'left_intact', 'reason': 'no_worktree_found'}
+    state = mod.git_state(worktree)
+    info = {k: state.get(k) for k in ('worktree', 'branch', 'head', 'dirty', 'unpushed')}
+    if state['branch'] in PROTECTED_BRANCHES:
+        return {**info, 'status': 'left_intact', 'reason': 'protected_or_detached_branch'}
+    if state['dirty'] is None or state['dirty'] > 0:
+        return {**info, 'status': 'left_intact', 'reason': 'dirty_worktree' if state['dirty'] else 'dirty_unknown'}
+    if not state['unpushed']:
+        return {**info, 'status': 'left_intact', 'reason': 'nothing_unpushed' if state['unpushed'] == 0 else 'unpushed_unknown'}
+    try:
+        done = subprocess.run([mod.GIT, '-C', worktree, 'push', 'origin', f"HEAD:refs/heads/{state['branch']}"], stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, timeout=90, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {**info, 'status': 'left_intact', 'reason': f'push_failed:{type(exc).__name__}'}
+    if done.returncode != 0:
+        return {**info, 'status': 'left_intact', 'reason': f'push_failed:rc{done.returncode}'}
+    return {**info, 'status': 'pushed', 'reason': 'unpushed_clean_commits_pushed_non_force', 'unpushed': 0}
 
 
 def withdraw_obligation(oid, reason):
@@ -508,14 +620,18 @@ def main(argv=None, env=None, ps_text=None, killer=os.kill, alive=_alive, sleep=
     ap.add_argument('--override', default='', help='PROXY_AGENT_CAP_OVERRIDE of the launch')
     ap.add_argument('--brief', default='', help='ROLE_BRIEF of the launch (a first line `PRIORITY: P0` also marks a P0)')
     ap.add_argument('--total-cap', default='', help='PROXY_AGENT_TOTAL_CAP in force for the launch')
+    ap.add_argument('--pool-full', default='', help='launcher authority: this pool is at its cap (skips the own cap check; rc 0 = a slot is free, 3/4 = none)')
     ap.add_argument('--wait', type=int, default=int(env.get('PROXY_PREEMPT_WAIT_S', '120') or 120))
     ap.add_argument('--dry-run', '--dry', action='store_true')
     args = ap.parse_args(argv)
     now = time.time() if now is None else now
 
-    if not args.dry_run and str(env.get('PROXY_AGENT_PREEMPT', '0')).strip() in ('', '0'):
-        print('PREEMPT disabled (PROXY_AGENT_PREEMPT is 0; the CTO re-reviews before it is turned on)')
-        return 0
+    # --pool-full: the launcher already decided the pool is at cap and a P0 has NO bypass, so every "nothing to do" outcome below is rc 3 (no slot)
+    # instead of rc 0. Without it the helper keeps its original contract (rc 0 = nothing to preempt, the caller carries on).
+    no_slot = 3 if args.pool_full else 0
+    if not args.dry_run and str(env.get('PROXY_AGENT_PREEMPT', '1')).strip() in ('', '0'):
+        print('PREEMPT disabled (PROXY_AGENT_PREEMPT=0)')
+        return no_slot
 
     first = ''
     if args.brief:
@@ -527,8 +643,9 @@ def main(argv=None, env=None, ps_text=None, killer=os.kill, alive=_alive, sleep=
     p0_issue = args.override.split(':', 1)[1] if OVERRIDE_P0.match(args.override) else ''
     if not (p0_issue or BRIEF_P0.match(first)):
         print('PREEMPT not_p0')
-        return 0
+        return no_slot
     p0 = p0_issue or 'brief'
+    p0_label = args.override if p0_issue else f'launch:{args.launch_name or "?"}'
 
     def get_ps():  # ps_text: a fixed string, or a callable re-read before each custody check (tests); None = the real ps
         if callable(ps_text):
@@ -538,19 +655,24 @@ def main(argv=None, env=None, ps_text=None, killer=os.kill, alive=_alive, sleep=
     table = get_ps()
     if table is None:
         print('PREEMPT UNAVAILABLE reason=ps_failed')
-        return 0  # never block a P0 on a tooling failure; the cap exemption already lets it through
+        return no_slot  # legacy mode: the old cap exemption let the P0 through; --pool-full: no bypass, the P0 queues
     lanes = live_lanes(table)
-    pool = pool_of(args.model)
+    pool = args.pool_full or pool_of(args.model)
     cap = pool_cap(pool, env) if pool else None
     live_pool = sum(1 for lane in lanes if lane['pool'] == pool) if pool else 0
     pool_full = cap is not None and live_pool > 0 and live_pool >= cap
+    if args.pool_full:
+        if cap is not None and live_pool < cap:
+            print(f'PREEMPT not_needed pool={pool} live={live_pool} cap={cap} (the pool has room now)')
+            return 0  # a lane exited since the launcher counted: the slot is already free
+        pool_full = True
     total_cap = int(args.total_cap) if args.total_cap.isdigit() else None
     names = {lane['name'] for lane in lanes}
     live_total = sum(1 for n in names if (manifest_of(n) or {}).get('type') in CAPPED)
     total_full = total_cap is not None and live_total >= total_cap
     if not (pool_full or total_full):
         print(f'PREEMPT not_needed pool={pool or "unknown"} live={live_pool} cap={cap} total_live={live_total} total_cap={total_cap}')
-        return 0
+        return no_slot
 
     labels_cmd = env.get('PROXY_PREEMPT_LABELS_CMD', '')
     launcher = args.launch_name or '?'
@@ -586,10 +708,12 @@ def main(argv=None, env=None, ps_text=None, killer=os.kill, alive=_alive, sleep=
         return refuse(f"custody_not_persisted victim={victim['name']}", skipped)
     # (2) re-read custody and the process table now that the obligation exists; anything that changed in between wins.
     try:
+        # Lease ledgers first, process table LAST: a box tool or push that starts while the ledgers are being read is still seen before the signal.
+        rows_now = custody_snapshot(RTB_ROOT, lease_runner)
         fresh_table = get_ps()
         if fresh_table is None:
             raise LeaseUnverifiable('ps_failed')
-        holds = holds_for(victim, custody_snapshot(RTB_ROOT, lease_runner), process_tree(fresh_table))
+        holds = holds_for(victim, rows_now, process_tree(fresh_table))
     except LeaseUnverifiable as exc:
         withdraw_obligation(oid, f'preempt withdrawn before any signal: lease_unverifiable {exc}')
         return refuse(f"lease_unverifiable detail={exc} victim={victim['name']}", skipped)
@@ -600,8 +724,21 @@ def main(argv=None, env=None, ps_text=None, killer=os.kill, alive=_alive, sleep=
     outcome, waited = stop_victim(victim, launcher, p0, max(0, args.wait), now, killer, alive, sleep)
     if outcome == 'signal_failed':
         withdraw_obligation(oid, 'preempt withdrawn: SIGTERM could not be delivered, the lane was not stopped')
-    line = f'{iso(now)} PREEMPT {desc} outcome={outcome} waited={waited}s obligation={oid}'
+    # (5) WIP: only after the lane has really exited (so its worktree is quiet); never a reason to keep the P0 waiting or to fail.
+    wip = {'status': 'not_attempted', 'reason': 'lane_not_stopped'}
+    if outcome == 'exited':
+        try:
+            wip = preserve_wip(victim)
+        except Exception as exc:  # best effort by design
+            wip = {'status': 'left_intact', 'reason': f'wip_error:{type(exc).__name__}'}
+        if wip['status'] == 'pushed':
+            record_wip(victim, wip)
+    wip_note = f"wip={wip['status']}:{wip.get('reason', '')} worktree={wip.get('worktree', 'UNKNOWN')}"
+    line = f'{iso(now)} PREEMPT {desc} outcome={outcome} waited={waited}s obligation={oid} {wip_note}'
     log_line(line)
+    if outcome == 'exited':  # the audit trail Rajiv asked for: proxy-cap-overrides.log carries every preemption
+        append_line(OVERRIDES_LOG, f"{iso(now)} PREEMPTED {victim['name']} for {p0_label} pool={pool or 'unknown'} model={victim['model']} "
+                                   f"launcher={launcher} {wip_note}")
     print(line.split(' ', 1)[1])
     return 0 if outcome == 'exited' else 4
 

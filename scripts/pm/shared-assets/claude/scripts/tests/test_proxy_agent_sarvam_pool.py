@@ -452,13 +452,15 @@ class PoolBlocked(Base):
     def blocked(self, id_, **extra):
         return self.bash_rc(f'ID={shlex.quote(id_)}\n' + POOL_HARNESS, **extra).returncode == 0
 
-    def test_p0_override_and_exempt_roles_do_not_lift_the_sarvam_cap(self):
-        # Sarvam is paid with no meter (like OpenCode): no role exemption. Contrast: the Claude pool IS lifted by the same override.
+    def test_exempt_roles_do_not_lift_the_sarvam_cap_and_a_p0_override_lifts_no_pool(self):
+        # Sarvam is paid with no meter (like OpenCode): no role exemption. Contrast: the Claude pool IS lifted by an exempt ROLE.
+        # A P0 override lifts NO pool any more (Rajiv C0ALZJHGE49 ts 1795439359.022079: a P0 preempts instead; see test_proxy_preempt.py).
         for extra in ({'TYPE': 'pm-ops-tooling'}, {'TYPE': 'hd-planner', 'PROXY_AGENT_CAP_OVERRIDE': 'P0:123'}):
             with self.subTest(extra=extra):
                 self.assertTrue(self.blocked(RING[0], LIVE=4, **extra))
                 self.assertFalse(self.blocked(RING[0], LIVE=3, **extra))
-                self.assertFalse(self.blocked('claude-opus-5-5', LIVE=99, CLAUDE_PROXY_CAP=1, **extra))
+        self.assertFalse(self.blocked('claude-opus-5-5', LIVE=99, CLAUDE_PROXY_CAP=1, TYPE='pm-ops-tooling'))
+        self.assertTrue(self.blocked('claude-opus-5-5', LIVE=99, CLAUDE_PROXY_CAP=1, TYPE='hd-planner', PROXY_AGENT_CAP_OVERRIDE='P0:123'))
 
     def test_every_sarvam_id_shares_one_cap(self):
         for sid in SARVAM_IDS:

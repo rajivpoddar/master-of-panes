@@ -26,6 +26,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -294,9 +295,160 @@ def notify(args: argparse.Namespace) -> None:
     post(target[0], target[1], body)
 
 
+# ---- Structured exit result (Rajiv D0AMF0XE6TS thread 1795436469.682079, ts 1795438159.967189) --------------------------------------
+# A lane ends with ONE block placed BEFORE its final DONE:/BLOCKED:/HANDOFF: marker line (the marker contract is unchanged):
+#   RESULT_BEGIN
+#   {"lane": ..., "type": ..., "issue": ..., "pr": ..., "head": "<40 hex>", "verdict": "DONE|BLOCKED|FAILED|HANDOFF",
+#    "proof_links": [...], "next_stage": ..., "notes": ...}
+#   RESULT_END
+# Missing or invalid -> UNSTRUCTURED: today's result line is kept and the head is derived from git ls-remote (PR head ref) instead.
+RESULT_BEGIN = re.compile(r"^\s*\**\s*RESULT_BEGIN\s*\**\s*$")
+RESULT_END = re.compile(r"^\s*\**\s*RESULT_END\s*\**\s*$")
+VERDICTS = ("DONE", "BLOCKED", "FAILED", "HANDOFF")
+SCHEMA_KEYS = ("lane", "type", "issue", "pr", "head", "verdict", "proof_links", "next_stage", "notes")
+HEX40_FULL = re.compile(r"^[0-9a-f]{40}$")
+MESSAGE_JSON_CHARS = 1400
+
+
+def extract_block(text: str) -> str | None:
+    """Body of the LAST RESULT_BEGIN ... RESULT_END block in `text`, else None."""
+    lines = text.splitlines()
+    end = None
+    for index in range(len(lines) - 1, -1, -1):
+        if end is None:
+            if RESULT_END.match(lines[index]):
+                end = index
+        elif RESULT_BEGIN.match(lines[index]):
+            return "\n".join(lines[index + 1:end])
+    return None
+
+
+def _ref(value) -> tuple[bool, int | None]:
+    if value is None or value == "":
+        return True, None
+    if isinstance(value, bool):
+        return False, None
+    if isinstance(value, int) and value > 0:
+        return True, value
+    if isinstance(value, str) and re.fullmatch(r"#?\d{1,7}", value.strip()):
+        return True, int(value.strip().lstrip("#"))
+    return False, None
+
+
+def _clean(value: str, limit: int) -> str:
+    value = redact("".join(c if c >= " " and c != "\x7f" else " " for c in value))
+    return value[:limit]
+
+
+def validate_block(body: str, name: str = "") -> tuple[dict | None, str]:
+    """(clean block, "") or (None, reason). Unknown keys are dropped; strings are redacted; a lane-name mismatch is normalised, not fatal."""
+    lines = [line for line in body.strip().splitlines() if not line.strip().startswith("```")]
+    try:
+        data = json.loads("\n".join(lines))
+    except ValueError:
+        return None, "json_parse"
+    if not isinstance(data, dict):
+        return None, "not_object"
+    missing = [key for key in SCHEMA_KEYS if key not in data]
+    if missing:
+        return None, "missing:" + ",".join(missing)
+    for key in ("lane", "type"):
+        if not isinstance(data[key], str) or not data[key].strip():
+            return None, key + "_invalid"
+    refs = {}
+    for key in ("issue", "pr"):
+        ok, number = _ref(data[key])
+        if not ok:
+            return None, key + "_invalid"
+        refs[key] = number
+    head = data["head"].strip().lower() if isinstance(data["head"], str) else ""
+    if not HEX40_FULL.match(head):
+        return None, "head_invalid"
+    verdict = data["verdict"].strip().upper() if isinstance(data["verdict"], str) else ""
+    if verdict not in VERDICTS:
+        return None, "verdict_invalid"
+    links = data["proof_links"]
+    if not isinstance(links, list) or len(links) > 20 or not all(isinstance(x, str) and x.strip() and len(x) <= 500 for x in links):
+        return None, "proof_links_invalid"
+    stage = data["next_stage"]
+    if stage is not None and (not isinstance(stage, str) or len(stage) > 100):
+        return None, "next_stage_invalid"
+    notes = data["notes"]
+    if notes is not None and not isinstance(notes, str):
+        return None, "notes_invalid"
+    clean = {"lane": _clean(data["lane"].strip(), 80), "type": _clean(data["type"].strip(), 60), "issue": refs["issue"], "pr": refs["pr"],
+             "head": head, "verdict": verdict, "proof_links": [_clean(x.strip(), 500) for x in links],
+             "next_stage": _clean(stage.strip(), 100) if isinstance(stage, str) and stage.strip() else None,
+             "notes": _clean((notes or "").strip(), 2000)}
+    if name and clean["lane"] != name:
+        clean["lane_declared"] = clean["lane"]
+        clean["lane"] = name
+    return clean, ""
+
+
+def ls_remote_pr_head(pr: str, cwd: str) -> str:
+    """PR head sha from the remote's refs/pull/<n>/head (git ls-remote), or ''."""
+    git = os.environ.get("PROXY_NOTIFY_GIT", "git")
+    where = cwd if cwd and Path(cwd).is_dir() else "."
+    done = run([git, "-C", where, "ls-remote", "origin", f"refs/pull/{pr}/head"], timeout=20)
+    if done is not None and done.returncode == 0:
+        found = re.match(r"([0-9a-f]{40})\s", done.stdout)
+        if found:
+            return found.group(1)
+    return ""
+
+
+def derive_head(brief: str, cwd: str, jsonl: str, _text: str = "") -> str:
+    """Head for an UNSTRUCTURED result: the brief PR's remote head ref first, else the lane's last observed push; '' = unknown."""
+    try:
+        _issue, pr = parse_refs(Path(brief).read_text(errors="replace")) if brief else (None, None)
+    except OSError:
+        pr = None
+    if pr:
+        head = ls_remote_pr_head(pr, cwd)
+        if head:
+            return head
+    # No bare-sha scraping of the lane's own prose: only the observed git push output (proxy-observe --stop-info) counts.
+    return pushed_head(jsonl, "") if jsonl else ""
+
+
+def structured_result(text: str, name: str, brief: str, cwd: str, jsonl: str) -> dict:
+    body = extract_block(text)
+    clean, reason = (None, "no_result_block") if body is None else validate_block(body, name)
+    if clean:
+        return {"status": "STRUCTURED", "block": clean, "head": clean["head"], "reason": "", "verdict": clean["verdict"]}
+    reason = reason if reason == "no_result_block" else "invalid:" + reason
+    return {"status": "UNSTRUCTURED", "block": None, "head": derive_head(brief, cwd, jsonl, text), "reason": reason, "verdict": ""}
+
+
+def message_json(block: dict) -> str:
+    """Compact one-line JSON for the PROXY_STOP message; trims notes/proof links when needed (the run row keeps the full block)."""
+    text = json.dumps(block, separators=(",", ":"), ensure_ascii=True)
+    if len(text) > MESSAGE_JSON_CHARS:
+        short = dict(block, notes=block["notes"][:200], proof_links=block["proof_links"][:5])
+        text = json.dumps(short, separators=(",", ":"), ensure_ascii=True)
+    return text
+
+
+def result_command(args: argparse.Namespace) -> None:
+    text = result_text(args.jsonl, args.out)
+    found = structured_result(text, args.name, args.brief, args.cwd or os.getcwd(), args.jsonl)
+    block = found["block"]
+    values = {"RESULT_STATUS": found["status"], "RESULT_HEAD": found["head"], "RESULT_VERDICT": found["verdict"],
+              "RESULT_REASON": found["reason"], "RESULT_JSON": json.dumps(block, separators=(",", ":")) if block else "",
+              "RESULT_MSGJSON": message_json(block) if block else ""}
+    if args.format == "json":
+        print(json.dumps({**found, "message_json": values["RESULT_MSGJSON"]}))
+    else:
+        for key, value in values.items():
+            print(f"{key}={shlex.quote(value)}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument("cmd", choices=("launch", "stop"))
+    parser.add_argument("cmd", choices=("launch", "stop", "result"))
+    parser.add_argument("--format", default="shell")
+    parser.add_argument("--cwd", default="")
     parser.add_argument("--type", default="")
     parser.add_argument("--brief", default="")
     parser.add_argument("--name", default=os.environ.get("PROXY_AGENT_NAME", "proxy"))
@@ -305,7 +457,11 @@ def main() -> int:
     parser.add_argument("--jsonl", default="")
     parser.add_argument("--rc", default="")
     try:
-        notify(parser.parse_args())
+        parsed = parser.parse_args()
+        if parsed.cmd == "result":
+            result_command(parsed)
+        else:
+            notify(parsed)
     except SystemExit:
         pass
     except Exception as exc:  # fail open: never block a launch or stop

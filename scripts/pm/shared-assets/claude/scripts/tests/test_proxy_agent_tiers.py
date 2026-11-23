@@ -251,8 +251,8 @@ class Selection(unittest.TestCase):
         for role in JUDGMENT_MID:
             with self.subTest(role=role):
                 self.assertEqual(route(role).model, 'claude-sonnet-5-5')
-        # A P0 override makes any lane a judgment lane.
-        self.assertEqual(route('claude', PROXY_AGENT_CAP_OVERRIDE='P0:13907').model, 'claude-sonnet-5-5')
+        # A P0 launch (PA_P0_REF, captured from the P0:<issue> override at launch) makes any lane a judgment lane; it gets no cap bypass.
+        self.assertEqual(route('claude', PA_P0_REF='P0:13907').model, 'claude-sonnet-5-5')
         self.assertEqual(route('hd-investigator').model, 'grok-4.7')
 
     def test_opencode_rotation_still_cycles_inside_mid(self):
@@ -467,7 +467,8 @@ class PoolCaps(unittest.TestCase):
         for role in ('pm-admission-reviewer', 'growth'):
             with self.subTest(role=role):
                 self.assertNotIn('pool_cap', route(role, CLAUDE_PROXY_CAP='0').reason)
-        self.assertNotIn('claude-sonnet-5-5:pool_cap', route('pm-triage-agent', PROXY_AGENT_CAP_OVERRIDE='P0:13907', **blocked).reason)
+        # A P0 override no longer lifts a pool cap (Rajiv C0ALZJHGE49 ts 1795439359.022079): the P0 preempts at admission instead (test_proxy_preempt.py).
+        self.assertIn('claude-sonnet-5-5:pool_cap', route('pm-triage-agent', PROXY_AGENT_CAP_OVERRIDE='P0:13907', **blocked).reason)
         self.assertNotIn('claude-sonnet-5-5:pool_cap', route('claude', 'MODE: heartbeat', **blocked).reason)
 
     def test_spark_proxy_cap_is_read_from_proxy_caps_env(self):
