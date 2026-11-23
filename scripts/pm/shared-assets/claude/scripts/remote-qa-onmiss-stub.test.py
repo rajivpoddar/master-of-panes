@@ -184,10 +184,15 @@ HEAD1 = subprocess.run(['git', '-C', str(APP), 'rev-parse', 'HEAD'], capture_out
 _n = [0]
 
 
-RUN1 = 'qa-spec-20261124T000000Z-10001'  # the QA RUN id keys the spend ledgers (Rajiv ts 1795459248.640279 "per run")
+def run_for(host):
+    """The QA RUN id keys the spend ledgers (Rajiv ts 1795459248.640279 "per run"). Scenarios that are independent of each other get
+    their own run (here: one per physical host, like the pre-change per-box ledgers) so they cannot spend each other's $3;
+    a scenario that wants the SAME run on another box/lease passes run_id explicitly."""
+    return 'qa-spec-stub-' + host
 
 
-def ids_for(box, host, head=None, run_id=RUN1):
+def ids_for(box, host, head=None, run_id=None):
+    run_id = run_id or run_for(host)
     real = socket.gethostname
     socket.gethostname = lambda: host
     try:
@@ -315,15 +320,24 @@ base = committed(IDS['box_key'])
 r = call(c, 'MISS-4')
 check('cap boundary: committed %.6f + bound 1.032192 = %.6f > $3 -> typed 402 QA_ONMISS_SPEND_CAP, 0 upstream' % (base, base + 1.032192),
       r.status_code == 402 and r.json().get('error') == 'QA_ONMISS_SPEND_CAP' and n_calls('MISS-4') == 0, str(r.status_code))
-# 6. lifetime: new lease on the SAME physical box (warm reuse), and a replacement box for the SAME attempt
+# 6. SCOPE = ONE QA RUN (Rajiv ts 1795459248.640279): a re-lease / replacement box INSIDE the same run keeps the run's spend; a NEW run on the same
+# physical box starts with its own $3 (the old box-keyed $2.06 of run 88091 can no longer refuse a later run).
 ids_l2 = ids_for('rtbl-fedcba9876543210-654321', 'rtb-pool-07-115933', head='f' * 40)
 m2, c2 = boot(ids_l2, box='rtbl-fedcba9876543210-654321')
 r = call(c2, 'MISS-5')
-check('warm re-lease, new head, same physical box: box-lifetime cap still applies, 0 upstream', r.status_code == 402 and r.json().get('error') == 'QA_ONMISS_SPEND_CAP' and n_calls('MISS-5') == 0 and ids_l2['box_key'] == IDS['box_key'], str(r.status_code) + ' ' + r.json().get('detail', '')[:90])
-ids_rep = ids_for('rtb-qa-replace-111111', 'rtb-qa-replace-111111')
+check('warm re-lease, new head, same physical box, SAME RUN: the run cap still applies, 0 upstream', r.status_code == 402 and r.json().get('error') == 'QA_ONMISS_SPEND_CAP' and n_calls('MISS-5') == 0 and ids_l2['box_key'] == IDS['box_key'], str(r.status_code) + ' ' + r.json().get('detail', '')[:90])
+ids_rep = ids_for('rtb-qa-replace-111111', 'rtb-qa-replace-111111', run_id=run_for('rtb-pool-07-115933'))
 m3, c3 = boot(ids_rep, box='rtb-qa-replace-111111')
 r = call(c3, 'MISS-6', max_out=1000, usage=[10, 10])
-check('replacement box, same QA attempt (head): attempt cap still applies, 0 upstream', r.status_code == 402 and r.json().get('error') == 'QA_ONMISS_SPEND_CAP' and n_calls('MISS-6') == 0 and ids_rep['attempt_key'] == IDS['attempt_key'] and ids_rep['box_key'] != IDS['box_key'], str(r.status_code) + ' ' + r.json().get('detail', '')[:90])
+check('replacement box, SAME RUN and head: the run + attempt cap still applies, 0 upstream', r.status_code == 402 and r.json().get('error') == 'QA_ONMISS_SPEND_CAP' and n_calls('MISS-6') == 0 and ids_rep['attempt_key'] == IDS['attempt_key'] and ids_rep['box_key'] == IDS['box_key'], str(r.status_code) + ' ' + r.json().get('detail', '')[:90])
+# NEW RUN on the SAME physical box (and the same head): its own ledgers, so the exhausted run above does not refuse it.
+ids_new = ids_for('rtbl-0123456789abcdef-777777', 'rtb-pool-07-115933', run_id='qa-spec-20261124T120000Z-new-run')
+mn, cn = boot(ids_new, box='rtbl-0123456789abcdef-777777')
+r = call(cn, 'MISS-NEWRUN', max_out=1000, usage=[100, 10])
+check('NEW RUN on a reused physical box starts with its own $3: dispatched once, run ledgers distinct from the exhausted run',
+      r.status_code == 200 and n_calls('MISS-NEWRUN') == 1 and ids_new['box_key'] != IDS['box_key'] and ids_new['attempt_key'] != IDS['attempt_key']
+      and ids_new['spend_box'] == IDS['spend_box'] and committed(ids_new['box_key']) > 0 and committed(ids_new['box_key']) < 0.1, str(r.status_code) + ' ' + r.text[:80])
+check('NEW RUN did not touch the old run ledger (audit record kept, no reset)', committed(IDS['box_key']) > 2.0, '%.6f' % committed(IDS['box_key']))
 
 # 6b. same head on a NEW lease of the same physical box: earlier payload was deleted with its lease -> one fresh priced claim,
 # charged cumulatively (no renewal), and a same-lease repeat is reused locally.
@@ -753,7 +767,7 @@ try:
                                   ('missing session file', (str(MDIR / 'absent.json'), 'scoped'), 'QA_SCOPED_R2_UNAVAILABLE'),
                                   ('no explicit app-data mode', (str(MDIR / 'absent.json'), None), 'QA_APP_DATA_MODE_INVALID')):
             try:
-                H.capture_report(EX_BOX, APP, MDIR / 'rep.json', False, False, 2.0, True, False, str(head_manifest), *args)
+                H.capture_report(EX_BOX, APP, MDIR / 'rep.json', False, False, 2.0, True, False, str(head_manifest), *args, qa_run_id=run_for(EX_HOST))
                 check('exact report container: ' + why + ' refuses (no shared-secret fallback)', False)
             except RuntimeError as error:
                 check('exact report container: ' + why + ' refuses (no shared-secret fallback)', needle in str(error), str(error)[:70])
@@ -766,7 +780,7 @@ try:
         except RuntimeError as error:
             check('exact report container: an expired session refuses and the session file is deleted', 'UNAVAILABLE' in str(error) and not sess.exists())
         try:
-            H.capture_report(EX_BOX, APP, MDIR / 'rep.json', False, False, 2.0, False, False, str(head_manifest), None)
+            H.capture_report(EX_BOX, APP, MDIR / 'rep.json', False, False, 2.0, False, False, str(head_manifest), None, qa_run_id=run_for(EX_HOST))
             check('--exact-manifest without --on-miss is refused', False)
         except RuntimeError as error:
             check('--exact-manifest without --on-miss is refused', 'requires --on-miss' in str(error))
@@ -791,7 +805,7 @@ try:
             ok = False
         check('arming prerequisite: ' + ('accepts ' if expect else 'rejects ') + why, ok is expect)
     # ---- CTO REVISE 1795306033.832689 (pel-mwr051ua-91fb8062): 1 derivation/DENIED, 2 custody, dry-check, app-data, 3 verified join ----
-    D = H.derive_exact_ids(EX_BOX, EX_HEAD, EX_HOST, RUN1)
+    D = H.derive_exact_ids(EX_BOX, EX_HEAD, EX_HOST, run_for(EX_HOST))
     check('trusted derivation equals the box-side identity (lease, physical box, ledger objects, staging prefix)',
           all(D[k] == EX_IDS[k] for k in ('lease', 'spend_box', 'head', 'dict', 'box_key', 'attempt_key', 'stage_run', 'run_key')))
     claimed = dict(D, manifest_digest=MAN['digest'])
@@ -810,14 +824,14 @@ try:
     for why, args in (('a pool lease alias without its physical pool server', (EX_BOX, EX_HEAD, EX_BOX)), ('a pool lease with a non-pool identity', (EX_BOX, EX_HEAD, 'evil-host')),
                       ('an ephemeral box claiming another physical identity', ('rtb-qa-eph-111111', EX_HEAD, EX_HOST)), ('a short head', (EX_BOX, 'd' * 12, EX_HOST))):
         try:
-            H.derive_exact_ids(*args, RUN1)
+            H.derive_exact_ids(*args, run_for(EX_HOST))
             check('derivation refuses ' + why, False)
         except ValueError as error:
             check('derivation refuses ' + why, 'QA_SCOPED_MINT_DENIED' in str(error), str(error)[:60])
     foreign = MDIR / 'foreign-ids.json'
     foreign.write_text(json.dumps(dict(claimed, stage_run='remote-qa-onmiss-bbbbbbbbbbbb-' + EX_HEAD[:12], box_key='qa-capture-ledgers/onmiss/box-1111111111111111.json')))
     proc = subprocess.run([sys.executable, '-I', str(HELPER), 'mint-session', '--kind', 'proxy', '--box', EX_BOX, '--head', EX_HEAD, '--spend-box', EX_HOST,
-                           '--ids', str(foreign), '--exact-manifest', str(MAN_PATH)], capture_output=True, text=True, env={'HOME': str(MDIR), 'PATH': os.environ.get('PATH', '')})
+                           '--run-id', run_for(EX_HOST), '--ids', str(foreign), '--exact-manifest', str(MAN_PATH)], capture_output=True, text=True, env={'HOME': str(MDIR), 'PATH': os.environ.get('PATH', '')})
     check('CLI: mint-session with a box-supplied foreign scope is DENIED (rc 1) and emits no credential material',
           proc.returncode == 1 and 'QA_SCOPED_MINT_DENIED' in proc.stderr and '"secret"' not in proc.stdout + proc.stderr and not proc.stdout.strip(), (proc.stderr or proc.stdout)[:120])
     # custody

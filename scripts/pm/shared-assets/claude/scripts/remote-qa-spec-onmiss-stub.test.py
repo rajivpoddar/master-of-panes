@@ -42,10 +42,10 @@ def dry(*extra, head=h40, spec=None):
     return r.returncode, (r.stdout + r.stderr).strip()
 rc, o = dry('--disposable-convex', '--dry-run')
 check('spec default (no flag) resolves llm_mode=capture-on-miss with the auto-approved $3 cap (Rajiv ts 1795445281.923019)',
-      rc == 0 and o.endswith('llm_mode=capture-on-miss onmiss_cap_usd=3 onmiss_fixture_bucket=heydonna-fixtures onmiss_scope=box-lifetime+attempt app_data=ci-parity app_data_bucket=heydonna-uploads'), o[-90:])
+      rc == 0 and o.endswith('llm_mode=capture-on-miss onmiss_cap_usd=3 onmiss_fixture_bucket=heydonna-fixtures onmiss_scope=run+attempt onmiss_headroom=pre-lane app_data=ci-parity app_data_bucket=heydonna-uploads'), o[-120:])
 rc, o = dry('--disposable-convex', '--on-miss', '--dry-run')
 ONMISS_TAIL = ('llm_mode=capture-on-miss onmiss_cap_usd=3 onmiss_fixture_bucket=heydonna-fixtures '
-               'onmiss_scope=box-lifetime+attempt app_data=ci-parity app_data_bucket=heydonna-uploads')
+               'onmiss_scope=run+attempt onmiss_headroom=pre-lane app_data=ci-parity app_data_bucket=heydonna-uploads')
 check('spec --on-miss resolves llm_mode=capture-on-miss', rc == 0 and o.endswith(ONMISS_TAIL), o[-100:])
 rc, o = dry('--on-miss', '--dry-run')
 check('--on-miss without --disposable-convex refused (synthetic-only bound)', rc == 2 and 'requires --disposable-convex' in o, o)
@@ -67,7 +67,7 @@ def manifest(**over):
 good = manifest()
 rc, o = dry('--disposable-convex', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
 EXACT_TAIL = ('llm_mode=capture-on-miss-exact onmiss_cap_usd=3 onmiss_fixture_bucket=heydonna-fixtures '
-              'onmiss_scope=box-lifetime+attempt app_data=ci-parity app_data_bucket=heydonna-uploads')
+              'onmiss_scope=run+attempt onmiss_headroom=pre-lane app_data=ci-parity app_data_bucket=heydonna-uploads')
 check('spec --on-miss-exact resolves llm_mode=capture-on-miss-exact', rc == 0 and o.endswith(EXACT_TAIL), o[-100:])
 rc, o = dry('--disposable-convex', '--on-miss', '--on-miss-exact', good, '--canary-receipt', '/nonexistent', '--grant-receipt', '/nonexistent', '--dry-run')
 check('--on-miss-exact replaces stock --on-miss (never both)', rc == 2 and 'replaces --on-miss' in o, o[-80:])
@@ -180,24 +180,27 @@ check('option A: CI-parity app data skips ONLY the mount replacement/readback; t
 check('REVISE 1: box env readback, trusted-derivation check (DENIED), shared-mount readback and custody reconcile all precede the first session',
       chk['check-app-data'] < chk['check-exact-ids'] < chk['check-app-mounts'] < chk['reconcile-custody'] < chk['scoped_arm_loop & arm_pid=$!'] and 'product-pin.log' in SPEC_SH, str(chk))
 check('REVISE 1: every mint passes the trusted lease, physical box and head (never only a box-written file)',
-      len(re.findall(r'mint-session --kind (?:proxy|report) --box "\$box" --head "\$head" --spend-box "\$exact_spend_box" --ids', SPEC_SH)) == 2
+      len(re.findall(r'mint-session --kind (?:proxy|report) --box "\$box" --head "\$head" --spend-box "\$exact_spend_box" --run-id "\$run_id" --ids', SPEC_SH)) == 2
       and 'exact_spend_box="${pool_box:-$box}"' in SPEC_SH)
 check('REVISE 2: custody reconcile runs on the trusted host (uv + boto3) and the launcher itself never touches the legacy read key',
-      'reconcile-custody --box "$box" --head "$head" --spend-box "$exact_spend_box"' in SPEC_SH and 'LEGACY_ENV' not in SPEC_SH and 'R2_SECRET' not in SPEC_SH)
+      'reconcile-custody --box "$box" --head "$head" --spend-box "$exact_spend_box" --run-id "$run_id"' in SPEC_SH and 'LEGACY_ENV' not in SPEC_SH and 'R2_SECRET' not in SPEC_SH)
 check('REVISE 3: the join is verified by the helper (project, transcript, aligned draft), not accepted from the spec file',
       'verify-join --report' in SPEC_SH and 'JOIN\n' not in SPEC_SH)
 check('exact wiring: the manifest and canary receipt are validated before any lease, box or spend',
       SPEC_SH.index('check-exact-manifest') < SPEC_SH.index('rtb" up --owner') and SPEC_SH.index('check-canary-receipt') < SPEC_SH.index('rtb" up --owner')
       and SPEC_SH.index('mint-session --kind check') < SPEC_SH.index('rtb" up --owner'))
 for cmd in ('register --box "$box" --ttl "$ttl_seconds" $llm_onmiss',
-            "modal-lane.py overlay --root '$remote' --box '$box' $llm_onmiss",
-            "modal-lane.py prepare --box '$box' --root '$remote' --config /root/qa/config.json $llm_onmiss",
-            "modal-lane.py capture-report --box '$box' --root '$remote' --output /root/qa/out/llm-ledger.json $llm_onmiss"):
+            "modal-lane.py overlay --root '$remote' --box '$box' --run-id '$run_id' $llm_onmiss",
+            "modal-lane.py prepare --box '$box' --root '$remote' --config /root/qa/config.json --run-id '$run_id' $llm_onmiss",
+            "modal-lane.py capture-report --box '$box' --root '$remote' --output /root/qa/out/llm-ledger.json --run-id '$run_id' $llm_onmiss"):
     check('spec passes the flag to the shared controller: ' + cmd.split(' --')[0].split()[-1], cmd in SPEC_SH)
 check('capture lane uses the same controller commands (register/overlay/prepare/capture-report + $llm_onmiss)',
       all(s in CAPTURE_SH for s in ('modal-lane.py overlay', 'modal-lane.py prepare', 'modal-lane.py capture-report', '$llm_onmiss')))
-check('spec runtime keeps STRICT_FIXTURES=true and capture off in BOTH modes',
-      'export STRICT_FIXTURES=true LLM_PROXY_ENABLED=true LLM_PROXY_FIXTURE_CAPTURE=false' in RUNTIME_SH and 'llm_mode' in RUNTIME_SH)
+check('spec runtime keeps capture OFF in BOTH modes; the Playwright STRICT_FIXTURES is derived from the SELECTED llm_mode (strict=true 180/300, onmiss=false 600/720) and baked into the npx shim',
+      'export LLM_PROXY_ENABLED=true LLM_PROXY_FIXTURE_CAPTURE=false' in RUNTIME_SH and 'LLM_PROXY_FIXTURE_CAPTURE=true' not in RUNTIME_SH
+      and 'if [ "$llm_mode" = onmiss ]; then export STRICT_FIXTURES=false; else export STRICT_FIXTURES=true; fi' in RUNTIME_SH
+      and 'write_npx_shim "$qa/bin/npx" "$real_npx" "$([ "$llm_mode" = onmiss ] && echo onmiss || echo strict)"' in RUNTIME_SH
+      and 'QA_TIMEOUT_MODE_MISMATCH' in RUNTIME_SH and 'exp_pipeline_ms=600000; exp_test_ms=720000' in RUNTIME_SH)
 check('no CI workflow or UserPromptSubmit hook referenced by the change',
       not any(s in SPEC_SH + RUNTIME_SH for s in ('.github/workflows', 'UserPromptSubmit')))
 
@@ -205,9 +208,10 @@ check('no CI workflow or UserPromptSubmit hook referenced by the change',
 SPEC_BOX = 'rtbl-5pec000000000000-101010'.replace('5pec', '5bec')  # hex lease alias
 POOL_HOST = 'rtb-pool-08-090909'
 HEADX = 'c' * 40
-IDS_CAP = ids_for('rtbl-ca00000000000000-111111', POOL_HOST, head=HEADX)  # capture-lane lease on the same physical box + head
-IDS_SPEC = ids_for(SPEC_BOX, POOL_HOST, head=HEADX)                        # spec-lane lease, same physical box + head
-check('capture and spec on the same physical box + head bind the SAME durable ledgers',
+RUN_B = 'qa-spec-20261124T010101Z-20001'  # ONE QA run: its capture and spec legs share the run's $3 (Rajiv ts 1795459248.640279 "per run")
+IDS_CAP = ids_for('rtbl-ca00000000000000-111111', POOL_HOST, head=HEADX, run_id=RUN_B)  # capture-lane lease on the same physical box + head, same run
+IDS_SPEC = ids_for(SPEC_BOX, POOL_HOST, head=HEADX, run_id=RUN_B)                        # spec-lane lease, same physical box + head, same run
+check('capture and spec in the same QA run (same box + head) bind the SAME durable ledgers',
       IDS_CAP['box_key'] == IDS_SPEC['box_key'] and IDS_CAP['attempt_key'] == IDS_SPEC['attempt_key'] and IDS_CAP['lease'] != IDS_SPEC['lease'])
 
 # 1. strict spec mode sends zero (no --on-miss -> OFF source baked)
@@ -267,11 +271,11 @@ check('restart + mode switch back: cumulative cap (capture+spec) enforced before
 check('cap never exceeded across capture+spec', committed(IDS_SPEC['box_key']) <= 3 and committed(IDS_SPEC['attempt_key']) <= 3,
       '%.6f / %.6f' % (committed(IDS_SPEC['box_key']), committed(IDS_SPEC['attempt_key'])))
 # replacement box / warm re-lease for the same head (attempt) cannot renew
-IDS_REP = ids_for('rtb-qa-specrep-202020', 'rtb-qa-specrep-202020', head=HEADX)
+IDS_REP = ids_for('rtb-qa-specrep-202020', 'rtb-qa-specrep-202020', head=HEADX, run_id=RUN_B)
 m, cr = boot(IDS_REP, box='rtb-qa-specrep-202020')
 r = call(cr, 'S-REP')
-check('replacement box, same attempt: attempt cap still applies (402, 0 upstream)',
-      r.status_code == 402 and n_calls('S-REP') == 0 and IDS_REP['attempt_key'] == IDS_SPEC['attempt_key'])
+check('replacement box, same run + attempt: the run cap still applies (402, 0 upstream)',
+      r.status_code == 402 and n_calls('S-REP') == 0 and IDS_REP['attempt_key'] == IDS_SPEC['attempt_key'] and IDS_REP['box_key'] == IDS_SPEC['box_key'])
 
 # 4. UNKNOWN refusal (own box+head so it does not depend on the exhausted budget above)
 IDS_U = ids_for('rtbl-d000000000000000-303030', 'rtb-pool-10-303030', head='d' * 40)
@@ -284,7 +288,7 @@ m, cu = boot(IDS_U, box='rtbl-d000000000000000-303030')
 r = call(cu, 'S-UNK DROP', max_out=1000)
 check('spec restart: UNKNOWN never resent (424 QA_ONMISS_NO_RESEND, 1 upstream total)',
       r.status_code == 424 and r.json().get('error') == 'QA_ONMISS_NO_RESEND' and n_calls('S-UNK') == 1)
-IDS_U2 = ids_for('rtbl-d100000000000000-404040', 'rtb-pool-10-303030', head='d' * 40)  # new lease, same box + head
+IDS_U2 = ids_for('rtbl-d100000000000000-404040', 'rtb-pool-10-303030', head='d' * 40)  # new lease, same box + head, same run (default run is per host)
 m, cu2 = boot(IDS_U2, box='rtbl-d100000000000000-404040')
 r = call(cu2, 'S-UNK DROP', max_out=1000)
 check('new lease, same box+head: UNKNOWN still blocks (no blind resend, no reset)',
