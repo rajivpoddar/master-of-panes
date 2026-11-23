@@ -919,6 +919,15 @@
       "source_path": "claude/scripts/proxy-agent-notify.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/proxy-agent-stop.sh",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 448,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "b3de9a64e7aff4eaf44eb4e5f418af0f647ed92a21da2f4fc7d2d7cb6a100f5c",
+      "source_path": "claude/scripts/proxy-agent-stop.sh"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/proxy-agent.sh",
       "dependencies": [],
       "dependency_status": "closed",
@@ -946,6 +955,15 @@
       "source_path": "claude/scripts/proxy-cap-count.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/proxy-lease-check.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "5a8bcd49cad6be73e345a63a39f3b1b4e08a624b24a26187d2f3cd1ec1ea4634",
+      "source_path": "claude/scripts/proxy-lease-check.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/proxy-preempt.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -962,6 +980,15 @@
       "ownership_class": "shared-claude-proxy-launcher",
       "sha256": "6ec8e0d0d92e465a8ccaca7abce61131a27f95cebeee7b2b80522fd6134ae77d",
       "source_path": "claude/scripts/proxy-review-cap.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/proxy-run-state.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "80058bdf8bb1d88b15bfa82ebaa1426e4def76e8a325d0f517068b641842ff5f",
+      "source_path": "claude/scripts/proxy-run-state.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/proxy-skill-overrides.py",
@@ -1182,6 +1209,33 @@
       "source_path": "claude/scripts/tests/test_proxy_agent_tiers.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_proxy_codex_primary.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "cbb07c5d9dc852796a3fabdaca061543c4db47f5e45b05b5afe2eab51f66ceed",
+      "source_path": "claude/scripts/tests/test_proxy_codex_primary.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_proxy_lane_launch_states.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "1fbeafe2092cbd43363b48dbf07773bfa623fc1eb4a3ce72d03f14a48e91056d",
+      "source_path": "claude/scripts/tests/test_proxy_lane_launch_states.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_proxy_lease_check.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "387e8cc3a368ee8d1b9b145870b05851e7b3215c7c6e0bc8337efb261c642dcc",
+      "source_path": "claude/scripts/tests/test_proxy_lease_check.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_proxy_preempt.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1189,6 +1243,24 @@
       "ownership_class": "shared-claude-proxy-launcher",
       "sha256": "1925c431a3d113abcc1b626a1e3910969b490a802fc20541b5b5f74b9817bcaa",
       "source_path": "claude/scripts/tests/test_proxy_preempt.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_proxy_result_block.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "8ba36826aa4ddc80ec1958d8aa734fb2c3b123111e1e87f3bf3b47ad7e7e95cb",
+      "source_path": "claude/scripts/tests/test_proxy_result_block.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_proxy_run_state_machine.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "8d5aaf985107fe104e31e9f72c24109523395de0ff052f64223063d5a82a969f",
+      "source_path": "claude/scripts/tests/test_proxy_run_state_machine.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/validate-issue-contract-ledger.py",
@@ -2148,7 +2220,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 235,
+    "selected_count": 243,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
