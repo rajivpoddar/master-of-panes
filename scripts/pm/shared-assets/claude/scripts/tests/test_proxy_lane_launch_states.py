@@ -129,7 +129,8 @@ def test_a_p0_at_a_full_pool_with_nothing_to_preempt_is_queued_and_never_launche
     helper = tmp / 'helper.py'
     helper.write_text('import sys\nprint("PREEMPT_REFUSED reason=nothing_preemptible")\nsys.exit(3)\n')
     done = launch(lab, 'proxy-test-states-p0', '--model', 'gpt-6.2-sol',
-                  env={'PROXY_AGENT_CAP_OVERRIDE': 'P0:14461', 'PROXY_AGENT_STUB_POOL_LIVE': '8', 'CODEX_PROXY_CAP': '8', 'PROXY_AGENT_PREEMPT_HELPER': str(helper)})
+                  env={'PROXY_AGENT_CAP_OVERRIDE': 'P0:14461', 'PROXY_AGENT_STUB_POOL_LIVE': '8', 'CODEX_PROXY_CAP': '8', 'PROXY_AGENT_PREEMPT_HELPER': str(helper),
+                       'PROXY_AGENT_PREEMPT': '1'})  # the launcher default is OFF (CTO ts 1795441848.817099): switch it on to exercise the helper path
     assert done.returncode == 75 and 'nothing preemptable' in done.stderr and 'REFUSED primary gpt-6.2-sol (codex pool_cap)' in done.stderr
     assert not (home / 'prompt-seen.txt').exists()  # no lane started anywhere
     (relaunch,) = rows(tmp, 'proxy_relaunch')

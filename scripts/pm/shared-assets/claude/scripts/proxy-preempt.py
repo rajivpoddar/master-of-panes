@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """P0 preemption for proxy-agent.sh: free ONE proxy slot for a P0 launch by stopping the lowest-priority live lane.
 
-STATUS: ON by default (Rajiv C0ALZJHGE49 thread 1795437841.011459, ts 1795439359.022079: "drop the P0 override rule. preempt the lowest
-priority agent and use that instead."). PROXY_AGENT_PREEMPT=0 switches it off. A P0 no longer bypasses a pool cap or burn gate: when the
+STATUS: the helper itself defaults ON (Rajiv C0ALZJHGE49 thread 1795437841.011459, ts 1795439359.022079: "drop the P0 override rule. preempt the
+lowest priority agent and use that instead."); PROXY_AGENT_PREEMPT=0 switches it off. The LAUNCHER decides whether it calls the helper at all
+(PROXY_AGENT_PREEMPT, see proxy-agent.sh; CTO ts 1795441848.817099 kept it default OFF until the stop path fenced new effects: this file).
+A P0 no longer bypasses a pool cap or burn gate: when the
 launcher finds the P0's pool at cap it calls this helper with --pool-full <pool>. rc 0 = a slot is free for the P0 (a victim exited, a dry
 run found one, or the pool already had room); rc 3 = nothing preemptable; rc 4 = the victim did not exit. Any rc but 0 means the P0
 is refused rc 75 and queued as a proxy_relaunch CAPACITY_WAIT row: it never falls to another pool or tier. The CTO's earlier custody
@@ -22,9 +24,13 @@ agent"). Behaviour:
     live process table. A victim is refused when any non-free box lease, queue ticket, unresolved create or eph record binds to it
     (by lane name, its issue/PR number, or its pid / a descendant's pid), or when a live descendant process is a remote-box tool or
     a push. If the lease tooling or process table cannot be read, nothing is preempted (PREEMPT_REFUSED reason=lease_unverifiable).
-  * ORDER for the chosen victim: (1) persist the pm-ops `proxy_relaunch` obligation (--print-id) and require its id, (2) re-read
-    custody, (3) write ~/.claude/state/proxy-stop-requests/<name>, (4) SIGTERM, wait up to --wait seconds, (5) log. A failure at (1)
-    or (2) signals nothing and withdraws any obligation it created; a failed SIGTERM withdraws it too.
+  * ORDER for the chosen victim (CTO ts 1795441848.817099: "fences new lease and external-effect acquisition, then rechecks custody under that
+    fence before signaling. Keep the durable relaunch obligation ahead of SIGTERM."): (1) persist the pm-ops `proxy_relaunch` obligation
+    (--print-id) and require its id, (2) set the per-lane FENCE (proxy-fence.py, keyed by lane name + run id): the lane can no longer START a
+    box lease, a box action or a push, (3) re-read custody UNDER the fence (lease ledgers, then the process table: an acquisition, push or box
+    action that started first is seen and aborts), (4) write ~/.claude/state/proxy-stop-requests/<name>, SIGTERM, wait up to --wait seconds,
+    (5) clear the fence on EVERY path (refuse, abort, signal failure, exited, still alive) and log. A failure at (1)-(3) signals nothing,
+    withdraws any obligation it created and leaves the P0 queued; a failed SIGTERM withdraws it too. A lane with no run id is not preemptible.
   * Nothing preemptible -> log `PREEMPT_REFUSED`, rc 3. The P0 is NOT launched over the cap: it is queued (CAPACITY_WAIT).
   * Also never preemptible: a lane inside the last ~5 minutes of its EXPECTED_MIN window (when the registry row carries one).
   * After the victim exits, its WIP is preserved: a worktree that is clean with unpushed commits is pushed NON-force to its own branch;
@@ -55,6 +61,8 @@ CAPS_ENV = Path(os.environ.get('PROXY_PREEMPT_CAPS_ENV', str(STATE / 'proxy-caps
 STOP_DIR = Path(os.environ.get('PROXY_PREEMPT_STOP_DIR', str(STATE / 'proxy-stop-requests')))
 LOG = Path(os.environ.get('PROXY_PREEMPT_LOG', str(STATE / 'proxy-preemptions.log')))
 OVERRIDES_LOG = Path(os.environ.get('PROXY_PREEMPT_OVERRIDES_LOG', str(STATE / 'proxy-cap-overrides.log')))
+FENCE_DIR = Path(os.environ.get('PROXY_FENCE_DIR', str(STATE / 'proxy-fences')))
+FENCE_TTL_S = 600  # outlives the custody re-check + SIGTERM wait (--wait, default 120s); expires by itself if this process dies
 NEAR_END_S = 300  # a lane this close to the end of its EXPECTED_MIN window is not preempted
 PROTECTED_BRANCHES = ('main', 'master', 'HEAD', '')
 PM_OPS_CLI = os.environ.get('PROXY_AGENT_PM_OPS_CLI', str(HOME / '.claude/scripts/pm-ops.py'))
@@ -419,6 +427,14 @@ def candidates(lanes, launch_name, scope_pool, labels_cmd, now, capped_only=Fals
         if fresh:
             skipped.append((name, 'already_stopping'))
             continue
+        token = str(manifest.get('token') or '')
+        if not token:
+            skipped.append((name, 'no_run_id'))  # the fence is keyed by lane name + run id: without one it cannot be set, so the lane is no victim
+            continue
+        fence = _fence_mod()
+        if fence is not None and fence.read_fence(FENCE_DIR, name, token, now) is not None:
+            skipped.append((name, 'already_fenced'))  # another preemption is stopping it right now
+            continue
         cands.append({**lane, 'type': rtype, 'priority': prio, 'source': source, 'manifest': manifest,
                       'started': str(manifest.get('started_at') or '')})
     cands.sort(key=lambda c: (RANK[c['priority']], c['started'], c['name']), reverse=True)
@@ -529,6 +545,17 @@ def _lease_mod():
         return None
 
 
+def _fence_mod():
+    """proxy-fence.py beside this file, or None when it cannot be loaded (the preemption then refuses: no fence, no signal)."""
+    try:
+        spec = importlib.util.spec_from_file_location('proxy_fence_for_preempt', Path(__file__).with_name('proxy-fence.py'))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
+
 def preserve_wip(victim):
     """After the victim has exited: push its clean, unpushed commits NON-force to its own branch; otherwise leave the worktree exactly as is.
     Never adds, commits, stashes, resets or force-pushes. Returns {status: pushed|left_intact, reason, worktree, branch, head, dirty, unpushed}."""
@@ -606,7 +633,8 @@ def _alive(pid):
 
 def _read_ps():
     try:
-        return subprocess.check_output(['/bin/ps', '-axo', 'pid=,ppid=,command='], text=True, timeout=10)
+        # utf-8 + errors=replace: lane command lines carry non-ASCII brief text (a decode error here would crash the preemption)
+        return subprocess.check_output(['/bin/ps', '-axo', 'pid=,ppid=,command='], encoding='utf-8', errors='replace', timeout=10)
     except (OSError, subprocess.SubprocessError):
         return None
 
@@ -706,22 +734,34 @@ def main(argv=None, env=None, ps_text=None, killer=os.kill, alive=_alive, sleep=
     oid = record_obligation(victim, launcher, p0, now)
     if oid is None:
         return refuse(f"custody_not_persisted victim={victim['name']}", skipped)
-    # (2) re-read custody and the process table now that the obligation exists; anything that changed in between wins.
+    # (2) FENCE the lane (name + run id), CTO ts 1795441848.817099: from here it cannot START a box lease, a box action or a push (proxy-fence.py is
+    # checked by remote-test-box.sh up, remote-browser-box.sh up/once, rtb-pool-lease.py acquire2/borrow and the lanes' Bash hook). It is cleared on
+    # every path below (finally), and it expires by itself if this process dies.
+    fence = _fence_mod()
+    token = str(victim['manifest'].get('token') or '')
+    ok, detail = fence.set_fence(FENCE_DIR, victim['name'], token, launcher, FENCE_TTL_S, now, p0) if fence is not None else (False, 'fence_helper_unavailable')
+    if not ok:
+        withdraw_obligation(oid, f'preempt withdrawn before any signal: fence not set ({detail})')
+        return refuse(f"fence_not_set detail={detail} victim={victim['name']}", skipped)
     try:
-        # Lease ledgers first, process table LAST: a box tool or push that starts while the ledgers are being read is still seen before the signal.
-        rows_now = custody_snapshot(RTB_ROOT, lease_runner)
-        fresh_table = get_ps()
-        if fresh_table is None:
-            raise LeaseUnverifiable('ps_failed')
-        holds = holds_for(victim, rows_now, process_tree(fresh_table))
-    except LeaseUnverifiable as exc:
-        withdraw_obligation(oid, f'preempt withdrawn before any signal: lease_unverifiable {exc}')
-        return refuse(f"lease_unverifiable detail={exc} victim={victim['name']}", skipped)
-    if holds:
-        withdraw_obligation(oid, 'preempt withdrawn before any signal: custody appeared ' + '+'.join(holds))
-        return refuse(f"custody_changed victim={victim['name']} holds={'+'.join(holds)}", skipped)
-    # (3)-(4) stop request, SIGTERM, wait.
-    outcome, waited = stop_victim(victim, launcher, p0, max(0, args.wait), now, killer, alive, sleep)
+        # (3) re-read custody and the process table UNDER the fence; anything that started before the fence went up wins and aborts the stop.
+        try:
+            # Lease ledgers first, process table LAST: a box tool or push that starts while the ledgers are being read is still seen before the signal.
+            rows_now = custody_snapshot(RTB_ROOT, lease_runner)
+            fresh_table = get_ps()
+            if fresh_table is None:
+                raise LeaseUnverifiable('ps_failed')
+            holds = holds_for(victim, rows_now, process_tree(fresh_table))
+        except LeaseUnverifiable as exc:
+            withdraw_obligation(oid, f'preempt withdrawn before any signal: lease_unverifiable {exc}')
+            return refuse(f"lease_unverifiable detail={exc} victim={victim['name']}", skipped)
+        if holds:
+            withdraw_obligation(oid, 'preempt withdrawn before any signal: custody appeared ' + '+'.join(holds))
+            return refuse(f"custody_changed victim={victim['name']} holds={'+'.join(holds)}", skipped)
+        # (4) stop request, SIGTERM, wait. The fence stays up for the whole wait: a lane that has been told to stop starts nothing new.
+        outcome, waited = stop_victim(victim, launcher, p0, max(0, args.wait), now, killer, alive, sleep)
+    finally:
+        fence.clear_fence(FENCE_DIR, victim['name'], token, launcher)  # EVERY path: refuse, abort, signal failure, exited, still alive
     if outcome == 'signal_failed':
         withdraw_obligation(oid, 'preempt withdrawn: SIGTERM could not be delivered, the lane was not stopped')
     # (5) WIP: only after the lane has really exited (so its worktree is quiet); never a reason to keep the P0 waiting or to fail.
@@ -745,3 +785,5 @@ def main(argv=None, env=None, ps_text=None, killer=os.kill, alive=_alive, sleep=
 
 if __name__ == '__main__':
     sys.exit(main())
+
+

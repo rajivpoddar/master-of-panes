@@ -2154,7 +2154,7 @@ proxy_agent_p0_preempt() {
   proxy_agent_is_p0_launch || return 1
   # Default OFF until the stop path fences new lease/external-effect acquisition (CTO C0ALZJHGE49 thread 1795441441.525659, ts 1795441848.817099).
   if [[ "${PROXY_AGENT_PREEMPT:-0}" == 0 || ! -r "$helper" ]]; then
-    printf 'proxy-agent: P0 at %s pool cap and preemption is unavailable (PROXY_AGENT_PREEMPT=%s helper=%s): queued CAPACITY_WAIT\n' "$pool" "${PROXY_AGENT_PREEMPT:-1}" "$helper" >&2
+    printf 'proxy-agent: P0 at %s pool cap and preemption is unavailable (PROXY_AGENT_PREEMPT=%s helper=%s): queued CAPACITY_WAIT\n' "$pool" "${PROXY_AGENT_PREEMPT:-0}" "$helper" >&2
     PA_P0_WAIT="$pool"; return 1
   fi
   [[ "${PROXY_AGENT_DRY_RUN:-}" != 1 ]] || dry=(--dry-run)
@@ -2667,6 +2667,13 @@ _guard = "/Users/rajiv/.local/share/master-of-panes/current/scripts/bulk_read_gu
 _guard_cmd = "bash -c 'f=\"$1\"; if [ -f \"$f\" ]; then python3 -I \"$f\"; fi; exit 0' _ " + _guard
 for _matcher in ("Read", "Bash"):
     keep.append({"matcher": _matcher, "hooks": [{"type": "command", "command": _guard_cmd, "timeout": 8}]})
+# P0 preemption fence (CTO C0ALZJHGE49 thread 1795441441.525659, ts 1795441848.817099): a lane that proxy-preempt.py has fenced may not START a push or a
+# PR action (git push, gh pr create/merge/edit/ready, pm-admit-ci.sh). The wrapper exits 2 (block) only when proxy-fence.py says so; a missing script or any
+# other result passes (fail open). Box leases are gated inside remote-test-box.sh / remote-browser-box.sh / rtb-pool-lease.py. Applies to lanes launched
+# after this change (the settings file is generated per launch).
+_fence = "/Users/rajiv/.claude/scripts/proxy-fence.py"
+_fence_cmd = "bash -c 'f=\"$1\"; if [ -f \"$f\" ]; then python3 -I \"$f\" hook; rc=$?; [ \"$rc\" = 2 ] && exit 2; fi; exit 0' _ " + _fence
+keep.append({"matcher": "Bash", "hooks": [{"type": "command", "command": _fence_cmd, "timeout": 8}]})
 import os
 deny = ["Bash(git reset --hard*)", "Bash(git restore *)",
         "Bash(gh pr merge *)", "Bash(git push --force*)",
@@ -3145,3 +3152,4 @@ if [[ "$RC" -ne 0 ]] && ! proxy_agent_uses_claude_account "$MODEL_ID"; then
 fi
 echo "PROXY_AGENT_DONE rc=$RC type=$TYPE model=$MODEL_ID window=$WINDOW out=$OUT log=$LOG"
 exit "$RC"
+

@@ -1,9 +1,11 @@
 """P0 preemption for proxy-agent.sh (proxy-preempt.py) and the Claude no-burn-gate contract of the launcher.
 
 UPDATE 23 Nov (Rajiv C0ALZJHGE49 thread 1795437841.011459, ts 1795439359.022079: "drop the P0 override rule. preempt the lowest priority agent and
-use that instead."): preemption is ON by default (PROXY_AGENT_PREEMPT=0 turns it off) and is the ONLY way a P0 gets a slot at cap: the launcher no longer
-launches a P0 over a pool cap or past a burn gate. It calls the helper with --pool-full; rc 0 = slot free, anything else = queued CAPACITY_WAIT.
-The CTO custody-before-signal tests below are unchanged.
+use that instead."): preemption is the ONLY way a P0 gets a slot at cap: the launcher no longer launches a P0 over a pool cap or past a burn gate. It
+calls the helper with --pool-full; rc 0 = slot free, anything else = queued CAPACITY_WAIT. The HELPER defaults ON (PROXY_AGENT_PREEMPT=0 turns it off);
+the LAUNCHER defaults OFF (CTO C0ALZJHGE49 thread 1795441441.525659, ts 1795441848.817099: keep the P0 queued until the stop path fences new lease and
+external-effect acquisition, then rechecks custody under that fence before signaling) and calls the helper only with PROXY_AGENT_PREEMPT=1.
+The fence tests below pin that order: relaunch row, fence (lane name + run id), custody re-check under the fence, then SIGTERM; fence cleared on every path.
 
 Rajiv C0ALZJHGE49 thread 1795369444.132999, ts 1795372352.279289 (23 Nov): "for P0's, preempt the lowest priority proxy agent" and
 "drop the P0 gate ... we don't have to track the burn rate for calude proxy accounts".
@@ -74,7 +76,7 @@ class World:
         (tmp / 'caps.env').write_text('')
         self.stub = tmp / 'pm-ops-stub.py'
         self.stub.write_text(STUB % (str(tmp / 'obligations.jsonl'), str(tmp / 'stub-mode')))
-        for attr, val in (('RUNS', tmp / 'runs'), ('STOP_DIR', tmp / 'stop'), ('LOG', tmp / 'preemptions.log'),
+        for attr, val in (('RUNS', tmp / 'runs'), ('STOP_DIR', tmp / 'stop'), ('LOG', tmp / 'preemptions.log'), ('FENCE_DIR', tmp / 'fences'),
                           ('CAPS_ENV', tmp / 'caps.env'), ('PM_OPS_CLI', str(self.stub)), ('RTB_ROOT', self.rtb), ('OVERRIDES_LOG', tmp / 'overrides.log')):
             monkeypatch.setattr(pp, attr, val)
 
@@ -85,7 +87,7 @@ class World:
         (self.tmp / 'stub-mode').write_text(mode)
 
     def lane(self, name, model='claude-sonnet-5-5', type='hd-builder', brief='PRIORITY: P2\n', started='2026-11-23T01:00:00Z',
-             issue=None, pr=None, log='', jsonl=None, register=True, ppid=1):
+             issue=None, pr=None, log='', jsonl=None, register=True, ppid=1, token='auto'):
         pid = self.next_pid
         self.next_pid += 1
         self.alive.add(pid)
@@ -98,6 +100,8 @@ class World:
             if jsonl is not None:
                 (self.tmp / f'{name}.jsonl').write_text('\n'.join(json.dumps(e) for e in jsonl) + '\n')
             m = {'name': name, 'type': type, 'brief': str(brief_path), 'out': str(out), 'started_at': started, 'model': model}
+            if token:  # the run id the fence is keyed by (PROXY_AGENT_RUN_TOKEN; proxy-run-state.py start writes it into the registry row)
+                m['token'] = f'tok-{name}' if token == 'auto' else token
             if issue:
                 m['issue'] = issue
             if pr:
@@ -156,11 +160,11 @@ class World:
         if self.exit_on_term:
             self.alive.discard(pid)
 
-    def run(self, *argv, env=None, now=1_795_400_000.0, enabled='1'):
+    def run(self, *argv, env=None, now=1_795_400_000.0, enabled='1', killer=None):
         base = ['--launch-name', 'p0-launch', '--wait', '3']
         full_env = {} if enabled is None else {'PROXY_AGENT_PREEMPT': enabled}
         full_env.update(env or {})
-        return pp.main([*base, *argv], env=full_env, ps_text=lambda: '\n'.join(self.ps), killer=self.killer,
+        return pp.main([*base, *argv], env=full_env, ps_text=lambda: '\n'.join(self.ps), killer=killer or self.killer,
                        alive=lambda pid: pid in self.alive, sleep=lambda _s: None, now=now, lease_runner=self.lease_runner)
 
     def obligations(self):
@@ -211,8 +215,8 @@ def test_dry_run_still_plans_while_disabled_because_it_changes_nothing(w, capsys
     assert 'PREEMPT_PLAN victim=lane-p3' in capsys.readouterr().out and w.nothing_happened()
 
 
-def test_the_launcher_default_is_on_and_the_helper_is_called_only_at_pool_admission():
-    assert '"${PROXY_AGENT_PREEMPT:-1}" == 0' in LAUNCHER and 'PROXY_AGENT_PREEMPT:-0' not in LAUNCHER
+def test_the_launcher_default_is_off_and_the_helper_is_called_only_at_pool_admission():
+    assert '"${PROXY_AGENT_PREEMPT:-0}" == 0' in LAUNCHER and 'PROXY_AGENT_PREEMPT:-1' not in LAUNCHER  # CTO ts 1795441848.817099
     assert LAUNCHER.count('proxy-preempt.py') >= 1 and LAUNCHER.count('--pool-full') >= 1
 
 
@@ -692,8 +696,14 @@ def test_sigterm_is_delivered_only_by_stop_victim_and_only_after_custody_is_pers
     callers = {f.name for f in funcs if any(isinstance(n, ast.Call) and getattr(n.func, 'id', '') == 'stop_victim' for n in ast.walk(f))}
     assert callers == {'main'}
     main_src = inspect.getsource(pp.main)
-    assert main_src.index('record_obligation(') < main_src.index('holds_for(') < main_src.index('stop_victim(')
+    # CTO ts 1795441848.817099: relaunch row, THEN the fence, THEN the custody re-check under the fence, THEN the stop (SIGTERM).
+    assert main_src.index('record_obligation(') < main_src.index('set_fence(') < main_src.index('holds_for(') < main_src.index('stop_victim(')
     assert main_src.index('custody_snapshot(') < main_src.index('record_obligation(')
+    setters = {f.name for f in funcs if any(isinstance(n, ast.Attribute) and n.attr == 'set_fence' for n in ast.walk(f))}
+    assert setters == {'main'}
+    # the fence comes down in a finally that wraps BOTH the re-check and the stop, so no refuse/abort/signal-failure/exit path can leave it up
+    tries = [n for n in ast.walk(ast.parse(main_src)) if isinstance(n, ast.Try) and n.finalbody]
+    assert any('clear_fence' in ast.unparse(n.finalbody) and 'holds_for' in ast.unparse(n.body) and 'stop_victim' in ast.unparse(n.body) for n in tries)
     assert 'PROXY_AGENT_PREEMPT' in main_src and main_src.index('PREEMPT disabled') < main_src.index('custody_snapshot(')
 
 
@@ -702,7 +712,8 @@ def test_sigterm_is_delivered_only_by_stop_victim_and_only_after_custody_is_pers
 @pytest.mark.skipif(not MANIFEST.exists(), reason='release manifest is not beside this copy (installed ~/.claude tree)')
 def test_the_helper_and_its_test_are_packaged_in_the_release_manifest_with_current_digests():
     entries = {e['source_path']: e for e in json.loads(MANIFEST.read_text())['entries']}
-    for rel in ('claude/scripts/proxy-preempt.py', 'claude/scripts/tests/test_proxy_preempt.py'):
+    for rel in ('claude/scripts/proxy-preempt.py', 'claude/scripts/tests/test_proxy_preempt.py', 'claude/scripts/proxy-fence.py',
+                'claude/scripts/tests/test_proxy_fence.py'):
         entry = entries[rel]
         assert entry['sha256'] == hashlib.sha256((MANIFEST.parent / rel).read_bytes()).hexdigest(), f'{rel}: manifest digest is stale'
         assert entry['canonical_target'].endswith('/.claude/scripts/' + rel.split('claude/scripts/', 1)[1])
@@ -729,7 +740,7 @@ proxy_agent_pool_live() { cat "$LIVE_FILE"; }
 
 
 def p0_pool(tmp_path, *, live=5, cap=5, model='claude-opus-5-5', ref='', brief_first='ordinary brief', helper_rc=0, frees=True, armed=True,
-            preempt=None, dry=False, role='hd-builder', cap_name='CLAUDE_PROXY_CAP'):
+            preempt=1, dry=False, role='hd-builder', cap_name='CLAUDE_PROXY_CAP'):
     """Run proxy_agent_pool_blocked for one model. Returns (BLOCKED|FREE, helper args or None, PA_P0_WAIT, stderr)."""
     helper = tmp_path / 'helper.py'
     record = tmp_path / 'helper-args.json'
@@ -794,8 +805,11 @@ def test_the_off_switch_queues_the_p0_without_calling_the_helper(tmp_path):
     assert state == 'BLOCKED' and called is None and wait == 'claude' and 'preemption is unavailable' in err
 
 
-def test_preemption_is_on_by_default_and_only_for_the_armed_primary_pick(tmp_path):
-    assert p0_pool(tmp_path, ref='P0:1')[0] == 'FREE'                      # PROXY_AGENT_PREEMPT unset = on
+def test_preemption_is_off_by_default_and_on_only_for_the_armed_primary_pick(tmp_path):
+    state, called, wait, _ = p0_pool(tmp_path, ref='P0:1', preempt=None)    # PROXY_AGENT_PREEMPT unset = the launcher default = off
+    assert state == 'BLOCKED' and called is None and wait == 'claude'
+    (tmp_path / 'on').mkdir()
+    assert p0_pool(tmp_path / 'on', ref='P0:1')[0] == 'FREE'                # PROXY_AGENT_PREEMPT=1
     (tmp_path / 'unarmed').mkdir()
     state, called, wait, _ = p0_pool(tmp_path / 'unarmed', ref='P0:1', armed=False)  # nested alias picks / availability probes never preempt
     assert state == 'BLOCKED' and called is None and wait == ''
@@ -833,7 +847,7 @@ def test_the_deepseek_total_cap_and_burn_gates_no_longer_accept_a_p0_override():
 
 
 def test_the_old_post_selection_hook_that_launched_the_p0_over_the_cap_is_gone():
-    assert 'launching the P0 anyway' not in LAUNCHER and 'PROXY_AGENT_PREEMPT:-0' not in LAUNCHER and 'PROXY_AGENT_PREEMPT:-1' in LAUNCHER
+    assert 'launching the P0 anyway' not in LAUNCHER and '"${PROXY_AGENT_PREEMPT:-0}" == 0' in LAUNCHER
 
 
 def burn_refused(tmp_path, model, gate='enforce'):
@@ -1079,7 +1093,7 @@ def p0_route(tmp_path, role='hd-planner', *, p0=True, live=2, cap=2, helper_rc=3
     body = ('proxy_agent_pool_live() { if [[ -n "$ONLY_POOL" && "$1" != "$ONLY_POOL" ]]; then echo 0; else cat "$LIVE_FILE"; fi; }\n'
             + extra + tiers.ROUTE_BODY)
     env = tiers.base_env(tmp_path, REQUESTED='auto', ROLE=role, BRIEF=str(brief), RUNG='', UNAVAILABLE='', PROBEFAIL='', LIVE_FILE=str(live_file),
-                         ONLY_POOL=only_pool or '', PROXY_AGENT_PREEMPT_HELPER=str(helper), PROXY_AGENT_NAME='p0-lane',
+                         ONLY_POOL=only_pool or '', PROXY_AGENT_PREEMPT_HELPER=str(helper), PROXY_AGENT_NAME='p0-lane', PROXY_AGENT_PREEMPT='1',
                          **{k: cap for k in ('CLAUDE_PROXY_CAP', 'CODEX_PROXY_CAP', 'GROK_PROXY_CAP', 'OPENCODE_PROXY_CAP', 'SARVAM_PROXY_CAP')})
     env.pop('PROXY_AGENT_STUB_POOL_LIVE', None)
     if p0:
@@ -1111,3 +1125,133 @@ def test_a_p0_whose_first_pool_has_room_never_calls_the_helper(tmp_path):
 def test_a_non_p0_at_cap_never_preempts_and_still_skips_to_the_next_model(tmp_path):
     fields, calls, err = p0_route(tmp_path, p0=False, only_pool='grok', cap=2, live=2)
     assert calls == [] and fields[2] != 'grok-4.7' and 'pool_cap skip model=grok-4.7' in err
+
+
+# ---- fence: the stop path fences the lane (name + run id) BEFORE the custody re-check and the signal, and always clears it ----------------------
+# CTO C0ALZJHGE49 thread 1795441441.525659, ts 1795441848.817099: "keep the P0 queued when the pool is full until the stop path fences new lease and
+# external-effect acquisition, then rechecks custody under that fence before signaling. Keep the durable relaunch obligation ahead of SIGTERM."
+
+def fence_of(w, name='victim-lane'):
+    return w.tmp / 'fences' / f'{name}.tok-{name}.json'
+
+
+def test_the_lane_is_fenced_during_the_custody_recheck_and_the_signal_and_unfenced_afterwards(w):
+    seen = {}
+    w.lane('victim-lane', brief='PRIORITY: P3\n')
+    path = fence_of(w)
+
+    def at_recheck():  # the second ledger read is the re-check under the fence
+        seen['recheck'] = json.loads(path.read_text())['by'] if path.exists() else None
+        seen['obligations_then'] = len(w.obligations())
+
+    def killer(pid, sig):
+        seen['signal'] = path.exists()
+        seen['obligations_at_signal'] = len(w.obligations())
+        w.killer(pid, sig)
+    w.mutations[2] = at_recheck
+    fill_claude_pool(w, 1)
+    assert w.run(*P0, killer=killer) == 0
+    # relaunch row first, then the fence (set by the launcher p0-launch), custody re-read under it, then SIGTERM with the fence still up
+    assert seen == {'recheck': 'p0-launch', 'obligations_then': 1, 'signal': True, 'obligations_at_signal': 1}
+    assert w.signals and not path.exists()
+
+
+@pytest.mark.parametrize('under_fence', ['box lease', 'queue ticket', 'push', 'box tool'])
+def test_an_acquisition_or_effect_that_started_before_the_fence_aborts_the_preemption_and_clears_the_fence(w, capsys, under_fence):
+    pid = w.lane('victim-lane', brief='PRIORITY: P3\n')
+    start = {'box lease': lambda: w.box('hetzner-1', 'leased', 'qa-victim-lane-12'),
+             'queue ticket': lambda: w.ticket('qa-victim-lane-12'),
+             'push': lambda: w.child(pid, 'git push origin HEAD'),
+             'box tool': lambda: w.child(pid, 'bash /Users/rajiv/.claude/scripts/remote-test-box.sh up --pr 9')}[under_fence]
+    w.mutations[2] = start  # it appears between the first custody read and the re-check made under the fence
+    fill_claude_pool(w, 1)
+    assert w.run(*P0) == 3  # the P0 stays queued: rc 3 = nothing preemptable
+    assert 'PREEMPT_REFUSED reason=custody_changed victim=victim-lane' in capsys.readouterr().out
+    assert w.signals == [] and pid in w.alive and not fence_of(w).exists() and not (w.tmp / 'stop').exists()
+    assert [a[0] for a in w.obligations()] == ['obligation-upsert', 'obligation-resolve']  # the relaunch row is withdrawn with the abort
+
+
+@pytest.mark.parametrize('how', ['exited', 'still_alive', 'signal_failed', 'lease_unverifiable', 'custody_changed'])
+def test_the_fence_is_cleared_on_every_path_out_of_the_stop(w, how):
+    w.lane('victim-lane', brief='PRIORITY: P3\n')
+    fill_claude_pool(w, 1)
+    kwargs = {}
+    if how == 'still_alive':
+        w.exit_on_term = False
+    elif how == 'lease_unverifiable':
+        w.mutations[2] = lambda: w.cli.update({('pool', 'list'): (1, '')})
+    elif how == 'custody_changed':
+        w.mutations[2] = lambda: w.box('hetzner-1', 'leased', 'qa-victim-lane-12')
+    elif how == 'signal_failed':
+        def refuse(pid, sig):
+            raise PermissionError('not ours')
+        kwargs['killer'] = refuse
+    rc = w.run(*P0, **kwargs)
+    assert rc == {'exited': 0, 'still_alive': 4, 'signal_failed': 4, 'lease_unverifiable': 3, 'custody_changed': 3}[how]
+    assert not fence_of(w).exists()
+
+
+def test_no_persisted_obligation_means_no_fence_and_no_signal(w):
+    w.stub_mode('fail')
+    w.lane('victim-lane', brief='PRIORITY: P3\n')
+    fill_claude_pool(w, 1)
+    assert w.run(*P0) == 3 and w.signals == [] and not (w.tmp / 'fences').exists()
+
+
+def test_a_dry_run_sets_no_fence(w, capsys):
+    w.lane('victim-lane', brief='PRIORITY: P3\n')
+    fill_claude_pool(w, 1)
+    assert w.run(*P0, '--dry-run') == 0 and 'PREEMPT_PLAN victim=victim-lane' in capsys.readouterr().out
+    assert not (w.tmp / 'fences').exists() and w.nothing_happened()
+
+
+def test_a_lane_already_fenced_by_another_preemption_is_skipped_and_its_fence_is_left_alone(w, capsys):
+    w.lane('victim-lane', brief='PRIORITY: P3\n')
+    fill_claude_pool(w, 1)
+    assert pp._fence_mod().set_fence(w.tmp / 'fences', 'victim-lane', 'tok-victim-lane', 'other-preemptor', 600, 1_795_400_000.0)[0]
+    assert w.run(*P0) == 3
+    assert 'victim-lane:already_fenced' in capsys.readouterr().out and w.nothing_happened() and fence_of(w).exists()
+
+
+def test_losing_the_race_for_the_fence_refuses_with_nothing_signalled_and_the_obligation_withdrawn(w, capsys, monkeypatch):
+    class Lost:  # another preemptor set the fence between the candidate check and ours
+        @staticmethod
+        def read_fence(*a, **k):
+            return None
+
+        @staticmethod
+        def set_fence(*a, **k):
+            return False, 'fence_held'
+
+        @staticmethod
+        def clear_fence(*a, **k):
+            raise AssertionError('a fence this preemptor did not set must never be cleared')
+    monkeypatch.setattr(pp, '_fence_mod', lambda: Lost)
+    pid = w.lane('victim-lane', brief='PRIORITY: P3\n')
+    fill_claude_pool(w, 1)
+    assert w.run(*P0) == 3
+    assert 'PREEMPT_REFUSED reason=fence_not_set detail=fence_held victim=victim-lane' in capsys.readouterr().out
+    assert w.signals == [] and pid in w.alive and not (w.tmp / 'stop').exists()
+    assert [a[0] for a in w.obligations()] == ['obligation-upsert', 'obligation-resolve']
+
+
+def test_without_the_fence_helper_nothing_is_ever_signalled(w, capsys, monkeypatch):
+    monkeypatch.setattr(pp, '_fence_mod', lambda: None)
+    w.lane('victim-lane', brief='PRIORITY: P3\n')
+    fill_claude_pool(w, 1)
+    assert w.run(*P0) == 3
+    assert 'reason=fence_not_set detail=fence_helper_unavailable' in capsys.readouterr().out and w.signals == []
+
+
+def test_a_lane_with_no_run_id_cannot_be_fenced_so_it_is_not_a_victim(w, capsys):
+    w.lane('victim-lane', brief='PRIORITY: P3\n', token=None)
+    fill_claude_pool(w, 1)
+    assert w.run(*P0) == 3
+    assert 'victim-lane:no_run_id' in capsys.readouterr().out and w.nothing_happened()
+
+
+def test_the_next_lowest_priority_lane_is_taken_when_the_lowest_has_no_run_id(w):
+    w.lane('no-id-p3', brief='PRIORITY: P3\n', token=None)
+    pid = w.lane('with-id-p2', brief='PRIORITY: P2\n')
+    fill_claude_pool(w, 2)
+    assert w.run(*P0) == 0 and [p for p, _ in w.signals] == [pid]

@@ -964,6 +964,15 @@
       "source_path": "claude/scripts/proxy-cap-count.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/proxy-fence.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "3ee968dfd5b76045f80d762913c990628319747f6cceb8aa36eaa9c3fdc0b4ec",
+      "source_path": "claude/scripts/proxy-fence.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/proxy-lease-check.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1245,12 +1254,21 @@
       "source_path": "claude/scripts/tests/test_proxy_codex_primary.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_proxy_fence.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "4e000334db0a59d60448c736086cb9630648f45a865e4d19c123a0072ac801a5",
+      "source_path": "claude/scripts/tests/test_proxy_fence.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_proxy_lane_launch_states.py",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "1fbeafe2092cbd43363b48dbf07773bfa623fc1eb4a3ce72d03f14a48e91056d",
+      "sha256": "8497e522de9d5aeaecf7b90871c86e531bf79b2f2421c47ace62fabb7d592dfa",
       "source_path": "claude/scripts/tests/test_proxy_lane_launch_states.py"
     },
     {
@@ -2247,7 +2265,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 246,
+    "selected_count": 248,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
