@@ -910,6 +910,107 @@ class FinalRoundProbe(Sandbox):
         self.assertEqual(persisted, {})
 
 
+class Backfill(Sandbox):
+    """The --backfill-gaps flag (one-shot, MoP main): a full re-scan that records a lane's gap the incremental
+    watermark no longer reaches. It persists gap state only -- never invents a row and never moves the watermark
+    -- so the next hourly, which still skips that lane, reports its gap and keeps the burn n/a while it is in range.
+
+    Run alone: python3 -I tests/test_sarvam_usage.py Backfill -v
+    """
+
+    def _seed(self, minutes_ago):
+        """A ledger seeded with a watermark `minutes_ago`, plus one already-verified lane, so the malformed lane
+        below (older than the watermark) is skipped by the next hourly -- exactly the state a fresh install leaves
+        before the gap-persistence code, or a lane that first appears after a scan's watermark has advanced."""
+        self.ledger.parent.mkdir(parents=True)
+        self.ledger.write_text(
+            json.dumps({"v": su.SCHEMA, "id": "ok:sarvam-105b:r0", "ts": su._iso(NOW - timedelta(minutes=40)),
+                        "route": "sarvam-105b", "in": 1_000_000, "cin": 0, "out": 0}) + "\n"
+            + json.dumps({"v": su.SCHEMA, "scan_at": int((NOW - timedelta(minutes=minutes_ago)).timestamp())}) + "\n")
+
+    def rows(self):
+        return [json.loads(line) for line in self.ledger.read_text().splitlines() if '"id"' in line]
+
+    def gap_lanes(self):
+        return {json.loads(line)["gap"]["lane"]: json.loads(line)["gap"]["kinds"]
+                for line in self.ledger.read_text().splitlines() if '"gap"' in line}
+
+    WITNESS = NOW - timedelta(minutes=35)  # the malformed completion's own time (the only witness in its lane)
+
+    def _gap_lane(self):
+        """A malformed-only lane: no assistant events (an `asst` message with no verified result would open a
+        competing UNVERIFIED gap and flip the burn wording), just the empty-usage result with its own timestamp."""
+        self.lane("gap", init(GLM), raw_result("g-r1", {}, timestamp=fmt(self.WITNESS)),
+                  launch_alias=GLM, minutes_ago=30)
+
+    # 1. A malformed lane older than the watermark is skipped by the next hourly; the gap is NOT recorded.
+    def test_next_hourly_skips_a_lane_older_than_the_watermark_and_records_no_gap(self):
+        self.sarvam_lane("ok", usage=(1_000_000, 0, 0), minutes_ago=40)  # available estimate
+        self._gap_lane()
+        self._seed(10)  # watermark 10 min old: the 30-min-old malformed lane is skipped
+
+        later = self.run_collect(now=NOW + timedelta(minutes=10))
+        self.assertEqual(later["files_scanned"], 0)
+        self.assertEqual(later["malformed_lanes"], 0)
+        self.assertEqual(self.gap_lanes(), {}, "the malformed lane's gap was never recorded by the skipped scan")
+
+    # 2. --backfill-gaps re-scans the full window, records that lane's gap, and invents NO row and NO watermark.
+    def test_backfill_records_the_gap_without_inventing_a_row_or_watermark(self):
+        self.sarvam_lane("ok", usage=(1_000_000, 0, 0), minutes_ago=40)
+        self._gap_lane()
+        self._seed(10)
+        before_rows = self.rows()
+        before_wm = su.read_ledger(self.ledger)[1]
+
+        filled = self.run_collect(now=NOW + timedelta(minutes=10), backfill=True)
+        self.assertEqual(filled["malformed_lanes"], 1)
+        self.assertEqual(filled["backfilled"], 1)
+        self.assertEqual(filled["recorded"], 0, "backfill writes no usage rows -- the read will still read UNAVAILABLE")
+        # No row was invented or added: the malformed lane's empty usage is NOT a priced/zero row.
+        self.assertEqual(self.rows(), before_rows)
+        # The watermark is untouched: the next --record run is not pushed out of this lane.
+        self.assertEqual(su.read_ledger(self.ledger)[1], before_wm)
+        self.assertEqual(self.gap_lanes(), {"gap": {"malformed": {GLM: su._iso(self.WITNESS)}}})
+
+    # 3. After backfill, the next hourly STILL sees the gap via persisted state, even though it still skips the lane.
+    def test_next_hourly_still_sees_the_gap_after_backfill_and_burn_stays_n_a_while_in_range(self):
+        self.sarvam_lane("ok", usage=(1_000_000, 0, 0), minutes_ago=40)
+        self._gap_lane()
+        self._seed(10)
+        self.run_collect(now=NOW + timedelta(minutes=10), backfill=True)
+        later = self.run_collect(now=NOW + timedelta(minutes=20))
+        self.assertEqual(later["files_scanned"], 0)  # it still cannot see the file
+        self.assertEqual(later["gaps"]["window"]["malformed"], 1)  # but the persisted gap is reported
+        self.assertIn("burn n/a (some lane usage is unavailable)", later["line"])
+        self.assertEqual(later["summary"]["priced_lanes"], 1)  # the ok lane still carries the estimate
+
+    # 4. A backfill never re-opens a burn window: a second run rewrites the same state, backfilled == 0.
+    def test_backfill_is_idempotent_and_never_reopens_the_burn_window(self):
+        self.sarvam_lane("ok", usage=(1_000_000, 0, 0), minutes_ago=40)
+        self._gap_lane()
+        self._seed(10)
+        self.run_collect(now=NOW + timedelta(minutes=10), backfill=True)
+        second = self.run_collect(now=NOW + timedelta(minutes=15), backfill=True)
+        self.assertEqual(second["backfilled"], 0, "the lane's gap was already recorded")
+        self.assertEqual(second["malformed_lanes"], 1)
+        self.assertEqual(self.gap_lanes(), {"gap": {"malformed": {GLM: su._iso(self.WITNESS)}}})
+
+    # 5. A lane that resolved (its malformed completion was actually a reported, now-verified completion) records an
+    #    EMPTY kinds so the next hourly drops it -- backfill records what the lane currently is, no more, no less.
+    def test_backfill_records_a_resolved_lane_as_empty_kinds(self):
+        self.sarvam_lane("ok", usage=(1_000_000, 0, 0), minutes_ago=40)
+        # A lane whose malformed result is followed by a real completion: it has NO gap now.
+        key = GLM.replace("-", "_")
+        self.lane("clean", init(GLM), asst("c1", su.ROUTES[GLM]["upstream"], when=NOW - timedelta(minutes=40)),
+                  result(uuid="c-r0", since_last={key: (500, 0, 0)}, **{key: (500, 0, 0)}),
+                  launch_alias=GLM, minutes_ago=30)
+        self._seed(10)
+        filled = self.run_collect(now=NOW + timedelta(minutes=10), backfill=True)
+        # No lane has a gap, so backfill records nothing new and reports nothing to backfill.
+        self.assertEqual(filled["backfilled"], 0)
+        self.assertEqual(self.gap_lanes(), {})
+
+
 class LauncherWiring(unittest.TestCase):
     """Structural, no hand-kept list (rule 60): every Sarvam alias the launcher can route to has a registered route."""
 

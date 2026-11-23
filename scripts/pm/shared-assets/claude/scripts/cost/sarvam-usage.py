@@ -714,16 +714,23 @@ def reconcile_ledger(path: Path, now: datetime) -> dict:
 
 
 def collect(now: datetime, root: Path = TRANSCRIPTS, ledger: Path = LEDGER, caps: Path = CAPS, environ=None,
-            window_h: float = WINDOW_H, deadline_s: float = SCAN_DEADLINE_S, record: bool = False) -> dict:
+            window_h: float = WINDOW_H, deadline_s: float = SCAN_DEADLINE_S, record: bool = False,
+            backfill: bool = False) -> dict:
     environ = os.environ if environ is None else environ
     persisted: dict = {}  # lane stem -> gap state recorded by earlier scans
     rows, watermark, ledger_exists = read_ledger(ledger, persisted)
     scan_started = now.timestamp()  # the scan runs at `now`; it is also the watermark a --record run stores
-    # The source scan reads back to whichever starts earlier, the month or the trailing window, so a bootstrap just
-    # after the month turns still sees the last window's transcripts (a file untouched since before both bounds cannot
-    # hold a completion in either).
-    floor = min(_month_start_epoch(now), scan_started - window_h * 3600)
-    since = max(floor, (watermark - SCAN_OVERLAP_S) if watermark else 0.0)
+    # A --backfill run re-reads the FULL window (since=0) so it can re-scan lanes the scan watermark no longer reaches
+    # (a lane the hourly no longer re-reads keeps its gap only if it was already recorded); it persists gap records
+    # only and writes no rows and no watermark, so it never invents a number or changes what the next --record sees.
+    if backfill:
+        since = 0.0
+    else:
+        # The source scan reads back to whichever starts earlier, the month or the trailing window, so a bootstrap just
+        # after the month turns still sees the last window's transcripts (a file untouched since before both bounds cannot
+        # hold a completion in either).
+        since = max(min(_month_start_epoch(now), scan_started - window_h * 3600),
+                    (watermark - SCAN_OVERLAP_S) if watermark else 0.0)
     fresh, info = scan_transcripts(root, since, time.monotonic() + deadline_s)
     allowance, allowance_reason = read_allowance(environ, caps)
     if info["error"] and not ledger_exists:
@@ -776,7 +783,25 @@ def collect(now: datetime, root: Path = TRANSCRIPTS, ledger: Path = LEDGER, caps
         with open(ledger, "a") as fh:
             fh.write("\n".join(batch) + "\n")
         recorded = len(fresh)
+    backfilled = 0
+    if backfill and not info["error"] and not info["partial"]:
+        # A --backfill run records a lane's gap the first time its file is seen past the watermark. It writes gap
+        # records only: never a row (that would invent the number the read will report UNAVAILABLE) and never a
+        # watermark (so the next --record is not pushed out of this lane). It is idempotent: a later record re-scan,
+        # or another backfill, rewrites the same lane state and does not re-open its burn window.
+        batch = []
+        for lane, state in scanned.items():
+            if state["kinds"]:  # only lanes with a real gap; a resolved lane is left to the normal --record path
+                if state != persisted.get(lane):
+                    gap = {"lane": lane, "seen": state["seen"], "kinds": state["kinds"]}
+                    batch.append(json.dumps({"v": SCHEMA, "gap": gap}, separators=(",", ":")))
+                    backfilled += 1
+        if batch:
+            ledger.parent.mkdir(parents=True, exist_ok=True)
+            with open(ledger, "a") as fh:
+                fh.write("\n".join(batch) + "\n")
     return {"line": line, "available": summary["priced_lanes"] > 0 and not summary["untimed"], "recorded": recorded,
+            "backfilled": backfilled,
             "new_rows": new_rows, "summary": summary, "allowance": allowance, "files_scanned": info["files"],
             "unverified_lanes": info["unverified"], "unattributed_lanes": info["unattributed"],
             "malformed_lanes": info["malformed"], "unbounded_lanes": info["unbounded"],
@@ -790,6 +815,9 @@ def main(argv=None) -> int:
     parser.add_argument("--json", action="store_true", help="print the full summary as JSON instead of the line")
     parser.add_argument("--reconcile-ledger", action="store_true",
                         help="back up the ledger and drop pre-current-schema lines (tombstoned), then exit")
+    parser.add_argument("--backfill-gaps", action="store_true",
+                        help="re-scan the full window and append gap records only (no rows, no watermark) so a lane the "
+                             "scan watermark no longer reaches persists its gap; run MoP main only under a one-shot directive")
     parser.add_argument("--now", help="ISO time override (tests/dry-run)")
     parser.add_argument("--transcripts", default=str(TRANSCRIPTS))
     parser.add_argument("--ledger", default=str(LEDGER))
@@ -806,7 +834,7 @@ def main(argv=None) -> int:
         return 0
     try:
         result = collect(now, Path(args.transcripts), Path(args.ledger), Path(args.caps), None, args.window_hours,
-                         args.deadline_s, args.record)
+                         args.deadline_s, args.record, backfill=args.backfill_gaps)
     except Exception as exc:  # the hourly must always get a line, never a traceback
         print(f"Sarvam TF: UNAVAILABLE ({type(exc).__name__})")
         return 0
