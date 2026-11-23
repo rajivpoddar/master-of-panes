@@ -381,7 +381,7 @@ def arm_strict_session(box, manifest_path):
     print('QA_STRICT_ARM kind=strict-read expires_in_s=' + str(int(row['exp'] - now)))
 
 
-def derive_exact_ids(box, head, spend_box):
+def derive_exact_ids(box, head, spend_box, run_id=None):
     """TRUSTED-HOST derivation of everything a scoped credential is bound to: the lease (from the controller's own box receipt), the
     physical-box identity (from the controller's pool/ephemeral receipt) and the exact head. Nothing the box wrote is used; a
     box-supplied value can only be CHECKED against this (see check_exact_ids)."""
@@ -393,12 +393,12 @@ def derive_exact_ids(box, head, spend_box):
             raise ValueError('QA_SCOPED_MINT_DENIED: a pool lease needs its physical pool server identity')
     elif spend_box != box:
         raise ValueError('QA_SCOPED_MINT_DENIED: an ephemeral box is its own physical identity')
-    return onmiss_keys(box, spend_box, head)
+    return onmiss_keys(box, spend_box, head, run_id)
 
 
 def check_exact_ids(derived, claimed, manifest):
     """DENIED unless every box-written identity equals the trusted derivation and the baked manifest digest is this run's."""
-    for key in ('lease', 'spend_box', 'head', 'dict', 'box_key', 'attempt_key', 'stage_run', 'run_key'):
+    for key in ('lease', 'spend_box', 'head', 'run_id', 'dict', 'box_key', 'attempt_key', 'stage_run', 'run_key'):
         if claimed.get(key) != derived[key]:
             raise ValueError('QA_SCOPED_MINT_DENIED: box-supplied ' + key + ' differs from the trusted derivation')
     if claimed.get('manifest_digest') != manifest['digest'] or manifest['head'] != derived['head']:
@@ -687,17 +687,19 @@ def load_exact_ids(path):
     if p.is_symlink() or not p.is_file() or p.stat().st_size > 16384:
         raise ValueError('QA_EXACT_IDS_INVALID')
     ids = json.loads(p.read_text())
-    keys = ('lease', 'spend_box', 'head', 'dict', 'box_key', 'attempt_key', 'stage_run', 'run_key', 'manifest_digest')
+    keys = ('lease', 'spend_box', 'head', 'run_id', 'dict', 'box_key', 'attempt_key', 'stage_run', 'run_key', 'manifest_digest')
     if (not isinstance(ids, dict) or any(not isinstance(ids.get(k), str) or not re.fullmatch(r'[A-Za-z0-9._/-]{1,120}', ids[k])
                                          for k in keys) or not re.fullmatch(r'[0-9a-f]{64}', ids['manifest_digest'])):
         raise ValueError('QA_EXACT_IDS_INVALID')
     return ids
 
 
-def onmiss_identity(root, box):
-    """Server-side spend identities for capture-on-miss (CTO ts 1793378243.332849): $3 per PHYSICAL box lifetime and per
-    QA attempt (exact head). Derived on the box from its hostname and the checkout HEAD, never from a caller flag, so a
-    warm-pool re-lease, redeploy, restart or replacement box cannot open a fresh budget."""
+def onmiss_identity(root, box, run_id=None):
+    """Server-side spend identities for capture-on-miss: $3 per QA RUN (Rajiv ts 1795459248.640279, supersedes the box-lifetime
+    scope of CTO ts 1793378243.332849). The run id is the controller's own id (--run-id), the head comes from the checkout HEAD,
+    the physical box (hostname) is an audit field: a reused box with a new run gets its own budget; a re-lease, redeploy,
+    restart or replacement inside the SAME run keeps the run's spend."""
+    check_run_id(run_id)
     head = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'], capture_output=True, text=True, timeout=30).stdout.strip()
     if not re.fullmatch(r'[0-9a-f]{40}', head):
         raise RuntimeError('capture-on-miss needs the exact checkout head')
@@ -712,16 +714,31 @@ def onmiss_identity(root, box):
         raise RuntimeError('capture-on-miss: pool box hostname unverified (' + host + '); refusing a per-lease budget')
     else:
         spend_box = box  # ephemeral box: the receipt name is unique for the box lifetime
-    return onmiss_keys(box, spend_box, head)
+    return onmiss_keys(box, spend_box, head, run_id)
 
 
-def onmiss_keys(box, spend_box, head):
-    """Pure: the lease, ledger objects and staging prefix for (lease box, physical box, exact head). Shared by the box
-    (onmiss_identity) and by the TRUSTED HOST (derive_exact_ids), so a scope can be derived without trusting the box."""
+RUN_ID_RE = r'[A-Za-z0-9._-]{1,100}'
+
+
+def check_run_id(run_id):
+    """The QA RUN id keys the capture-on-miss spend ledgers (Rajiv D0AMF0XE6TS thread 1795455420.472449, ts 1795459248.640279: "per run";
+    CTO ts 1795459406.930519). Missing/odd ids fail closed: no ledger key is ever derived from an empty or free-form run."""
+    if not isinstance(run_id, str) or not re.fullmatch(RUN_ID_RE, run_id):
+        raise ValueError('QA_ONMISS_RUN_ID_REQUIRED: capture-on-miss spend is keyed by the QA run id (--run-id / QA_CONTROLLER_RUN_ID)')
+    return run_id
+
+
+def onmiss_keys(box, spend_box, head, run_id):
+    """Pure: the lease, ledger objects and staging prefix for (lease box, physical box, exact head, QA RUN). Shared by the box
+    (onmiss_identity) and by the TRUSTED HOST (derive_exact_ids), so a scope can be derived without trusting the box.
+    SPEND SCOPE = ONE QA RUN (Rajiv ts 1795459248.640279 "per run"): both ledgers are keyed by the run id, never by the physical box,
+    so a reused/warm box with a NEW run starts with its own $3, attempts inside one run (same run id) share reservations and charges,
+    and concurrent misses still serialise through the same CAS claim on these two objects. `spend_box` stays an audit field only."""
+    run_id = check_run_id(run_id)
     digest = lambda s: hashlib.sha256(s.encode()).hexdigest()[:16]
-    return {'lease': identity(box), 'spend_box': spend_box, 'head': head, 'dict': onmiss_dict_name(box),
-            'box_key': 'qa-capture-ledgers/onmiss/box-' + digest('box:' + spend_box) + '.json',
-            'attempt_key': 'qa-capture-ledgers/onmiss/attempt-' + digest('head:' + head) + '.json',
+    return {'lease': identity(box), 'spend_box': spend_box, 'head': head, 'run_id': run_id, 'dict': onmiss_dict_name(box),
+            'box_key': 'qa-capture-ledgers/onmiss/run-' + digest('run:' + run_id) + '.json',
+            'attempt_key': 'qa-capture-ledgers/onmiss/attempt-' + digest('run:' + run_id + ':head:' + head) + '.json',
             # S161 scope: on-miss stages under its OWN run prefix (this lease + head), so a failed capture lane's or an
             # older lease's leftovers are never published by an on-miss finish (rule 32: failed capture stays FAILED).
             'stage_run': 'remote-qa-onmiss-' + identity(box) + '-' + head[:12],
@@ -730,13 +747,14 @@ def onmiss_keys(box, spend_box, head):
             'run_key': 'qa-capture-ledgers/remote-qa-' + identity(box) + '.json'}
 
 
-def onmiss_effective(root, box, onmiss, exact=None, dry=False):
-    """ids when capture-on-miss can bind a lifetime spend identity; otherwise None = strict replay (fail safe, visible).
-    An --exact-manifest run NEVER degrades: an invalid manifest, head mismatch or unbound identity refuses the run."""
+def onmiss_effective(root, box, onmiss, exact=None, dry=False, run_id=None):
+    """ids when capture-on-miss can bind a per-RUN spend identity; otherwise None = strict replay (fail safe, visible).
+    An --exact-manifest run NEVER degrades: an invalid manifest, head mismatch or unbound identity refuses the run.
+    A missing run id degrades stock on-miss to strict replay (QA_ONMISS_DISABLED reason=QA_ONMISS_RUN_ID_REQUIRED), never to a shared budget."""
     if not onmiss:
         return None
     try:
-        ids = onmiss_identity(root, box)
+        ids = onmiss_identity(root, box, run_id)
         if exact:
             ids['exact'] = load_exact_manifest(exact, ids['head'])
             ids['exact_dry'] = bool(dry)
@@ -746,6 +764,49 @@ def onmiss_effective(root, box, onmiss, exact=None, dry=False):
             raise
         print('QA_ONMISS_DISABLED reason=' + sanitize(error, limit=160) + ' fallback=strict-replay')
         return None
+
+
+def planned_miss_reserve_usd(model='gemini-3.8-flash', maximum=65536):
+    """Priced maximum of ONE on-miss provider request: the Gemini branch of the proxy's _qa_price (entire 1,048,576-token multimodal
+    window at the input tariff + maxOutputTokens at the output tariff). Default = the largest single estimate a QA spec can need
+    (gemini-3.8-flash @ 65536 => 1.0322). The offline test execs the proxy's own _qa_price and asserts equality, so the two cannot drift."""
+    input_rate, output_rate = (.75, 3.75) if model == 'gemini-3.8-flash' else (.50, 1.50)
+    return round((1048576 * input_rate + maximum * output_rate) / 1000000, 6)
+
+
+def headroom_verdict(committed_usd, planned_usd, cap_usd=ONMISS_CAP_USD):
+    """Pure: the SAME admission test the proxy applies at claim time (`committed + bound > cap` refuses), run BEFORE the lease is accepted.
+    A lease whose remaining budget cannot cover one planned miss reservation would die with QA_ONMISS_SPEND_CAP after project creation
+    (run qa-spec-20261123T165940Z-88091); refusing here costs nothing. Never resets or edits a ledger."""
+    committed, planned = round(float(committed_usd), 6), round(float(planned_usd), 6)
+    remaining = round(cap_usd - committed, 6)
+    ok = round(committed + planned, 6) <= cap_usd
+    return {'ok': ok, 'code': None if ok else 'QA_ONMISS_LEASE_HEADROOM', 'cap_usd': cap_usd, 'committed_usd': committed,
+            'planned_reserve_usd': planned, 'remaining_usd': remaining}
+
+
+def onmiss_headroom_cli(box, head, spend_box, run_id, planned_usd, ledger_file, legacy_env, output=None):
+    """Read-only pre-dispatch headroom check on the RUN-scoped box ledger. Absent ledger (a new run, even on a reused box) = $0 committed.
+    Source: --ledger-file (offline/dry run) or the exact-key get-only legacy reader; any non-absence read error is QA_CUSTODY_UNCERTAIN
+    (fail closed). Exit 0 = accepted, exit 3 = refused (controller tries the next eligible pool box; the ledger is never touched)."""
+    ids = derive_exact_ids(box, head, spend_box, run_id)
+    if ledger_file:
+        path = Path(ledger_file)
+        raw = path.read_bytes() if path.exists() else None
+    else:
+        found = legacy_reader(legacy_env)(ids['box_key'])
+        raw = found[0] if found else None
+    view = _ledger_view(raw, ())
+    verdict = headroom_verdict(view['committed_usd'], planned_usd if planned_usd is not None else planned_miss_reserve_usd())
+    line = ('QA_ONMISS_LEASE_HEADROOM status=' + ('ok' if verdict['ok'] else 'refused') + ' run=' + ids['run_id'] + ' spend_box=' + ids['spend_box']
+            + ' scope=run cap_usd=' + str(verdict['cap_usd']) + ' committed_usd=' + str(verdict['committed_usd'])
+            + ' planned_reserve_usd=' + str(verdict['planned_reserve_usd']) + ' remaining_usd=' + str(verdict['remaining_usd'])
+            + ' ledger=' + ids['box_key'].rsplit('/', 1)[-1] + ' ledger_state=' + view['state'] + ' before=project-creation+dispatch')
+    print(line)
+    if output:
+        Path(output).write_text(json.dumps({**verdict, 'run_id': ids['run_id'], 'spend_box': ids['spend_box'], 'box_key': ids['box_key'],
+                                            'ledger_state': view['state']}, indent=2, sort_keys=True) + '\n')
+    return 0 if verdict['ok'] else 3
 
 
 def onmiss_summary(box_state, attempt_state, lease):
@@ -1164,7 +1225,7 @@ def ledger_source(box, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmis
         return source + QA_ONMISS_OFF_SOURCE
     if allow_billable_tools:
         raise ValueError('capture-on-miss never enables paid tools/search')
-    for k in ('dict', 'lease', 'spend_box', 'box_key', 'attempt_key'):
+    for k in ('dict', 'lease', 'spend_box', 'run_id', 'box_key', 'attempt_key'):
         source_value = onmiss[k]
         if not isinstance(source_value, str) or not re.fullmatch(r'[A-Za-z0-9._/-]{1,120}', source_value):
             raise ValueError('Invalid capture-on-miss identity: ' + k)
@@ -1203,7 +1264,7 @@ def strict_mode_check(strict_manifest, capture, onmiss, exact, allow_billable_to
 
 
 def overlay(root, box=None, capture=False, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmiss=False, exact=None,
-            ids_out=None, dry=False, app_data=None, strict_manifest=None):
+            ids_out=None, dry=False, app_data=None, strict_manifest=None, run_id=None):
     if onmiss and capture:
         raise ValueError('--on-miss and --capture are exclusive')
     strict = strict_mode_check(strict_manifest, capture, onmiss, exact, allow_billable_tools, app_data, box)
@@ -1530,15 +1591,15 @@ echo "QA_MODAL_DEPLOY_SECONDS=$((SECONDS-qa_deploy_started)) parallel=true"
         changes[p] = overlay_audit_secrets(p.read_text())
     if box:
         proxy = root/'modal/shared/llm_proxy_server.py'
-        ids = onmiss_effective(root, box, onmiss, exact, dry)
+        ids = onmiss_effective(root, box, onmiss, exact, dry, run_id)
         if ids:
             print('QA_ONMISS_IDENTITY lease=' + ids['lease'] + ' spend_box=' + ids['spend_box'] + ' head=' + ids['head'][:12]
-                  + ' cap_usd=' + str(ONMISS_CAP_USD) + ' store=' + ids['dict'])
+                  + ' run=' + ids['run_id'] + ' cap_usd=' + str(ONMISS_CAP_USD) + ' scope=run store=' + ids['dict'])
         if ids and ids.get('exact'):
             print('QA_ONMISS_EXACT digest=' + ids['exact']['digest'] + ' approved=' + str(len(ids['exact']['entries']))
                   + ' approval_ref=' + ids['exact']['approval_ref'])
             if ids_out:
-                record = {k: ids[k] for k in ('lease', 'spend_box', 'head', 'dict', 'box_key', 'attempt_key', 'stage_run', 'run_key')}
+                record = {k: ids[k] for k in ('lease', 'spend_box', 'head', 'run_id', 'dict', 'box_key', 'attempt_key', 'stage_run', 'run_key')}
                 record['manifest_digest'] = ids['exact']['digest']
                 record['canonical_keys'] = sorted(ids['exact']['entries'])
                 Path(ids_out).write_text(json.dumps(record, indent=2) + '\n')
@@ -2915,12 +2976,12 @@ def provision_extra_secrets(names, convex_helper, convex_root, run=subprocess.ru
 
 
 def prepare(box, root, config_path, capture=False, allow_billable_tools=False, tool_spend_cap_usd=2.0, onmiss=False,
-            extra_secrets=(), convex_helper=None, convex_root=None, exact=None, app_data=None, strict_manifest=None):
+            extra_secrets=(), convex_helper=None, convex_root=None, exact=None, app_data=None, strict_manifest=None, run_id=None):
     extra_names = parse_extra_secrets(extra_secrets, convex_helper, convex_root)  # fail closed before any write
     strict = strict_mode_check(strict_manifest, capture, onmiss, exact, allow_billable_tools, app_data, box)
     if exact and not onmiss:
         raise ValueError('--exact-manifest requires --on-miss')
-    exact_ids = onmiss_effective(root, box, onmiss, exact)  # an invalid exact manifest refuses here, before any write
+    exact_ids = onmiss_effective(root, box, onmiss, exact, False, run_id)  # an invalid exact manifest refuses here, before any write
     onmiss = bool(exact_ids)
     policy = tool_policy(allow_billable_tools, tool_spend_cap_usd)
     (config_path.parent/'billable-tools.json').write_text(json.dumps(policy, indent=2)+'\n')
@@ -2959,7 +3020,7 @@ def prepare(box, root, config_path, capture=False, allow_billable_tools=False, t
               + ' bucket=' + strict['bucket'] + ' app_data=ci-parity digest=' + strict['digest'])
     if onmiss:
         print('LLM_MODE=capture-on-miss strict_fixtures=true cap_usd=' + str(ONMISS_CAP_USD)
-              + ' scope=box-lifetime+attempt payloads=box-local')
+              + ' scope=run+attempt payloads=box-local')
         if exact_ids and exact_ids.get('exact'):
             print('QA_ONMISS_EXACT_PREPARED digest=' + exact_ids['exact']['digest'] + ' approved=' + str(len(exact_ids['exact']['entries'])))
     if capture:
@@ -3317,7 +3378,7 @@ def legacy_reader(env_path):
                           aws_access_key_id=values['R2_ACCESS_KEY_ID'], aws_secret_access_key=values['R2_SECRET_ACCESS_KEY'],
                           region_name='auto', config=Config(retries={'total_max_attempts': 2}, read_timeout=15, connect_timeout=10))
     def get(key):
-        if not re.fullmatch(r'qa-capture-ledgers/onmiss/(?:box|attempt)-[0-9a-f]{16}\.json', key):
+        if not re.fullmatch(r'qa-capture-ledgers/onmiss/(?:box|run|attempt)-[0-9a-f]{16}\.json', key):
             raise RuntimeError('QA_CUSTODY_UNCERTAIN: not an on-miss ledger key')
         try:
             obj = client.get_object(Bucket=LEGACY_BUCKET, Key=key)
@@ -3356,9 +3417,9 @@ def qa_ledger_access(row):
     return get, put
 
 
-def reconcile_custody_cli(box, head, spend_box, manifest_path, output, read_only, legacy_env):
+def reconcile_custody_cli(box, head, spend_box, manifest_path, output, read_only, legacy_env, run_id=None):
     manifest = load_exact_manifest(manifest_path, head)
-    ids = derive_exact_ids(box, head, spend_box)
+    ids = derive_exact_ids(box, head, spend_box, run_id)
     row = mint_exact_sessions('custody', ids, manifest)['custody']
     qa_get, qa_put = qa_ledger_access(row)
     receipt = reconcile_custody(ids, manifest, legacy_reader(legacy_env), qa_get, None if read_only else qa_put)
@@ -3489,12 +3550,12 @@ def scoped_report_canary(root, output):
 
 
 def capture_report(box, root, output, capture=False, allow_billable_tools=False, tool_spend_cap_usd=2.0,
-                   onmiss=False, scoped=False, exact=None, session_file=None, app_data=None):
+                   onmiss=False, scoped=False, exact=None, session_file=None, app_data=None, qa_run_id=None):
     os.environ.update(modal_env(True))
     run_id = 'remote-qa-' + identity(box)
     if exact and not onmiss:
         raise RuntimeError('--exact-manifest requires --on-miss')
-    ids = onmiss_effective(root, box, onmiss, exact)
+    ids = onmiss_effective(root, box, onmiss, exact, False, qa_run_id)
     if exact:
         # Exact mode: the report container gets ONLY the controller-piped prefix-scoped session (no shared secret, no fallback).
         if app_data not in APP_DATA_MODES:
@@ -3667,7 +3728,7 @@ def main():
     parser.add_argument('command',choices=['register','credentials','check-credentials','finish','stop','reap','overlay','prepare','resolve','ready','provider-ready','capture-report','scoped-report-canary','tool-policy','route-check',
                                             'check-exact-manifest','check-canary-receipt','mint-session','arm-session','check-exact-ids',
                                             'reconcile-custody','check-grant-receipt','check-app-data','check-app-mounts','verify-join','check-m15-stage',
-                                            'check-strict-manifest','strict-preflight','strict-ready'])
+                                            'check-strict-manifest','strict-preflight','strict-ready','onmiss-headroom'])
     parser.add_argument('--box')
     parser.add_argument('--ttl',type=int,default=2700)
     parser.add_argument('--root',type=Path)
@@ -3676,7 +3737,7 @@ def main():
     parser.add_argument('--verify',action='store_true')
     parser.add_argument('--capture',action='store_true')
     parser.add_argument('--on-miss',action='store_true',
-                        help='capture-on-miss (default QA capture lane): replay first, one priced eligible miss, $3 box+attempt cap')
+                        help='capture-on-miss (default QA capture lane): replay first, one priced eligible miss, $3 per QA run (+ per-attempt) cap')
     parser.add_argument('--output',type=Path)
     parser.add_argument('--allow-billable-tools',action='store_true',
                         help='Opt-in synthetic capture: metered Google Search with a soft admission budget')
@@ -3701,7 +3762,10 @@ def main():
     parser.add_argument('--legacy-env',type=Path,default=Path(LEGACY_ENV_DEFAULT),help='reconcile-custody: app env file holding the legacy-bucket read key (names only; never printed)')
     parser.add_argument('--report',type=Path,help='verify-join')
     parser.add_argument('--trace',type=Path,help='verify-join: the run-local spec langsmith-trace.json (optional)')
-    parser.add_argument('--run-id',help='verify-join: the controller run id')
+    parser.add_argument('--run-id',help='the controller QA run id: verify-join, and the KEY of the capture-on-miss spend ledgers '
+                        '(overlay/prepare/capture-report/mint-session/check-exact-ids/reconcile-custody/onmiss-headroom); $3 per RUN, not per box')
+    parser.add_argument('--planned-reserve-usd',type=float,help='onmiss-headroom: planned single-miss reservation (default: the proxy estimator maximum, 1.0322)')
+    parser.add_argument('--ledger-file',type=Path,help='onmiss-headroom: read the run ledger from this file (offline/dry run) instead of R2')
     parser.add_argument('--session-file',type=Path,help='capture-report --exact-manifest: controller-piped report session (deleted after use)')
     parser.add_argument('--receipt',type=Path,help='check-canary-receipt')
     parser.add_argument('--head',help='check-exact-manifest: required checkout head')
@@ -3753,9 +3817,13 @@ def main():
     elif a.command=='stop': stop(a.box,a.remote)
     elif a.command=='reap': reap()
     elif a.command=='overlay': overlay(a.root,a.box,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss,a.exact_manifest,a.ids_out,a.dry_check,a.app_data,
-                                       a.strict_manifest)
+                                       a.strict_manifest,a.run_id)
     elif a.command=='prepare': prepare(a.box,a.root,a.config,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss,
-                                       a.extra_secret,a.convex_helper,a.convex_root,a.exact_manifest,a.app_data,a.strict_manifest)
+                                       a.extra_secret,a.convex_helper,a.convex_root,a.exact_manifest,a.app_data,a.strict_manifest,a.run_id)
+    elif a.command=='onmiss-headroom':
+        if not (a.box and a.head and a.run_id):
+            parser.error('onmiss-headroom requires --box, --head, --spend-box and --run-id')
+        raise SystemExit(onmiss_headroom_cli(a.box, a.head, a.spend_box, a.run_id, a.planned_reserve_usd, a.ledger_file, a.legacy_env, a.output))
     elif a.command=='check-strict-manifest':
         if not a.strict_manifest:
             parser.error('check-strict-manifest requires --strict-manifest')
@@ -3772,7 +3840,7 @@ def main():
               + ' ' + ' '.join(k + ':sha256=' + v['sha256'] + ',bytes=' + str(v['bytes']) for k, v in receipt['fixtures'].items())
               + ' absent=' + receipt['absent'])
     elif a.command=='capture-report': capture_report(a.box,a.root,a.output,a.capture,a.allow_billable_tools,a.tool_spend_cap_usd,a.on_miss,
-                                                     False,a.exact_manifest,a.session_file,a.app_data)
+                                                     False,a.exact_manifest,a.session_file,a.app_data,a.run_id)
     elif a.command=='check-exact-manifest':
         if not a.exact_manifest:
             parser.error('check-exact-manifest requires --exact-manifest')
@@ -3811,7 +3879,7 @@ def main():
             # Scope is derived HERE from the trusted lease, physical-box identity and exact head. A box-written ids file is only
             # CHECKED against it (DENIED on any difference); it never selects a path.
             manifest = load_exact_manifest(a.exact_manifest, a.head)
-            ids = derive_exact_ids(a.box, a.head, a.spend_box)
+            ids = derive_exact_ids(a.box, a.head, a.spend_box, a.run_id)
             if a.ids:
                 check_exact_ids(ids, load_exact_ids(a.ids), manifest)
             print(json.dumps(mint_exact_sessions(a.kind, ids, manifest)))
@@ -3821,13 +3889,13 @@ def main():
         if not (a.box and a.head and a.ids and a.exact_manifest):
             parser.error('check-exact-ids requires --box, --head, --spend-box, --ids and --exact-manifest')
         manifest = load_exact_manifest(a.exact_manifest, a.head)
-        ids = derive_exact_ids(a.box, a.head, a.spend_box)
+        ids = derive_exact_ids(a.box, a.head, a.spend_box, a.run_id)
         check_exact_ids(ids, load_exact_ids(a.ids), manifest)
-        print('QA_EXACT_IDS ok lease=' + ids['lease'] + ' spend_box=' + ids['spend_box'] + ' head=' + ids['head'][:12])
+        print('QA_EXACT_IDS ok lease=' + ids['lease'] + ' spend_box=' + ids['spend_box'] + ' head=' + ids['head'][:12] + ' run=' + ids['run_id'])
     elif a.command=='reconcile-custody':
         if not (a.box and a.head and a.exact_manifest and a.output):
             parser.error('reconcile-custody requires --box, --head, --spend-box, --exact-manifest and --output')
-        reconcile_custody_cli(a.box, a.head, a.spend_box, a.exact_manifest, a.output, a.read_only, a.legacy_env)
+        reconcile_custody_cli(a.box, a.head, a.spend_box, a.exact_manifest, a.output, a.read_only, a.legacy_env, a.run_id)
     elif a.command=='check-grant-receipt':
         if not a.receipt:
             parser.error('check-grant-receipt requires --receipt')

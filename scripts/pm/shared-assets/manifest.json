@@ -1106,7 +1106,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "190d902ec36b12f28793f419e6f82f2895f07994100a8a34fbc2475fde9810fe",
+      "sha256": "84964d768779e68cfedca94b76a6236c89fe3b400bff26d44798e3717cdb2684",
       "source_path": "claude/scripts/remote-qa-modal.py"
     },
     {
@@ -1151,7 +1151,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "83d0275cd3ade490db6b0c6ecd2f0846cda800096f77bef39606f01264942477",
+      "sha256": "6d135110876ea155c1b0711450272a43413d5e250a2eef35c86f5dfcc756ee3d",
       "source_path": "claude/scripts/remote-qa-spec.sh"
     },
     {

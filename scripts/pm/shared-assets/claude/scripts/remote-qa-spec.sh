@@ -61,7 +61,7 @@
 #   MANIFEST = {"version":1,"head":"<40hex = --head>","approval_ref":"...","hashes":[{"hash":"<64hex>","provider","model","operation",
 #   "canonical_key"}]} (1-4 full hashes, no prefixes). Only those exact request hashes may dispatch live (checked after an AUTHORITATIVE
 #   replay miss and before pricing or any reservation; a lookup error or 403 is never a miss); every other miss is a typed refusal
-#   (QA_ONMISS_NOT_APPROVED, with its full hash) and zero provider I/O. Spend: stock $3 box-lifetime + per-attempt ledgers, both CAS
+#   (QA_ONMISS_NOT_APPROVED, with its full hash) and zero provider I/O. Spend: stock $3 PER QA RUN (Rajiv ts 1795459248.640279) + per-attempt ledgers, both CAS
 #   reservations before the single send, zero retries, no reclaim of an earlier lease's completed claim, UNKNOWN stays consumed at its
 #   bound. Storage: the proxy's fixture/staging/ledger clients and the report container get ONLY prefix-scoped 5-minute sessions minted
 #   on this host (re-minted every 100 s during the leg; the report session is minted after the leg), no shared secret and no fallback;
@@ -113,6 +113,28 @@ strict_manifest='' strict_digest='' strict_args='' strict_pid='' strict_prefligh
 # Label of the requested LLM mode (follows llm_onmiss, which the controller clears if it disables on-miss).
 llm_label() { if [ -n "$strict_manifest" ]; then echo strict-replay; elif [ -z "$llm_onmiss" ]; then echo strict; elif [ -n "$exact_manifest" ]; then echo capture-on-miss-exact; else echo capture-on-miss; fi; }
 modal_helper="${QA_MODAL_HELPER:-$HOME/.claude/scripts/remote-qa-modal.py}"
+# HEADROOM_GATE_BEGIN
+# Capture-on-miss lease headroom (CTO GO C0ALZJHGE49 thread 1795445208.612469, ts 1795455841.967449; per-run spend scope Rajiv D0AMF0XE6TS thread
+# 1795455420.472449, ts 1795459248.640279). READ-ONLY: reads this RUN's two spend ledgers through the helper, never writes or resets one. Same arithmetic as the
+# proxy's admission (committed + planned > $3 refuses). rc 0 = the remaining balance covers the planned miss reservation; rc 1 = refused
+# (helper rc 3 = QA_ONMISS_LEASE_HEADROOM, any other helper rc = custody uncertain, which also refuses). Runs on the trusted host right after
+# prepare confirms on-miss is live (QA_ONMISS_IDENTITY) and BEFORE the Playwright leg, project creation, the deadline readback and any
+# dispatch, so a refused run creates no project and sends nothing.
+qa_onmiss_headroom_gate() {
+  local hrc=0
+  "${QA_UV:-$HOME/.local/bin/uv}" run --no-project --python 3.13 --with boto3==1.35.99 python "$modal_helper" onmiss-headroom --box "$box" --head "$head" \
+    --spend-box "${pool_box:-$box}" --run-id "$run_id" --output "$out/onmiss-headroom.json" >"$out/onmiss-headroom.log" 2>&1 || hrc=$?
+  tee -a "$out/lane.txt" <"$out/onmiss-headroom.log"
+  [ "$hrc" = 0 ] && return 0
+  if [ "$hrc" = 3 ]; then
+    echo 'QA_ONMISS_LEASE_HEADROOM_REFUSED: the run balance cannot cover the planned miss reservation; stopped before project creation and dispatch; ledger untouched (no reset, no bypass)' | tee -a "$out/lane.txt" >&2
+  else
+    echo "QA_ONMISS_LEASE_HEADROOM_UNCERTAIN rc=$hrc: the run ledger could not be read; refusing before project creation and dispatch" | tee -a "$out/lane.txt" >&2
+  fi
+  echo 1 >"$out/lane.rc"
+  return 1
+}
+# HEADROOM_GATE_END
 runtime="${QA_SPEC_RUNTIME:-$HOME/.claude/scripts/remote-qa-spec-runtime.sh}"
 fetch_helper="$HOME/.claude/scripts/remote-qa-spec-fetch.py"
 slot='' branch='' head='' out='' env_file='' config='' provider=auto ttl=150m allow_seed='' spec='' patch='' test_line='' project='' with_deps=no legs_override='' timeout_secs='' prod_build=no trace=no dry_run=no
@@ -282,7 +304,7 @@ fi
 # The relay lease is registered with the box TTL and must outlive the whole lane run (modal logs are read until the end).
 [ "$ttl_seconds" -ge 60 ] && [ "$ttl_seconds" -le 10800 ] || { echo '--ttl must be 60s..3h (QA Modal lease limit)' >&2; exit 2; }
 [ "$timeout_secs" -le $(( ttl_seconds - 600 )) ] || { echo '--timeout must leave 600s of --ttl for setup/teardown (lease covers the lane only within --ttl)' >&2; exit 2; }
-if [ "$dry_run" = yes ]; then echo "DRY_RUN slot=$slot head=$head spec=$spec legs=$legs test_line=${test_line:-} project=${project:-} with_deps=$with_deps prod_build=$prod_build trace=$trace timeout_secs=$timeout_secs pool=${pool_lane:-0} priority=${pool_priority:-} disposable_convex=${disposable_convex:-0} pre_write_check=$([ -n "$pre_write_check" ] && echo yes || echo no) stripe_test_env=$([ -n "$stripe_test_env" ] && echo yes || echo no) llm_mode=$(llm_label)${llm_onmiss:+ onmiss_cap_usd=3 onmiss_fixture_bucket=heydonna-fixtures onmiss_scope=box-lifetime+attempt app_data=ci-parity app_data_bucket=heydonna-uploads}${strict_manifest:+ strict_digest=$strict_digest strict_fixtures=3 strict_bucket=heydonna-qa forwarding=off product_pin=$product_pin app_data=$app_data app_data_bucket=$app_data_bucket m15_staged=$([ -n "$m15_draft" ] && echo yes || echo no)}${m15_overlay_sha:+ m15_overlay_sha256=$m15_overlay_sha m15_convex_flag=config m15_next_flags=spec_env m15_observer_gate=before_browser}"; exit 0; fi
+if [ "$dry_run" = yes ]; then echo "DRY_RUN slot=$slot head=$head spec=$spec legs=$legs test_line=${test_line:-} project=${project:-} with_deps=$with_deps prod_build=$prod_build trace=$trace timeout_secs=$timeout_secs pool=${pool_lane:-0} priority=${pool_priority:-} disposable_convex=${disposable_convex:-0} pre_write_check=$([ -n "$pre_write_check" ] && echo yes || echo no) stripe_test_env=$([ -n "$stripe_test_env" ] && echo yes || echo no) llm_mode=$(llm_label)${llm_onmiss:+ onmiss_cap_usd=3 onmiss_fixture_bucket=heydonna-fixtures onmiss_scope=run+attempt onmiss_headroom=pre-lane app_data=ci-parity app_data_bucket=heydonna-uploads}${strict_manifest:+ strict_digest=$strict_digest strict_fixtures=3 strict_bucket=heydonna-qa forwarding=off product_pin=$product_pin app_data=$app_data app_data_bucket=$app_data_bucket m15_staged=$([ -n "$m15_draft" ] && echo yes || echo no)}${m15_overlay_sha:+ m15_overlay_sha256=$m15_overlay_sha m15_convex_flag=config m15_next_flags=spec_env m15_observer_gate=before_browser}"; exit 0; fi
 # Report unexpected failures without exposing command arguments or environment values.
 trap 'rc=$?; printf "QA_SPEC_ERROR: command failed at line %s (rc=%s)\n" "$LINENO" "$rc" >&2' ERR
 # Shared slot Convex may still use production storage; never start a QA box against it.
@@ -471,12 +493,12 @@ cleanup() {
         if [ -n "$exact_manifest" ]; then
           # Report container: ONLY a freshly minted prefix-scoped five-minute session, piped to a mode-600 box file that the
           # controller deletes on read (no shared secret mount, no fallback). Minted now, after the leg, never at launcher startup.
-          python3 -I "$modal_helper" mint-session --kind report --box "$box" --head "$head" --spend-box "$exact_spend_box" --ids "$out/onmiss-ids.json" --exact-manifest "$exact_manifest" \
+          python3 -I "$modal_helper" mint-session --kind report --box "$box" --head "$head" --spend-box "$exact_spend_box" --run-id "$run_id" --ids "$out/onmiss-ids.json" --exact-manifest "$exact_manifest" \
             | qa_rsh "umask 077; cat > /root/qa/scoped-report-session.json" >"$out/llm-report-session.log" 2>&1 || { rc=1; echo 'QA_SCOPED_REPORT_SESSION_FAILED' >>"$out/llm-report-session.log"; }
-          qa_rsh "set -e; source /root/qa/modal.env; export REMOTE_BOX=1; python3 -I /root/qa/modal-lane.py capture-report --box '$box' --root '$remote' --output /root/qa/out/llm-ledger.json $llm_onmiss$exact_args --session-file /root/qa/scoped-report-session.json" >"$out/llm-report.log" 2>&1 || rc=1
+          qa_rsh "set -e; source /root/qa/modal.env; export REMOTE_BOX=1; python3 -I /root/qa/modal-lane.py capture-report --box '$box' --root '$remote' --output /root/qa/out/llm-ledger.json --run-id '$run_id' $llm_onmiss$exact_args --session-file /root/qa/scoped-report-session.json" >"$out/llm-report.log" 2>&1 || rc=1
           qa_rsh "rm -f /root/qa/scoped-report-session.json" >/dev/null 2>&1
         else
-        qa_rsh "set -e; source /root/qa/modal.env; export REMOTE_BOX=1; python3 -I /root/qa/modal-lane.py capture-report --box '$box' --root '$remote' --output /root/qa/out/llm-ledger.json $llm_onmiss" >"$out/llm-report.log" 2>&1 || rc=1
+        qa_rsh "set -e; source /root/qa/modal.env; export REMOTE_BOX=1; python3 -I /root/qa/modal-lane.py capture-report --box '$box' --root '$remote' --output /root/qa/out/llm-ledger.json --run-id '$run_id' $llm_onmiss" >"$out/llm-report.log" 2>&1 || rc=1
         fi
         grep -E '^QA_ONMISS_(REPORT|TERMINAL)' "$out/llm-report.log" >"$out/llm-onmiss.txt" || true
       fi
@@ -746,7 +768,7 @@ if [ -n "$pre_write_check" ]; then
     echo "QA_M15_OVERLAY ok overlay_sha256=$m15_overlay_sha product_pin=$product_pin overlay_diff_sha256=$(shasum -a 256 <"$out/m15-overlay.diff" | cut -c1-64) files=$(grep -c '^diff --git ' "$out/m15-overlay.diff" || true) anchors=$(grep -c '^QA_M15_ANCHOR ' "$out/pre-write-check.log")" | tee -a "$out/lane.txt"
   fi
 fi
-qa_rsh "set -e; source /root/qa/modal.env; export REMOTE_BOX=1; python3 -I /root/qa/modal-lane.py overlay --root '$remote' --box '$box' $llm_onmiss$exact_overlay_args$strict_args; ${extra_box_env}python3 -I /root/qa/modal-lane.py prepare --box '$box' --root '$remote' --config /root/qa/config.json $llm_onmiss$exact_args$strict_args$extra_args_remote" >"$out/modal-prepare.log" 2>&1
+qa_rsh "set -e; source /root/qa/modal.env; export REMOTE_BOX=1; python3 -I /root/qa/modal-lane.py overlay --root '$remote' --box '$box' --run-id '$run_id' $llm_onmiss$exact_overlay_args$strict_args; ${extra_box_env}python3 -I /root/qa/modal-lane.py prepare --box '$box' --root '$remote' --config /root/qa/config.json --run-id '$run_id' $llm_onmiss$exact_args$strict_args$extra_args_remote" >"$out/modal-prepare.log" 2>&1
 if [ -n "$strict_manifest" ]; then
   grep -q "^QA_STRICT_REPLAY digest=$strict_digest fixtures=3 bucket=heydonna-qa forwarding=off " "$out/modal-prepare.log" \
     && grep -q "^LLM_MODE=strict-replay strict_fixtures=true forwarding=off fixtures=3 bucket=heydonna-qa app_data=ci-parity digest=$strict_digest\$" "$out/modal-prepare.log" \
@@ -762,12 +784,14 @@ if [ -n "$llm_onmiss" ]; then
     echo "llm_mode=strict (on-miss requested, controller disabled it)" | tee -a "$out/lane.txt"
   else
     grep -m1 '^QA_ONMISS_IDENTITY' "$out/modal-prepare.log" | tee -a "$out/lane.txt" || { echo 'QA_ONMISS_IDENTITY missing; refusing an unbound on-miss run' | tee -a "$out/lane.txt" >&2; exit 1; }
+    # Headroom BEFORE custody writes, the Playwright leg and project creation (stock and exact): refuse if the run balance cannot cover the planned miss.
+    qa_onmiss_headroom_gate || exit 1
     if [ -n "$exact_manifest" ]; then
       # The proxy was baked with THIS manifest digest and the box wrote its non-secret run identities; bind both before any session exists.
       grep -q "^QA_ONMISS_EXACT_PREPARED digest=$exact_digest approved=" "$out/modal-prepare.log" || { echo 'QA_ONMISS_EXACT_UNBOUND: prepare did not bind this manifest digest' | tee -a "$out/lane.txt" >&2; exit 1; }
       qa_rsh "cat /root/qa/onmiss-ids.json" >"$out/onmiss-ids.json" 2>/dev/null || { echo 'QA_ONMISS_IDS_MISSING' | tee -a "$out/lane.txt" >&2; exit 1; }
       # The box-written identities are only CHECKED against the trusted derivation (lease, physical box, exact head); DENIED on any difference.
-      python3 -I "$modal_helper" check-exact-ids --box "$box" --head "$head" --spend-box "$exact_spend_box" --ids "$out/onmiss-ids.json" --exact-manifest "$exact_manifest" | tee -a "$out/lane.txt" || { echo 'QA_ONMISS_IDS_DENIED: box-written identities differ from the trusted derivation' | tee -a "$out/lane.txt" >&2; exit 1; }
+      python3 -I "$modal_helper" check-exact-ids --box "$box" --head "$head" --spend-box "$exact_spend_box" --run-id "$run_id" --ids "$out/onmiss-ids.json" --exact-manifest "$exact_manifest" | tee -a "$out/lane.txt" || { echo 'QA_ONMISS_IDS_DENIED: box-written identities differ from the trusted derivation' | tee -a "$out/lane.txt" >&2; exit 1; }
       # Run 9 mount readback: no leased runtime may still mount the shared R2 secret.
       if [ "$app_data" = scoped ]; then
         qa_rsh "python3 -I /root/qa/modal-lane.py check-app-mounts --root '$remote'" 2>&1 | tee -a "$out/lane.txt"
@@ -778,7 +802,7 @@ if [ -n "$llm_onmiss" ]; then
       # Spend custody BEFORE any session exists: legacy (heydonna-fixtures) + QA (heydonna-qa) ledgers for the physical box AND the exact head,
       # prior claims for the approved hashes, halts and the combined allowance, bound into the QA ledgers (carry rows + custody marker) so the
       # proxy refuses every reservation without it. Trusted host only: the legacy read key never reaches a box.
-      "${QA_UV:-$HOME/.local/bin/uv}" run --no-project --python 3.13 --with boto3==1.35.99 python "$modal_helper" reconcile-custody --box "$box" --head "$head" --spend-box "$exact_spend_box" --exact-manifest "$exact_manifest" --output "$out/custody-reconcile.json" ${exact_dry:+--read-only} 2>&1 | tee -a "$out/lane.txt"
+      "${QA_UV:-$HOME/.local/bin/uv}" run --no-project --python 3.13 --with boto3==1.35.99 python "$modal_helper" reconcile-custody --box "$box" --head "$head" --spend-box "$exact_spend_box" --run-id "$run_id" --exact-manifest "$exact_manifest" --output "$out/custody-reconcile.json" ${exact_dry:+--read-only} 2>&1 | tee -a "$out/lane.txt"
       [ "$(grep -c '^QA_CUSTODY status=RECONCILED' "$out/lane.txt")" -ge 1 ] || { echo 'QA_CUSTODY_REFUSED: see custody-reconcile.json' | tee -a "$out/lane.txt" >&2; exit 1; }
       echo "QA_ONMISS_EXACT_BOUND manifest_sha256=$exact_digest ids=$out/onmiss-ids.json fixture_session_ttl_s=300 refresh_s=100 no_shared_secret=true" | tee -a "$out/lane.txt"
     fi
@@ -797,7 +821,7 @@ lane_rc=0
 scoped_arm_loop() {
   local n=0
   while :; do
-    if python3 -I "$modal_helper" mint-session --kind proxy --box "$box" --head "$head" --spend-box "$exact_spend_box" --ids "$out/onmiss-ids.json" --exact-manifest "$exact_manifest" \
+    if python3 -I "$modal_helper" mint-session --kind proxy --box "$box" --head "$head" --spend-box "$exact_spend_box" --run-id "$run_id" --ids "$out/onmiss-ids.json" --exact-manifest "$exact_manifest" \
         | qa_rsh "set -e; source /root/qa/modal.env; export REMOTE_BOX=1; python3 -I /root/qa/modal-lane.py arm-session --box '$box' --exact-manifest /root/qa/exact-manifest.json" >>"$out/scoped-arm.log" 2>&1; then
       n=$((n + 1)); echo "QA_SCOPED_ARM n=$n at=$(date -u +%FT%TZ)" >>"$out/scoped-arm.log"
     else
