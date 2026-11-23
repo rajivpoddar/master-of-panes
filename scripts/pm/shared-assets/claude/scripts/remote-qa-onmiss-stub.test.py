@@ -184,16 +184,19 @@ HEAD1 = subprocess.run(['git', '-C', str(APP), 'rev-parse', 'HEAD'], capture_out
 _n = [0]
 
 
-def ids_for(box, host, head=None):
+RUN1 = 'qa-spec-20261124T000000Z-10001'  # the QA RUN id keys the spend ledgers (Rajiv ts 1795459248.640279 "per run")
+
+
+def ids_for(box, host, head=None, run_id=RUN1):
     real = socket.gethostname
     socket.gethostname = lambda: host
     try:
-        ids = H.onmiss_identity(APP, box)
+        ids = H.onmiss_identity(APP, box, run_id)
     finally:
         socket.gethostname = real
-    if head:  # a different QA attempt (head) on the same physical box
+    if head:  # a different QA attempt (head) inside the same run / on the same physical box
         ids = dict(ids, head=head, stage_run='remote-qa-onmiss-' + H.identity(box) + '-' + head[:12],
-                   attempt_key='qa-capture-ledgers/onmiss/attempt-' + __import__('hashlib').sha256(('head:' + head).encode()).hexdigest()[:16] + '.json')
+                   attempt_key='qa-capture-ledgers/onmiss/attempt-' + __import__('hashlib').sha256(('run:' + run_id + ':head:' + head).encode()).hexdigest()[:16] + '.json')
     return ids
 
 
@@ -788,7 +791,7 @@ try:
             ok = False
         check('arming prerequisite: ' + ('accepts ' if expect else 'rejects ') + why, ok is expect)
     # ---- CTO REVISE 1795306033.832689 (pel-mwr051ua-91fb8062): 1 derivation/DENIED, 2 custody, dry-check, app-data, 3 verified join ----
-    D = H.derive_exact_ids(EX_BOX, EX_HEAD, EX_HOST)
+    D = H.derive_exact_ids(EX_BOX, EX_HEAD, EX_HOST, RUN1)
     check('trusted derivation equals the box-side identity (lease, physical box, ledger objects, staging prefix)',
           all(D[k] == EX_IDS[k] for k in ('lease', 'spend_box', 'head', 'dict', 'box_key', 'attempt_key', 'stage_run', 'run_key')))
     claimed = dict(D, manifest_digest=MAN['digest'])
@@ -807,7 +810,7 @@ try:
     for why, args in (('a pool lease alias without its physical pool server', (EX_BOX, EX_HEAD, EX_BOX)), ('a pool lease with a non-pool identity', (EX_BOX, EX_HEAD, 'evil-host')),
                       ('an ephemeral box claiming another physical identity', ('rtb-qa-eph-111111', EX_HEAD, EX_HOST)), ('a short head', (EX_BOX, 'd' * 12, EX_HOST))):
         try:
-            H.derive_exact_ids(*args)
+            H.derive_exact_ids(*args, RUN1)
             check('derivation refuses ' + why, False)
         except ValueError as error:
             check('derivation refuses ' + why, 'QA_SCOPED_MINT_DENIED' in str(error), str(error)[:60])

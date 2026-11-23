@@ -1115,7 +1115,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "041f249e94a4568cbe8b0bea8ead6890d9c0de218262983d16b860e27f4f5209",
+      "sha256": "446cd6812cd3026cd6bb095909fd65cd4f11e9b46479dc90970d3ad11cfbded4",
       "source_path": "claude/scripts/remote-qa-onmiss-stub.test.py"
     },
     {
