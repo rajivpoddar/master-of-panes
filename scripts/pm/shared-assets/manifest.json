@@ -928,6 +928,15 @@
       "source_path": "claude/scripts/proxy-agent-stop.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/proxy-agent-stream.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "23485fd062a830a2b6eb99d6154429bc91650db672ca25ce2f784aa2a6418990",
+      "source_path": "claude/scripts/proxy-agent-stream.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/proxy-agent.sh",
       "dependencies": [],
       "dependency_status": "closed",
@@ -998,6 +1007,15 @@
       "ownership_class": "shared-claude-proxy-launcher",
       "sha256": "856c897d2fee12452937c6d04beda0224e88dbdd8c2c7751413ba4d8fb50df82",
       "source_path": "claude/scripts/proxy-skill-overrides.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/proxy-window-label.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 493,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "0bbc29cefa1f0cc19384f986ce6272a8fbc03ded5a969603634d2e24fbe71238",
+      "source_path": "claude/scripts/proxy-window-label.py"
     },
     {
       "additional_targets": [
@@ -2220,7 +2238,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 243,
+    "selected_count": 245,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",
