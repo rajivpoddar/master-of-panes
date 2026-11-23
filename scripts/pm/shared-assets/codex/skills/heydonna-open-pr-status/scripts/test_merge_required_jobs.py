@@ -27,7 +27,13 @@ class World:
     def __init__(self):
         self.pr = copy.deepcopy(FIXTURE["pr"])
         self.run = copy.deepcopy(FIXTURE["run"])
+        self.run.setdefault("run_started_at", "2026-10-24T07:48:30Z")  # fixture predates it
         self.jobs = copy.deepcopy(FIXTURE["jobs"])
+        # The fixture's aggregate predates the exemption gate step; the current
+        # workflow runs it (skipped) before a paid verdict. Shape it to match.
+        next(j for j in self.jobs if j["name"] == "test")["steps"].insert(1, {
+            "name": "Require exemption or exact-head real CI success",
+            "status": "completed", "conclusion": "skipped"})
         self.log = FIXTURE["log"]
         self.files = copy.deepcopy(FIXTURE["files"])
         self.parents = FIXTURE["parents"][:]
@@ -38,7 +44,9 @@ class World:
         scope.update(run_id=self.e2e["id"], steps=[{
             "name": "Classify paid E2E scope", "status": "completed", "conclusion": "success"}])
         self.e2e_jobs = [scope, dict(scope, id=scope["id"]+1, name="e2e",
-                                     conclusion="skipped", steps=[])]
+                                     conclusion="skipped", steps=[]),
+                         dict(scope, id=scope["id"]+2, name="e2e-log-capture",
+                              conclusion="skipped", steps=[])]
         self.commands = []
         self.reads = []
         self.runs = None

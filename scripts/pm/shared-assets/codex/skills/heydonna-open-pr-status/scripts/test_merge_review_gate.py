@@ -37,6 +37,13 @@ REQUIRED_STEPS = {
 }
 
 
+def stamp(minutes):
+    """A run_started_at value; different calls must give different seconds."""
+    import datetime
+    base = datetime.datetime(2026, 11, 23, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    return (base + datetime.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def make_pr(head=HEAD, labels=PENDING, merged=False):
     pr = {"number": NUMBER,
           "head": {"sha": head, "ref": REF, "repo": {"full_name": "heydonna-app/heydonna-app"}},
@@ -48,11 +55,12 @@ def make_pr(head=HEAD, labels=PENDING, merged=False):
     return pr
 
 
-def workflow_run(workflow, conclusion):
-    return {"id": RUN_IDS[workflow], "run_attempt": 1, "head_sha": HEAD,
+def workflow_run(workflow, conclusion, minutes=0, status="completed", attempt=1):
+    return {"id": RUN_IDS[workflow], "run_attempt": attempt, "head_sha": HEAD,
             "event": "pull_request", "head_branch": REF,
-            "path": f".github/workflows/{workflow}", "status": "completed",
-            "conclusion": conclusion}
+            "path": f".github/workflows/{workflow}", "status": status,
+            "conclusion": conclusion, "run_started_at": stamp(minutes),
+            "pull_requests": [{"number": NUMBER}]}
 
 
 def workflow_jobs(workflow, conclusion, without_steps):
@@ -61,7 +69,9 @@ def workflow_jobs(workflow, conclusion, without_steps):
         steps = [] if without_steps else [
             {"name": step, "status": "completed", "conclusion": "success"} for step in step_names]
         jobs.append({"id": 100 + len(jobs), "name": name, "status": "completed",
-                     "conclusion": conclusion, "steps": steps})
+                     "conclusion": conclusion if conclusion else "skipped",
+                     "steps": steps, "run_id": RUN_IDS[workflow],
+                     "run_attempt": 1, "head_sha": HEAD})
     return jobs
 
 
@@ -79,6 +89,10 @@ class Stub:
             return dict(self.pr)
         if path == "git/ref/heads/main":
             return {"object": {"sha": world.get("main", MAIN)}}
+        if path.startswith("git/commits/"):
+            # Synthetic merge-commit parents for a workflow sha in a stubbed
+            # classifier log: [BASE, HEAD] mirrors the GitHub test-merge shape.
+            return {"parents": [{"sha": BASE}, {"sha": HEAD}]}
         if path.startswith("compare/"):
             return {"merge_base_commit": {"sha": world.get("merge_base", world.get("main", MAIN))},
                     "html_url": "https://example.invalid/compare",
@@ -318,6 +332,910 @@ def t20_site_lane_checks_renamed_previous_filename():
     merge.command = lambda *args: json.dumps([[{"filename": "docs/b.md",
                                                "previous_filename": "app/a.tsx"}]])
     assert merge.site_paths_confined(make_pr(), SITE_RULES) is False
+
+
+# ---- exact-head run selection: substantive vs gate-only verifier runs ----
+# One head can carry several pull_request CI/E2E runs: the substantive run (real
+# jobs) and gate-only verifier runs (only classify-change-scope + the aggregate
+# gate job; every other roster job skipped with no steps). The merge decision
+# binds to the newest SUBSTANTIVE run at its newest attempt.
+#   PR #14629 rule: the newest gate-only verifier NEWER than the selected
+#   substantive run must still be green.
+#   PR #14626 rule (CTO ts 1795403483.247259): an OLDER verifier-only run is
+#   superseded by a newer substantive run and never decides; a newer red or
+#   pending substantive run still refuses.
+SCOPE_JOB = "classify-change-scope"
+E2E_LEGS = ("Run E2E auto-process-critical", "Run E2E core-rest shard 1/2",
+            "Run E2E core-rest shard 2/2")
+CI_GATE = "Require exemption or exact-head real CI success"
+E2E_GATE = "Require exemption or exact-head real E2E success"
+
+
+_JOB_IDS = __import__("itertools").count(500)
+
+
+def _job(name, conclusion, steps=(), run_id=None, attempt=1):
+    return {"id": next(_JOB_IDS), "name": name, "status": "completed",
+            "conclusion": conclusion, "steps": list(steps),
+            "run_id": run_id, "run_attempt": attempt, "head_sha": HEAD}
+
+
+def _step(name, conclusion):
+    return {"name": name, "status": "completed", "conclusion": conclusion}
+
+
+def _run(workflow, run_id, attempt, conclusion, minutes, status="completed"):
+    return {"id": run_id, "run_attempt": attempt, "head_sha": HEAD, "event": "pull_request",
+            "head_branch": REF, "path": f".github/workflows/{workflow}", "status": status,
+            "conclusion": conclusion, "run_started_at": stamp(minutes),
+            "pull_requests": [{"number": NUMBER}]}
+
+
+def _scope_steps(workflow):
+    classifier = "Classify paid CI scope" if workflow == "ci.yml" else "Classify paid E2E scope"
+    return [_step("Set up job", "success"), _step(classifier, "success"),
+            _step("Complete runner", "success"), _step("Complete job", "success")]
+
+
+def ci_verifier_entry(run_id, attempt, conclusion, minutes):
+    """Gate-only ci run: classifier + aggregate gate ran, every other roster job skipped."""
+    test_steps = [_step("Set up job", "success"),
+                  _step("Require all CI phases", "skipped"),
+                  _step("Confirm current paid CI success", "skipped"),
+                  _step(CI_GATE, conclusion),
+                  _step("Complete runner", "success"), _step("Complete job", "success")]
+    jobs = [_job(SCOPE_JOB, "success", _scope_steps("ci.yml"), run_id, attempt),
+            _job("test", conclusion, test_steps, run_id, attempt)]
+    for name in merge.verifier_job_names("ci.yml"):
+        if name not in (SCOPE_JOB, "test"):
+            jobs.append(_job(name, "skipped", (), run_id, attempt))
+    return _run("ci.yml", run_id, attempt, conclusion, minutes), jobs
+
+
+def ci_substantive_entry(run_id, attempt, conclusion, minutes):
+    """Paid ci run: real jobs executed, aggregate carries the paid verdict."""
+    test_steps = [_step("Set up job", "success"),
+                  _step("Require all CI phases", conclusion),
+                  _step("Confirm current paid CI success", conclusion),
+                  _step(CI_GATE, "skipped"),
+                  _step("Complete runner", "success"), _step("Complete job", "success")]
+    jobs = [_job(SCOPE_JOB, "success", _scope_steps("ci.yml"), run_id, attempt),
+            _job("typescript", conclusion, [_step("Unit tests", conclusion)], run_id, attempt),
+            _job("unit-tests (1)", conclusion, [_step("Unit tests", conclusion)], run_id, attempt),
+            _job("python", conclusion, (), run_id, attempt),
+            _job("test", conclusion, test_steps, run_id, attempt)]
+    for name in ("unit-select", "unit-prechecks", "unit-tests-isolated", "unit-gate",
+                 "unit-cost-receipt", "ci-receipt-publish", "functional-selection-manifest"):
+        jobs.append(_job(name, conclusion, (), run_id, attempt))
+    for name in ("python-modal", "python-docx", "python-contracts", "ci-infra", "theme-palette"):
+        jobs.append(_job(name, "skipped", (), run_id, attempt))
+    return _run("ci.yml", run_id, attempt, conclusion, minutes), jobs
+
+
+def e2e_verifier_entry(run_id, attempt, conclusion, minutes):
+    """Gate-only e2e run: aggregate gate ran, every browser leg skipped."""
+    steps = [_step("Set up job", "success"),
+             _step("Record whether this run starts paid E2E", "success")]
+    steps += [_step(leg, "skipped") for leg in E2E_LEGS]
+    steps += [_step("Final verdict", "skipped"),
+              _step("Confirm current paid E2E success", "skipped"),
+              _step(E2E_GATE, conclusion),
+              _step("Complete runner", "success"), _step("Complete job", "success")]
+    jobs = [_job(SCOPE_JOB, "success", _scope_steps("e2e.yml"), run_id, attempt),
+            _job("e2e", conclusion, steps, run_id, attempt)]
+    for name in ("teardown-pr-modal-apps", "rerun-on-infra-failure", "e2e-log-capture"):
+        jobs.append(_job(name, "skipped", (), run_id, attempt))
+    return _run("e2e.yml", run_id, attempt, conclusion, minutes), jobs
+
+
+def e2e_substantive_entry(run_id, attempt, conclusion, minutes):
+    """Paid e2e run: browser legs executed, aggregate carries the paid verdict."""
+    steps = [_step("Set up job", "success"),
+             _step("Record whether this run starts paid E2E", "success")]
+    steps += [_step(leg, conclusion) for leg in E2E_LEGS]
+    steps += [_step("Final verdict", conclusion),
+              _step("Confirm current paid E2E success", conclusion),
+              _step(E2E_GATE, "skipped"),
+              _step("Complete runner", "success"), _step("Complete job", "success")]
+    jobs = [_job(SCOPE_JOB, "success", _scope_steps("e2e.yml"), run_id, attempt),
+            _job("e2e", conclusion, steps, run_id, attempt),
+            _job("e2e-log-capture", "success", (), run_id, attempt),
+            _job("teardown-pr-modal-apps", "skipped", (), run_id, attempt),
+            _job("rerun-on-infra-failure", "skipped", (), run_id, attempt)]
+    return _run("e2e.yml", run_id, attempt, conclusion, minutes), jobs
+
+
+class RunSetStub(Stub):
+    """Stub whose exact-head run set is explicit: {workflow file: [(run, jobs), ...]}."""
+
+    def pages(self, path, key):
+        self.calls.append(path)
+        run_set = self.world["run_set"]
+        if "/runs?" in path:
+            workflow = path.split("actions/workflows/")[1].split("/")[0]
+            return [run for run, _ in run_set.get(workflow, [])]
+        if "/jobs?" in path:
+            run_id = int(path.split("actions/runs/")[1].split("/")[0])
+            for entries in run_set.values():
+                for run, jobs in entries:
+                    if run["id"] == run_id:
+                        return jobs
+        raise AssertionError(f"unexpected pages path: {path}")
+
+
+def install_run_set(run_set):
+    stub = RunSetStub({"run_set": run_set})
+    merge.api, merge.pages, merge.command = stub.api, stub.pages, stub.command
+    merge.workflow_requirements = lambda *_: {"e2e_required": True}
+    merge.job_log = lambda job_id: "no classifier receipt"  # never a control-plane/test-only receipt
+    return stub
+
+
+def pr14629_run_set(**overrides):
+    """The #14629 shape: newest runs are gate-only verifiers, substantive below."""
+    run_set = {
+        "ci.yml": [ci_verifier_entry(45087101884, 2, "success", 40),   # verifier, attempt 2 green
+                   ci_verifier_entry(45086965553, 1, "failure", 30),   # verifier, attempt 1 red
+                   ci_substantive_entry(45086965482, 1, "success", 20),
+                   ci_verifier_entry(45086745712, 1, "failure", 10)],
+        "e2e.yml": [e2e_verifier_entry(45087101843, 2, "success", 40),
+                    e2e_verifier_entry(45086965508, 1, "failure", 30),
+                    e2e_substantive_entry(45086965486, 1, "success", 20),
+                    e2e_verifier_entry(45086745600, 1, "failure", 10)]}
+    run_set.update(overrides)
+    return run_set
+
+
+def expect_any_refusal(fn):
+    try:
+        fn()
+    except merge.Refusal:
+        return
+    raise AssertionError("expected a Refusal")
+
+
+def t21_pr14629_selects_substantive_runs_when_gate_only_verifier_is_newest():
+    install_run_set(pr14629_run_set())
+    out = merge.merge(NUMBER, HEAD)
+    assert out["status"] == "READY_TO_MERGE", out
+    assert out["workflows"]["ci.yml"]["run"] == 45086965482, out["workflows"]
+    assert out["workflows"]["e2e.yml"]["run"] == 45086965486, out["workflows"]
+
+
+def t22_no_substantive_run_at_the_head_still_refuses():
+    for workflow, entry in (("ci.yml", ci_verifier_entry), ("e2e.yml", e2e_verifier_entry)):
+        install_run_set(pr14629_run_set(**{workflow: [entry(7001, 2, "success", 60)]}))
+        expect_refusal(lambda: merge.merge(NUMBER, HEAD), f"WORKFLOW_MISSING workflow={workflow}")
+
+
+def t23_gate_only_verifier_newer_than_substantive_failed_still_refuses():
+    for workflow, ver, sub in (("ci.yml", ci_verifier_entry, ci_substantive_entry),
+                               ("e2e.yml", e2e_verifier_entry, e2e_substantive_entry)):
+        bad = [ver(7002, 2, "failure", 40), sub(7000, 1, "success", 20)]
+        install_run_set(pr14629_run_set(**{workflow: bad}))
+        expect_refusal(lambda: merge.merge(NUMBER, HEAD), "VERIFIER_NOT_GREEN")
+
+
+def t24_newest_substantive_run_red_is_not_shopped_past_for_an_older_green():
+    for workflow, entry in (("ci.yml", ci_substantive_entry), ("e2e.yml", e2e_substantive_entry)):
+        runs = [entry(7005, 1, "failure", 40), entry(7003, 1, "success", 20)]
+        install_run_set(pr14629_run_set(**{workflow: runs}))
+        expect_refusal(lambda: merge.merge(NUMBER, HEAD), f"WORKFLOW_NOT_GREEN workflow={workflow}")
+
+
+def t25_gate_only_run_with_classifier_exemption_is_still_honoured():
+    # Only ci.yml attempts the in-loop exemption for a gate-only verifier run;
+    # e2e exemptions travel through the app-test-only or ci-dummy lanes instead.
+    exemption = {"run": 7006, "exempt": "control_plane_only"}
+    original = merge.classifier_exemption
+    try:
+        install_run_set({"ci.yml": [ci_verifier_entry(7006, 1, "success", 60)]})
+        merge.classifier_exemption = lambda *args, **kwargs: exemption
+        assert merge.workflow_proof(make_pr(), "ci.yml", merge.WORKFLOWS["ci.yml"]) == exemption
+    finally:
+        merge.classifier_exemption = original
+
+
+def t26_pr14626_older_red_verifier_superseded_by_newer_green_substantive_allows():
+    # The exact refusal shape of PR #14626 at dacdb72f (CTO ts 1795403483.247259):
+    # newest run a green substantive, below it an older red verifier-only run and
+    # an older red substantive-with-failed-receipt-publish. The superseded red
+    # verifier must not veto.
+    run_set = pr14629_run_set(**{
+        "ci.yml": [ci_substantive_entry(45096280214, 1, "success", 60),
+                   ci_substantive_entry(45081008267, 1, "success", 30),
+                   ci_verifier_entry(45081008513, 1, "failure", 30),
+                   ci_verifier_entry(45080932030, 1, "failure", 20)],
+        "e2e.yml": [e2e_substantive_entry(45096280208, 1, "success", 60),
+                    e2e_verifier_entry(45081008556, 1, "success", 30)]})
+    install_run_set(run_set)
+    out = merge.merge(NUMBER, HEAD)
+    assert out["status"] == "READY_TO_MERGE", out
+    assert out["workflows"]["ci.yml"]["run"] == 45096280214, out["workflows"]
+
+
+def t27_newer_red_substantive_still_refuses_with_older_verifier_noise():
+    for workflow, ver, sub in (("ci.yml", ci_verifier_entry, ci_substantive_entry),
+                               ("e2e.yml", e2e_verifier_entry, e2e_substantive_entry)):
+        runs = [sub(7005, 1, "failure", 60), sub(7003, 1, "success", 30),
+                ver(7001, 1, "failure", 10)]
+        install_run_set(pr14629_run_set(**{workflow: runs}))
+        expect_any_refusal(lambda: merge.merge(NUMBER, HEAD))
+
+
+def t28_newer_pending_substantive_still_refuses():
+    pending_run = {"id": 7007, "run_attempt": 1, "head_sha": HEAD, "event": "pull_request",
+                   "head_branch": REF, "path": ".github/workflows/ci.yml",
+                   "status": "in_progress", "conclusion": None,
+                   "run_started_at": stamp(90), "pull_requests": [{"number": NUMBER}]}
+    pending_jobs = [{"id": 901, "name": "test", "status": "in_progress", "conclusion": None,
+                     "steps": [], "run_id": 7007, "run_attempt": 1, "head_sha": HEAD}]
+    run_set = pr14629_run_set(**{
+        "ci.yml": [(pending_run, pending_jobs),
+                   ci_substantive_entry(7003, 1, "success", 30)]})
+    install_run_set(run_set)
+    expect_any_refusal(lambda: merge.merge(NUMBER, HEAD))
+
+
+def t29_red_verifier_with_no_substantive_run_still_refuses():
+    for workflow, entry in (("ci.yml", ci_verifier_entry), ("e2e.yml", e2e_verifier_entry)):
+        install_run_set(pr14629_run_set(**{workflow: [entry(7008, 1, "failure", 60)]}))
+        expect_refusal(lambda: merge.merge(NUMBER, HEAD), "VERIFIER_NOT_GREEN")
+
+
+# ---- CTO rework controls (ts 1795416141.013939): the native required verifier ----
+# The same-second CI waiver now also requires the CURRENT successful native
+# required-context verifier (ci-dummy.yml at this exact PR/head, bound to the
+# attempt that published the green contexts, with an authenticated mixed-scope
+# classifier receipt whose bindings carry this HEAD_SHA). Without it, a
+# gate-only red plus a tied paid success alone must REFUSE.
+DUMMY_RID = 8001
+DUMMY_WF = "ci-dummy.yml"
+
+
+def native_verifier_entry(run_id, attempt, minutes, receipt_head=HEAD, receipt=None,
+                          classify_job_steps=None, test_gate="success", e2e_gate="success"):
+    """A green ci-dummy.yml run: the required-context exemption verifier."""
+    receipt = receipt if receipt is not None else _classifier_receipt_json()
+    lines = _classifier_lines(dict(receipt), workflow_sha=WFSHA)
+    if receipt_head is not None:
+        lines = [json.dumps(dict(receipt)), f"BASE_SHA: {BASE}",
+                 f"HEAD_SHA: {receipt_head}", f"WORKFLOW_SHA: {WFSHA}",
+                 "EVENT_NAME: pull_request", f"PR_NUMBER: {NUMBER}"]
+    scope_steps = ([_step("Set up job", "success"), _step("Classify paid CI scope", "success"),
+                    _step("Complete runner", "success"), _step("Complete job", "success")]
+                   if classify_job_steps is None else classify_job_steps)
+    jobs = [_job("detect-docs-only", "success", scope_steps, run_id, attempt),
+            _job("validate-detect", "success", (), run_id, attempt),
+            _job("test", "success" if test_gate == "success" else "failure",
+                 [_step("Set up job", "success"),
+                  _step("Require exemption or exact-head real CI success", test_gate),
+                  _step("Complete runner", "success"), _step("Complete job", "success")],
+                 run_id, attempt),
+            _job("e2e", "success" if e2e_gate == "success" else "failure",
+                 [_step("Set up job", "success"),
+                  _step("Require exemption or exact-head real E2E success", e2e_gate),
+                  _step("Complete runner", "success"), _step("Complete job", "success")],
+                 run_id, attempt)]
+    run = {"id": run_id, "run_attempt": attempt, "head_sha": HEAD, "event": "pull_request",
+           "head_branch": REF, "path": f".github/workflows/{DUMMY_WF}", "status": "completed",
+           "conclusion": "success", "run_started_at": stamp(minutes),
+           "pull_requests": [{"number": NUMBER}]}
+    return run, jobs, lines
+
+
+def install_with_native_verifier(entries, native_entries):
+    """Install ci/e2e run-set entries plus ci-dummy.yml native verifier runs."""
+    stub = RunSetStub({"run_set": {**entries, DUMMY_WF: native_entries}})
+    merge.api, merge.pages, merge.command = stub.api, stub.pages, stub.command
+    merge.workflow_requirements = lambda *_: {"e2e_required": True}
+    merge.job_log = lambda job_id: _log_for_run_set(DUMMY_LOGS, job_id)
+    return stub
+
+
+DUMMY_LOGS = {}
+
+
+def _log_for_run_set(logs, job_id):
+    if job_id in logs:
+        return "\n".join(logs[job_id])
+    return "no classifier receipt"
+
+
+def t30_same_second_gate_only_verifier_beside_green_substantive_proceeds():
+    # The #14638 shape (CTO ts 1795413605.307949 + REWORK 1795416141.013939):
+    # the gate-only CI sibling and the paid run STARTED IN THE SAME UTC SECOND,
+    # and the CURRENT successful native required verifier (ci-dummy.yml run
+    # 45108723956 attempt 5 shape) is bound to this exact PR/head with an
+    # authenticated mixed-scope receipt. The verifier's sole failure is its own
+    # exemption gate; the paid run is native-bound and green; the native
+    # required verifier is green. Only then is the verifier superseded.
+    run, jobs, lines = native_verifier_entry(DUMMY_RID, 5, 90)
+    DUMMY_LOGS.clear()
+    DUMMY_LOGS[jobs[0]["id"]] = lines
+    run_set = pr14629_run_set(**{
+        "ci.yml": [ci_verifier_entry(7009, 1, "failure", 60),
+                   ci_substantive_entry(7010, 1, "success", 60)]})
+    install_with_native_verifier(run_set, [(run, jobs)])
+    out = merge.merge(NUMBER, HEAD)
+    assert out["status"] == "READY_TO_MERGE", out
+    assert out["workflows"]["ci.yml"]["run"] == 7010, out["workflows"]
+
+
+def t31_same_second_verifier_red_outside_its_gate_still_refuses():
+    # Not narrow enough to pass a REAL failed verifier: a red job beside the
+    # gate makes the run no longer a gate-only sibling, so it refuses (fail
+    # closed) instead of being waived as a start-race artefact.
+    bad_jobs_run, jobs = ci_verifier_entry(7011, 1, "failure", 60)
+    for job in jobs:
+        if job["name"] == "python":
+            job["conclusion"] = "failure"
+    run_set = pr14629_run_set(**{
+        "ci.yml": [(bad_jobs_run, jobs), ci_substantive_entry(7012, 1, "success", 60)]})
+    install_run_set(run_set)
+    expect_any_refusal(lambda: merge.merge(NUMBER, HEAD))
+
+
+def t31b_same_second_verifier_with_a_second_failed_step_still_refuses():
+    # Only the gate step may be red for the waiver; any additional failed step in
+    # the aggregate is a genuine failure and refuses.
+    run, jobs = ci_verifier_entry(7019, 1, "failure", 60)
+    for job in jobs:
+        if job["name"] == "test":
+            job["steps"] = [dict(step) for step in job["steps"]]
+            job["steps"].insert(2, _step("Require all CI phases", "failure"))
+    run_set = pr14629_run_set(**{
+        "ci.yml": [(run, jobs), ci_substantive_entry(7020, 1, "success", 60)]})
+    install_run_set(run_set)
+    expect_any_refusal(lambda: merge.merge(NUMBER, HEAD))
+
+
+def t32_same_second_verifier_with_no_green_substantive_still_refuses():
+    # A real failed verifier with no later green substantive run keeps refusing.
+    run_set = pr14629_run_set(**{
+        "ci.yml": [ci_verifier_entry(7013, 1, "failure", 60),
+                   ci_substantive_entry(7014, 1, "failure", 60)]})
+    install_run_set(run_set)
+    expect_any_refusal(lambda: merge.merge(NUMBER, HEAD))
+
+
+def t33_same_second_verifier_beside_pending_substantive_still_refuses():
+    pending_run = {"id": 7015, "run_attempt": 1, "head_sha": HEAD, "event": "pull_request",
+                   "head_branch": REF, "path": ".github/workflows/ci.yml",
+                   "status": "in_progress", "conclusion": None,
+                   "run_started_at": stamp(60), "pull_requests": [{"number": NUMBER}]}
+    pending_jobs = [{"id": 950, "name": "test", "status": "in_progress", "conclusion": None,
+                     "steps": [], "run_id": 7015, "run_attempt": 1, "head_sha": HEAD}]
+    run_set = pr14629_run_set(**{
+        "ci.yml": [ci_verifier_entry(7016, 1, "failure", 60), (pending_run, pending_jobs)]})
+    install_run_set(run_set)
+    expect_any_refusal(lambda: merge.merge(NUMBER, HEAD))
+
+
+def t34_same_second_verifier_beside_unbound_substantive_still_refuses():
+    # No bound green verifier + green substantive pair: the substantive run must
+    # be natively bound to this exact PR, else the ambiguity still refuses.
+    unbound_run, jobs = ci_substantive_entry(7017, 1, "success", 60)
+    unbound_run["pull_requests"] = [{"number": NUMBER}, {"number": NUMBER + 1}]
+    run_set = pr14629_run_set(**{
+        "ci.yml": [ci_verifier_entry(7018, 1, "failure", 60), (unbound_run, jobs)]})
+    install_run_set(run_set)
+    expect_any_refusal(lambda: merge.merge(NUMBER, HEAD))
+
+
+def _classifier_receipt_json(**overrides):
+    receipt = {"schema_version": 1, "scope": "mixed", "test_only": False,
+               "app_test_only": False, "control_plane_only": False,
+               "paid_ci_exempt": False, "product_changed": True,
+               "ci_required": True, "e2e_required": False,
+               "ts_changed": True, "python_changed": True,
+               "rules_sha256": RULES_SHA, "changed_files": [TEST_FILE]}
+    receipt.update(overrides)
+    return receipt
+
+
+def _classifier_lines(receipt, workflow_sha=WFSHA):
+    return [json.dumps(receipt), f"BASE_SHA: {BASE}", f"HEAD_SHA: {HEAD}",
+            f"WORKFLOW_SHA: {workflow_sha}", "EVENT_NAME: pull_request",
+            f"PR_NUMBER: {NUMBER}"]
+
+
+def _numbered_step(number, name, conclusion):
+    return {"number": number, "name": name, "status": "completed", "conclusion": conclusion}
+
+
+def e2e_exempted_entry(run_id, attempt, conclusion, minutes, receipt):
+    """Gate-only e2e run that passed its exemption gate with every leg skipped."""
+    steps = [_numbered_step(1, "Set up job", "success"),
+             _numbered_step(2, "Record whether this run starts paid E2E", "success")]
+    number = 3
+    for leg in ("Run E2E auto-process-critical", "Run E2E core-rest shard 1/2",
+                "Run E2E core-rest shard 2/2", "Final verdict",
+                "Confirm current paid E2E success"):
+        steps.append(_numbered_step(number, leg, "skipped"))
+        number += 1
+    steps.append(_numbered_step(number, E2E_GATE, "success"))
+    steps.append(_numbered_step(number + 1, "Complete runner", "success"))
+    steps.append(_numbered_step(number + 2, "Complete job", "success"))
+    jobs = [_job(SCOPE_JOB, "success", _scope_steps("e2e.yml"), run_id, attempt),
+            _job("e2e", conclusion, steps, run_id, attempt),
+            _job("teardown-pr-modal-apps", "skipped", (), run_id, attempt),
+            _job("rerun-on-infra-failure", "skipped", (), run_id, attempt),
+            _job("e2e-log-capture", "skipped", (), run_id, attempt)]
+    return _run("e2e.yml", run_id, attempt, conclusion, minutes), jobs
+
+
+def install_e2e_duplicates(entries, receipts_by_scope_id):
+    merge.pages = lambda path, key: (
+        [run for run, _ in entries] if "/runs?" in path else
+        next(jobs for run, jobs in entries
+             if run["id"] == int(path.split("actions/runs/")[1].split("/")[0])))
+    merge.job_log = lambda job_id: "\n".join(_classifier_lines(receipts_by_scope_id[job_id]))
+    merge.command = lambda *args: json.dumps([[{"filename": TEST_FILE}]])
+
+
+def e2e_classifier_proof(receipt):
+    return {"head": HEAD, "rules_sha256": receipt["rules_sha256"], "workflow_sha": WFSHA}
+
+
+def t35_identical_duplicate_e2e_exemptions_are_one_exemption():
+    # #14638 second hold (CTO ts 1795413884.774109): two same-head, same-second
+    # E2E runs, both successful exemptions with identical classifier output.
+    receipt = _classifier_receipt_json()
+    entries = [e2e_exempted_entry(7101, 1, "success", 60, receipt),
+               e2e_exempted_entry(7102, 1, "success", 60, receipt)]
+    install_e2e_duplicates(entries, {entry[1][0]["id"]: receipt for entry in entries})
+    proof = merge.app_test_only_e2e_proof(make_pr(), e2e_classifier_proof(receipt))
+    assert proof is not None and proof["skipped"] is True, proof
+    assert proof["run"] == 7102, proof
+
+
+def t36_duplicate_e2e_exemptions_must_match_the_classifier_output():
+    for other in ({"e2e_required": True}, {"scope": "test_only"}, {"ci_required": False},
+                  {"changed_files": [TEST_FILE, "app/page.tsx"]}):
+        base = _classifier_receipt_json()
+        changed = dict(base, **other)
+        entries = [e2e_exempted_entry(7103, 1, "success", 60, base),
+                   e2e_exempted_entry(7104, 1, "success", 60, base)]
+        install_e2e_duplicates(entries, {entry[1][0]["id"]: receipt
+                                         for entry, receipt in zip(entries, (base, changed))})
+        assert merge.app_test_only_e2e_proof(make_pr(), e2e_classifier_proof(base)) is None, other
+
+
+def t37_mixed_duplicate_e2e_pair_red_or_pending_still_refuses():
+    receipt = _classifier_receipt_json()
+    red_run, red_jobs = e2e_exempted_entry(7105, 1, "failure", 60, receipt)
+    pending = {"id": 7106, "run_attempt": 1, "head_sha": HEAD, "event": "pull_request",
+               "head_branch": REF, "path": ".github/workflows/e2e.yml",
+               "status": "in_progress", "conclusion": None,
+               "run_started_at": stamp(60), "pull_requests": [{"number": NUMBER}]}
+    good = e2e_exempted_entry(7107, 1, "success", 60, receipt)
+    for second in ((red_run, red_jobs), (pending, [])):
+        entries = [good, second]
+        scopes = {entry[1][0]["id"] if entry[1] else 0: receipt for entry in entries}
+        install_e2e_duplicates(entries, scopes)
+        assert merge.app_test_only_e2e_proof(make_pr(), e2e_classifier_proof(receipt)) is None, second[0]["id"]
+
+
+def t38_duplicate_e2e_pair_executed_vs_exempt_still_refuses():
+    receipt = _classifier_receipt_json()
+    good = e2e_exempted_entry(7108, 1, "success", 60, receipt)
+    executed_run, executed_jobs = e2e_substantive_entry(7109, 1, "success", 60)
+    install_e2e_duplicates([good, (executed_run, executed_jobs)],
+                           {good[1][0]["id"]: receipt, executed_jobs[0]["id"]: receipt})
+    assert merge.app_test_only_e2e_proof(make_pr(), e2e_classifier_proof(receipt)) is None
+
+
+def t39_three_identical_duplicate_e2e_exemptions_are_still_one_exemption():
+    # The rule is "ALL of them are successful exemptions", not "exactly two":
+    # a third identical same-second exemption at the same head must not turn an
+    # otherwise-clean trio into a refusal.
+    receipt = _classifier_receipt_json()
+    entries = [e2e_exempted_entry(7110, 1, "success", 60, receipt),
+               e2e_exempted_entry(7111, 1, "success", 60, receipt),
+               e2e_exempted_entry(7112, 1, "success", 60, receipt)]
+    install_e2e_duplicates(entries, {entry[1][0]["id"]: receipt for entry in entries})
+    proof = merge.app_test_only_e2e_proof(make_pr(), e2e_classifier_proof(receipt))
+    assert proof is not None and proof["skipped"] is True, proof
+    assert proof["run"] == 7112, proof
+
+
+def t40_third_duplicate_e2e_exemption_that_differs_still_refuses():
+    # Ordering is irrelevant to the rule: whichever position the odd run takes,
+    # a trio where one exemption's classifier output differs must refuse.
+    base = _classifier_receipt_json()
+    changed = dict(base, changed_files=[TEST_FILE, "app/page.tsx"])
+    for receipts in ((base, base, changed), (base, changed, base), (changed, base, base)):
+        entries = [e2e_exempted_entry(7113 + index, 1, "success", 60, base)
+                   for index in range(3)]
+        install_e2e_duplicates(
+            entries,
+            {entry[1][0]["id"]: receipt for entry, receipt in zip(entries, receipts)})
+        assert merge.app_test_only_e2e_proof(make_pr(), e2e_classifier_proof(base)) is None, receipts
+
+
+# ---- CTO rework refusal controls (ts 1795416141.013939) ----
+
+def t41_gate_red_plus_tied_paid_success_without_native_verifier_refuses():
+    # The CTO's t30 control: WITHOUT the current successful native required
+    # verifier, a gate-only red plus a tied paid success alone must REFUSE.
+    # The failed gate can also mean untrusted scope or invalid binding.
+    run_set = pr14629_run_set(**{
+        "ci.yml": [ci_verifier_entry(7021, 1, "failure", 60),
+                   ci_substantive_entry(7022, 1, "success", 60)]})
+    install_run_set(run_set)  # no ci-dummy.yml runs at all
+    expect_refusal(lambda: merge.merge(NUMBER, HEAD), "VERIFIER_NOT_GREEN")
+
+
+def t42_gate_red_plus_tied_paid_success_with_red_native_verifier_refuses():
+    # The native verifier exists but its required-context test job is red: it
+    # is not a CURRENT successful verifier, so the refusal stands.
+    bad_ver, bad_jobs, lines = native_verifier_entry(DUMMY_RID + 1, 5, 90, test_gate="failure")
+    DUMMY_LOGS.clear()
+    DUMMY_LOGS[bad_jobs[0]["id"]] = lines
+    run_set = pr14629_run_set(**{
+        "ci.yml": [ci_verifier_entry(7023, 1, "failure", 60),
+                   ci_substantive_entry(7024, 1, "success", 60)]})
+    install_with_native_verifier(run_set, [(bad_ver, bad_jobs)])
+    expect_refusal(lambda: merge.merge(NUMBER, HEAD), "VERIFIER_NOT_GREEN")
+
+
+def t43_gate_red_plus_tied_paid_success_with_unbound_native_verifier_refuses():
+    # The native verifier is green-shaped but bound to ANOTHER PR: not bound
+    # to the exact PR/head, so it cannot supersede the gate-only red.
+    other_ver, other_jobs, lines = native_verifier_entry(DUMMY_RID + 2, 5, 90)
+    other_ver["pull_requests"] = [{"number": NUMBER + 1}]
+    DUMMY_LOGS.clear()
+    DUMMY_LOGS[other_jobs[0]["id"]] = lines
+    run_set = pr14629_run_set(**{
+        "ci.yml": [ci_verifier_entry(7025, 1, "failure", 60),
+                   ci_substantive_entry(7026, 1, "success", 60)]})
+    install_with_native_verifier(run_set, [(other_ver, other_jobs)])
+    expect_refusal(lambda: merge.merge(NUMBER, HEAD), "VERIFIER_NOT_GREEN")
+
+
+def t44_gate_red_plus_tied_paid_success_with_wrong_head_native_verifier_refuses():
+    # The native verifier's classifier receipt is bound to a DIFFERENT head:
+    # the authenticated binding (HEAD_SHA) fails, so it cannot supersede.
+    wrong_ver, wrong_jobs, lines = native_verifier_entry(DUMMY_RID + 3, 5, 90,
+                                                        receipt_head=OTHER)
+    DUMMY_LOGS.clear()
+    DUMMY_LOGS[wrong_jobs[0]["id"]] = lines
+    run_set = pr14629_run_set(**{
+        "ci.yml": [ci_verifier_entry(7027, 1, "failure", 60),
+                   ci_substantive_entry(7028, 1, "success", 60)]})
+    install_with_native_verifier(run_set, [(wrong_ver, wrong_jobs)])
+    expect_refusal(lambda: merge.merge(NUMBER, HEAD), "VERIFIER_NOT_GREEN")
+
+
+def t45_gate_red_plus_tied_paid_success_with_missing_classifier_receipt_refuses():
+    # The native verifier ran but its classifier log has NO schema_version=1
+    # receipt: nothing authenticates the scope decision, so it cannot supersede.
+    no_ver, no_jobs, _lines = native_verifier_entry(DUMMY_RID + 4, 5, 90)
+    DUMMY_LOGS.clear()
+    DUMMY_LOGS[no_jobs[0]["id"]] = ["no classifier receipt here"]
+    run_set = pr14629_run_set(**{
+        "ci.yml": [ci_verifier_entry(7029, 1, "failure", 60),
+                   ci_substantive_entry(7030, 1, "success", 60)]})
+    install_with_native_verifier(run_set, [(no_ver, no_jobs)])
+    expect_refusal(lambda: merge.merge(NUMBER, HEAD), "VERIFIER_NOT_GREEN")
+
+
+def t46_native_verifier_control_plane_receipt_cannot_supersede():
+    # Only a ci_required=true mixed/product receipt supports the paid lanes'
+    # gate skip; a control_plane_only exemption receipt is a different fact.
+    cp_receipt = {"schema_version": 1, "scope": "control_plane_only",
+                  "control_plane_only": True, "paid_ci_exempt": True,
+                  "product_changed": False, "ci_required": False,
+                  "e2e_required": False, "test_only": False,
+                  "rules_sha256": RULES_SHA, "changed_files": [TEST_FILE]}
+    cp_ver, cp_jobs, lines = native_verifier_entry(DUMMY_RID + 5, 5, 90,
+                                                   receipt=cp_receipt)
+    DUMMY_LOGS.clear()
+    DUMMY_LOGS[cp_jobs[0]["id"]] = lines
+    run_set = pr14629_run_set(**{
+        "ci.yml": [ci_verifier_entry(7031, 1, "failure", 60),
+                   ci_substantive_entry(7032, 1, "success", 60)]})
+    install_with_native_verifier(run_set, [(cp_ver, cp_jobs)])
+    expect_refusal(lambda: merge.merge(NUMBER, HEAD), "VERIFIER_NOT_GREEN")
+
+
+def t47_valid_14638_control_with_native_verifier_and_paid_run_proceeds():
+    # The valid #14638 control: same-second gate-only CI sibling, tied bound
+    # green paid run, AND the current successful native required verifier
+    # (run 45108723956 attempt 5 shape) bound to the exact PR/head. READY.
+    run, jobs, lines = native_verifier_entry(45108723956, 5, 90)
+    DUMMY_LOGS.clear()
+    DUMMY_LOGS[jobs[0]["id"]] = lines
+    run_set = pr14629_run_set(**{
+        "ci.yml": [ci_verifier_entry(45108847861, 1, "failure", 60),
+                   ci_substantive_entry(45108848017, 1, "success", 60)]})
+    install_with_native_verifier(run_set, [(run, jobs)])
+    out = merge.merge(NUMBER, HEAD)
+    assert out["status"] == "READY_TO_MERGE", out
+    assert out["workflows"]["ci.yml"]["run"] == 45108848017, out["workflows"]
+
+
+# ---- CTO rework refusal controls: E2E duplicate authentication ----
+
+def e2e_skipped_aggregate_entry(run_id, attempt, minutes, receipt, with_steps=False,
+                               receipt_head=HEAD, e2e_job_name="e2e"):
+    """An e2e.yml run whose aggregate job is marked skipped (GitHub: all legs skipped)."""
+    e2e_steps = ([_numbered_step(1, "Set up job", "success"),
+                  _numbered_step(2, "Run E2E auto-process-critical", "success")]
+                 if with_steps else [])
+    jobs = [_job(SCOPE_JOB, "success", _scope_steps("e2e.yml"), run_id, attempt),
+            _job(e2e_job_name, "skipped", e2e_steps, run_id, attempt),
+            _job("teardown-pr-modal-apps", "skipped", (), run_id, attempt),
+            _job("rerun-on-infra-failure", "skipped", (), run_id, attempt),
+            _job("e2e-log-capture", "skipped", (), run_id, attempt)]
+    run = {"id": run_id, "run_attempt": attempt, "head_sha": HEAD, "event": "pull_request",
+           "head_branch": REF, "path": ".github/workflows/e2e.yml", "status": "completed",
+           "conclusion": "success", "run_started_at": stamp(minutes),
+           "pull_requests": [{"number": NUMBER}]}
+    lines = ([json.dumps(dict(receipt)), f"BASE_SHA: {BASE}",
+              f"HEAD_SHA: {receipt_head}", f"WORKFLOW_SHA: {WFSHA}",
+              "EVENT_NAME: pull_request", f"PR_NUMBER: {NUMBER}"]
+             if receipt is not None else ["no classifier receipt"])
+    return run, jobs, lines
+
+
+def t48_duplicate_e2e_with_wrong_classifier_head_sha_and_no_classify_step_refuses():
+    # The CTO's first repro: a duplicate carrying a WRONG classifier HEAD_SHA
+    # and NO classify step must refuse. The skipped-aggregate path must not
+    # bypass the classifier-step and binding authentication.
+    receipt = _classifier_receipt_json()
+    good = e2e_exempted_entry(7201, 1, "success", 60, receipt)
+    # Duplicate with a wrong HEAD_SHA in its log and a scope job whose steps
+    # carry NO "Classify paid E2E scope" step at all.
+    bad_run, bad_jobs, bad_lines = e2e_skipped_aggregate_entry(
+        7202, 1, 60, dict(receipt), receipt_head=OTHER)
+    bad_jobs[0]["steps"] = [_step("Set up job", "success"),
+                            _step("Complete runner", "success"),
+                            _step("Complete job", "success")]
+    entries = [good, (bad_run, bad_jobs)]
+    install_e2e_duplicates(entries, {good[1][0]["id"]: receipt, bad_jobs[0]["id"]: None})
+    merge.job_log = lambda job_id: "\n".join(
+        _classifier_lines(receipt) if job_id == good[1][0]["id"] else
+        ([line for line in bad_lines if not line.startswith("{")]))
+    assert merge.app_test_only_e2e_proof(make_pr(), e2e_classifier_proof(receipt)) is None
+
+
+def t49_duplicate_e2e_marked_skipped_with_successful_browser_step_refuses():
+    # The CTO's second repro: a duplicate marked skipped with a SUCCESSFUL
+    # browser step must refuse. A skipped aggregate must have EMPTY steps.
+    receipt = _classifier_receipt_json()
+    good = e2e_exempted_entry(7203, 1, "success", 60, receipt)
+    bad_run, bad_jobs, bad_lines = e2e_skipped_aggregate_entry(
+        7204, 1, 60, dict(receipt), with_steps=True)
+    entries = [good, (bad_run, bad_jobs)]
+    install_e2e_duplicates(entries, {good[1][0]["id"]: receipt, bad_jobs[0]["id"]: receipt})
+    merge.job_log = lambda job_id: "\n".join(
+        _classifier_lines(receipt) if job_id == good[1][0]["id"] else bad_lines)
+    assert merge.app_test_only_e2e_proof(make_pr(), e2e_classifier_proof(receipt)) is None
+
+
+def t50_duplicate_e2e_skipped_aggregate_with_empty_steps_and_identical_identity_is_one():
+    # The valid skipped-aggregate control: empty steps, authenticated identical
+    # identity, non-null in every field. Still one exemption.
+    receipt = _classifier_receipt_json()
+    good = e2e_exempted_entry(7205, 1, "success", 60, receipt)
+    skip_run, skip_jobs, skip_lines = e2e_skipped_aggregate_entry(
+        7206, 1, 60, dict(receipt))
+    entries = [good, (skip_run, skip_jobs)]
+    install_e2e_duplicates(entries, {good[1][0]["id"]: receipt, skip_jobs[0]["id"]: receipt})
+    merge.job_log = lambda job_id: "\n".join(
+        _classifier_lines(receipt) if job_id == good[1][0]["id"] else skip_lines)
+    proof = merge.app_test_only_e2e_proof(make_pr(), e2e_classifier_proof(receipt))
+    assert proof is not None and proof["skipped"] is True, proof
+
+
+def t51_duplicate_e2e_with_null_classifier_identity_refuses():
+    # A candidate whose classifier identity has a NULL field (e.g. no rules
+    # sha) is not identical to a non-null identity: dedup requires non-null.
+    receipt = _classifier_receipt_json()
+    null_receipt = dict(receipt, rules_sha256=None)
+    good = e2e_exempted_entry(7207, 1, "success", 60, receipt)
+    bad_run, bad_jobs, bad_lines = e2e_skipped_aggregate_entry(
+        7208, 1, 60, dict(receipt))
+    entries = [good, (bad_run, bad_jobs)]
+    install_e2e_duplicates(entries, {good[1][0]["id"]: receipt, bad_jobs[0]["id"]: null_receipt})
+    merge.job_log = lambda job_id: "\n".join(
+        _classifier_lines(receipt) if job_id == good[1][0]["id"]
+        else _classifier_lines(null_receipt))
+    assert merge.app_test_only_e2e_proof(make_pr(), e2e_classifier_proof(receipt)) is None
+
+
+# ---- CTO rework-4 refusal controls: newer unusable verifier must NOT fall through ----
+
+def t52_newer_unusable_native_verifier_does_not_fall_through_to_older_valid_refuses():
+    # The CTO's ambiguous-ordering repro: the NEWEST native verifier at the
+    # head is unusable (a red test job), an OLDER valid green native verifier
+    # exists below it. Without rework-4 the loop skips past the unusable one to
+    # the older valid green; with it, the newest attempt is authoritative and
+    # the gate-only red is NOT superseded -> refuse (VERIFIER_NOT_GREEN).
+    bad_ver, bad_jobs, lines = native_verifier_entry(DUMMY_RID, 5, 100, test_gate="failure")
+    DUMMY_LOGS.clear()
+    DUMMY_LOGS[bad_jobs[0]["id"]] = lines
+    good_ver, good_jobs, good_lines = native_verifier_entry(45200, 5, 90)
+    DUMMY_LOGS[good_jobs[0]["id"]] = good_lines
+    run_set = pr14629_run_set(**{
+        "ci.yml": [ci_verifier_entry(7101, 1, "failure", 60),
+                   ci_substantive_entry(7102, 1, "success", 60)]})
+    install_with_native_verifier(run_set, [(bad_ver, bad_jobs), (good_ver, good_jobs)])
+    expect_refusal(lambda: merge.merge(NUMBER, HEAD), "VERIFIER_NOT_GREEN")
+
+
+def t53_newer_native_verifier_with_invalid_timestamp_does_not_fall_through_refuses():
+    # The CTO's invalid-timestamp repro: the newest native verifier's
+    # run_started_at is malformed (not an ISO 8601 Z stamp). The newest attempt
+    # is authoritative, so an invalid timestamp refuses even if an older valid
+    # green verifier exists below it -> refuse (VERIFIER_NOT_GREEN).
+    bad_ver, bad_jobs, lines = native_verifier_entry(DUMMY_RID, 5, 100)
+    bad_ver["run_started_at"] = "not-a-timestamp"
+    DUMMY_LOGS.clear()
+    DUMMY_LOGS[bad_jobs[0]["id"]] = lines
+    good_ver, good_jobs, good_lines = native_verifier_entry(45201, 5, 90)
+    DUMMY_LOGS[good_jobs[0]["id"]] = good_lines
+    run_set = pr14629_run_set(**{
+        "ci.yml": [ci_verifier_entry(7103, 1, "failure", 60),
+                   ci_substantive_entry(7104, 1, "success", 60)]})
+    install_with_native_verifier(run_set, [(bad_ver, bad_jobs), (good_ver, good_jobs)])
+    expect_refusal(lambda: merge.merge(NUMBER, HEAD), "VERIFIER_NOT_GREEN")
+
+
+def t54_newer_native_verifier_missing_attempt_metadata_refuses():
+    # The CTO's missing-attempt repro: the newest native verifier omits
+    # run_attempt. The CTO made run_attempt a required native attempt metadata
+    # field, so the newest attempt is refused regardless of an older valid green
+    # verifier below it -> refuse (VERIFIER_NOT_GREEN).
+    bad_ver, bad_jobs, lines = native_verifier_entry(DUMMY_RID, 5, 100)
+    bad_ver["run_attempt"] = None
+    DUMMY_LOGS.clear()
+    DUMMY_LOGS[bad_jobs[0]["id"]] = lines
+    good_ver, good_jobs, good_lines = native_verifier_entry(45202, 5, 90)
+    DUMMY_LOGS[good_jobs[0]["id"]] = good_lines
+    run_set = pr14629_run_set(**{
+        "ci.yml": [ci_verifier_entry(7105, 1, "failure", 60),
+                   ci_substantive_entry(7106, 1, "success", 60)]})
+    install_with_native_verifier(run_set, [(bad_ver, bad_jobs), (good_ver, good_jobs)])
+    expect_refusal(lambda: merge.merge(NUMBER, HEAD), "VERIFIER_NOT_GREEN")
+
+
+def t55_newest_native_verifier_is_the_valid_green_one_proceeds():
+    # Positive control: the newest native verifier IS the valid green one. It
+    # supersedes the same-second gate-only red -> READY. (t52-t54 prove the
+    # refusals; t47 + t55 together show the fix does not over-close.)
+    run, jobs, lines = native_verifier_entry(45203, 5, 100)
+    DUMMY_LOGS.clear()
+    DUMMY_LOGS[jobs[0]["id"]] = lines
+    run_set = pr14629_run_set(**{
+        "ci.yml": [ci_verifier_entry(7107, 1, "failure", 60),
+                   ci_substantive_entry(7108, 1, "success", 60)]})
+    install_with_native_verifier(run_set, [(run, jobs)])
+    out = merge.merge(NUMBER, HEAD)
+    assert out["status"] == "READY_TO_MERGE", out
+    assert out["workflows"]["ci.yml"]["run"] == 7108, out["workflows"]
+
+
+# ---- CTO rework-5 refusal controls (ts 1795444808.341169) ----
+# One fact per control. Each is RED on merge.py b24e34c9 and GREEN on the rework.
+
+def _rework5_ci(native):
+    """Same-second gate-only red + tied paid green, plus the given ci-dummy runs."""
+    DUMMY_LOGS.clear()
+    for _run_, jobs, lines in native:
+        DUMMY_LOGS[jobs[0]["id"]] = lines
+    run_set = pr14629_run_set(**{
+        "ci.yml": [ci_verifier_entry(7401, 1, "failure", 60),
+                   ci_substantive_entry(7402, 1, "success", 60)]})
+    install_with_native_verifier(run_set, [(run, jobs) for run, jobs, _ in native])
+
+
+def t56_native_verifier_invalid_timestamp_sorting_below_a_valid_one_refuses():
+    # An invalid stamp that string-sorts BELOW the valid green run used to be
+    # ordered away and ignored. Every matching stamp is validated first.
+    good = native_verifier_entry(45401, 5, 100)
+    stale = native_verifier_entry(45400, 5, 90)
+    stale[0]["run_started_at"] = "2026-11-23 10:00:00"  # no T/Z: sorts below any valid stamp
+    _rework5_ci([good, stale])
+    expect_refusal(lambda: merge.merge(NUMBER, HEAD), "VERIFIER_NOT_GREEN")
+
+
+def t57_native_verifier_same_second_red_at_a_lower_run_id_refuses():
+    # Two candidates in the newest second are ambiguous. The higher run id must
+    # never win the tie, even when it is the green one.
+    green = native_verifier_entry(45411, 5, 100)
+    red = native_verifier_entry(45410, 5, 100, test_gate="failure")
+    red[0]["conclusion"] = "failure"
+    _rework5_ci([green, red])
+    expect_refusal(lambda: merge.merge(NUMBER, HEAD), "VERIFIER_NOT_GREEN")
+
+
+def t58_native_verifier_missing_timestamp_refuses_without_keyerror():
+    good = native_verifier_entry(45421, 5, 100)
+    nostamp = native_verifier_entry(45420, 5, 90)
+    del nostamp[0]["run_started_at"]
+    _rework5_ci([good, nostamp])
+    expect_refusal(lambda: merge.merge(NUMBER, HEAD), "VERIFIER_NOT_GREEN")
+
+
+def t59_native_verifier_run_attempt_must_be_a_positive_integer():
+    # Jobs carry the same attempt value as the run, so only the attempt's type
+    # and sign are in question (never the job/run binding).
+    for bad in (0, -1, "5", 5.0, True):
+        run, jobs, lines = native_verifier_entry(45430, 5, 100)
+        run["run_attempt"] = bad
+        for job in jobs:
+            job["run_attempt"] = bad
+        _rework5_ci([(run, jobs, lines)])
+        try:
+            expect_refusal(lambda: merge.merge(NUMBER, HEAD), "VERIFIER_NOT_GREEN")
+        except Exception as exc:  # noqa: BLE001 - name the offending value
+            raise AssertionError(f"run_attempt={bad!r}: {type(exc).__name__}: {exc}") from exc
+
+
+def _install_skipped_e2e(entries):
+    """e2e.yml skipped-aggregate runs: [(run, jobs, classifier log lines), ...]."""
+    merge.pages = lambda path, key: (
+        [run for run, _, _ in entries] if "/runs?" in path else
+        next(jobs for run, jobs, _ in entries
+             if run["id"] == int(path.split("actions/runs/")[1].split("/")[0])))
+    logs = {jobs[0]["id"]: "\n".join(lines) for _, jobs, lines in entries}
+    merge.job_log = lambda job_id: logs[job_id]
+    merge.command = lambda *args: json.dumps([[{"filename": TEST_FILE}]])
+
+
+def t60_sole_skipped_e2e_aggregate_with_only_head_sha_wrong_refuses():
+    # Green classifier step, valid receipt, skipped shape: ONLY the logged
+    # HEAD_SHA is wrong. The skipped shape must not bypass authentication.
+    receipt = _classifier_receipt_json()
+    entry = e2e_skipped_aggregate_entry(7501, 1, 60, dict(receipt), receipt_head=OTHER)
+    _install_skipped_e2e([entry])
+    assert merge.app_test_only_e2e_proof(make_pr(), e2e_classifier_proof(receipt)) is None
+
+
+def t61_two_skipped_e2e_runs_sharing_the_same_wrong_head_refuse():
+    # Identical wrong identity on both runs is equality, not authentication.
+    receipt = _classifier_receipt_json()
+    entries = [e2e_skipped_aggregate_entry(7502, 1, 60, dict(receipt), receipt_head=OTHER),
+               e2e_skipped_aggregate_entry(7503, 1, 60, dict(receipt), receipt_head=OTHER)]
+    _install_skipped_e2e(entries)
+    assert merge.app_test_only_e2e_proof(make_pr(), e2e_classifier_proof(receipt)) is None
+
+
+def t62_sole_and_paired_authenticated_skipped_e2e_aggregates_still_proceed():
+    # Green controls for the skipped shape: the correct head must not over-close.
+    receipt = _classifier_receipt_json()
+    _install_skipped_e2e([e2e_skipped_aggregate_entry(7504, 1, 60, dict(receipt))])
+    proof = merge.app_test_only_e2e_proof(make_pr(), e2e_classifier_proof(receipt))
+    assert proof is not None and proof["skipped"] is True and proof["run"] == 7504, proof
+    _install_skipped_e2e([e2e_skipped_aggregate_entry(7505, 1, 60, dict(receipt)),
+                          e2e_skipped_aggregate_entry(7506, 1, 60, dict(receipt))])
+    proof = merge.app_test_only_e2e_proof(make_pr(), e2e_classifier_proof(receipt))
+    assert proof is not None and proof["skipped"] is True and proof["run"] == 7506, proof
+
+
+def t63_skipped_e2e_aggregate_authenticates_pr_event_files_rules_and_workflow():
+    # The rest of the authenticated bindings, for the skipped shape.
+    receipt = _classifier_receipt_json()
+    cases = {
+        "pr_number": (dict(receipt), lambda line: f"PR_NUMBER: {NUMBER + 1}"
+                      if line.startswith("PR_NUMBER") else line),
+        "event_name": (dict(receipt), lambda line: "EVENT_NAME: push"
+                       if line.startswith("EVENT_NAME") else line),
+        "workflow_sha": (dict(receipt), lambda line: f"WORKFLOW_SHA: {'9' * 40}"
+                         if line.startswith("WORKFLOW_SHA") else line),
+        "receipt_files": (dict(receipt, changed_files=[TEST_FILE, "app/page.tsx"]), None),
+        "rules_sha": (dict(receipt, rules_sha256="f" * 64), None),
+    }
+    for label, (case_receipt, rewrite) in cases.items():
+        run, jobs, lines = e2e_skipped_aggregate_entry(7507, 1, 60, case_receipt)
+        if rewrite is not None:
+            lines = [rewrite(line) for line in lines]
+        _install_skipped_e2e([(run, jobs, lines)])
+        assert merge.app_test_only_e2e_proof(
+            make_pr(), e2e_classifier_proof(receipt)) is None, label
 
 
 def _tests():

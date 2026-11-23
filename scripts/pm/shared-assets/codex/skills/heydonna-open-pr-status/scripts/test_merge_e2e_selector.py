@@ -29,6 +29,9 @@ class World:
                        base={"ref": "main"})
         self.pr["head"]["repo"] = {"full_name": "Scribie/heydonna-app"}
         self.runs = copy.deepcopy(NATIVE["runs"])
+        for run in self.runs:  # the fixture predates run_started_at; ordering now validates it
+            run.setdefault("run_started_at", {
+                WRAPPER: "2026-11-02T05:34:19Z", SUBSTANTIVE: "2026-11-02T05:34:18Z"}[run["id"]])
         self.jobs = copy.deepcopy(NATIVE["jobs"])
         self.required = False
         self.reads = []
@@ -62,8 +65,13 @@ class World:
                             "ts_changed": True, "python_changed": False}}
             return real_workflow_proof(pr, workflow, names)
 
+        # E2E classifier authentication has its own owning suite (test_merge_review_gate);
+        # its already-authenticated receipt is supplied at that seam.
         with patch.object(guard, "api", self.api), patch.object(guard, "pages", self.pages), \
                 patch.object(guard, "workflow_proof", workflow_proof), \
+                patch.object(guard, "e2e_classifier_authenticated",
+                             return_value={"ci_required": True, "e2e_required": False}), \
+                patch.object(guard, "e2e_duplicate_classifier_identity", return_value=("native",)), \
                 patch.object(guard, "site_classifier_exemption", return_value=None), \
                 patch.object(guard, "control_plane_classifier_exemption", return_value=None), \
                 patch.object(guard, "classifier_exemption", return_value=None), \
@@ -89,6 +97,13 @@ def test_exact_native_pair_selects_executed_classifier_not_label_wrapper():
     proof = result["workflows"]["e2e.yml"]
     assert (proof["run"], proof["attempt"], proof["head"], proof["skipped"]) == (
         SUBSTANTIVE, 1, HEAD, True)
+
+
+def test_newer_run_bound_to_another_pr_refuses_not_excluded():
+    # A same-head run that claims another PR is a binding conflict: fail closed.
+    w = World()
+    w.newest()["pull_requests"] = [{"number": 999}]
+    w.refuse()
 
 
 @pytest.mark.parametrize("case", ["empty", "only_skipped", "missing_classifier", "no_classify_step"])
@@ -117,7 +132,7 @@ def test_newest_executed_classifier_failure_or_inconclusive_never_falls_back(con
 
 @pytest.mark.parametrize("field,value", [
     ("head_sha", "f" * 40), ("head_branch", "other"), ("event", "push"),
-    ("path", ".github/workflows/other.yml"), ("pull_requests", [{"number": 999}])])
+    ("path", ".github/workflows/other.yml")])
 def test_foreign_newer_run_excluded(field, value):
     w = World()
     w.newest()[field] = value

@@ -2,6 +2,7 @@
 """Verify actual CI/E2E execution and squash a PR with a head pin."""
 
 import argparse
+import datetime
 import fnmatch
 import json
 import re
@@ -61,26 +62,360 @@ def successful(item):
     return item.get("status") == "completed" and item.get("conclusion") == "success"
 
 
+def bound_attempt_jobs(pr, run, jobs, *, allow_failed=False):
+    """Bind every native job to the selected exact PR, head, run and attempt."""
+    return (native_pr_binding_ok(run, pr) and bool(jobs)
+            and all(j.get("id") is not None and j.get("name") for j in jobs)
+            and len({j.get("id") for j in jobs}) == len(jobs)
+            and len({j.get("name") for j in jobs}) == len(jobs)
+            and all(j.get("run_id") == run.get("id") and j.get("run_attempt") == run.get("run_attempt", 1)
+                    and j.get("head_sha") == pr["head"]["sha"] and j.get("status") == "completed"
+                    and j.get("conclusion") in (("success", "skipped", "failure") if allow_failed else ("success", "skipped")) for j in jobs))
+
+
+def verifier_job_names(workflow):
+    return ({"classify-change-scope", "test", "ci-infra", "unit-tests-isolated", "unit-select", "python-contracts", "unit-prechecks", "typescript", "python-docx", "unit-gate", "theme-palette", "python-modal", "python", "unit-tests (${{ matrix.shard }})", "unit-cost-receipt", "ci-receipt-publish", "functional-selection-manifest"} if workflow == "ci.yml" else {"classify-change-scope", "teardown-pr-modal-apps", "e2e", "rerun-on-infra-failure", "e2e-log-capture"})
+
+
+LEGACY_CI_VERIFIER_JOBS = {"test", "classify-change-scope", "python-contracts", "unit-tests", "unit-tests-isolated", "typescript", "python-docx", "python", "theme-palette", "ci-receipt-publish", "functional-selection-manifest", "ci-infra", "python-modal"}
+LEGACY_CI_WORKFLOW_BLOB = "eb973c3382478b845d1d0541f12f95ee4efc7d33"
+
+
+def legacy_ci_roster_authenticated(pr, run, jobs):
+    """Accept the complete older roster only for its bound workflow blob."""
+    if {j.get("name") for j in jobs} != LEGACY_CI_VERIFIER_JOBS:
+        return False
+    scope = next(j for j in jobs if j.get("name") == CLASSIFIER_JOB_NAME)
+    bindings = classifier_bindings(strip_log_framing(job_log(scope["id"])))
+    if not bindings or bindings["HEAD_SHA"] != pr["head"]["sha"] or not event_binding_ok(bindings, run, pr) or not pr_binding_ok(bindings, run, pr):
+        return False
+    base, execution = bindings["BASE_SHA"], bindings["WORKFLOW_SHA"]
+    if not HEX40.fullmatch(base) or not HEX40.fullmatch(execution):
+        return False
+    if [p.get("sha") for p in api(f"git/commits/{execution}").get("parents", [])] != [base, pr["head"]["sha"]]:
+        return False
+    path = ".github/workflows/ci.yml"
+    at_base, at_execution = contents_identity(path, base), contents_identity(path, execution)
+    return bool(at_base and at_execution and at_base[0] == at_execution[0] == LEGACY_CI_WORKFLOW_BLOB)
+
+
+def verifier_only_outcome(pr, workflow, run, jobs):
+    """Identify a completed native gate-only sibling, never paid execution."""
+    outcome = run.get("conclusion")
+    if run.get("status") != "completed" or outcome not in ("success", "failure"): return None
+    aggregate = "test" if workflow == "ci.yml" else "e2e"
+    if not native_pr_binding_ok(run, pr) or not jobs or any(j.get("id") is None or not j.get("name") for j in jobs): return None
+    if len({j.get("id") for j in jobs}) != len(jobs) or len({j.get("name") for j in jobs}) != len(jobs): return None
+    if any(j.get("run_id") != run.get("id") or j.get("run_attempt") != run.get("run_attempt", 1)
+           or j.get("head_sha") != pr["head"]["sha"] or j.get("status") != "completed"
+           or j.get("conclusion") not in ((outcome,) if j.get("name") == aggregate else ("success", "skipped")) for j in jobs): return None
+    by_name = {j["name"]: j for j in jobs}
+    if (set(by_name) != verifier_job_names(workflow)
+            and not (workflow == "ci.yml" and legacy_ci_roster_authenticated(pr, run, jobs))): return None
+    scope=by_name.get(CLASSIFIER_JOB_NAME,{})
+    scope_step="Classify paid CI scope" if workflow == "ci.yml" else "Classify paid E2E scope"
+    if not successful(scope) or len([s for s in scope.get("steps",[]) if s.get("name") == scope_step and successful(s)]) != 1: return False
+    name="test" if workflow == "ci.yml" else "e2e"
+    job=by_name.get(name,{})
+    if job.get("conclusion") != outcome: return None
+    steps=job.get("steps",[])
+    if not steps or len({s.get("name") for s in steps}) != len(steps): return False
+    gate="Require exemption or exact-head real CI success" if workflow == "ci.yml" else "Require exemption or exact-head real E2E success"
+    skipped=("Require all CI phases", "Confirm current paid CI success") if workflow == "ci.yml" else ("Run E2E auto-process-critical", "Run E2E core-rest shard 1/2", "Run E2E core-rest shard 2/2", "Final verdict", "Confirm current paid E2E success")
+    for prefix in skipped:
+        matches=[s for s in steps if s.get("name","").startswith(prefix)]
+        if len(matches)!=1 or matches[0].get("status") != "completed" or matches[0].get("conclusion") != "skipped": return False
+    gate_steps=[s for s in steps if s.get("name") == gate]
+    if len(gate_steps)!=1 or gate_steps[0].get("status") != "completed" or gate_steps[0].get("conclusion") != outcome: return None
+    plumbing={"Set up job", "Record whether this run starts paid E2E", gate, "Complete runner", "Complete job"}
+    if any(s.get("status") != "completed" or not (s.get("conclusion") == "skipped" or (s.get("name") in plumbing and successful(s)) or (s.get("name") == gate and s.get("conclusion") == outcome)) for s in steps): return None
+    if any(j.get("name") not in (CLASSIFIER_JOB_NAME,name) and (j.get("conclusion") != "skipped" or j.get("steps") != []) for j in jobs): return False
+    if workflow == "e2e.yml":
+        capture=by_name.get("e2e-log-capture",{})
+        if capture.get("conclusion") != "skipped" or capture.get("steps") != []: return False
+    return outcome
+
+
+def verify_substantive_after_wrapper(pr, workflow, run, jobs):
+    """A verifier never substitutes for a current native paid producer."""
+    if not successful(run) or not bound_attempt_jobs(pr, run, jobs):
+        raise Refusal(f"SUBSTANTIVE_RUN_NOT_GREEN_OR_UNBOUND workflow={workflow} run={run['id']}")
+    name="test" if workflow == "ci.yml" else "e2e"
+    job=next((j for j in jobs if j.get("name") == name),{})
+    verdict="Confirm current paid CI success" if workflow == "ci.yml" else "Confirm current paid E2E success"
+    if not successful(job) or len([s for s in job.get("steps",[]) if s.get("name") == verdict and successful(s)]) != 1:
+        raise Refusal(f"SUBSTANTIVE_PAID_VERDICT_MISSING workflow={workflow} run={run['id']}")
+    if workflow == "e2e.yml" and not successful(next((j for j in jobs if j.get("name") == "e2e-log-capture"),{})):
+        raise Refusal(f"SUBSTANTIVE_E2E_CAPTURE_MISSING run={run['id']}")
+
+
+def native_required_verifier_green(pr, workflow, run, jobs):
+    """The CURRENT successful native required-context verifier (CTO ts
+    1795416141.013939): the ci-dummy.yml (ci.yml for its roster) run whose
+    required-context jobs carry the exemption gate that justified the paid
+    lanes' skip, natively bound to this exact PR and head, at the attempt
+    that published the green contexts.
+
+    A gate-only red plus a tied paid success alone must REFUSE: the failed
+    gate can mean an untrusted scope or invalid binding, and only this
+    verifier proves the required contexts are green at this head.
+    """
+    if not successful(run) or not native_pr_binding_ok(run, pr):
+        return False
+    attempt = run.get("run_attempt")
+    if type(attempt) is not int or attempt < 1:
+        return False
+    head = pr["head"]["sha"]
+    if (run.get("head_sha") != head or run.get("event") != "pull_request"
+            or run.get("head_branch") != pr["head"]["ref"]
+            or run.get("path", "").split("@")[0] != f".github/workflows/{SITE_EXEMPTION_WORKFLOW}"):
+        return False
+    if not bound_attempt_jobs(pr, run, jobs):
+        return False
+    aggregate = "test" if workflow == "ci.yml" else "e2e"
+    by_name = {job.get("name"): job for job in jobs}
+    if set(by_name) != {"detect-docs-only", "validate-detect", "test", "e2e"}:
+        return False
+    scope = by_name.get(SITE_CLASSIFIER_JOB_NAME, {})
+    if not successful(scope):
+        return False
+    # The classifier receipt and its authenticated bindings prove the scope
+    # decision this verifier ran on is bound to this exact PR/head.
+    lines = strip_log_framing(job_log(scope["id"]))
+    receipt = classifier_receipt_object(lines, "mixed")
+    if receipt is None or receipt.get("ci_required") is not True:
+        return False
+    bindings = classifier_bindings(lines)
+    if (bindings is None or bindings.get("HEAD_SHA") != head
+            or not event_binding_ok(bindings, run, pr)
+            or not pr_binding_ok(bindings, run, pr)):
+        return False
+    required = [job for job in jobs if job.get("name") in ("test", "e2e")]
+    for job in required:
+        gate = ("Require exemption or exact-head real CI success" if job["name"] == "test"
+                else "Require exemption or exact-head real E2E success")
+        steps = job.get("steps", [])
+        if not successful(job):
+            return False
+        if len([step for step in steps if step.get("name") == gate and successful(step)]) != 1:
+            return False
+    return True
+
+
+def run_started_at_valid(value):
+    """True only for a real UTC second stamp (YYYY-MM-DDTHH:MM:SSZ, ASCII digits)."""
+    if not isinstance(value, str) or not re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value, re.ASCII):
+        return False
+    try:
+        datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return False
+    return True
+
+
+def native_required_verifier_for(pr, workflow):
+    """Find the newest CURRENT successful native required verifier for this head.
+
+    The newest ci-dummy run at this head must ITSELF be a green verifier: an
+    unusable newer attempt (unbound, wrong head, or a receipt log with no
+    schema_version=1 line) never falls through to an older valid verifier.
+    Ordering is only ever by a VALIDATED start second (CTO rework-4, ts
+    1795433408.345089, and rework-5, ts 1795444808.341169):
+      * every matching run's run_started_at must be present and parse BEFORE
+        any ordering, so a bad stamp can neither raise KeyError nor sort below
+        a valid run and be ignored;
+      * more than one candidate in the newest second is ambiguous and refuses
+        (never a run-id tie-break);
+      * the selected run must carry a positive integer native run_attempt.
+    """
+    runs = pages(
+        f"actions/workflows/{SITE_EXEMPTION_WORKFLOW}/runs?event=pull_request&head_sha={pr['head']['sha']}&per_page=100",
+        "workflow_runs")
+    matching = [run for run in runs if (
+        run.get("head_sha") == pr["head"]["sha"] and run.get("event") == "pull_request"
+        and run.get("head_branch") == pr["head"]["ref"]
+        and run.get("path", "").split("@")[0] == f".github/workflows/{SITE_EXEMPTION_WORKFLOW}")]
+    if not matching:
+        return False
+    if not all(run_started_at_valid(run.get("run_started_at")) for run in matching):
+        return False
+    matching.sort(key=lambda run: run["run_started_at"], reverse=True)
+    newest = matching[0]
+    if sum(run["run_started_at"] == newest["run_started_at"] for run in matching) != 1:
+        return False
+    attempt = newest.get("run_attempt")
+    if type(attempt) is not int or attempt < 1:
+        return False
+    if not successful(newest):
+        return False
+    jobs = pages(f"actions/runs/{newest['id']}/jobs?filter=latest&per_page=100", "jobs")
+    return native_required_verifier_green(pr, workflow, newest, jobs)
+
+
+def verifier_gate_only_red_is_superseded(pr, workflow, verifier, selected):
+    """A same-second gate-only verifier that lost a start race does not veto.
+
+    Narrow rule (CTO ts 1795413605.307949): the verifier's ONLY red must be its
+    own exemption gate, and the selected substantive run must be a native
+    PR/head/attempt-bound paid run whose verdict steps succeeded at the same
+    head. A real failed job, an unbound or unverified substantive run, or any
+    red/pending sibling at the same second still refuses.
+    """
+    outcome, verifier_run, verifier_jobs = verifier
+    run, jobs = selected
+    if outcome != "failure":
+        return False
+    if verifier_run.get("run_started_at") != run.get("run_started_at"):
+        return False
+    if not (native_pr_binding_ok(verifier_run, pr) and native_pr_binding_ok(run, pr)):
+        return False
+    name = "test" if workflow == "ci.yml" else "e2e"
+    gate = ("Require exemption or exact-head real CI success" if workflow == "ci.yml"
+            else "Require exemption or exact-head real E2E success")
+    verdict = ("Confirm current paid CI success" if workflow == "ci.yml"
+               else "Confirm current paid E2E success")
+    v_aggregate = next((job for job in verifier_jobs if job.get("name") == name), None)
+    if v_aggregate is None or v_aggregate.get("conclusion") != "failure":
+        return False
+    failed = [step.get("name") for step in v_aggregate.get("steps", [])
+              if step.get("conclusion") == "failure"]
+    if failed != [gate]:
+        return False
+    aggregate = next((job for job in jobs if job.get("name") == name), {})
+    if not successful(run) or not successful(aggregate):
+        return False
+    if not bound_attempt_jobs(pr, run, jobs):
+        return False
+    if not any(step.get("name") in (verdict, "Require all CI phases") and successful(step)
+               for step in aggregate.get("steps", [])):
+        return False
+    # The CTO's control (ts 1795416141.013939): a gate-only red plus a tied
+    # paid success alone must REFUSE. The failed gate can also mean an
+    # untrusted scope or invalid binding; only the CURRENT successful native
+    # required verifier, bound to this exact PR/head and its attempt, can
+    # supersede it. Its absence keeps the refusal.
+    return native_required_verifier_for(pr, workflow)
+
+
+def cleanup_only_e2e(pr, workflow, run, jobs):
+    if workflow != "e2e.yml" or not successful(run) or not bound_attempt_jobs(pr, run, jobs):
+        return False
+    if {j.get("name") for j in jobs} != verifier_job_names(workflow):
+        return False
+    cleanup = next(j for j in jobs if j["name"] == "teardown-pr-modal-apps")
+    expected = {"Set up job", "Install Modal CLI", "Delete per-PR Modal apps", "Complete runner", "Complete job"}
+    steps = cleanup.get("steps", [])
+    return (successful(cleanup) and len(steps) == len(expected)
+            and {s.get("name") for s in steps} == expected and all(successful(s) for s in steps)
+            and all(j.get("conclusion") == "skipped" and j.get("steps") == []
+                    for j in jobs if j is not cleanup))
+
+
 def workflow_proof(pr, workflow, names):
     head = pr["head"]["sha"]
     runs = pages(f"actions/workflows/{workflow}/runs?event=pull_request&head_sha={head}&per_page=100", "workflow_runs")
-    runs.sort(key=lambda run: (run["id"], run.get("run_attempt", 1)), reverse=True)
-    for run in runs:
-        if (run["head_sha"] != head or run["event"] != "pull_request"
-                or run["head_branch"] != pr["head"]["ref"]
-                or run.get("path", "").split("@")[0] != f".github/workflows/{workflow}"):
-            continue
+    eligible = [r for r in runs if r.get("head_sha") == head and r.get("event") == "pull_request"
+                and r.get("head_branch") == pr["head"]["ref"]
+                and r.get("path", "").split("@")[0] == f".github/workflows/{workflow}"]
+    for run in eligible:
+        try:
+            value = run.get("run_started_at")
+            if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value):
+                raise ValueError("invalid timestamp")
+            datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            raise Refusal(f"RUN_ATTEMPT_START_INVALID workflow={workflow} run={run.get('id')}")
+    eligible.sort(key=lambda r: (r["run_started_at"], r["id"]), reverse=True)
+    latest_verifier = None
+    selected = None
+    selected_exemption = None
+    for run in eligible:
+        if (selected is not None and latest_verifier is not None
+                and run["run_started_at"] < min(selected[0]["run_started_at"], latest_verifier[1]["run_started_at"])):
+            break
         jobs = pages(f"actions/runs/{run['id']}/jobs?filter=latest&per_page=100", "jobs")
+        if cleanup_only_e2e(pr, workflow, run, jobs):
+            continue
+        if (run.get("status") == "completed" and run.get("conclusion") == "skipped"
+                and bound_attempt_jobs(pr, run, jobs)
+                and {j.get("name") for j in jobs} == verifier_job_names(workflow)
+                and all(j.get("conclusion") == "skipped" and j.get("steps") == [] for j in jobs)):
+            continue
+        verifier = verifier_only_outcome(pr, workflow, run, jobs)
+        if verifier:
+            if verifier == "success" and workflow == "ci.yml":
+                scope = next(j for j in jobs if j.get("name") == CLASSIFIER_JOB_NAME)
+                exempt = classifier_exemption(pr, workflow, run, scope)
+                if exempt is not None:
+                    if selected is not None and selected[0]["run_started_at"] == run["run_started_at"]:
+                        raise Refusal(f"SUBSTANTIVE_ORDER_AMBIGUOUS workflow={workflow}")
+                    if selected is None:
+                        selected = (run, jobs)
+                        selected_exemption = exempt
+                    continue
+            if latest_verifier is None:
+                latest_verifier = (verifier, run, jobs)
+            elif latest_verifier[1]["run_started_at"] == run["run_started_at"]:
+                raise Refusal(f"VERIFIER_ORDER_AMBIGUOUS workflow={workflow}")
+            continue
+        name = "test" if workflow == "ci.yml" else "e2e"
+        aggregate = next((j for j in jobs if j.get("name") == name), {})
+        gate = "Require exemption or exact-head real CI success" if workflow == "ci.yml" else "Require exemption or exact-head real E2E success"
+        paid = "Confirm current paid CI success" if workflow == "ci.yml" else "Confirm current paid E2E success"
+        steps = aggregate.get("steps", [])
+        paid_execution = any(s.get("name") in (paid, "Require all CI phases")
+                             and s.get("status") == "completed" and s.get("conclusion") in ("success", "failure") for s in steps)
+        if paid_execution and not bound_attempt_jobs(pr, run, jobs, allow_failed=True):
+            raise Refusal(f"SUBSTANTIVE_RUN_NOT_BOUND workflow={workflow} run={run['id']}")
+        gate_steps = [s for s in steps if s.get("name") == gate]
+        paid_names = [s.get("name") for s in steps if s.get("name") in (paid, "Require all CI phases")]
+        if (gate_steps or paid_execution) and (len(gate_steps) != 1 or len(paid_names) != len(set(paid_names)) or not paid_execution
+                           or gate_steps[0].get("status") != "completed"
+                           or gate_steps[0].get("conclusion") != "skipped"):
+            raise Refusal(f"VERIFIER_SHAPE_AMBIGUOUS workflow={workflow} run={run['id']}")
+        if selected is not None and selected[0]["run_started_at"] == run["run_started_at"]:
+            raise Refusal(f"SUBSTANTIVE_ORDER_AMBIGUOUS workflow={workflow}")
+        if selected is None:
+            selected = (run, jobs)
+    if latest_verifier and latest_verifier[0] != "success":
+        # The newest substantive run decides. A verifier only outranks it when it
+        # started after (or, fail-closed, at the same second as) the selected run;
+        # an older verifier-only sibling was superseded by that later paid run.
+        superseded = (selected is not None
+                      and latest_verifier[1]["run_started_at"] < selected[0]["run_started_at"])
+        if (not superseded and selected is not None
+                and latest_verifier[1]["run_started_at"] == selected[0]["run_started_at"]
+                and verifier_gate_only_red_is_superseded(pr, workflow, latest_verifier, selected)):
+            superseded = True
+        if not superseded:
+            raise Refusal(f"VERIFIER_NOT_GREEN workflow={workflow} run={latest_verifier[1]['id']}")
+    if selected is None:
+        raise Refusal(f"WORKFLOW_MISSING workflow={workflow}")
+    run, jobs = selected
+    if not bound_attempt_jobs(pr, run, jobs, allow_failed=True):
+        raise Refusal(f"SUBSTANTIVE_RUN_NOT_BOUND workflow={workflow} run={run['id']}")
+    if selected_exemption is not None:
+        return selected_exemption
+    if workflow == "ci.yml":
+        if not successful(run):
+            raise Refusal(f"WORKFLOW_NOT_GREEN workflow={workflow} run={run['id']}")
+        for job in jobs:
+            if job.get("conclusion") not in ("success", "skipped"):
+                raise Refusal(f"JOB_NOT_GREEN_OR_UNBOUND job={job['name']} run={run['id']}")
+    if True:
         scope_jobs = [job for job in jobs if job.get("name") == CLASSIFIER_JOB_NAME]
         scope = scope_jobs[0] if scope_jobs else None
         if scope and scope.get("conclusion") == "skipped":
-            continue
+            raise Refusal(f"WORKFLOW_NOT_GREEN workflow={workflow} run={run['id']}")
         by_name = {job["name"]: job for job in jobs}
         test_only = None
         if scope is not None and successful(scope):
             exempt = classifier_exemption(pr, workflow, run, scope)
             if exempt is not None:
                 return exempt
+            if latest_verifier:
+                verify_substantive_after_wrapper(pr, workflow, run, jobs)
             if workflow == "ci.yml" and len(scope_jobs) == 1:
                 try:
                     test_only = app_test_only_classifier_proof(pr, workflow, run, scope)
@@ -93,6 +428,8 @@ def workflow_proof(pr, workflow, names):
                     verify_ci_required_jobs(run, jobs, required_set)
                     return {"run": run["id"], "attempt": run.get("run_attempt", 1),
                             "head": head, "classifier_required_set": required_set}
+        if latest_verifier and scope is None:
+            verify_substantive_after_wrapper(pr, workflow, run, jobs)
         # A verified app-test-only receipt lets the classifier skip the python job.
         required = [name for name in names
                     if not (test_only is not None and name == "python"
@@ -522,18 +859,153 @@ def verify_ci_required_jobs(run, jobs, required_set):
         raise Refusal(f"CI_AGGREGATE_NOT_EXECUTED run={run['id']}")
 
 
+def e2e_classifier_authenticated(pr, run, scope, classifier_proof):
+    """The run's own classifier receipt, authenticated, else None.
+
+    Binds THIS run's classifier log to the actual PR number, head SHA and
+    event, to the PR's real file set, and to the trusted rules sha256 and
+    workflow sha of the CI classifier proof. Every E2E candidate, whatever its
+    aggregate shape (skipped or gate-passed), passes this BEFORE any shape or
+    duplicate-equality check (CTO rework-5, ts 1795444808.341169).
+    """
+    if classifier_proof.get("head") != pr["head"]["sha"]:
+        return None
+    lines = strip_log_framing(job_log(scope["id"]))
+    receipts = [classifier_receipt_object(lines, name) for name in
+                ("test_only", "app_test_only", "product", "mixed", "editor_product")]
+    receipts = [receipt for receipt in receipts if receipt is not None]
+    if len(receipts) != 1:
+        return None
+    receipt = receipts[0]
+    bindings = classifier_bindings(lines)
+    if (bindings is None or receipt.get("ci_required") is not True
+            or receipt.get("e2e_required") is not False
+            or receipt.get("rules_sha256") != classifier_proof.get("rules_sha256")
+            or bindings.get("HEAD_SHA") != pr["head"]["sha"]
+            or bindings.get("WORKFLOW_SHA") != classifier_proof.get("workflow_sha")
+            or not event_binding_ok(bindings, run, pr)
+            or not pr_binding_ok(bindings, run, pr)
+            or not receipt_files_match_pr(pr, receipt)):
+        return None
+    return receipt
+
+
+def exempt_success_e2e_job(pr, run, scope, job, classifier_proof):
+    """Accept only a bound native exemption aggregate with no paid execution."""
+    if not successful(job):
+        return False
+    if e2e_classifier_authenticated(pr, run, scope, classifier_proof) is None:
+        return False
+    steps = job.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return False
+    if (any(not isinstance(step, dict) or step.get("status") != "completed"
+            or type(step.get("number")) is not int or step["number"] < 1
+            for step in steps)
+            or len({step.get("name") for step in steps}) != len(steps)
+            or len({step.get("number") for step in steps}) != len(steps)):
+        return False
+    required_skips = ("Run E2E auto-process-critical", "Run E2E core-rest shard 1/2",
+                      "Run E2E core-rest shard 2/2", "Final verdict",
+                      "Confirm current paid E2E success")
+    skipped_steps = []
+    for prefix in required_skips:
+        matches = [step for step in steps if isinstance(step.get("name"), str)
+                   and (step["name"].startswith(prefix) if prefix.startswith("Run E2E ")
+                        else step["name"] == prefix)]
+        if len(matches) != 1 or matches[0].get("conclusion") != "skipped":
+            return False
+        skipped_steps.append(matches[0])
+    gate = "Require exemption or exact-head real E2E success"
+    gates = [step for step in steps if step.get("name") == gate]
+    if (len(gates) != 1 or not successful(gates[0])
+            or any(step["number"] >= gates[0]["number"] for step in skipped_steps)):
+        return False
+    plumbing = {"Set up job", "Record whether this run starts paid E2E",
+                gate, "Complete runner", "Complete job"}
+    return all(step.get("conclusion") == "skipped"
+               or (step.get("name") in plumbing and successful(step))
+               for step in steps)
+
+
+def e2e_duplicate_classifier_identity(scope):
+    """The classifier facts two duplicate E2E runs must agree on, else None."""
+    lines = strip_log_framing(job_log(scope["id"]))
+    receipts = [classifier_receipt_object(lines, name) for name in
+                ("test_only", "app_test_only", "product", "mixed", "editor_product")]
+    receipts = [receipt for receipt in receipts if receipt is not None]
+    if len(receipts) != 1:
+        return None
+    receipt = receipts[0]
+    bindings = classifier_bindings(lines)
+    if bindings is None:
+        return None
+    identity = (receipt.get("scope"), receipt.get("e2e_required"), receipt.get("ci_required"),
+                receipt.get("rules_sha256"), bindings.get("WORKFLOW_SHA"),
+                bindings.get("HEAD_SHA"), bindings.get("BASE_SHA"),
+                json.dumps(receipt.get("changed_files"), sort_keys=True))
+    if any(value is None for value in identity):
+        return None
+    return identity
+
+
+def e2e_exemption_shape(pr, run, jobs, scope, classifier_proof):
+    """True only for one wholly-skipped exemption run, by either accepted shape.
+
+    The aggregate gate job is `skipped` when the paid legs never started and
+    `success` when it ran the exemption gate itself; both must pass every other
+    bound-shape check. Anything else is not an exemption.
+    """
+    if not successful(run) or not successful(scope):
+        return False
+    e2e_jobs = [job for job in jobs if job.get("name") == "e2e"]
+    capture_jobs = [job for job in jobs if job.get("name") == "e2e-log-capture"]
+    if (len(e2e_jobs) != 1 or len(capture_jobs) != 1
+            or capture_jobs[0].get("status") != "completed"
+            or capture_jobs[0].get("conclusion") != "skipped"
+            or capture_jobs[0].get("steps") != []):
+        return False
+    if any(job.get("status") != "completed"
+           or job.get("conclusion") not in ("success", "skipped") for job in jobs):
+        return False
+    e2e_job = e2e_jobs[0]
+    if e2e_job.get("conclusion") == "skipped":
+        # A skipped aggregate must have EXECUTED NOTHING (CTO ts
+        # 1795416141.013939): any executed step is a browser leg or gate
+        # that ran, and a skipped aggregate is not an exemption receipt.
+        # The capture job skipped-with-empty-steps binds the skipped shape
+        # the same way the gate-passed shape is bound below. The caller has
+        # already authenticated this run's classifier (rework-5).
+        return e2e_job.get("steps") == []
+    return exempt_success_e2e_job(pr, run, scope, e2e_job, classifier_proof)
+
+
 def app_test_only_e2e_proof(pr, classifier_proof):
     """Select the newest substantive E2E run; only wholly skipped wrappers may yield."""
     head = pr["head"]["sha"]
     runs = pages(f"actions/workflows/e2e.yml/runs?event=pull_request&head_sha={head}&per_page=100",
                  "workflow_runs")
-    runs.sort(key=lambda run: (run["id"], run.get("run_attempt", 1)), reverse=True)
     matching = [run for run in runs if (
         run.get("head_sha") == head and run.get("event") == "pull_request"
         and run.get("head_branch") == pr["head"]["ref"]
-        and run.get("path", "").split("@")[0] == ".github/workflows/e2e.yml"
-        and native_pr_binding_ok(run, pr))]
+        and run.get("path", "").split("@")[0] == ".github/workflows/e2e.yml")]
     for run in matching:
+        try:
+            value = run.get("run_started_at")
+            if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", value):
+                return None
+            datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            return None
+    matching.sort(key=lambda run: (run["run_started_at"], run["id"]), reverse=True)
+    selected = None
+    selected_time = None
+    duplicate_identity = None
+    for run in matching:
+        if selected is not None and run["run_started_at"] < selected_time:
+            return selected
+        if not native_pr_binding_ok(run, pr):
+            return None
         jobs = pages(f"actions/runs/{run['id']}/jobs?filter=latest&per_page=100", "jobs")
         if (len({job.get("name") for job in jobs}) != len(jobs)
                 or len({job.get("id") for job in jobs}) != len(jobs)
@@ -541,6 +1013,8 @@ def app_test_only_e2e_proof(pr, classifier_proof):
                        or job.get("run_attempt") != run.get("run_attempt", 1)
                        or job.get("head_sha") != head for job in jobs)):
             return None
+        if cleanup_only_e2e(pr, "e2e.yml", run, jobs):
+            continue
         scope_jobs = [job for job in jobs if job.get("name") == CLASSIFIER_JOB_NAME]
         if len(scope_jobs) != 1:
             return None
@@ -548,22 +1022,61 @@ def app_test_only_e2e_proof(pr, classifier_proof):
         # Label-event wrappers have no executed classifier. Do not use this
         # exception to ignore pending/failed/ambiguous classifiers or infra red.
         if (run.get("status") == "completed" and run.get("conclusion") == "skipped"
+                and bound_attempt_jobs(pr, run, jobs)
+                and {job.get("name") for job in jobs} == verifier_job_names("e2e.yml")
                 and all(job.get("status") == "completed"
                         and job.get("conclusion") == "skipped"
                         and not job.get("steps") for job in jobs)):
             continue
+        # Authenticate THIS run's classifier (PR, head, event, receipt files,
+        # trusted rules/workflow) before any aggregate-shape or duplicate-
+        # equality check, for the skipped shape too (CTO rework-5, ts
+        # 1795444808.341169): a sole skipped aggregate, or two skipped runs
+        # sharing the same wrong HEAD_SHA, must not bypass it.
         if (not successful(run) or not successful(scope)
-                or not any(step.get("name") == "Classify paid E2E scope" and successful(step)
-                           for step in scope.get("steps", []))
+                or e2e_classifier_authenticated(pr, run, scope, classifier_proof) is None):
+            return None
+        if selected is not None:
+            # Duplicate runs at the same head and second are ONE exemption only
+            # when ALL of them are successful exemptions with a non-null
+            # IDENTICAL authenticated classifier identity (CTO ts
+            # 1795416141.013939). Every candidate gets the same full proof as
+            # the first: one unique classify step, authenticated bindings
+            # (HEAD_SHA), the classifier-receipt tuple, and the exemption
+            # job shape (empty steps for a skipped aggregate). Any other
+            # difference - a failure, a pending run, a different scope, an
+            # executed-vs-exempt mismatch - still refuses.
+            if run["run_started_at"] != selected_time:
+                return None
+            if (len([step for step in scope.get("steps", [])
+                    if step.get("name") == "Classify paid E2E scope"
+                    and successful(step)]) != 1
+                    or sum(step.get("name") == "Classify paid E2E scope"
+                           for step in scope.get("steps", [])) != 1):
+                return None
+            if (e2e_duplicate_classifier_identity(scope) != duplicate_identity
+                    or duplicate_identity is None
+                    or not e2e_exemption_shape(pr, run, jobs, scope, classifier_proof)):
+                return None
+            continue
+        if (not successful(run) or not successful(scope)
+                or len([step for step in scope.get("steps", [])
+                        if step.get("name") == "Classify paid E2E scope" and successful(step)]) != 1
+                or sum(step.get("name") == "Classify paid E2E scope"
+                       for step in scope.get("steps", [])) != 1
                 or any(job.get("status") != "completed"
                        or job.get("conclusion") not in ("success", "skipped") for job in jobs)):
             return None
-        e2e_jobs = [job for job in jobs if job.get("name") == "e2e"]
-        if len(e2e_jobs) != 1 or e2e_jobs[0].get("conclusion") != "skipped":
+        exempt = e2e_exemption_shape(pr, run, jobs, scope, classifier_proof)
+        if not exempt:
             return None
-        return {**classifier_proof, "workflow": "e2e.yml", "run": run["id"],
-                "attempt": run.get("run_attempt", 1), "skipped": True}
-    return None
+        selected = {**classifier_proof, "workflow": "e2e.yml", "run": run["id"],
+                    "attempt": run.get("run_attempt", 1), "skipped": True}
+        selected_time = run["run_started_at"]
+        # Only an exemption may be matched by later duplicates; an executed run
+        # never merges with a skipped sibling.
+        duplicate_identity = e2e_duplicate_classifier_identity(scope)
+    return selected
 
 
 def site_paths_confined(pr, rules_bytes):
