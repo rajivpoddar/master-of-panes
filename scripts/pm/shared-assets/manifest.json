@@ -931,7 +931,7 @@
       "canonical_target": "/Users/rajiv/.claude/scripts/proxy-agent-stop.sh",
       "dependencies": [],
       "dependency_status": "closed",
-      "mode": 448,
+      "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
       "sha256": "ec70a2ac5bc5c1b7383bac5e2dc14abdfbdd7d3fcbb801b0e269a2c3283f403d",
       "source_path": "claude/scripts/proxy-agent-stop.sh"
