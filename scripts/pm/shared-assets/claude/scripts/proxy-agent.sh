@@ -2524,6 +2524,8 @@ if [[ "${PROXY_AGENT_DRY_RUN:-}" == "1" ]]; then
   if [[ -n "${PROXY_AGENT_EXHAUSTION_LOG:-}" || -n "${PROXY_AGENT_EXHAUSTION_OUT:-}" ]]; then
     proxy_agent_note_log_exhaustion "$MODEL" "${PROXY_AGENT_EXHAUSTION_LOG:-}" "${PROXY_AGENT_EXHAUSTION_OUT:-}" || true
   fi
+  # Handoff preview (Rajiv D0AMF0XE6TS thread 1795441948.588769): a dry run shows the HANDOFF block this launch would inject. Fail-open, stderr only.
+  python3 -I "$HOME/.claude/scripts/proxy-handoff.py" inject --brief "${PROXY_RESUME_ORIGINAL:-$PROMPT_FILE}" --type "$TYPE" --name "${PROXY_AGENT_NAME:-proxy-$TYPE}" --dry-run >&2 2>/dev/null || true
   printf 'PROXY_AGENT_PATHS out=%s delivery=%s jsonl=%s\n' "$OUT" "$DELIVERY" "$JSONL"
   exit 0
 fi
@@ -2993,6 +2995,8 @@ RESULT_CONTRACT
     receipt_instruction+="REVIEW_ROUND_RECEIPT: $REVIEW_ROUND_TOKEN"
     printf 'printf "\\n\\n%%s\\n" %q >> %q\n' "$receipt_instruction" "$JOB_DIR/prompt0.md"
   fi
+  # Per-issue handoff (Rajiv D0AMF0XE6TS thread 1795441948.588769, ts 1795443398.969229): append the issue's HANDOFF file plus the boot-restate/handoff contract to the brief at run time. proxy-handoff.py is fail-open (always rc 0).
+  printf 'python3 -I %q inject --brief %q --type %q --name %q >> %q 2>> %q || true\n' "$HOME/.claude/scripts/proxy-handoff.py" "${PROXY_RESUME_ORIGINAL:-$PROMPT_FILE}" "$TYPE" "$NAME" "$JOB_DIR/prompt0.md" "$LOG"
   printf 'pa_claude_429=0; pa_retry=0\n'
   if proxy_agent_uses_claude_account "$MODEL_ID"; then
     PA_MODEL="$(proxy_agent_router_identity "$MODEL_ID")"
