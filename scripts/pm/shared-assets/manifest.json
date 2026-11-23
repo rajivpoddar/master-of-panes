@@ -951,7 +951,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "b293ece2af984ac7d0b2fd9a326d7f6d206099c7a54ac077205342025ff3894a",
+      "sha256": "8f737f90cfb0a48c7d9e26201e323a1fd173299233dba109ae2bb381131e3243",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -1023,7 +1023,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "b6d3ea2af84be15d013d49eb0d7a62c2d212dff33b968711fe39bd9ecbcd9ae2",
+      "sha256": "6badf7fbdcdb28b2a8ce161625edb977c2e78e3d8f67701cec8ae711a88e2c42",
       "source_path": "claude/scripts/proxy-run-state.py"
     },
     {
@@ -1317,12 +1317,21 @@
       "source_path": "claude/scripts/tests/test_proxy_preempt.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_proxy_refusal_ledger.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "2dd8728b029977035bc26551dc93816475644654b8dbffad691dbe964a0b584c",
+      "source_path": "claude/scripts/tests/test_proxy_refusal_ledger.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_proxy_result_block.py",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "8ba36826aa4ddc80ec1958d8aa734fb2c3b123111e1e87f3bf3b47ad7e7e95cb",
+      "sha256": "7626cca97c8b936194819f6a817fee554a202992a01458cd7e4af3a6d89502b0",
       "source_path": "claude/scripts/tests/test_proxy_result_block.py"
     },
     {
@@ -2292,7 +2301,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 251,
+    "selected_count": 252,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",

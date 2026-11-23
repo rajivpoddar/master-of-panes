@@ -40,7 +40,8 @@ def final_text(obj, marker='HANDOFF: pushed, ready for QA', before='All done.'):
 def test_a_valid_block_is_accepted_and_normalised():
     clean, why = notify.validate_block(json.dumps(block(issue='#14461', pr=None, head=HEAD.upper(), verdict='done', unknown_key='dropped')), NAME)
     assert why == '' and clean['issue'] == 14461 and clean['pr'] is None and clean['head'] == HEAD and clean['verdict'] == 'DONE'
-    assert set(clean) == set(notify.SCHEMA_KEYS) and clean['proof_links'] == ['https://github.com/o/r/pull/14470']
+    # the optional per-issue handoff field (Rajiv D0AMF0XE6TS ts 1795443398.969229; proxy-agent-notify.py) is always normalised in, None when absent
+    assert set(clean) == set(notify.SCHEMA_KEYS) | {'handoff'} and clean['handoff'] is None and clean['proof_links'] == ['https://github.com/o/r/pull/14470']
 
 
 @pytest.mark.parametrize('over, reason', [
@@ -188,7 +189,7 @@ def test_the_proxy_stop_message_carries_the_validated_block_and_the_row_stores_i
     assert msg.startswith(f'PROXY_STOP name={NAME} rc=0 ') and 'RESULT DONE: pushed, ready for QA' in msg
     assert f'result=STRUCTURED verdict=HANDOFF head={HEAD} RESULT_JSON {{' in msg and '"next_stage":"hd-proof-qa"' in msg
     ev = finish_row(world[0])
-    assert ev['state'] == 'done' and ev['result_status'] == 'STRUCTURED' and ev['head'] == HEAD and ev['result_block'] == block()
+    assert ev['state'] == 'done' and ev['result_status'] == 'STRUCTURED' and ev['head'] == HEAD and ev['result_block'] == {**block(), 'handoff': None, 'handoff_status': 'missing'}  # handoff: live contract of the notify helper (no path given)
 
 
 def test_a_handoff_lane_with_a_valid_block_is_a_structured_result_even_though_the_legacy_line_matcher_ignores_handoff(world):

@@ -67,7 +67,9 @@ def ledger(args):
     try:
         p = subprocess.run([sys.executable, CLI, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
         if p.returncode:
-            print('PROXY_AGENT_WARN reason=pm_ops_failed', file=sys.stderr)
+            # The CLI's own refusal text names the cause (23 Nov: "obligation-resolve matched no open row ... exact stored-key match"); keep one line of it.
+            detail = ' '.join(p.stderr.decode('utf-8', 'replace').split())[:200]
+            print('PROXY_AGENT_WARN reason=pm_ops_failed verb=' + (args[0] if args else '?') + (' detail=' + detail if detail else ''), file=sys.stderr)
             return False
         return True
     except (OSError, subprocess.TimeoutExpired):
@@ -160,6 +162,14 @@ def lane_pid(name):
             return int(pid.group(1)) if pid else None
     return None
 
+def ref_args(data):
+    """--issue/--pr exactly as the proxy_run row was stored: pm-ops resolves by an EXACT key match, so a resolve without them cannot find a row that carries
+    them (23 Nov: every refusal of an ISSUE:/PR: brief left its proxy_run row open and warned pm_ops_failed)."""
+    extra = []
+    if data.get('issue'): extra += ['--issue', str(data['issue'])]
+    if data.get('pr'): extra += ['--pr', str(data['pr'])]
+    return extra
+
 def relaunch_row(name, spec, data, why, cmd=''):
     """Persist the pm-ops proxy_relaunch CAPACITY_WAIT row for a refused launch. True only when the ledger accepted it."""
     extra = []
@@ -177,9 +187,7 @@ def relaunch_row(name, spec, data, why, cmd=''):
                    '--blocker', 'CAPACITY_WAIT: ' + why, *extra, '--evidence-json', json.dumps(evidence)])
 
 def upsert(name, data, suppress_until, replace=False):
-    extra = []
-    if data.get('issue'): extra += ['--issue', str(data['issue'])]
-    if data.get('pr'): extra += ['--pr', str(data['pr'])]
+    extra = ref_args(data)
     if replace: extra.append('--replace-evidence')
     return ledger(['obligation-upsert', '--kind', 'proxy_run', '--target-type', 'proxy', '--target-id', name,
                    '--owner', name, '--horizon', 'heartbeat', '--title', 'Proxy run ' + name,
@@ -331,8 +339,9 @@ def main():
             if owned:
                 atomic(base / 'manifest.json', json.dumps(data) + '\n')
             upsert(a.name, data, now)
-            if refused and relaunch_row(a.name, spec, data, 'launch refused rc=75 (pool cap, burn gate or no usable model; see launcher stderr)'):
-                ledger(['obligation-resolve', '--kind', 'proxy_run', '--target-type', 'proxy', '--target-id', a.name,
+            why = 'launch refused rc=75 (pool cap, burn gate or no usable model; see launcher stderr)'
+            if refused and (relaunch_row(a.name, spec, data, why) or relaunch_row(a.name, spec, data, why)):  # one retry: the row is the only record of the refusal
+                ledger(['obligation-resolve', '--kind', 'proxy_run', '--target-type', 'proxy', '--target-id', a.name, *ref_args(data),
                         '--reason', 'refused rc=75: relaunch queued as proxy_relaunch CAPACITY_WAIT',
                         '--external-state', json.dumps({'state': 'refused', 'rc': '75'})])
         unlock(base, a.token)
@@ -415,7 +424,7 @@ def main():
             atomic(base / 'manifest.json', json.dumps(data) + '\n')
             updated = upsert(a.name, data, data['suppress_until'] if terminal else now)
             if updated and terminal:
-                ledger(['obligation-resolve', '--kind', 'proxy_run', '--target-type', 'proxy', '--target-id', a.name,
+                ledger(['obligation-resolve', '--kind', 'proxy_run', '--target-type', 'proxy', '--target-id', a.name, *ref_args(data),
                         '--reason', a.result, '--external-state', json.dumps({'rc': a.rc, 'reason': a.reason, 'out': data['out']})])
             if updated and refused:
                 spec = read_json(base / 'active' / 'launch.json')
@@ -424,7 +433,7 @@ def main():
                     cmd = 'env PROXY_AGENT_NAME=' + shlex.quote(a.name) + ' ' + shlex.quote(os.environ.get('PROXY_AGENT_LAUNCHER') or str(Path.home() / '.claude/scripts/proxy-agent.sh')) \
                         + ' --resume ' + shlex.quote(a.name) + ' --model ' + shlex.quote(str(data['model']))
                 if relaunch_row(a.name, spec, data, 'continuation refused rc=75 (pool cap or capacity stop); lane is resumable', cmd):
-                    ledger(['obligation-resolve', '--kind', 'proxy_run', '--target-type', 'proxy', '--target-id', a.name,
+                    ledger(['obligation-resolve', '--kind', 'proxy_run', '--target-type', 'proxy', '--target-id', a.name, *ref_args(data),
                             '--reason', 'refused rc=75: resume queued as proxy_relaunch CAPACITY_WAIT',
                             '--external-state', json.dumps({'state': 'refused', 'rc': '75', 'out': data['out']})])
         unlock(base, a.token)

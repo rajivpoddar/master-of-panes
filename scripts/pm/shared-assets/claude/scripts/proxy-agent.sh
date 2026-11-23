@@ -2065,6 +2065,7 @@ proxy_agent_cap_exempt() {
 }
 
 proxy_agent_pool_live() {
+  if [[ "${PROXY_AGENT_STUB_POOL_LIVE:-}" == unreadable ]]; then return 1; fi  # tests: an unreadable process table
   if [[ -n "${PROXY_AGENT_STUB_POOL_LIVE:-}" ]]; then
     printf '%s\n' "$PROXY_AGENT_STUB_POOL_LIVE"
     return 0
@@ -2075,7 +2076,9 @@ pool = sys.argv[1]
 # Same shape as proxy-cap-count.py: one count per real `claude -p` process, not the wrapper line that embeds --model.
 pat = re.compile(r'(?:^|\s)\S*/claude\s+-p\s+--name\s+\S+\s+--model\s+(\S+)')
 try:
-    out = subprocess.check_output(["/bin/ps", "-axo", "command="], text=True, timeout=5)
+    # utf-8 + errors=replace: a lane command line carries non-ASCII brief text (or is cut mid-character by ps). text=True raised UnicodeDecodeError
+    # here, the count became "unreadable" and every Claude/Grok/Codex launch logged pool_cap UNAVAILABLE and went through uncapped (23 Nov).
+    out = subprocess.check_output(["/bin/ps", "-axo", "command="], encoding="utf-8", errors="replace", timeout=5)
 except Exception:
     raise SystemExit(1)
 n = 0
@@ -2102,7 +2105,9 @@ PY
 # the early exemption return never consulted it. Existing processes are not touched.
 # The id is the router-equivalent identity, so `deepseek-v4.1-flash(high)` is the same admission as the canonical id
 # (CTO REVISE ts 1795010788.320629). An unreadable OpenCode count is not a free pass: the id is skipped and tier
-# selection tries the next route. Claude, Grok and Codex stay fail-open on an unreadable count, and their role exemption stays.
+# selection tries the next route. The Claude pool also fails CLOSED on an unreadable count (PM 23 Nov: "pool_cap UNAVAILABLE pool=claude" let launches
+# past a cap of 2): a Claude id is skipped by the picker, a Claude primary is refused rc 75 and the state machine queues the CAPACITY_WAIT relaunch row.
+# Grok and Codex stay fail-open on an unreadable count, and every role exemption stays.
 proxy_agent_pool_blocked() {
   local id pool cap live
   id="$(proxy_agent_router_identity "$1")"
@@ -2126,6 +2131,7 @@ proxy_agent_pool_blocked() {
   if [[ ( "$pool" == opencode || "$pool" == hy4 || "$pool" == sarvam ) && "$cap" =~ ^0+$ ]]; then return 0; fi
   if ! live="$(proxy_agent_pool_live "$pool")"; then
     printf 'proxy-agent: pool_cap UNAVAILABLE pool=%s\n' "$pool" >&2
+    if [[ "$pool" == claude ]]; then printf 'proxy-agent: pool_cap fail-closed pool=claude (live count unreadable)\n' >&2; return 0; fi
     if [[ "$pool" == opencode || "$pool" == hy4 || "$pool" == sarvam || "$pool" == spark || "$pool" == inkling ]]; then return 0; fi
     return 1
   fi
@@ -3156,4 +3162,5 @@ if [[ "$RC" -ne 0 ]] && ! proxy_agent_uses_claude_account "$MODEL_ID"; then
 fi
 echo "PROXY_AGENT_DONE rc=$RC type=$TYPE model=$MODEL_ID window=$WINDOW out=$OUT log=$LOG"
 exit "$RC"
+
 
