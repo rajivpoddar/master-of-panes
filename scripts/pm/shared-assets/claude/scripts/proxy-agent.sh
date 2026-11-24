@@ -1782,8 +1782,8 @@ proxy_agent_type_level() {
 proxy_agent_tier_models() {
   local models _m _kept=""
   case "$1" in
-    LOW) models="ornith-1.5-35b-a3b sarvam-glm-5.3 sarvam-deepseek-v4.1-flash sarvam-105b sarvam-gemma4 gpt-6-luna claude-haiku-5-5 muse-spark-1.3-contributor";;  # Sarvam = light work only (Rajiv C0ALZJHGE49 ts 1795420232.692599: "sarvam looks to be quite useless if we max out the monthly in 2d. maybe we should use it only for light work.")  # Spark (free) stays first for LOW: OpenCode monthly burn 0.35 vs 0.10 %/h budget (23 Nov 08:30)
-    MID) models="glm-5.3 deepseek-v4.1-flash hy4-flash-free claude-sonnet-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;  # Sarvam moved to LOW only (Rajiv ts 1795420232.692599); ornith LOW only (Rajiv ts 1795484559.513619, 24 Nov)
+    LOW) models="ornith-1.5-35b-a3b sarvam-glm-5.3 sarvam-deepseek-v4.1-flash sarvam-105b sarvam-gemma4 gpt-6-luna claude-haiku-5-5";;  # muse (OpenCode Go) dropped until the 30 Nov weekly reset (Rajiv ts 1795515247.892709);  # Sarvam = light work only (Rajiv C0ALZJHGE49 ts 1795420232.692599: "sarvam looks to be quite useless if we max out the monthly in 2d. maybe we should use it only for light work.")  # Spark (free) stays first for LOW: OpenCode monthly burn 0.35 vs 0.10 %/h budget (23 Nov 08:30)
+    MID) models="hy4-flash-free claude-sonnet-5-5 gpt-6.1-terra";;  # OpenCode Go weekly 62% at 1.87 vs 0.28 %/h budget: paid OpenCode ids (glm, deepseek, muse) out of MID until the Mon 30 Nov 05:30 IST reset (Rajiv D0AMF0XE6TS thread 1795513877.716279, ts 1795515247.892709 "ok"); was: glm-5.3 deepseek-v4.1-flash hy4-flash-free claude-sonnet-5-5 gpt-6.1-terra muse-spark-1.3-contributor;  # Sarvam moved to LOW only (Rajiv ts 1795420232.692599); ornith LOW only (Rajiv ts 1795484559.513619, 24 Nov)
     TOP) models="claude-opus-5-5 claude-fable-5-2 gpt-6.2-sol sarvam-kimi-k3 grok-4.7 muse-spark-1.3-contributor";;  # Rajiv D0AMF0XE6TS thread 1795485653.099709, ts 1795486375.339929 (24 Nov): value-per-$ order, Opus (77x) first, Grok (11-13x) last
     *) return 1;;
   esac
