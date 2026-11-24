@@ -1238,6 +1238,248 @@ def t63_skipped_e2e_aggregate_authenticates_pr_event_files_rules_and_workflow():
             make_pr(), e2e_classifier_proof(receipt)) is None, label
 
 
+# ---- carried-over unit-gate attempt (run 45305541606, attempt 2) ----
+# GitHub's jobs API rewrites run_attempt to the latest attempt and mints new
+# job ids for jobs it did not re-execute. The reissued jobs keep the original
+# start and completion. PR #14582 attempt 2 carried the attempt-1 unit gate
+# (receipt run_attempt "1"; gate 138159904929 and reissued 138167137778 both
+# completed at 01:59:36Z, before attempt 2 began at 02:16:57Z). A lower attempt
+# number is not enough: that attempt's own jobs must show the same execution.
+
+
+_UNSET = object()
+
+
+def _unit_schedule_log(run_id, head, receipt_attempt, count=3):
+    shards = [f"unit-tests ({n})" for n in range(1, count + 1)]
+    receipt = {"skip_matrix": False, "scheduled_count": count, "mode": "selected",
+               "zero_proof": "", "reason": "selected", "head": head,
+               "run_id": str(run_id), "run_attempt": str(receipt_attempt)}
+    body = json.dumps(receipt, indent=2).splitlines()
+    lines = [f"  CI_EXECUTION_SHA: {head}",
+             "  UNIT_SELECT_RESULT: success",
+             "  UNIT_PRECHECKS_RESULT: success",
+             "  UNIT_TESTS_RESULT: success",
+             f"  UNIT_SCHEDULED_COUNT: {count}",
+             f"  EXPECTED_RUN_ID: {run_id}",
+             f"  UNIT_JOB_HEAD_SHA: {head}",
+             "  UNIT_SCHEDULE: " + body[0],
+             *body[1:],
+             json.dumps({"event": "unit_jobs_verified", "run_id": str(run_id),
+                         "head_sha": head, "declared_count": count,
+                         "observed_jobs": shards}, separators=(",", ":"))]
+    return "\n".join(lines)
+
+
+def _carried_unit_world(run_attempt, receipt_attempt, *, gate_started, shard_started,
+                        gate_completed=_UNSET, shard_completed=_UNSET, historical="mirror",
+                        attempt_starts=None):
+    """Dynamic unit lane: three shards plus the jobs verify_ci_required_jobs reads.
+
+    historical="mirror" is the named attempt's own jobs for this same execution,
+    under new ids. "earlier" is a different execution on that attempt.
+    "shard-mismatch" keeps the gate and swaps one shard. attempt_starts is the
+    GitHub attempt record's run_started_at keyed by attempt number. The default
+    opens the named attempt at the gate's own start, so a mirrored execution
+    sits inside that attempt. The jobs list still copies those timestamps into
+    every later attempt; only the attempt record says which one ran the gate.
+    """
+    if gate_completed is _UNSET:
+        gate_completed = gate_started
+    if shard_completed is _UNSET:
+        shard_completed = shard_started
+    run_id = 88064
+    run = {"id": run_id, "run_attempt": run_attempt, "head_sha": HEAD,
+           "run_started_at": stamp(40)}
+    jobs = []
+
+    def add(name, conclusion, steps, started=None, completed=None):
+        job = _job(name, conclusion, steps, run_id, run_attempt)
+        if started is not None:
+            job["started_at"] = started
+        if completed is not None:
+            job["completed_at"] = completed
+        jobs.append(job)
+        return job
+
+    add("typescript", "success", [_step("Typecheck", "success")])
+    add("unit-tests-isolated", "success", [_step("Isolated unit tests", "success")])
+    add("unit-select", "success", [_step("Emit trusted unit matrix", "success")],
+        gate_started, gate_completed)
+    for number in (1, 2, 3):
+        add(f"unit-tests ({number})", "success", [_step("Unit tests", "success")],
+            shard_started, shard_completed)
+    gate = add("unit-gate", "success",
+               [_step("Validate unit lane and scheduled jobs", "success")],
+               gate_started, gate_completed)
+    for name in ("python", "python-docx", "python-contracts",
+                 "python-modal (0)", "python-modal (1)", "python-modal (2)"):
+        add(name, "skipped", [])
+    add("test", "success", [_step("Require all CI phases", "success"),
+                            _step("Confirm current paid CI success", "success")])
+
+    def pages(path, key):
+        pages.calls.append(path)
+        assert key == "jobs", key
+        assert f"actions/runs/{run_id}/attempts/{receipt_attempt}/jobs?" in path, path
+        mirrored = []
+        for job in jobs:
+            if job["name"] != "unit-gate" and not merge.unit_family(job["name"]):
+                continue
+            copy = {"id": job["id"] + 10_000_000, "name": job["name"],
+                    "status": job["status"], "conclusion": job["conclusion"],
+                    "steps": [dict(step) for step in job.get("steps", [])],
+                    "run_id": job["run_id"], "run_attempt": receipt_attempt,
+                    "head_sha": job["head_sha"], "started_at": job.get("started_at"),
+                    "completed_at": job.get("completed_at")}
+            if historical == "earlier":
+                copy["started_at"] = stamp(3)
+                copy["completed_at"] = stamp(4)
+            elif historical == "shard-mismatch" and job["name"] == "unit-tests (2)":
+                copy["started_at"] = stamp(3)
+                copy["completed_at"] = stamp(4)
+            mirrored.append(copy)
+        return mirrored
+
+    pages.calls = []
+    merge.pages = pages
+    if attempt_starts is None:
+        attempt_starts = {receipt_attempt: gate_started} if isinstance(gate_started, str) else {}
+
+    def api(path):
+        api.calls.append(path)
+        prefix = f"actions/runs/{run_id}/attempts/"
+        assert path.startswith(prefix), path
+        asked = int(path[len(prefix):])
+        opened = attempt_starts.get(asked)
+        if opened is None:
+            return None
+        return {"id": run_id, "run_attempt": asked, "head_sha": HEAD,
+                "run_started_at": opened}
+
+    api.calls = []
+    merge.api = api
+    merge.job_log = lambda job_id: (
+        _unit_schedule_log(run_id, HEAD, receipt_attempt) if job_id == gate["id"] else "")
+    required = {"head": HEAD, "ts_changed": True, "python_changed": False}
+    return run, jobs, required
+
+
+def t64_carried_over_attempt_receipt_attests_shards_that_actually_ran():
+    # The attempt-2 jobs API says run_attempt 2; the gate log, written on
+    # attempt 1, says "1". The named attempt's jobs match this execution.
+    run, jobs, required = _carried_unit_world(
+        2, 1, gate_started=stamp(0), shard_started=stamp(0),
+        gate_completed=stamp(10), shard_completed=stamp(10))
+    assert merge.unit_gate_attested_count(run, jobs, required) == 3
+    assert any("/attempts/1/jobs?" in path for path in merge.pages.calls), merge.pages.calls
+    merge.verify_ci_required_jobs(run, jobs, required)
+
+
+def t65_reexecuted_gate_with_an_older_receipt_attempt_still_refuses():
+    run, jobs, required = _carried_unit_world(
+        2, 1, gate_started=stamp(40), shard_started=stamp(40))
+    assert merge.unit_gate_attested_count(run, jobs, required) is None
+    try:
+        merge.verify_ci_required_jobs(run, jobs, required)
+    except merge.Refusal as exc:
+        assert str(exc) == "UNIT_ATTESTATION_REQUIRED run=88064", exc
+    else:
+        raise AssertionError("re-executed gate accepted an attempt-1 receipt")
+
+
+def t66_carried_over_gate_with_a_reexecuted_shard_still_refuses():
+    # A shard that actually ran on this attempt is not covered by the older gate.
+    run, jobs, required = _carried_unit_world(
+        2, 1, gate_started=stamp(0), shard_started=stamp(0))
+    for job in jobs:
+        if job["name"] == "unit-tests (2)":
+            job["started_at"] = stamp(40)
+    assert merge.unit_gate_attested_count(run, jobs, required) is None
+
+
+def t67_carried_over_gate_claiming_the_current_attempt_still_refuses():
+    # started_at is before this attempt, so a receipt numbered as this attempt is a lie.
+    run, jobs, required = _carried_unit_world(
+        2, 2, gate_started=stamp(0), shard_started=stamp(0))
+    assert merge.unit_gate_attested_count(run, jobs, required) is None
+
+
+def t68_reexecuted_gate_whose_receipt_matches_this_attempt_attests():
+    run, jobs, required = _carried_unit_world(
+        2, 2, gate_started=stamp(41), shard_started=stamp(41))
+    assert merge.unit_gate_attested_count(run, jobs, required) == 3
+    merge.verify_ci_required_jobs(run, jobs, required)
+
+
+def t69_same_attempt_receipt_without_timestamps_still_attests():
+    # Pre-existing fixtures omit started_at. Equal attempts stay valid, padded
+    # attempt text does not. No historical lookup on this path.
+    run, jobs, required = _carried_unit_world(
+        1, 1, gate_started=None, shard_started=None)
+    assert merge.unit_gate_attested_count(run, jobs, required) == 3
+    assert merge.pages.calls == []
+    run, jobs, required = _carried_unit_world(
+        1, "01", gate_started=None, shard_started=None)
+    assert merge.unit_gate_attested_count(run, jobs, required) is None
+    assert merge.pages.calls == []
+
+
+def t70_wrong_historical_attempt_does_not_bind():
+    # Attempt 3 reissues a gate that executed on attempt 2. A receipt naming
+    # attempt 1 must not bind just because attempt 1 also has a successful gate:
+    # that gate is an earlier execution (different start and completion).
+    run, jobs, required = _carried_unit_world(
+        3, 1, gate_started=stamp(0), shard_started=stamp(0),
+        gate_completed=stamp(10), shard_completed=stamp(10), historical="earlier")
+    assert merge.unit_gate_attested_count(run, jobs, required) is None
+    assert any("/attempts/1/jobs?" in path for path in merge.pages.calls), merge.pages.calls
+
+
+def t71_carried_gate_without_completion_does_not_bind():
+    # A start before this attempt, with no completion, is not a carried execution.
+    run, jobs, required = _carried_unit_world(
+        2, 1, gate_started=stamp(0), shard_started=stamp(0),
+        gate_completed=None, shard_completed=stamp(10))
+    assert merge.unit_gate_attested_count(run, jobs, required) is None
+
+
+def t72_carried_gate_completing_after_attempt_start_does_not_bind():
+    # Started before this attempt, but finished after the attempt began.
+    run, jobs, required = _carried_unit_world(
+        2, 1, gate_started=stamp(0), shard_started=stamp(0),
+        gate_completed=stamp(41), shard_completed=stamp(10))
+    assert merge.unit_gate_attested_count(run, jobs, required) is None
+
+
+def t73_carried_gate_does_not_cover_a_different_shard_execution():
+    # The named attempt's gate is this execution; one shard is not.
+    run, jobs, required = _carried_unit_world(
+        3, 2, gate_started=stamp(0), shard_started=stamp(0),
+        gate_completed=stamp(10), shard_completed=stamp(10),
+        historical="shard-mismatch")
+    assert merge.unit_gate_attested_count(run, jobs, required) is None
+
+
+def t74_copied_gate_binds_only_the_attempt_whose_window_contains_it():
+    # The gate ran in attempt 1. Attempts 2 and 3 reissue that row with the
+    # same timestamps, so a jobs-list match cannot tell them apart. At attempt
+    # 3, naming 2 must refuse and naming 1 must pass. The shards started before
+    # attempt 1 and were copied in with the gate; that still belongs to attempt 1.
+    starts = {1: stamp(0), 2: stamp(20), 3: stamp(40)}
+    common = dict(gate_started=stamp(5), shard_started=stamp(-5),
+                  gate_completed=stamp(10), shard_completed=stamp(4),
+                  attempt_starts=starts)
+    run, jobs, required = _carried_unit_world(3, 2, **common)
+    refused = merge.unit_gate_attested_count(run, jobs, required)
+    assert refused is None, refused
+    assert "actions/runs/88064/attempts/2" in merge.api.calls, merge.api.calls
+    run, jobs, required = _carried_unit_world(3, 1, **common)
+    assert merge.unit_gate_attested_count(run, jobs, required) == 3
+    assert "actions/runs/88064/attempts/1" in merge.api.calls, merge.api.calls
+    merge.verify_ci_required_jobs(run, jobs, required)
+
+
 def _tests():
     return sorted((k, v) for k, v in list(globals().items())
                   if len(k) > 1 and k[0] == "t" and k[1].isdigit() and callable(v))

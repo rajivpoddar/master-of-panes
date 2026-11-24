@@ -912,12 +912,195 @@ def unit_gate_log_facts(lines):
     return facts, schedules[0], events[0]
 
 
+def _utc_instant(value):
+    """GitHub Zulu timestamp, or None. Fractional seconds are optional."""
+    if not isinstance(value, str) or not value.endswith("Z"):
+        return None
+    text = value[:-1]
+    if "." in text:
+        head, frac = text.split(".", 1)
+        if not frac.isdigit():
+            return None
+        text = f"{head}.{frac[:6].ljust(6, '0')}"
+        fmt = "%Y-%m-%dT%H:%M:%S.%f"
+    else:
+        fmt = "%Y-%m-%dT%H:%M:%S"
+    try:
+        return datetime.datetime.strptime(text, fmt)
+    except ValueError:
+        return None
+
+
+def _positive_attempt(value):
+    """1, 2, ... as an int or its canonical decimal text. Rejects bool, '', '01'."""
+    if type(value) is int and value >= 1:
+        return value
+    if type(value) is str and value.isdigit():
+        number = int(value)
+        if number >= 1 and str(number) == value:
+            return number
+    return None
+
+
+def _started_before(job, attempt_started):
+    started = _utc_instant(job.get("started_at"))
+    return started is not None and attempt_started is not None and started < attempt_started
+
+
+def _completed_before(job, attempt_started):
+    """A real execution that finished strictly before this attempt began."""
+    started = _utc_instant(job.get("started_at"))
+    completed = _utc_instant(job.get("completed_at"))
+    return (started is not None and completed is not None and attempt_started is not None
+            and started <= completed < attempt_started)
+
+
+def _same_execution(original, reissued):
+    """Reissued job ids still carry the original start and completion strings."""
+    started, completed = original.get("started_at"), original.get("completed_at")
+    return (isinstance(started, str) and isinstance(completed, str)
+            and started == reissued.get("started_at")
+            and completed == reissued.get("completed_at")
+            and _utc_instant(started) is not None
+            and _utc_instant(completed) is not None)
+
+
+def _original_execution(original, reissued, run, attempt):
+    """One job from the receipt's attempt is the execution the reissued job copies."""
+    head = run.get("head_sha")
+    return (_same_execution(original, reissued)
+            and original.get("name") == reissued.get("name")
+            and original.get("run_id") == reissued.get("run_id") == run.get("id")
+            and original.get("head_sha") == reissued.get("head_sha") == head
+            and isinstance(head, str) and HEX40.fullmatch(head) is not None
+            and _positive_attempt(original.get("run_attempt")) == attempt
+            and original.get("status") == "completed"
+            and original.get("conclusion") == reissued.get("conclusion")
+            and successful(original) == successful(reissued))
+
+
+def _one_original(originals, reissued, run, attempt):
+    found = [job for job in originals if _original_execution(job, reissued, run, attempt)]
+    return found[0] if len(found) == 1 else None
+
+
+def jobs_for_attempt(run_id, attempt):
+    """Jobs GitHub recorded for one run attempt, or None when that proof is unavailable."""
+    if type(run_id) is not int or type(attempt) is not int or run_id < 1 or attempt < 1:
+        return None
+    try:
+        found = pages(
+            f"actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100", "jobs")
+    except (Refusal, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+        return None
+    if not isinstance(found, list) or any(not isinstance(job, dict) for job in found):
+        return None
+    return found
+
+
+def attempt_record(run_id, attempt):
+    """GitHub's workflow-run record for one attempt, or None if that boundary is unavailable.
+
+    The jobs list restamps a finished gate into later attempts. This record is the
+    attempt's own metadata (run id, head, attempt number, run_started_at).
+    """
+    if type(run_id) is not int or type(attempt) is not int or run_id < 1 or attempt < 1:
+        return None
+    try:
+        found = api(f"actions/runs/{run_id}/attempts/{attempt}")
+    except (Refusal, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+        return None
+    if not isinstance(found, dict):
+        return None
+    return found
+
+
+def _gate_ran_during_attempt(record, run, gate, attempt):
+    """The matched gate executed during the receipt-named attempt.
+
+    Copied job rows keep the original run, head and timestamps, so those fields
+    only prove the row was visible in the named attempt. The attempt record places
+    the execution: its run_started_at ≤ started_at ≤ completed_at < the current
+    attempt's run_started_at. A missing, mismatched or unparseable record refuses.
+    """
+    if not isinstance(record, dict):
+        return False
+    head = run.get("head_sha")
+    if (record.get("id") != run.get("id")
+            or record.get("head_sha") != head
+            or not isinstance(head, str) or HEX40.fullmatch(head) is None
+            or _positive_attempt(record.get("run_attempt")) != attempt):
+        return False
+    opened = _utc_instant(record.get("run_started_at"))
+    started = _utc_instant(gate.get("started_at"))
+    completed = _utc_instant(gate.get("completed_at"))
+    current = _utc_instant(run.get("run_started_at"))
+    if opened is None or started is None or completed is None or current is None:
+        return False
+    return opened <= started <= completed < current
+
+
+def _gate_step_succeeded(job):
+    steps = job.get("steps")
+    return isinstance(steps, list) and any(
+        successful(step) and step.get("name") == UNIT_GATE_STEP for step in steps)
+
+
+def receipt_attempt_binds(receipt_attempt, run, gate, jobs):
+    """The schedule receipt names the attempt that actually executed the gate.
+
+    On "re-run failed jobs", GitHub reports the latest run_attempt and a new job
+    id for successes it did not re-execute, but keeps the original start and
+    completion (run 45305541606: attempt-1 gate 138159904929 and attempt-2 gate
+    138167137778 both completed at 01:59:36Z, before attempt 2 began at
+    02:16:57Z). A carried receipt binds only when that named attempt's own jobs
+    show this same execution for the gate and for every unit shard: same run,
+    same head, same timestamps, despite the reissued id. That jobs row can be
+    restamped into a later attempt, so the named attempt's own record must place
+    the gate: its run_started_at ≤ the matched gate's started_at ≤ completed_at
+    < this attempt's run_started_at. An unavailable or invalid record refuses.
+    Shards that started earlier may be copied into the attempt that ran the gate;
+    they still match by execution, not by that window. The gate and those shards
+    must have completed before this attempt. A lower attempt number alone is not
+    that proof. A job re-executed on this attempt must carry this attempt's
+    number, and that path does not consult older attempts.
+    """
+    current = _positive_attempt(run.get("run_attempt", 1))
+    attested = _positive_attempt(receipt_attempt)
+    if current is None or attested is None or attested > current:
+        return False
+    attempt_started = _utc_instant(run.get("run_started_at"))
+    if _started_before(gate, attempt_started):
+        if attested >= current:
+            return False
+        if not _completed_before(gate, attempt_started):
+            return False
+        family = [job for job in jobs if unit_family(job["name"])]
+        if (not family or not all(_started_before(job, attempt_started) for job in family)
+                or not all(_completed_before(job, attempt_started) for job in family)):
+            return False
+        originals = jobs_for_attempt(run.get("id"), attested)
+        if originals is None:
+            return False
+        original_gate = _one_original(originals, gate, run, attested)
+        if original_gate is None or not _gate_step_succeeded(original_gate):
+            return False
+        if not _gate_ran_during_attempt(
+                attempt_record(run.get("id"), attested), run, original_gate, attested):
+            return False
+        return all(_one_original(originals, job, run, attested) is not None for job in family)
+    return attested == current
+
+
 def unit_gate_attested_count(run, jobs, required_set):
     """Shard count the unit gate attested for THIS head, run and attempt, else None.
 
     Mirrors the gate's own validation of its schedule receipt. A receipt for another
-    head, run or attempt, a failed or missing gate, or any doubt returns None. None is
-    never an attestation: on dynamic-selector CI the caller refuses, and only a workflow
+    head or run, a failed or missing gate, or any doubt returns None. The receipt's
+    run_attempt is the attempt that executed the gate. On a carried-over job that
+    attempt is earlier than the one GitHub stamps on the latest jobs, and it binds
+    only when that attempt's jobs still show the same start and completion. None is never an
+    attestation: on dynamic-selector CI the caller refuses, and only a workflow
     that proves a legacy static three-shard matrix keeps the fixed shard requirement.
     """
     head, run_id = required_set["head"], str(run["id"])
@@ -943,7 +1126,7 @@ def unit_gate_attested_count(run, jobs, required_set):
     if (facts["CI_EXECUTION_SHA"] != head or facts["UNIT_JOB_HEAD_SHA"] != head
             or facts["EXPECTED_RUN_ID"] != run_id or receipt.get("head") != head
             or str(receipt.get("run_id")) != run_id
-            or str(receipt.get("run_attempt")) != str(run.get("run_attempt", 1))
+            or not receipt_attempt_binds(receipt.get("run_attempt"), run, gate, jobs)
             or facts["UNIT_SCHEDULED_COUNT"] != count
             or facts["UNIT_SELECT_RESULT"] != "success"
             or facts["UNIT_PRECHECKS_RESULT"] != "success"
