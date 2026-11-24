@@ -28,7 +28,7 @@
 #   and auto approve a $3 budget for remote qa boxes"; earlier CTO option A C0ALZJHGE49 1793524845.153109): every spec run defaults
 #   to stock capture-on-miss through the SAME controller as the capture lane (remote-qa-modal.py register/overlay/prepare/capture-report
 #   --on-miss): replay first; ONE eligible priced miss per exact request goes live behind a pre-dispatch reservation in the shared
-#   R2 ledgers ($3 per physical box lifetime AND per QA attempt/head, cumulative with capture mode; the auto-approved budget, no
+#   R2 ledgers ($3 per QA run, Rajiv ts 1795459248.640279; a new run gets a fresh $3, restarts/re-leases within a run do not; the auto-approved budget, no
 #   approval list and no Rajiv/CTO approval step on this default path); payloads box-local only; every VALID response is published
 #   canonical PUT-if-absent to heydonna-fixtures (S161, never overwriting; invalid/UNKNOWN never published); UNKNOWN never resent.
 #   Needs --disposable-convex (mandatory for all spec runs anyway); GREEN legs only (RED/mutation runs fall back to strict replay).
@@ -116,7 +116,7 @@ modal_helper="${QA_MODAL_HELPER:-$HOME/.claude/scripts/remote-qa-modal.py}"
 # HEADROOM_GATE_BEGIN
 # Capture-on-miss lease headroom (CTO GO C0ALZJHGE49 thread 1795445208.612469, ts 1795455841.967449; per-run spend scope Rajiv D0AMF0XE6TS thread
 # 1795455420.472449, ts 1795459248.640279). READ-ONLY: reads this RUN's two spend ledgers through the helper, never writes or resets one. Same arithmetic as the
-# proxy's admission (committed + planned > $3 refuses). rc 0 = the remaining balance covers the planned miss reservation; rc 1 = refused
+# proxy's admission (a halted ledger refuses; committed + planned > $3 refuses). rc 0 = the remaining balance covers the planned miss reservation; rc 1 = refused
 # (helper rc 3 = QA_ONMISS_LEASE_HEADROOM, any other helper rc = custody uncertain, which also refuses). Runs on the trusted host right after
 # prepare confirms on-miss is live (QA_ONMISS_IDENTITY) and BEFORE the Playwright leg, project creation, the deadline readback and any
 # dispatch, so a refused run creates no project and sends nothing.
@@ -127,7 +127,8 @@ qa_onmiss_headroom_gate() {
   tee -a "$out/lane.txt" <"$out/onmiss-headroom.log"
   [ "$hrc" = 0 ] && return 0
   if [ "$hrc" = 3 ]; then
-    echo 'QA_ONMISS_LEASE_HEADROOM_REFUSED: the run balance cannot cover the planned miss reservation; stopped before project creation and dispatch; ledger untouched (no reset, no bypass)' | tee -a "$out/lane.txt" >&2
+    local code; code=$(sed -n 's/.* code=\(QA_[A-Z_]*\).*/\1/p' "$out/onmiss-headroom.log" | head -1)
+    echo "QA_ONMISS_LEASE_HEADROOM_REFUSED code=${code:-QA_ONMISS_LEASE_HEADROOM}: the run ledger is halted or its balance cannot cover the planned miss reservation; stopped before project creation and dispatch; ledger untouched (no reset, no bypass)" | tee -a "$out/lane.txt" >&2
   else
     echo "QA_ONMISS_LEASE_HEADROOM_UNCERTAIN rc=$hrc: the run ledger could not be read; refusing before project creation and dispatch" | tee -a "$out/lane.txt" >&2
   fi
@@ -309,6 +310,126 @@ if [ "$dry_run" = yes ]; then echo "DRY_RUN slot=$slot head=$head spec=$spec leg
 trap 'rc=$?; printf "QA_SPEC_ERROR: command failed at line %s (rc=%s)\n" "$LINENO" "$rc" >&2' ERR
 # Shared slot Convex may still use production storage; never start a QA box against it.
 [ "$disposable_convex" = 1 ] || { echo 'QA_R2_REFUSED: --disposable-convex required for isolated storage' >&2; exit 2; }
+# Run boundary (CTO C0ALZJHGE49 thread 1795463079.937409, ts 1795466201.039009; atomic claim per CTO REVISE ts 1795468361.226279).
+# Every invocation mints a FRESH run_id (and so a fresh per-run $3 on-miss ledger); there is NO continuation/resume path that
+# re-binds an earlier run_id, so restarting an unfinished run is UNSUPPORTED. The canonical (physical) --out dir is CLAIMED
+# atomically here, BEFORE strict preflight, disposable Convex create, the deployment lease, the box and dispatch:
+#  - under an flock on $out/.run-claim.lock (held across the check AND the write) the claimant creates $out/run-claim with
+#    O_CREAT|O_EXCL (run_id, pid, pstart, UTC) and appends its state=running record to run-boundary.txt (append-only; the last
+#    state= line wins). Two controllers on one --out can never both pass the check.
+#  - an existing claim (or legacy running record) whose run is not terminal FAILS CLOSED with the ORIGINAL run id:
+#    live owner (pid + start time match) -> QA_ONMISS_RESTART_UNSUPPORTED prior_reason=QA_RUN_ACTIVE;
+#    dead owner (SIGKILL / host crash at any point, including inside Convex create) -> that run is marked terminal
+#    QA_ONMISS_INTERRUPTED and this invocation refuses with QA_ONMISS_RESTART_UNSUPPORTED. INTERRUPTED is sticky: every later
+#    invocation on that --out refuses with the same original run id (its claims stay on the ORIGINAL run's ledger).
+#  - prior terminal with another QA_ONMISS_* reason after a leased box (run-identity.txt names its run_id) -> refuse the same way.
+#  - otherwise (fresh --out, or a terminal clean/non-on-miss prior run) the old claim is retired and a new run claims the dir.
+# From the claim on, every ordinary exit path writes a terminal record (pre-lane trap below, then cleanup()).
+# A separately authorized run uses its own --out and so gets its own run_id and its own $3. Box/Modal/lease cleanup after a
+# SIGKILL stays with the pool/reaper.
+# RUN_BOUNDARY_BEGIN
+qa_run_boundary_claim() {
+  mkdir -p "$out" && out=$(cd "$out" && pwd -P) || { echo "QA_RUN_CLAIM_FAILED out=$out: cannot create/resolve the output dir" >&2; return 2; }
+  python3 -I - "$out" "$run_id" "$$" "$head" "$spec" <<'CLAIM'
+import fcntl, os, re, subprocess, sys, time
+out, run_id, pid, head, spec = sys.argv[1:]
+now = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+def pstart(p):
+    try:
+        return re.sub(r'\s+', '_', subprocess.run(['ps', '-o', 'lstart=', '-p', str(p)], capture_output=True, text=True, timeout=10).stdout.strip())
+    except Exception:
+        return ''
+def fields(path):
+    d = {}
+    try:
+        for line in open(path, encoding='utf-8', errors='replace'):
+            k, sep, v = line.rstrip('\n').partition('=')
+            if sep:
+                d.setdefault(k, []).append(v)
+    except FileNotFoundError:
+        return None
+    return d
+def last(d, k):
+    return (d or {}).get(k, [''])[-1]
+def alive(p, start):
+    if not re.fullmatch(r'[0-9]+', p or ''):
+        return False
+    try:
+        os.kill(int(p), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    if start:
+        return pstart(p) == start
+    cmd = subprocess.run(['ps', '-o', 'command=', '-p', p], capture_output=True, text=True).stdout   # legacy record: no pstart
+    return 'remote-qa-spec' in cmd
+def append(path, text):
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        os.write(fd, text.encode()); os.fsync(fd)
+    finally:
+        os.close(fd)
+lock = os.open(os.path.join(out, '.run-claim.lock'), os.O_RDWR | os.O_CREAT, 0o644)
+fcntl.flock(lock, fcntl.LOCK_EX)   # covers check + write; released by the kernel if this process dies
+rbf, claimf = os.path.join(out, 'run-boundary.txt'), os.path.join(out, 'run-claim')
+rb, claim = fields(rbf), fields(claimf)
+rb_run, rb_state, reason = last(rb, 'run_id'), last(rb, 'state'), last(rb, 'terminal_reason')
+prior = last(claim, 'run_id') or rb_run
+unfinished = (rb_state == 'running') or (claim is not None and last(claim, 'run_id') != rb_run)   # claim written, run never recorded
+if unfinished:
+    owner_pid = last(rb, 'pid') if rb_state == 'running' and rb_run == prior else last(claim, 'pid')
+    owner_start = last(rb, 'pstart') if rb_state == 'running' and rb_run == prior else last(claim, 'pstart')
+    if alive(owner_pid, owner_start):
+        print('QA_RUN_ACTIVE run=%s pid=%s out=%s: a live controller owns this run; refusing a second controller' % (prior, owner_pid, out), file=sys.stderr)
+        print('QA_ONMISS_RESTART_UNSUPPORTED prior_run=%s prior_reason=QA_RUN_ACTIVE out=%s: the output dir is claimed by an unfinished run; refusing before Convex, lease, box and dispatch' % (prior, out), file=sys.stderr)
+        sys.exit(2)
+    if rb_state != 'running' or rb_run != prior:
+        append(rbf, 'run_id=%s\npid=%s\npstart=%s\nstarted_at=%s\nstate=running\n' % (prior, owner_pid, owner_start, last(claim, 'claimed_at')))
+    append(rbf, 'state=terminal\nterminal_rc=1\nterminal_reason=QA_ONMISS_INTERRUPTED\nterminal_at=%s\nterminal_by=%s\n' % (now, run_id))
+    open(os.path.join(out, 'terminal.rc'), 'w').write('1\n')
+    msg = 'QA_ONMISS_INTERRUPTED run=%s pid=%s: controller exited without its terminal trap; run is terminal (restart unsupported)' % (prior, owner_pid or 'UNKNOWN')
+    append(os.path.join(out, 'lane.txt'), msg + '\n'); print(msg, file=sys.stderr)
+    reason = 'QA_ONMISS_INTERRUPTED'
+if reason.startswith('QA_ONMISS_') and prior:
+    leased = last(fields(os.path.join(out, 'run-identity.txt')), 'run_id')
+    if reason == 'QA_ONMISS_INTERRUPTED' or leased == prior:
+        msg = ('QA_ONMISS_RESTART_UNSUPPORTED prior_run=%s prior_reason=%s out=%s: no continuation path binds the original run id; '
+               'refusing before Convex, lease, project creation and dispatch (no fresh budget; use a new --out only for a separately authorized run)' % (prior, reason, out))
+        append(os.path.join(out, 'restart-refused.txt'), msg + '\n'); print(msg, file=sys.stderr)
+        sys.exit(3)
+if claim is not None:   # terminal, restartable prior run: retire its claim (kept for audit), then claim exclusively below
+    os.replace(claimf, os.path.join(out, 'run-claim.%s.done' % re.sub(r'[^A-Za-z0-9._-]', '_', prior or 'unknown')))
+start = pstart(pid)
+try:
+    fd = os.open(claimf, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+except FileExistsError:
+    print('QA_RUN_CLAIM_RACE out=%s: claim appeared under the lock; refusing' % out, file=sys.stderr); sys.exit(2)
+os.write(fd, ('run_id=%s\npid=%s\npstart=%s\nclaimed_at=%s\nout=%s\n' % (run_id, pid, start, now, out)).encode()); os.fsync(fd); os.close(fd)
+append(rbf, 'run_id=%s\npid=%s\npstart=%s\nhead=%s\nspec=%s\nstarted_at=%s\nstate=running\n' % (run_id, pid, start, head, spec, now))
+print('QA_RUN_CLAIMED run=%s out=%s' % (run_id, out), file=sys.stderr)
+CLAIM
+}
+qa_run_boundary_end() {
+  printf 'state=terminal\nterminal_rc=%s\nterminal_reason=%s\nterminal_at=%s\n' "$1" "${2:-none}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$out/run-boundary.txt"
+}
+qa_pre_lane_exit() {   # EXIT trap from the claim until cleanup() takes over: tear down a created Convex, then record terminal
+  local rc=$?
+  trap - EXIT; set +e
+  disposable_cleanup || rc=1
+  echo "$rc" >"$out/terminal.rc"
+  qa_run_boundary_end "$rc" pre_lane_exit
+  exit "$rc"
+}
+disposable_cleanup() {
+  [ -n "$managed_dir" ] || return 0
+  python3 -I "$convex_helper" destroy --root "$managed_dir"
+}
+# RUN_BOUNDARY_END
+qa_run_boundary_claim || exit 1
+trap qa_pre_lane_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
 if [ -n "$strict_manifest" ]; then
   # Trusted-host readback BEFORE any Convex, lease or box: both canonical objects through a 60 s GetObject-only session on exactly
   # those keys plus one known-absent key (sha256 + size must match; the absent key must be NoSuchKey). Denial = stop, exact reason.
@@ -336,20 +457,13 @@ if [ -n "$exact_manifest" ]; then
   exact_args="$exact_args --app-data $app_data"; exact_overlay_args="$exact_overlay_args --app-data $app_data"
   echo "QA_APP_DATA mode=$app_data" >&2
 fi
-disposable_cleanup() {
-  [ -n "$managed_dir" ] || return 0
-  python3 -I "$convex_helper" destroy --root "$managed_dir"
-}
 if [ "$disposable_convex" = 1 ]; then
   [ -r "$convex_helper" ] || { echo 'Disposable Convex helper missing' >&2; exit 2; }
   pem=$(val SYNTH_JWT_PRIVATE_KEY_PATH || true)
   [ -r "$pem" ] || { echo 'Readable synthetic private key required (SYNTH_JWT_PRIVATE_KEY_PATH missing or unreadable)' >&2; exit 2; }
   mkdir -p "$HOME/.heydonna/qa-convex-leases"
   managed_dir=$(mktemp -d "$HOME/.heydonna/qa-convex-leases/spec-XXXXXXXX")
-  # Replaced by cleanup() below once the output dir exists; this covers a failure in between.
-  trap 'rc=$?; trap - EXIT; disposable_cleanup || rc=1; exit "$rc"' EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM HUP
+  # The pre-lane EXIT trap armed at the run claim tears this deployment down (and records terminal) until cleanup() takes over.
   python3 -I "$convex_helper" create --root "$managed_dir" --base-env "$env_file" $stripe_test_env
   env_file="$managed_dir/dev.env"
 fi
@@ -576,11 +690,12 @@ cleanup() {
   fi
   printf 'media_status=%s\nterminal_rc=%s\n' "$media_status" "$rc" >>"$out/lane.txt"
   echo "$rc" >"$out/terminal.rc"
+  qa_run_boundary_end "$rc" "$reason"
   find "$out" -type f ! -name SHA256SUMS -exec shasum -a 256 {} \; >"$out/SHA256SUMS" 2>/dev/null
   echo "REMOTE_SPEC verdict=$verdict${reason:+ reason=$reason} media_status=$media_status terminal_rc=$rc playwright_rc=${lane_rc:-UNKNOWN} llm_mode=$(llm_label) slot=$slot head=$head spec=$spec legs=$legs artifacts=$out"
   exit "$rc"
 }
-trap cleanup EXIT
+trap cleanup EXIT   # replaces qa_pre_lane_exit; the running record was written at the run claim
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 # Same deployment mutex as capture: seed replacement/config must have one owner.

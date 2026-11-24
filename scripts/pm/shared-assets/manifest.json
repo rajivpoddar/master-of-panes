@@ -375,7 +375,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-buddhi",
-      "sha256": "bf4395fc3a518b03320b0c9d547edc10efbd0d20c8aba2eb82006657bb017c5c",
+      "sha256": "ce201bf6a42c6854b9200c529dda694995d87c285ab6ad32895d9ba82b225f10",
       "source_path": "claude/rules/20-buddhi-pm.md"
     },
     {
@@ -1106,7 +1106,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "84964d768779e68cfedca94b76a6236c89fe3b400bff26d44798e3717cdb2684",
+      "sha256": "b2907a306caa5cc3dd0566f1b3305376da1ab9ffdf00e8e1d72b871aab871410",
       "source_path": "claude/scripts/remote-qa-modal.py"
     },
     {
@@ -1151,7 +1151,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "6d135110876ea155c1b0711450272a43413d5e250a2eef35c86f5dfcc756ee3d",
+      "sha256": "660a1c12547215b78a02614e1a9e56bdda1fc2089960c47c1e36a5b005d0535a",
       "source_path": "claude/scripts/remote-qa-spec.sh"
     },
     {

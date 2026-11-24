@@ -774,39 +774,69 @@ def planned_miss_reserve_usd(model='gemini-3.8-flash', maximum=65536):
     return round((1048576 * input_rate + maximum * output_rate) / 1000000, 6)
 
 
-def headroom_verdict(committed_usd, planned_usd, cap_usd=ONMISS_CAP_USD):
-    """Pure: the SAME admission test the proxy applies at claim time (`committed + bound > cap` refuses), run BEFORE the lease is accepted.
-    A lease whose remaining budget cannot cover one planned miss reservation would die with QA_ONMISS_SPEND_CAP after project creation
-    (run qa-spec-20261123T165940Z-88091); refusing here costs nothing. Never resets or edits a ledger."""
+def headroom_verdict(committed_usd, planned_usd, cap_usd=ONMISS_CAP_USD, halted=False):
+    """Pure: the SAME admission test the proxy applies at claim time (`state.get('halted') or committed + bound > cap` refuses), run
+    BEFORE the lease is accepted. A lease whose remaining budget cannot cover one planned miss reservation would die with
+    QA_ONMISS_SPEND_CAP after project creation (run qa-spec-20261123T165940Z-88091); refusing here costs nothing. A halted ledger is
+    refused whatever its nominal balance, because the proxy refuses every claim on it (CTO ts 1795466201.039009). Spent and UNKNOWN
+    claims are already inside committed_usd (every attempt at its charged bound, settled or not). Never resets or edits a ledger."""
     committed, planned = round(float(committed_usd), 6), round(float(planned_usd), 6)
     remaining = round(cap_usd - committed, 6)
-    ok = round(committed + planned, 6) <= cap_usd
-    return {'ok': ok, 'code': None if ok else 'QA_ONMISS_LEASE_HEADROOM', 'cap_usd': cap_usd, 'committed_usd': committed,
-            'planned_reserve_usd': planned, 'remaining_usd': remaining}
-
-
-def onmiss_headroom_cli(box, head, spend_box, run_id, planned_usd, ledger_file, legacy_env, output=None):
-    """Read-only pre-dispatch headroom check on the RUN-scoped box ledger. Absent ledger (a new run, even on a reused box) = $0 committed.
-    Source: --ledger-file (offline/dry run) or the exact-key get-only legacy reader; any non-absence read error is QA_CUSTODY_UNCERTAIN
-    (fail closed). Exit 0 = accepted, exit 3 = refused (controller tries the next eligible pool box; the ledger is never touched)."""
-    ids = derive_exact_ids(box, head, spend_box, run_id)
-    if ledger_file:
-        path = Path(ledger_file)
-        raw = path.read_bytes() if path.exists() else None
+    if halted:
+        code = 'QA_ONMISS_LEDGER_HALTED'
+    elif round(committed + planned, 6) > cap_usd:
+        code = 'QA_ONMISS_LEASE_HEADROOM'
     else:
-        found = legacy_reader(legacy_env)(ids['box_key'])
-        raw = found[0] if found else None
-    view = _ledger_view(raw, ())
-    verdict = headroom_verdict(view['committed_usd'], planned_usd if planned_usd is not None else planned_miss_reserve_usd())
-    line = ('QA_ONMISS_LEASE_HEADROOM status=' + ('ok' if verdict['ok'] else 'refused') + ' run=' + ids['run_id'] + ' spend_box=' + ids['spend_box']
-            + ' scope=run cap_usd=' + str(verdict['cap_usd']) + ' committed_usd=' + str(verdict['committed_usd'])
-            + ' planned_reserve_usd=' + str(verdict['planned_reserve_usd']) + ' remaining_usd=' + str(verdict['remaining_usd'])
-            + ' ledger=' + ids['box_key'].rsplit('/', 1)[-1] + ' ledger_state=' + view['state'] + ' before=project-creation+dispatch')
+        code = None
+    return {'ok': code is None, 'code': code, 'cap_usd': cap_usd, 'committed_usd': committed, 'planned_reserve_usd': planned,
+            'remaining_usd': remaining, 'halted': bool(halted)}
+
+
+def onmiss_headroom_cli(box, head, spend_box, run_id, planned_usd, ledger_file, legacy_env, output=None, ledger_dir=None):
+    """Read-only pre-dispatch headroom check on BOTH durable ledgers the proxy claims against: the RUN-scoped box ledger and the
+    per-head attempt ledger. Absent ledger (a new run, even on a reused box) = $0 committed. Each is refused when halted (the proxy
+    refuses every claim on a halted ledger, whatever its balance) or when committed + one planned reservation exceeds the cap; spent and
+    UNKNOWN claims count at their charged bound. Open custody (reserved/UNKNOWN/upstream_error/completed_unstored requests, unsettled
+    attempts) is reported in the verdict line. Source: --ledger-dir (offline/dry run: <dir>/<key basename>), --ledger-file (offline: the box ledger
+    only) or the exact-key get-only legacy reader; any non-absence read error is QA_CUSTODY_UNCERTAIN (fail closed).
+    Exit 0 = accepted, exit 3 = refused (controller stops before project creation; the ledger is never touched)."""
+    ids = derive_exact_ids(box, head, spend_box, run_id)
+    planned = planned_usd if planned_usd is not None else planned_miss_reserve_usd()
+    if ledger_dir:
+        def read(key):
+            path = Path(ledger_dir) / key.rsplit('/', 1)[-1]
+            return path.read_bytes() if path.exists() else None
+    elif ledger_file:
+        def read(key):
+            path = Path(ledger_file)
+            return path.read_bytes() if key == ids['box_key'] and path.exists() else None
+    else:
+        getter = legacy_reader(legacy_env)
+        def read(key):
+            found = getter(key)
+            return found[0] if found else None
+    views, verdicts = {}, {}
+    for scope, key in (('run', ids['box_key']), ('attempt', ids['attempt_key'])):
+        view = _ledger_view(read(key), ())
+        open_custody = view['unsettled'] + sum(n for st, n in view['request_states'].items() if st in CUSTODY_STATES_OPEN)
+        views[scope], verdicts[scope] = view, {**headroom_verdict(view['committed_usd'], planned, halted=view['halted']), 'open_custody': open_custody}
+    run_v, att_v = verdicts['run'], verdicts['attempt']
+    ok = run_v['ok'] and att_v['ok']
+    code = run_v['code'] or att_v['code']
+    line = ('QA_ONMISS_LEASE_HEADROOM status=' + ('ok' if ok else 'refused') + ' run=' + ids['run_id'] + ' spend_box=' + ids['spend_box']
+            + ' scope=run cap_usd=' + str(run_v['cap_usd']) + ' committed_usd=' + str(run_v['committed_usd'])
+            + ' planned_reserve_usd=' + str(run_v['planned_reserve_usd']) + ' remaining_usd=' + str(run_v['remaining_usd'])
+            + ' ledger=' + ids['box_key'].rsplit('/', 1)[-1] + ' ledger_state=' + views['run']['state']
+            + ' halted=' + str(int(run_v['halted'])) + ' open_custody=' + str(run_v['open_custody'])
+            + ' attempt_ledger=' + ids['attempt_key'].rsplit('/', 1)[-1] + ' attempt_state=' + views['attempt']['state']
+            + ' attempt_committed_usd=' + str(att_v['committed_usd']) + ' attempt_halted=' + str(int(att_v['halted']))
+            + ' attempt_open_custody=' + str(att_v['open_custody']) + (' code=' + code if code else '') + ' before=project-creation+dispatch')
     print(line)
     if output:
-        Path(output).write_text(json.dumps({**verdict, 'run_id': ids['run_id'], 'spend_box': ids['spend_box'], 'box_key': ids['box_key'],
-                                            'ledger_state': view['state']}, indent=2, sort_keys=True) + '\n')
-    return 0 if verdict['ok'] else 3
+        Path(output).write_text(json.dumps({**run_v, 'ok': ok, 'code': code, 'run_id': ids['run_id'], 'spend_box': ids['spend_box'],
+                                            'box_key': ids['box_key'], 'ledger_state': views['run']['state'], 'attempt_key': ids['attempt_key'],
+                                            'attempt': {**att_v, 'ledger_state': views['attempt']['state']}}, indent=2, sort_keys=True) + '\n')
+    return 0 if ok else 3
 
 
 def onmiss_summary(box_state, attempt_state, lease):
@@ -3766,6 +3796,7 @@ def main():
                         '(overlay/prepare/capture-report/mint-session/check-exact-ids/reconcile-custody/onmiss-headroom); $3 per RUN, not per box')
     parser.add_argument('--planned-reserve-usd',type=float,help='onmiss-headroom: planned single-miss reservation (default: the proxy estimator maximum, 1.0322)')
     parser.add_argument('--ledger-file',type=Path,help='onmiss-headroom: read the run ledger from this file (offline/dry run) instead of R2')
+    parser.add_argument('--ledger-dir',type=Path,help='onmiss-headroom: read BOTH ledgers (run + attempt) as <dir>/<key basename> (offline/dry run) instead of R2')
     parser.add_argument('--session-file',type=Path,help='capture-report --exact-manifest: controller-piped report session (deleted after use)')
     parser.add_argument('--receipt',type=Path,help='check-canary-receipt')
     parser.add_argument('--head',help='check-exact-manifest: required checkout head')
@@ -3823,7 +3854,7 @@ def main():
     elif a.command=='onmiss-headroom':
         if not (a.box and a.head and a.run_id):
             parser.error('onmiss-headroom requires --box, --head, --spend-box and --run-id')
-        raise SystemExit(onmiss_headroom_cli(a.box, a.head, a.spend_box, a.run_id, a.planned_reserve_usd, a.ledger_file, a.legacy_env, a.output))
+        raise SystemExit(onmiss_headroom_cli(a.box, a.head, a.spend_box, a.run_id, a.planned_reserve_usd, a.ledger_file, a.legacy_env, a.output, a.ledger_dir))
     elif a.command=='check-strict-manifest':
         if not a.strict_manifest:
             parser.error('check-strict-manifest requires --strict-manifest')
