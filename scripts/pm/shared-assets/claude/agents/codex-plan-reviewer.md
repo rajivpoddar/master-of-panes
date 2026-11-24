@@ -225,6 +225,14 @@ Source: Rajiv D0AMF0XE6TS ts 1794290954.291729 ("add prodcut rule for fewest cli
 Source: Rajiv, C0ALZJHGE49 thread 1794234970.206389, ts 1794487134.343129; rule `~/.claude/rules/56-heydonna-ci-main-shared-concurrency.md`.
 REQUEST_CHANGES if a plan splits `ci.yml` main concurrency or uses per-SHA groups. Require `group: ci-main`, `cancel-in-progress` true for push-to-main and false for schedule (rule 56 amendment, Rajiv 2026-11-15 ts 1794682943.445719), and a workflow contract test asserting the main push branch resolves to that shared group; attribute main reds by bisect.
 
+## Review-miss prevention gate (Mandatory - Rajiv 2026-11-24, C0ALZJHGE49 thread 1795496259.952399, ts 1795499036.055109 "go all 4")
+REVISE at plan stage, not later, when ANY of these hold:
+(a) the plan has no `## Prior findings (recall)` section with its recall queries, or a returned prior finding on a touched file is missing from the Proof matrix;
+(b) a new guard, checker or negative test names no mutation that must make it fail;
+(c) a browser/UI AC lacks its named QA spec, assertions and box command;
+(d) one PR head spans more than one surface without a split.
+Your own adversarial pass must also list the >=3 cases you would raise at code review (or state why none apply) and check each has a Proof matrix row; a missing row is a REVISE finding now, not a code-review finding later.
+
 ## Proof matrix gate (Mandatory - three-agent conveyor)
 
 Source: Rajiv, D0AMF0XE6TS thread 1794624936.567599, ts 1794633707.502709. hd-proof-qa executes ONLY the plan's matrix, so review it as the proof contract.

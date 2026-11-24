@@ -229,6 +229,13 @@ Source: Rajiv D0AMF0XE6TS ts 1794290954.291729 ("add prodcut rule for fewest cli
 - Required: primary actions complete in one click; protect data automatically (e.g. silent backup download) and report via toast (title + body).
 - Plans state the click count per changed user path. Tests: one-click completion, no dialog rendered, automatic protective side effect fires.
 
+## Review-miss prevention Planning Gate (Rajiv 2026-11-24, C0ALZJHGE49 thread 1795496259.952399, ts 1795499036.055109 "go all 4"; recall for item 1 per ts 1795498990.756949)
+Source: 23 Nov retros. In 3 of the top 5 slow PRs (#14578, #14466, #14486) reviewers raised proof or edge cases the plan never named, and each finding cost another head and CI/E2E round. Every plan carries these four checked items:
+1. **Prior-findings recall.** Before drafting, run `python3 ~/.claude/skills/recall/scripts/recall.py --limit 8 '<touched file path or feature keyword>'` (one run per main touched file or feature; record each query). Put every past Codex/12b/QA finding it returns on those files into the Proof matrix as `covered by <row>` or `out of scope: <reason>`. Section heading: `## Prior findings (recall)`, listing each query and its hit count (0 hits is a valid, recorded result).
+2. **Reviewer pre-mortem.** Section `## Reviewer pre-mortem`: the 3–5 cases a hostile code reviewer would raise (second/opaque call paths, concurrency and timing, the failure branch and its one-click recovery, stale snapshots, replay), each mapped to a Proof matrix row. Every new guard, checker or negative test names the mutation that must make it fail (e.g. "delete the reserve call → test reports missing_reserve"), so a test that passes without the fix is caught at plan time.
+3. **Proof spec at plan time.** Every browser/UI AC names its QA spec file, the assertions and the remote-box command in the plan. "Spec to be written after code review" is a plan defect.
+4. **One surface per head.** Editor, save/sync and other multi-surface changes are sliced so one PR head changes one surface. A plan whose single head spans more than one surface splits before build (file the later slice as its own issue with blocked-by, S127).
+
 ## Proof Matrix Planning Gate (Mandatory - three-agent conveyor)
 
 Source: Rajiv, D0AMF0XE6TS thread 1794624936.567599, ts 1794633707.502709 ("go on all three. should the planning should also cover the qa spec if browser testing is required?").

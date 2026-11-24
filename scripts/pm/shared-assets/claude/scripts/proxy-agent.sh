@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 # EDITING RULE: never edit this file in place while launchers run (bash reads scripts by byte offset, so a resumed launcher runs garbage, e.g. "notification: command not found" on 2026-11-14); write a temp file and mv it over (new inode).
 # proxy-agent.sh — model-selectable PM agent runner. Runs a PM agent definition out of process through CLIProxyAPI (127.0.0.1:8317),
+
+# Rajiv C0ALZJHGE49 thread 1794296562.075779 ts 1795505555.029549: when proxy pools refuse, say if the PM in-process cap has room.
+pa_inprocess_hint() {
+  local cap live
+  cap=$(sed -n 's/^PM_SUBAGENT_CAP=\([0-9][0-9]*\).*/\1/p' "$HOME/.claude/state/proxy-caps.env" 2>/dev/null | tail -1)
+  [ -n "$cap" ] || return 0
+  live=$(python3 -c 'import json,os;p=os.path.expanduser("~/.claude/state/pm-subagents.json");d=json.load(open(p)) if os.path.exists(p) else {};a=d.get("agents",[]);print(sum(1 for x in a if isinstance(x,dict) and x.get("status") not in ("done","stopped","failed","killed")))' 2>/dev/null || echo 0)
+  if [ "${live:-0}" -lt "$cap" ]; then
+    printf 'proxy-agent: IN_PROCESS_AVAILABLE live=%s cap=%s -> launch this brief in-process via the Agent tool (Skill launch-agent step 4)\n' "$live" "$cap" >&2
+  fi
+}
+
 # while the PM session stays on direct Claude. Default model: auto (S129 quota selector; luna is the GPT fallback). Legacy name luna-agent.sh is a symlink.
 # Rajiv DM D0AMF0XE6TS thread 1794087326.732679: "keep pm on direct claude" ... "go".
 # Rajiv DM ts 1794102299.043149: "set the correct context window sizes in the wrapper ... make the model configureable".
@@ -47,7 +59,7 @@ PM_ROLE="${PROXY_AGENT_PM_ROLE:-0}"
 PM_ROLE_TYPES="growth pm-ops-tooling pm-triage-agent customer-artifact-investigator cleanup-pr-runner pm-admission-reviewer donna-influencer explore-issue-agent"
 # PM-only skills live in heydonna-app/.claude/skills (Rajiv 2026-11-14, DM D0AMF0XE6TS thread 1794624936.567599: "move all pm skills to
 # heydonna-app/.claude/skills so that the dev agents don't get it"). These PM-owned types run from that checkout via the pm-skills plugin.
-PM_ROLE_TYPES="$PM_ROLE_TYPES pm-backlog-promoter pm-arch-reviewer e2e-failure-investigator ci-status-investigator mop-main-repair autoscaler-main-repair explee-outreach superproofer main-red-skip issue-contract-auditor lifecycle-email-agent pm-lock-release"
+PM_ROLE_TYPES="$PM_ROLE_TYPES pm-backlog-promoter pm-arch-reviewer e2e-failure-investigator ci-status-investigator mop-main-repair autoscaler-main-repair explee-outreach superproofer spark-lab main-red-skip issue-contract-auditor lifecycle-email-agent pm-lock-release"
 PM_TERRA_DEFAULT_TYPES="pm-admission-reviewer customer-artifact-investigator ci-repair-agent e2e-failure-investigator cleanup-pr-runner mop-main-repair pm-ops-tooling pm-triage-agent explore-issue-agent remote-qa-runner remote-test-runner"
 case " $PM_ROLE_TYPES " in
   *" $TYPE "*) PM_ROLE=1;;
@@ -1603,7 +1615,7 @@ fi
 PROXY_AGENT_CLAUDE_CAP="${PROXY_AGENT_CLAUDE_CAP:-5}"  # lowered 8→5 at 05:48Z; 5→3 at 09:46Z; raised 3→5 at 12:51Z (Rajiv D0AMF0XE6TS thread 1794659684.547559 ts 1794660569.044089: "raise it"; 4 Claude team accounts)
 # Only long-running roles participate in either cap (Rajiv ts 1794737134.234539).
 proxy_agent_is_capped() {
-  case "$1" in hd-planner|hd-builder|hd-proof-qa|pm-hotfix|pm-proof-qa|hd-investigator|superproofer) return 0;; *) return 1;; esac
+  case "$1" in hd-planner|hd-builder|hd-proof-qa|pm-hotfix|pm-proof-qa|hd-investigator|superproofer|spark-lab) return 0;; *) return 1;; esac
 }
 proxy_agent_live_count() {
   python3 -I "$HOME/.claude/scripts/proxy-cap-count.py" "$1" || printf '999\n'
@@ -1745,7 +1757,7 @@ proxy_agent_is_unresolved_auto() {
 proxy_agent_type_level() {
   local _first=""
   case "$1" in
-    hd-planner|hd-investigator|pm-admission-reviewer|*-reviewer|explore-issue-agent|growth|donna-influencer|marketing-site-builder|blog-post-builder) printf '%s' TOP;;
+    hd-planner|hd-investigator|pm-admission-reviewer|*-reviewer|explore-issue-agent|growth|donna-influencer|marketing-site-builder|blog-post-builder|spark-lab) printf '%s' TOP;;
     cleanup-pr-runner|pm-triage-agent|pm-backlog-promoter) printf '%s' LOW;;
     claude)
       # The heartbeat/digest brief is light ops work (same first-line test as proxy_agent_cap_exempt); every other generic claude brief stays MID.
@@ -2027,6 +2039,7 @@ proxy_agent_pick_tier() {
       printf 'proxy-agent: pool_cap skip model=%s\n' "$id" >&2
       if [[ -n "${PA_P0_WAIT:-}" ]]; then
         printf 'proxy-agent: REFUSED P0 queued: the %s pool is at cap and no lower-priority lane could be preempted (CAPACITY_WAIT; no bypass, no other pool or tier)\n' "$PA_P0_WAIT" >&2
+        pa_inprocess_hint
         PICK_MODEL=""
         return 75
       fi
@@ -2056,6 +2069,7 @@ proxy_agent_pick_tier() {
     # Fail closed for capped roles: no unchecked fallback is ever exported.
     PICK_MODEL=""
     printf 'proxy-agent: REFUSED no usable tier model (%s)\n' "$skipped" >&2
+    pa_inprocess_hint
     return 75
   fi
   # Cap enforcement on the fallback path (MoP proxy cap repair 2026-11-19): the best-effort fallback of a non-enforced role is never a way

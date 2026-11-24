@@ -85,7 +85,7 @@ MUSE = 'muse-spark-1.3-contributor'
 
 TOP_TYPES = ['hd-planner', 'hd-investigator', 'pm-admission-reviewer', 'codex-code-reviewer', 'codex-plan-reviewer', 'pm-plan-reviewer',
              'heydonna-ux-reviewer', 'pipeline-contract-reviewer', 'explore-issue-agent', 'growth', 'donna-influencer',
-             'marketing-site-builder', 'blog-post-builder']
+             'marketing-site-builder', 'blog-post-builder', 'spark-lab']  # spark-lab: Spark dev-model lab (Rajiv D0AMF0XE6TS ts 1795503812.405199); never takes a Spark model as its own driver
 # 24 Nov (Rajiv C0ALZJHGE49 ts 1795484559.513619): LOW = the light lanes (cleanup, triage); ornith is listed only there.
 LOW_TYPES = ['cleanup-pr-runner', 'pm-triage-agent', 'pm-backlog-promoter']
 MID_TYPES = ['claude', 'hd-builder', 'hd-proof-qa', 'remote-test-runner', 'remote-qa-runner', 'ci-repair-agent',

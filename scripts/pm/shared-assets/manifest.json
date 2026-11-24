@@ -24,7 +24,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-review-agents",
-      "sha256": "bec8c31d70372ee7e93da08fd7a817649d9163952f95773352105d5ff71feb1f",
+      "sha256": "88b414992bcdd0123ace2164fa1a76e8fe2ce963abf8a8fa60833317d0220631",
       "source_path": "claude/agents/codex-plan-reviewer.md"
     },
     {
@@ -33,7 +33,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-planning-agents",
-      "sha256": "1bc696cadb203b0b2af50830f0c412e2b4c2375a7783c68984f157c58dbb3572",
+      "sha256": "938fe54853186f4086be0958dce774e3fb28a8ecfdae504f7b4566e29ba26a7e",
       "source_path": "claude/agents/plan-agent.md"
     },
     {
@@ -753,7 +753,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-runtime-closure",
-      "sha256": "d05a97079253b008b0e991fc1420f021605de03d3e53ed9cef7bef6e063c194c",
+      "sha256": "ca213fd38e903cbae6d9f07ef620e71bc709045940b8c1a161853fcace25ab7d",
       "source_path": "claude/scripts/pm-hourly-post.sh"
     },
     {
@@ -960,7 +960,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "5cb7bde0728444231770f5d2cc24ed52b5d5660b3b64167d7dcd3fb1a7b4d3d5",
+      "sha256": "1b0a66f0494f9affec6fcfedb54a7298ef738bdbec893b05754b6d426ab4c3e6",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -1259,7 +1259,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "bc5d6771ba23e9fd87196e96e91e217fd84b9b02a35f5b9b4fc5c566b560f6f3",
+      "sha256": "4d45eb1fafe9a35355d6469227a80eadd6b409d2da15d509a4fa44be49a6cb2a",
       "source_path": "claude/scripts/tests/test_proxy_agent_tiers.py"
     },
     {
@@ -1439,7 +1439,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-app-review-prompts",
-      "sha256": "db772aebff88e0665f3e9fea58618c270f6a62ebe54efdb61f343b1f7208104f",
+      "sha256": "aca29275e55e8f02306013a3d7f4d2c41683b6d94c61afc0cd6e49ec4d001e34",
       "source_path": "claude/skills/codex-app-plan-review/templates/prompt.txt"
     },
     {

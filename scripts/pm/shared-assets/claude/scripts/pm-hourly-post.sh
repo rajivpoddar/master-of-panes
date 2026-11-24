@@ -19,6 +19,20 @@
 # (it exits 3 as a lone stderr line before its exec, so neither compose nor the sampler ran).
 # Known and deliberately NOT changed here: `if ! cmd; then rc=$?` below always reads rc=0 (separate follow-up).
 set -uo pipefail
+# Preview only. Never claims a bucket, never samples quotas, never posts to Slack.
+#   pm-hourly-post.sh --no-post [SRC] [OUT_PNG]
+# prints the absolute PNG path built from the last saved hourly (or SRC).
+if [ "${1:-}" = "--no-post" ]; then
+  SRC="${2:-/tmp/heartbeat-1h-post.txt}"
+  OUT="${3:-/tmp/hourly-chart-preview.png}"
+  TXT="${OUT}.txt"
+  if bash /Users/rajiv/.claude/scripts/pm/heartbeat/hourly_chart_hook.sh "$SRC" "$TXT" "$OUT"; then
+    python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$OUT"
+    exit 0
+  fi
+  echo "CHART_PREVIEW_FAILED"
+  exit 1
+fi
 BUCKET=$(date +%Y-%m-%d:%H)
 echo "$BUCKET" > /tmp/heartbeat-1h-bucket
 CLAIM="$HOME/.claude/hourly-heartbeat-posts/$BUCKET"
@@ -106,18 +120,37 @@ if bash "$_RB_HOOK" --hourly-batch "$CLAIM/routine-batch.json" </dev/null > "$CL
 else
   echo "ROUTINE_BATCH_SKIPPED the routine batch could not be built ($(head -c 160 "$CLAIM/routine-batch.export" 2>/dev/null | tr '\n\r' '  ')); the report posts without it"
 fi
+# Charts (Rajiv C0ALZJHGE49 thread 1795495430.992669, ts 1795497671.257839 / ts 1795497761.265599):
+# one PNG for burn gauges, OpenCode Go and the proxy lanes. The account-pace table stays in the parent.
+# OFF until ~/.claude/state/hourly-chart-enabled exists (Rajiv has not approved the chart): the hook
+# then returns rc 3 and this post keeps the original tables, including the account table.
+# FAIL OPEN: a missing flag, a missing venv python, a render error, or (after the post) a failed upload
+# leaves the current text tables and never blocks this post. The upload itself runs only after the parent receipt is valid.
+CHART_READY=0
+REPORT_SRC=/tmp/heartbeat-1h-post.txt
+CHART_PNG="$CLAIM/hourly-chart.png"
+if bash /Users/rajiv/.claude/scripts/pm/heartbeat/hourly_chart_hook.sh \
+    "$REPORT_SRC" /tmp/heartbeat-1h-post.chart.txt "$CHART_PNG"; then
+  if head -1 /tmp/heartbeat-1h-post.chart.txt | grep -Eq '^(<@[A-Z0-9]+> *)?\*Hourly'; then
+    REPORT_SRC=/tmp/heartbeat-1h-post.chart.txt
+    CHART_READY=1
+  else
+    echo "CHART_FALLBACK reason=rewritten_text_lost_first_line"
+    rm -f -- /tmp/heartbeat-1h-post.chart.txt /tmp/heartbeat-1h-post.chart.txt.tables "$CHART_PNG"
+  fi
+fi
 # Overflow tables (Rajiv C0ALZJHGE49 thread 1795351517.305319, ts 1795353266.972289: later tables were thread
 # replies so each could be its own native Slack table; Slack allows ONE native table block per message).
 # Superseded for three tables (Rajiv C0ALZJHGE49 thread 1795488293.729669, ts 1795488682.501089: "move these
 # tables to the main report rather than a reply to the thread"): Burn, OpenCode Go and the proxy
-# Lane | Model | Liveness table stay in the parent. slack-send.sh still makes the first table (pace) native
-# and renders the three as plain pipe text in that same message. Any OTHER later table is still one thread
-# reply per table. The Hourly per-PR status reply is a different sender and is not split here.
+# Lane | Model | Liveness table stay in the parent when the chart did not render. When the chart did
+# render, those tables are already headlines, and any OTHER later table is still one thread reply.
+# The Hourly per-PR status reply is a different sender and is not split here.
 # chat.postMessage rejects text over 40,000 characters. Never truncate the parent to fit: report the length
 # and do not send. A splitter crash (any rc other than 2) leaves N_TABLE_REPLIES=0 and posts the unsplit report.
 SPLIT_RC=0
 N_TABLE_REPLIES=$(python3 -I /Users/rajiv/.claude/scripts/pm/heartbeat/hourly_table_split.py \
-  "$CLAIM" /tmp/heartbeat-1h-post.txt /tmp/heartbeat-1h-post.parent.txt) || SPLIT_RC=$?
+  "$CLAIM" "$REPORT_SRC" /tmp/heartbeat-1h-post.parent.txt) || SPLIT_RC=$?
 if [ "$SPLIT_RC" -eq 2 ]; then
   echo "HOURLY_PARENT_TOO_LONG chars=$N_TABLE_REPLIES limit=40000 (not truncated, not posted)"
   EXIT_REASON="parent_over_slack_text_limit chars=$N_TABLE_REPLIES"
@@ -125,11 +158,11 @@ if [ "$SPLIT_RC" -eq 2 ]; then
 fi
 if [ "$SPLIT_RC" -ne 0 ]; then N_TABLE_REPLIES=0; fi
 case "$N_TABLE_REPLIES" in ''|*[!0-9]*) N_TABLE_REPLIES=0 ;; esac
-PARENT_BODY=/tmp/heartbeat-1h-post.txt
+PARENT_BODY="$REPORT_SRC"
 if [ "$N_TABLE_REPLIES" -gt 0 ] && head -1 /tmp/heartbeat-1h-post.parent.txt | grep -Eq '^(<@[A-Z0-9]+> *)?\*Hourly'; then
   PARENT_BODY=/tmp/heartbeat-1h-post.parent.txt
 else
-  N_TABLE_REPLIES=0   # no split, or a parent that fails the first-line check: post the whole report as one message, as before
+  N_TABLE_REPLIES=0   # no split, or a parent that fails the first-line check: post REPORT_SRC (original text, or the chart headlines)
 fi
 _OK_RE='^OK ts=[0-9]+\.[0-9]+ channel=C0ALZJHGE49$'
 # One overflow-table reply. Best effort: it never writes the parent receipt file and never changes this script's exit status, so a
@@ -168,6 +201,24 @@ fi
 TS=$(sed -n 's/^OK ts=\([0-9][0-9]*\.[0-9][0-9]*\) channel=C0ALZJHGE49$/\1/p' "$CLAIM/receipt")
 /Users/rajiv/.claude/scripts/hourly-thread-ts --set "$TS" --bucket "$BUCKET" --receipt "$RECEIPT" >/dev/null 2>&1 \
   || echo "WARN hourly-thread-ts --set failed for ts=$TS"
+# Chart image on the parent thread. A failed upload posts the original tables back into the thread
+# (plain pipe text) and does not change this script's exit status: the hourly parent is already delivered.
+if [ "$CHART_READY" = 1 ]; then
+  UP_RC=0
+  bash /Users/rajiv/.claude/scripts/slack-upload-file.sh "$CHART_PNG" C0ALZJHGE49 "$TS" "Hourly charts" \
+    > "$CLAIM/chart-upload.txt" 2>&1 || UP_RC=$?
+  if [ "$UP_RC" -eq 0 ] && grep -q '^OK ' "$CLAIM/chart-upload.txt"; then
+    echo "CHART_UPLOADED $(head -1 "$CLAIM/chart-upload.txt")"
+  else
+    echo "CHART_UPLOAD_FALLBACK rc=$UP_RC (posting the text tables in the thread; the hourly parent was not blocked)"
+    if [ -s /tmp/heartbeat-1h-post.chart.txt.tables ]; then
+      FB_RC=0
+      SLACK_TABLE_PLAIN=1 SLACK_SEND_AS=alerts bash /Users/rajiv/.claude/scripts/slack-send.sh -c C0ALZJHGE49 -t "$TS" -f < /tmp/heartbeat-1h-post.chart.txt.tables \
+        > "$CLAIM/chart-fallback.receipt" 2> "$CLAIM/chart-fallback.errors" || FB_RC=$?
+      echo "CHART_UPLOAD_FALLBACK_REPLY rc=$FB_RC"
+    fi
+  fi
+fi
 # Report-post record: written only now, after the parent receipt is valid, so it names the parent ts. It proves the REPORT POST only. Lane
 # ACCEPTANCE of the batch is a separate outcome that MoP records on the parent's lane receipt (hourly_receipt_reminders_v1 processing row)
 # when its single receipt-bound handoff reaches the existing hourly lane. The claim is per hour, so a second run in this bucket exits above.
