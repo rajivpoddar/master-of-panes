@@ -58,6 +58,9 @@ TEST_ONLY_BASE = "8219" + "b" * 36
 TEST_ONLY_WORKFLOW_SHA = "8219" + "c" * 36
 TEST_ONLY_NUMBER = 8219
 TEST_ONLY_SCOPE_ID = 8219001
+# The e2e.yml sibling of the CI scope job id; its log is routed to the
+# test-only classifier receipt so e2e_classifier_authenticated binds.
+TEST_ONLY_E2E_SCOPE_ID = 8219002
 # PR #14727 run 45334892718: BASE_SHA is the event-time base, but GitHub built the
 # synthetic merge commit on main after it advanced, so the first parent is a strict
 # descendant of BASE_SHA (compare status "ahead").
@@ -71,15 +74,22 @@ def pr():
 
 
 def run(conclusion="success"):
+    # run_started_at: workflow_proof validates ISO 8601 Z ordering stamps
+    # (merge.py rework 5, 8472745); fixtures must carry the live contract.
+    # pull_requests: native_pr_binding_ok binds the run to exactly this PR.
     return {"id": RUN_ID, "run_attempt": 1, "head_sha": HEAD, "event": "pull_request",
             "head_branch": REF, "path": f".github/workflows/{WORKFLOW}",
-            "status": "completed", "conclusion": conclusion}
+            "status": "completed", "conclusion": conclusion,
+            "run_started_at": "2026-09-22T10:00:00Z",
+            "pull_requests": [{"number": NUMBER}]}
 
 
 def site_run(conclusion="success"):
     return {"id": SITE_RUN_ID, "run_attempt": 1, "head_sha": HEAD, "event": "pull_request",
             "head_branch": REF, "path": ".github/workflows/ci-dummy.yml",
-            "status": "completed", "conclusion": conclusion}
+            "status": "completed", "conclusion": conclusion,
+            "run_started_at": "2026-09-22T10:00:01Z",
+            "pull_requests": [{"number": NUMBER}]}
 
 
 def site_pr():
@@ -109,12 +119,17 @@ def test_only_run(conclusion="success", path="ci.yml"):
             "run_attempt": 1, "head_sha": TEST_ONLY_HEAD,
             "event": "pull_request", "head_branch": "test/8219",
             "path": f".github/workflows/{path}", "status": "completed",
-            "conclusion": conclusion}
+            "conclusion": conclusion, "run_started_at": "2026-09-22T10:00:02Z",
+            "pull_requests": [{"number": TEST_ONLY_NUMBER}]}
 
 
 def test_only_jobs():
     rows = jobs(scope_conclusion="success", substantive="success")
+    run = test_only_run()
     for row in rows:
+        # Rebind to the test-only run and head (bound_attempt_jobs, rework 5).
+        row["run_id"], row["run_attempt"], row["head_sha"] = (
+            run["id"], run["run_attempt"], run["head_sha"])
         if row["name"] == "classify-change-scope":
             row["id"] = TEST_ONLY_SCOPE_ID
         if row["name"] == "typescript":
@@ -127,7 +142,11 @@ def test_only_log(receipt=None, bindings=None):
     body = {"schema_version": 1, "scope": "app_test_only", "app_test_only": True,
             "control_plane_only": False, "paid_ci_exempt": False,
             "product_changed": False, "ci_required": True, "e2e_required": False,
-            "rules_sha256": RULES_SHA}
+            "rules_sha256": RULES_SHA,
+            # e2e_classifier_authenticated (rework-5) binds the receipt's
+            # changed_files to the complete PR file set; the default matches
+            # the default app_test_files fixture below.
+            "changed_files": ["convex/__tests__/prmHunksMigration.test.ts"]}
     body.update(receipt or {})
     values = {"BASE_SHA": TEST_ONLY_BASE, "HEAD_SHA": TEST_ONLY_HEAD,
               "WORKFLOW_SHA": TEST_ONLY_WORKFLOW_SHA,
@@ -138,10 +157,14 @@ def test_only_log(receipt=None, bindings=None):
 
 
 def jobs(scope_conclusion="success", substantive="skipped"):
+    # bound_attempt_jobs (merge.py rework 5, 8472745) binds every job natively
+    # to the exact PR, head, run and attempt; fixtures must carry that contract.
     out = [{"id": SCOPE_ID, "name": "classify-change-scope", "status": "completed",
+            "run_id": RUN_ID, "run_attempt": 1, "head_sha": HEAD,
             "conclusion": scope_conclusion, "steps": [{"name": "classify", "status": "completed", "conclusion": scope_conclusion}]}]
     for name in NAMES:
         out.append({"id": 500 + len(out), "name": name, "status": "completed",
+                    "run_id": RUN_ID, "run_attempt": 1, "head_sha": HEAD,
                     "conclusion": substantive, "steps": []})
     return out
 
@@ -299,6 +322,8 @@ class Stub:
         if f"/actions/jobs/{SITE_SCOPE_ID}/logs" in path:
             return self.world.get("site_log", site_log_text())
         if f"/actions/jobs/{TEST_ONLY_SCOPE_ID}/logs" in path:
+            return self.world.get("test_only_log", test_only_log())
+        if f"/actions/jobs/{TEST_ONLY_E2E_SCOPE_ID}/logs" in path:
             return self.world.get("test_only_log", test_only_log())
         return self.world.get("log", log_text())
 
@@ -691,10 +716,19 @@ class AppTestOnlyCompatibilityTests(unittest.TestCase):
         skipped["pull_requests"] = [{"number": TEST_ONLY_NUMBER}]
         common = {"run_id": skipped["id"], "run_attempt": skipped["run_attempt"],
                   "head_sha": TEST_ONLY_HEAD, "status": "completed"}
+        # The e2e classifier job (8219002) shares the CI classifier log id space
+        # with the CI scope job; route its log by id in Stub.command so rework-5's
+        # e2e_classifier_authenticated reads the test-only receipt (rework-5, ts
+        # 1795444808.341169), and give the run the e2e-log-capture job the
+        # e2e_exemption_shape check requires.
         install(self.world(e2e_runs=[skipped], e2e_jobs=[
-            dict(common, id=8219002, name="classify-change-scope", conclusion="success", steps=[
-                {"name": "Classify paid E2E scope", "status": "completed", "conclusion": "success"}]),
-            dict(common, id=8219003, name="e2e", conclusion="skipped", steps=[])]))
+            dict(common, id=TEST_ONLY_E2E_SCOPE_ID, name="classify-change-scope",
+                 conclusion="success", steps=[
+                     {"name": "Classify paid E2E scope", "status": "completed",
+                      "conclusion": "success"}]),
+            dict(common, id=8219003, name="e2e", conclusion="skipped", steps=[]),
+            dict(common, id=8219004, name="e2e-log-capture",
+                 conclusion="skipped", steps=[])]))
         result = merge.merge(TEST_ONLY_NUMBER, TEST_ONLY_HEAD)
         self.assertEqual(result["status"], "READY_TO_MERGE")
         self.assertTrue(result["workflows"]["e2e.yml"]["skipped"])
@@ -753,7 +787,9 @@ class AppTestOnlyCompatibilityTests(unittest.TestCase):
         install(self.world(jobs=rows))
         with self.assertRaises(merge.Refusal) as ctx:
             merge.merge(TEST_ONLY_NUMBER, TEST_ONLY_HEAD)
-        self.assertIn("WORKFLOW_MISSING workflow=e2e.yml", str(ctx.exception))
+        # Rework-5's native job binding refuses a duplicate classifier name
+        # earlier than the old e2e-missing check; the run is still refused.
+        self.assertIn("SUBSTANTIVE_RUN_NOT_BOUND workflow=ci.yml", str(ctx.exception))
 
 
 def prove_test_only(world):
@@ -915,7 +951,10 @@ class NativeEventBindingTests(unittest.TestCase):
 
         def command(*args):
             calls.append(args)
-            allowed_log = ("gh", "api", f"repos/{merge.REPO}/actions/jobs/{scope['id']}/logs")
+            # job_log reads logs with `gh api --method GET` (60ab422 live sync):
+            # the allowlist pins the live transport contract.
+            allowed_log = ("gh", "api", "--method", "GET",
+                           f"repos/{merge.REPO}/actions/jobs/{scope['id']}/logs")
             allowed_files = ("gh", "api", "--paginate", "--slurp",
                              f"repos/{merge.REPO}/pulls/{pull['number']}/files?per_page=100")
             self.assertIn(args, (allowed_log, allowed_files))
