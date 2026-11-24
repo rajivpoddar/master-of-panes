@@ -92,10 +92,12 @@ def legacy_ci_roster_authenticated(pr, run, jobs):
     base, execution = bindings["BASE_SHA"], bindings["WORKFLOW_SHA"]
     if not HEX40.fullmatch(base) or not HEX40.fullmatch(execution):
         return False
-    if [p.get("sha") for p in api(f"git/commits/{execution}").get("parents", [])] != [base, pr["head"]["sha"]]:
+    trusted = merge_parent_base(base, pr["head"]["sha"],
+                                api(f"git/commits/{execution}").get("parents", []))
+    if trusted is None:
         return False
     path = ".github/workflows/ci.yml"
-    at_base, at_execution = contents_identity(path, base), contents_identity(path, execution)
+    at_base, at_execution = contents_identity(path, trusted), contents_identity(path, execution)
     return bool(at_base and at_execution and at_base[0] == at_execution[0] == LEGACY_CI_WORKFLOW_BLOB)
 
 
@@ -607,6 +609,35 @@ def contents_identity(path, ref):
     return blob, raw
 
 
+def merge_parent_base(base_sha, head_sha, parents):
+    """Trusted base ref for a pull_request synthetic merge commit, else None.
+
+    The classifier logs the event's pull_request.base.sha, while GitHub builds
+    the synthetic merge commit (WORKFLOW_SHA) on the base-branch tip at build
+    time. When main advanced in between (PR #14727 run 45334892718: BASE_SHA
+    2da0d1f7, first parent c2411b55, two commits ahead), the first parent is a
+    strict descendant of BASE_SHA, not BASE_SHA itself. That is not a defect in
+    the run, so an exact [base, head] parent match is not required. The second
+    parent must still be the exact PR head, and a differing first parent must be
+    strictly ahead of BASE_SHA; the trusted-tooling identity checks then compare
+    against that first parent (the tip the merge was built on). Anything else
+    (wrong head, unrelated or behind first parent, unreadable compare) is None.
+    """
+    shas = [parent.get("sha") if isinstance(parent, dict) else None for parent in parents]
+    if (len(shas) != 2 or shas[1] != head_sha
+            or not isinstance(shas[0], str) or not HEX40.fullmatch(shas[0])):
+        return None
+    if shas[0] == base_sha:
+        return base_sha
+    try:
+        compared = api(f"compare/{base_sha}...{shas[0]}")
+    except (Refusal, ValueError):
+        return None
+    if isinstance(compared, dict) and compared.get("status") == "ahead":
+        return shas[0]
+    return None
+
+
 def classifier_exemption(pr, workflow, run, scope, expected_scope="control_plane_only"):
     """Fail-closed verifier. Returns an exemption proof, or None to fall through."""
     head = pr["head"]["sha"]
@@ -628,6 +659,7 @@ def classifier_exemption(pr, workflow, run, scope, expected_scope="control_plane
         return None
     commit = api(f"git/commits/{workflow_sha}")
     parents = [parent["sha"] for parent in commit.get("parents", [])]
+    trusted_base = base_sha
     if workflow == SITE_EXEMPTION_WORKFLOW and expected_scope in ("site", "control_plane_only"):
         # BASE_SHA is the common merge base, while GitHub's synthetic merge
         # commit first parent is the current base-branch tip. Main may advance
@@ -635,11 +667,13 @@ def classifier_exemption(pr, workflow, run, scope, expected_scope="control_plane
         if (len(parents) != 2 or not HEX40.match(parents[0])
                 or parents[1] != head_sha):
             return None
-    elif parents != [base_sha, head_sha]:
-        return None
+    else:
+        trusted_base = merge_parent_base(base_sha, head_sha, commit.get("parents", []))
+        if trusted_base is None:
+            return None
     workflow_path = f".github/workflows/{workflow}"
     for path in (workflow_path, "scripts/ci/change_scope.py", "scripts/ci/change-scope-rules.json"):
-        at_base = contents_identity(path, base_sha)
+        at_base = contents_identity(path, trusted_base)
         at_workflow = contents_identity(path, workflow_sha)
         if at_base is None or at_workflow is None or at_base[0] != at_workflow[0]:
             return None
@@ -697,11 +731,12 @@ def app_test_only_classifier_proof(pr, workflow, run, scope):
             or not pr_binding_ok(bindings, run, pr)):
         return None
     commit = api(f"git/commits/{workflow_sha}")
-    if [parent["sha"] for parent in commit.get("parents", [])] != [base_sha, head_sha]:
+    trusted_base = merge_parent_base(base_sha, head_sha, commit.get("parents", []))
+    if trusted_base is None:
         return None
     for path in (".github/workflows/ci.yml", "scripts/ci/change_scope.py",
                  "scripts/ci/change-scope-rules.json"):
-        at_base = contents_identity(path, base_sha)
+        at_base = contents_identity(path, trusted_base)
         at_workflow = contents_identity(path, workflow_sha)
         if at_base is None or at_workflow is None or at_base[0] != at_workflow[0]:
             return None
@@ -787,12 +822,12 @@ def ci_required_set_proof(pr, run, scope):
             or not pr_binding_ok(bindings, run, pr)
             or not native_pr_binding_ok(run, pr)):
         return None
-    parents = api(f"git/commits/{workflow}").get("parents", [])
-    if [item["sha"] for item in parents] != [base, head]:
+    trusted_base = merge_parent_base(base, head, api(f"git/commits/{workflow}").get("parents", []))
+    if trusted_base is None:
         return None
     for path in (".github/workflows/ci.yml", "scripts/ci/change_scope.py",
                  "scripts/ci/change-scope-rules.json"):
-        before, selected = contents_identity(path, base), contents_identity(path, workflow)
+        before, selected = contents_identity(path, trusted_base), contents_identity(path, workflow)
         if before is None or selected is None or before[0] != selected[0]:
             return None
     rules = contents_identity("scripts/ci/change-scope-rules.json", workflow)

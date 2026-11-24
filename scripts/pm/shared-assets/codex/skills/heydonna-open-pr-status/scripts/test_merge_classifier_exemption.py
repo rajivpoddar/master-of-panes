@@ -58,6 +58,10 @@ TEST_ONLY_BASE = "8219" + "b" * 36
 TEST_ONLY_WORKFLOW_SHA = "8219" + "c" * 36
 TEST_ONLY_NUMBER = 8219
 TEST_ONLY_SCOPE_ID = 8219001
+# PR #14727 run 45334892718: BASE_SHA is the event-time base, but GitHub built the
+# synthetic merge commit on main after it advanced, so the first parent is a strict
+# descendant of BASE_SHA (compare status "ahead").
+ADVANCED_FIRST_PARENT = "c2411b55" + "f" * 32
 
 
 def pr():
@@ -211,8 +215,15 @@ class Stub:
         if path == "git/ref/heads/main":
             return {"object": {"sha": w.get("main", BASE)}}
         if path.startswith("compare/"):
-            return {"merge_base_commit": {"sha": w.get("main", BASE)},
-                    "html_url": "https://example.invalid/compare", "files": []}
+            if w.get("forbid_compare"):
+                raise AssertionError(f"compare must not be read for an exact base parent: {path}")
+            if w.get("compare_error"):
+                raise merge.Refusal("COMPARE_FAILED")
+            out = {"merge_base_commit": {"sha": w.get("main", BASE)},
+                   "html_url": "https://example.invalid/compare", "files": []}
+            if "compare_status" in w:
+                out["status"] = w["compare_status"]
+            return out
         if path.startswith("git/commits/"):
             sha = path.split("/", 2)[2]
             if sha == TEST_ONLY_WORKFLOW_SHA:
@@ -236,6 +247,8 @@ class Stub:
             blob = "blob-" + rel
             if w.get("blob_mismatch") and ref in (WORKFLOW_SHA, TEST_ONLY_WORKFLOW_SHA):
                 blob += "-drifted"
+            if ref in w.get("drifted_refs", ()):
+                blob += "-drifted-at-ref"
             content = base64.b64encode(RULES if rel.endswith("rules.json") else b"x").decode()
             if (w.get("rules_bytes") is not None and rel.endswith("rules.json")
                     and ref in (WORKFLOW_SHA, TEST_ONLY_WORKFLOW_SHA)):
@@ -741,6 +754,76 @@ class AppTestOnlyCompatibilityTests(unittest.TestCase):
         with self.assertRaises(merge.Refusal) as ctx:
             merge.merge(TEST_ONLY_NUMBER, TEST_ONLY_HEAD)
         self.assertIn("WORKFLOW_MISSING workflow=e2e.yml", str(ctx.exception))
+
+
+def prove_test_only(world):
+    install(world)
+    scope = next(j for j in test_only_jobs() if j["name"] == "classify-change-scope")
+    return merge.app_test_only_classifier_proof(test_only_pr(), "ci.yml", test_only_run(), scope)
+
+
+def prove_control_plane(world):
+    install(world)
+    scope = jobs()[0]
+    return merge.classifier_exemption(pr(), WORKFLOW, run(), scope, "control_plane_only")
+
+
+class AdvancedMainFirstParentTests(unittest.TestCase):
+    """PR #14727, run 45334892718: BASE_SHA is the event-time base, but the synthetic
+    merge commit was built on main after it advanced, so its first parent is a strict
+    descendant of BASE_SHA. That run is genuine and must keep its proof; anything that
+    is not strictly ahead, or whose second parent is not the exact head, must not."""
+
+    def scenario(self, **overrides):
+        world = {"workflow_parent": ADVANCED_FIRST_PARENT, "workflow_head": TEST_ONLY_HEAD,
+                 "compare_status": "ahead",
+                 "app_test_files": [{"filename": "convex/__tests__/prmHunksMigration.test.ts"}]}
+        world.update(overrides)
+        return world
+
+    def test_app_test_only_proof_accepts_first_parent_strictly_ahead(self):
+        result = prove_test_only(self.scenario())
+        self.assertIsNotNone(result)
+        self.assertEqual(result["exempt"], merge.TEST_ONLY_SCOPE)
+        self.assertEqual(result["workflow_sha"], TEST_ONLY_WORKFLOW_SHA)
+
+    def test_control_plane_proof_accepts_first_parent_strictly_ahead(self):
+        result = prove_control_plane({"workflow_parent": ADVANCED_FIRST_PARENT,
+                                      "compare_status": "ahead"})
+        self.assertIsNotNone(result)
+        self.assertEqual(result["exempt"], "control_plane_only")
+
+    def test_exact_base_first_parent_needs_no_compare(self):
+        self.assertIsNotNone(prove_test_only(self.scenario(
+            workflow_parent=TEST_ONLY_BASE, forbid_compare=True)))
+        self.assertIsNotNone(prove_control_plane({"forbid_compare": True}))
+
+    def test_first_parent_not_strictly_ahead_refuses(self):
+        for status in ("behind", "diverged", "identical"):
+            with self.subTest(status=status):
+                self.assertIsNone(prove_test_only(self.scenario(compare_status=status)))
+                self.assertIsNone(prove_control_plane({"workflow_parent": ADVANCED_FIRST_PARENT,
+                                                       "compare_status": status}))
+
+    def test_unprovable_ancestry_refuses(self):
+        no_status = self.scenario()
+        del no_status["compare_status"]
+        self.assertIsNone(prove_test_only(no_status))
+        self.assertIsNone(prove_test_only(self.scenario(compare_error=True)))
+        self.assertIsNone(prove_test_only(self.scenario(workflow_parent="c2411b55")))
+
+    def test_second_parent_must_be_the_exact_head(self):
+        self.assertIsNone(prove_test_only(self.scenario(workflow_head="0" * 40)))
+        self.assertIsNone(prove_control_plane({"workflow_parent": ADVANCED_FIRST_PARENT,
+                                               "compare_status": "ahead",
+                                               "workflow_head": "0" * 40}))
+
+    def test_trusted_tooling_must_match_at_the_first_parent_the_merge_was_built_on(self):
+        self.assertIsNone(prove_test_only(self.scenario(
+            drifted_refs={ADVANCED_FIRST_PARENT})))
+        self.assertIsNone(prove_control_plane({"workflow_parent": ADVANCED_FIRST_PARENT,
+                                               "compare_status": "ahead",
+                                               "drifted_refs": {ADVANCED_FIRST_PARENT}}))
 
 
 class RealColonFormLogTests(unittest.TestCase):

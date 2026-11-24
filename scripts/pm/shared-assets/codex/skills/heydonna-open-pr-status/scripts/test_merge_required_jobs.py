@@ -38,6 +38,7 @@ class World:
         self.job_logs = {}  # job id -> log text; any other job reads the classifier log
         self.files = copy.deepcopy(FIXTURE["files"])
         self.parents = FIXTURE["parents"][:]
+        self.compare = {"merge_base_commit": {"sha": BASE}}  # no "status": never proves ahead
         self.blobs = copy.deepcopy(FIXTURE["blob_shas"])
         self.rules = FIXTURE["rules"]
         self.e2e = dict(self.run, id=40075590960, path=".github/workflows/e2e.yml")
@@ -71,7 +72,7 @@ class World:
         if path == "git/ref/heads/main":
             return {"object": {"sha": BASE}}
         if path.startswith("compare/"):
-            return {"merge_base_commit": {"sha": BASE}}
+            return self.compare
         if path.startswith("git/commits/"):
             return {"parents": [{"sha": sha} for sha in self.parents]}
         if path in self.blobs:
@@ -119,6 +120,56 @@ def test_native_python_only_guard_entrypoint():
     assert flags["ts_changed"] is False and flags["python_changed"] is True
     assert result["workflows"]["e2e.yml"]["skipped"] is True
     assert all(args[:2] == ("gh", "api") for args in w.commands)
+
+
+# PR #14727, run 45334892718: the classifier logs the event-time BASE_SHA (2da0d1f7) but GitHub
+# built the synthetic merge commit on main after it advanced (first parent c2411b55, two commits
+# ahead). The run is genuine; only the exact [BASE_SHA, HEAD_SHA] parent match was too strict.
+ADVANCED = "c2411b55" + "f" * 32
+TRUSTED_FILES = (".github/workflows/ci.yml", "scripts/ci/change_scope.py",
+                 "scripts/ci/change-scope-rules.json")
+
+
+def advance_main(w, status="ahead"):
+    """Rebuild the fixture so the merge commit's first parent is a newer main tip."""
+    w.parents[0] = ADVANCED
+    for name in TRUSTED_FILES:  # same trusted tooling at the newer tip
+        w.blobs[f"contents/{name}?ref={ADVANCED}"] = w.blobs[f"contents/{name}?ref={BASE}"]
+    w.compare = {"status": status, "merge_base_commit": {"sha": BASE}}
+
+
+def test_first_parent_ahead_of_event_base_keeps_the_proof():
+    w = World()
+    advance_main(w)
+    result, _ = w.evaluate()
+    assert result["status"] == "READY_TO_MERGE"
+    flags = result["workflows"]["ci.yml"]["classifier_required_set"]
+    assert flags["python_changed"] is True
+    assert any(path == f"compare/{BASE}...{ADVANCED}" for path in w.reads)
+
+
+def test_exact_base_first_parent_never_reads_compare():
+    w = World()
+    w.evaluate()
+    assert not any(path.startswith(f"compare/{BASE}...") for path in w.reads)
+
+
+@pytest.mark.parametrize("change", ["behind", "diverged", "identical", "no_status",
+                                    "wrong_head_parent", "tooling_drift_at_first_parent",
+                                    "short_first_parent"])
+def test_advanced_main_parent_still_refuses_anything_not_strictly_ahead_and_bound(change):
+    w = World()
+    advance_main(w, status=change if change in ("behind", "diverged", "identical") else "ahead")
+    if change == "no_status":
+        w.compare = {"merge_base_commit": {"sha": BASE}}
+    elif change == "wrong_head_parent":
+        w.parents[1] = "f" * 40
+    elif change == "tooling_drift_at_first_parent":
+        w.blobs[f"contents/scripts/ci/change_scope.py?ref={ADVANCED}"] = "f" * 40
+    elif change == "short_first_parent":
+        w.parents[0] = "c2411b55"
+    with pytest.raises(RuntimeError):  # Refusal only; an AssertionError would be a vacuous pass
+        w.evaluate()
 
 
 @pytest.mark.parametrize("name", ["python", "python-contracts", "python-docx",
