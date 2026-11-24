@@ -1217,25 +1217,39 @@ def script_matches(template, echoed):
     return True
 
 
-def step_executed(blocks, kinds, script):
-    """True when exactly one log block is this step's own and its own output proves a passing run.
+def step_block(blocks, script):
+    """Index of the one log block that is this step's own, or None when none or several match."""
+    own = [at for at, (echoed, _) in enumerate(blocks) if script_matches(script, echoed)]
+    return own[0] if len(own) == 1 else None
 
-    The block is found by the step's script, never by the job's pooled output, so another step's
-    footer cannot stand in for a step that produced none. Its output must show nonzero passes for
-    each runner kind the step uses and no failure or error.
-    """
-    own = [output for echoed, output in blocks if script_matches(script, echoed)]
-    if len(own) != 1:
-        return False
-    passed, bad = pytest_totals(own[0])
+
+def block_executed(output, kinds):
+    """True when one block's own output shows nonzero passes for each runner kind and no failure."""
+    passed, bad = pytest_totals(output)
     node = {"pass": 0, "fail": 0}
-    for line in own[0]:
+    for line in output:
         summary = NODE_SUMMARY.match(line.strip())
         if summary:
             node[summary.group(1)] += int(summary.group(2))
     if bad or node["fail"]:
         return False
     return not (("pytest" in kinds and passed <= 0) or ("node" in kinds and node["pass"] <= 0))
+
+
+def steps_executed(blocks, steps):
+    """True when every required step owns a DISTINCT log block whose own output proves a pass.
+
+    One-to-one assignment of steps to blocks. Each block is found by its step's script, never by
+    the job's pooled output, so another step's footer cannot stand in for a step that produced
+    none. A step needs exactly one candidate block (none or several fail closed), and no block
+    may be assigned to two steps: two green step records with the same command, or two `${{ }}`
+    templates that both match one echo, still have only the one logged execution between them.
+    """
+    owned = {name: step_block(blocks, script) for name, (_, script) in steps.items()}
+    taken = list(owned.values())
+    if None in taken or len(set(taken)) != len(taken):
+        return False
+    return all(block_executed(blocks[owned[name]][1], kinds) for name, (kinds, _) in steps.items())
 
 
 def python_lanes_executed(jobs, test_only):
@@ -1249,8 +1263,10 @@ def python_lanes_executed(jobs, test_only):
     block in the job log is found by its `run:` script and that block's own output must show
     nonzero passes with no failure (pytest footers, or the node --test summary). Totals are never
     pooled across a job, so a sibling step's passing footer cannot vouch for a green step that
-    produced none, and a green step record alone is not proof. Any doubt about the workflow, a
-    log, or which block is which step is False.
+    produced none, and a green step record alone is not proof. Steps are assigned to blocks
+    one-to-one: a block that two steps would both claim (same command, or two expression
+    templates matching one echo) is one execution, so it cannot prove both. Any doubt about the
+    workflow, a log, or which block is which step is False.
     """
     try:
         selected = contents_identity(".github/workflows/ci.yml", test_only["workflow_sha"])
@@ -1278,7 +1294,7 @@ def python_lanes_executed(jobs, test_only):
             blocks = log_step_blocks(strip_log_framing(job_log(job["id"])))
         except (Refusal, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
             return False
-        if not all(step_executed(blocks, kinds, script) for kinds, script in steps.values()):
+        if not steps_executed(blocks, steps):
             return False
     return True
 

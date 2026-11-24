@@ -1686,6 +1686,67 @@ class PythonOnlyZeroSelectionTests(unittest.TestCase):
             8219130: pytest_log(FOOTER_0, script=echoed.replace("modal/newlane", "modal/other"))}
         self.assert_refused(ci_yaml=workflow, jobs=rows, job_logs=wrong)
 
+    # --- MoP 2026-11-25, CTO REVISE #3 (C0ALZJHGE49 ts 1795557717.070049) ---
+    # One logged execution cannot prove two required steps: each step needs its OWN block, so the
+    # step-to-block assignment is one-to-one. Checking each step independently let two green step
+    # records with the same command pass on a single passing block.
+
+    def doubled_step_world(self, first, second):
+        """The `python` lane with a second required step; `first` and `second` are the run scripts
+        of its two GC-style steps (the plain fixture has one). Returns (ci.yml bytes, job rows)."""
+        plain = "      - name: Modal GC unit tests\n        run: " + SCRIPT_GC + "\n"
+        workflow = python_workflow().replace(
+            plain, "      - name: Modal GC unit tests\n        run: " + first + "\n"
+                   "      - name: Modal GC unit tests again\n        run: " + second + "\n")
+        self.assertNotEqual(workflow, python_workflow())
+        rows = zero_selection_jobs()
+        for row in rows:
+            if row["name"] == "python":
+                row["steps"].append({"name": "Modal GC unit tests again", "status": "completed",
+                                     "conclusion": "success"})
+        return workflow.encode(), rows
+
+    def doubled_logs(self, *gc_blocks):
+        logs = self.world()["job_logs"]
+        return logs | {LANE_IDS["python"]: python_lane_log(gc="".join(gc_blocks))}
+
+    def test_two_green_steps_with_the_same_command_and_one_passing_block_are_refused(self):
+        # NEGATIVE CONTROL. Both step records are green and both name the same command, but the
+        # log holds one execution of it. Per-step matching found that one block for each step.
+        workflow, rows = self.doubled_step_world(SCRIPT_GC, SCRIPT_GC)
+        logs = self.doubled_logs(pytest_log(FOOTER_1_SECOND, script=SCRIPT_GC))
+        blocks = merge.log_step_blocks(merge.strip_log_framing(logs[LANE_IDS["python"]]))
+        self.assertIsNotNone(merge.step_block(blocks, SCRIPT_GC),
+                             "each step alone would have found the same one block")
+        self.assert_refused(ci_yaml=workflow, jobs=rows, job_logs=logs)
+
+    def test_two_steps_with_the_same_command_and_two_blocks_are_still_refused(self):
+        # Two executions, but a block cannot be told apart by script: neither is assignable.
+        workflow, rows = self.doubled_step_world(SCRIPT_GC, SCRIPT_GC)
+        twice = pytest_log(FOOTER_1_SECOND, script=SCRIPT_GC) * 2
+        self.assert_refused(ci_yaml=workflow, jobs=rows, job_logs=self.doubled_logs(twice))
+
+    def test_two_expression_templates_that_match_the_same_echo_are_refused(self):
+        # NEGATIVE CONTROL. The two scripts differ in the template but both reduce to this echo.
+        first = "python -m pytest scripts/tests/test_modal_gc.py --junitxml=gc-${{ github.run_id }}.xml"
+        second = "python -m pytest scripts/tests/test_modal_gc.py --junitxml=gc-${{ github.run_attempt }}.xml"
+        echoed = "python -m pytest scripts/tests/test_modal_gc.py --junitxml=gc-45478680523.xml"
+        workflow, rows = self.doubled_step_world(first, second)
+        logs = self.doubled_logs(pytest_log(FOOTER_1_SECOND, script=echoed))
+        self.assert_refused(ci_yaml=workflow, jobs=rows, job_logs=logs)
+
+    def test_two_expression_steps_each_with_their_own_block_are_accepted(self):
+        # The one-to-one assignment still accepts the real shape: two templated steps, two blocks.
+        first = "python -m pytest scripts/tests/test_modal_gc.py --junitxml=a-${{ github.run_id }}.xml"
+        second = "python -m pytest scripts/tests/test_modal_gc.py --junitxml=b-${{ github.run_id }}.xml"
+        workflow, rows = self.doubled_step_world(first, second)
+        own = (pytest_log(FOOTER_1_SECOND, script=first.replace("${{ github.run_id }}", "45478680523"))
+               + pytest_log(FOOTER_1_SECOND, script=second.replace("${{ github.run_id }}", "45478680523")))
+        self.assertIn("app_test_only", self.prove(ci_yaml=workflow, jobs=rows, job_logs=self.doubled_logs(own)))
+        # ...and the second step's block alone cannot vouch for the first step.
+        only_second = pytest_log(FOOTER_1_SECOND, script=second.replace("${{ github.run_id }}", "45478680523"))
+        self.assert_refused(ci_yaml=workflow, jobs=rows, job_logs=self.doubled_logs(only_second))
+
     def test_an_unreadable_job_log_refuses(self):
         # A shard whose log is absent falls back to the generic log, which has no pytest footer.
         logs = self.world()["job_logs"]
@@ -1832,6 +1893,47 @@ class ScriptMatchTests(unittest.TestCase):
         blocks = merge.log_step_blocks(merge.strip_log_framing(log))
         self.assertEqual([(echo, [line.strip() for line in out]) for echo, out in blocks],
                          [("echo one", ["out one"]), ("echo two\necho three", ["out two"])])
+
+
+class StepAssignmentTests(unittest.TestCase):
+    """steps_executed: required steps are assigned to log blocks one-to-one (REVISE #3)."""
+
+    OK = [FOOTER_0]
+
+    @staticmethod
+    def step(script, kinds=("pytest",)):
+        return (set(kinds), script)
+
+    def test_each_step_with_its_own_passing_block_is_accepted(self):
+        blocks = [("a", self.OK), ("b", self.OK), ("setup", [])]
+        steps = {"A": self.step("a"), "B": self.step("b")}
+        self.assertTrue(merge.steps_executed(blocks, steps))
+
+    def test_two_steps_with_the_same_script_cannot_share_one_block(self):
+        steps = {"A": self.step("a"), "B": self.step("a")}
+        self.assertEqual(merge.step_block([("a", self.OK)], "a"), 0)
+        self.assertFalse(merge.steps_executed([("a", self.OK)], steps))
+
+    def test_two_templates_that_match_one_echo_cannot_share_it(self):
+        steps = {"A": self.step("x ${{ a }}"), "B": self.step("x ${{ b }}")}
+        self.assertFalse(merge.steps_executed([("x 1", self.OK)], steps))
+
+    def test_a_block_claimed_twice_refuses_even_when_a_third_step_is_satisfied(self):
+        blocks = [("a 1", self.OK), ("b", self.OK)]
+        steps = {"A": self.step("a ${{ x }}"), "B": self.step("a ${{ y }}"), "C": self.step("b")}
+        self.assertFalse(merge.steps_executed(blocks, steps))
+
+    def test_a_step_with_no_block_refuses_even_when_its_sibling_has_one(self):
+        steps = {"A": self.step("a"), "B": self.step("b")}
+        self.assertFalse(merge.steps_executed([("a", self.OK)], steps))
+
+    def test_a_step_with_two_candidate_blocks_refuses(self):
+        self.assertFalse(merge.steps_executed([("a", self.OK), ("a", self.OK)], {"A": self.step("a")}))
+
+    def test_distinct_blocks_still_need_their_own_passing_result(self):
+        blocks = [("a", self.OK), ("b", ["= 1 failed, 5 passed in 1.00s ="])]
+        steps = {"A": self.step("a"), "B": self.step("b")}
+        self.assertFalse(merge.steps_executed(blocks, steps))
 
 
 class NodeSummaryTests(unittest.TestCase):
