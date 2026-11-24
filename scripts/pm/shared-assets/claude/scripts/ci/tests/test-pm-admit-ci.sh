@@ -8,6 +8,7 @@ export STUB_BASE_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 export STUB_MAIN_SHA=cccccccccccccccccccccccccccccccccccccccc
 export STUB_MERGED_SHA=dddddddddddddddddddddddddddddddddddddddd
 export STUB_FRESH_SHA=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+export STUB_MOVED_SHA=9999999999999999999999999999999999999999   # main after it moved on GitHub
 PASS=0; FAIL=0
 T=$(mktemp -d "${TMPDIR:-/tmp}/pm-admit-test.XXXXXX")
 
@@ -19,8 +20,7 @@ printf 'git %s\n' "$*" >> "$STUB_LOG"
 case "$*" in
   *'fetch -q --no-tags origin +refs/heads/main:'*) exit 0 ;;
   *'fetch -q --no-tags origin refs/pull/'*) [ -f "$STUB_DIR/updated" ] ;;
-  *'rev-parse --verify origin/main^{commit}')
-    if [ -n "${S166_CASE:-}" ]; then printf '%s\n' "$STUB_MAIN_SHA"; else printf '%s\n' "$STUB_SHA"; fi ;;
+  *'rev-parse --verify origin/main^{commit}') printf '%s\n' "$STUB_MAIN_SHA" ;;   # the main that passes the overlap check; the stale-ref guard binds to it
   *'merge-base --is-ancestor '*)
     if [ -z "${S166_CASE:-}" ]; then printf '%s\n' "$STUB_SHA"; exit 0; fi
     [ -f "$STUB_DIR/updated" ] && [[ "$*" = *" $STUB_MAIN_SHA $STUB_MERGED_SHA" || "$*" = *" $STUB_SHA $STUB_MERGED_SHA" ]] ;;
@@ -61,33 +61,40 @@ case "$args" in
     cat "${CAP_FIX:-/nonexistent}/runs.$sha" 2>/dev/null || printf '[{"workflow_runs":[]}]\n' ;;
   "api repos/"*"/actions/runs/"*"/jobs"*)
     printf '[{"jobs":[{"name":"typescript","conclusion":"failure","started_at":"2026-11-20T10:00:00Z","completed_at":"2026-11-20T10:20:00Z"}]}]\n' ;;
-  # Stale test-merge guard. Any STALE_MODE makes the FIRST merge ref stale (compare = diverged); the mode then drives the read-only re-verify:
-  #   recompute (stale on poll 1, rebuilt on poll 2) | still | unreadable | unreadable_parents | no_merge_sha | parents_mismatch | closed | head_moved | main_moved
-  "api repos/"*"/compare/"*"--jq .status"*)
-    case "${STALE_MODE:-}" in
-      "") printf 'ahead\n' ;;                                         # current main is contained
-      *) printf 'diverged\n' ;;
-    esac ;;
+  # Stale test-merge guard: ONE deadline-bounded read pass, bound to the main that passed the overlap check (STUB_MAIN_SHA). Default = fresh merge ref.
+  # STALE_MODE: stale | unreadable | unreadable_main | unreadable_parents | unreadable_confirm_pr | unreadable_confirm_main | no_merge_sha |
+  #             parents_mismatch | closed | head_moved | main_moved | main_moved_confirm | pr_changed_confirm | hung | hung_parents | late
   "api repos/"*"/git/ref/heads/main"*)
-    n=$(cnt main)                                                    # call 1 = first read, 2 = verify read, 3 = verify confirm read
-    if [ "${STALE_MODE:-}" = main_moved ] && [ "$n" -ge 3 ]; then printf '%040x\n' "$n"; else printf '%s\n' "$STUB_MAIN_SHA"; fi ;;
-  "api repos/"*"/pulls/"*".head.sha"*)                               # verify read: "<state> <head> <merge_commit_sha>"
+    n=$(cnt main)                                                    # read 1 = first main read, read 2 = confirming main read
+    case "${STALE_MODE:-}" in
+      unreadable_main) echo "HTTP 502" >&2; exit 1 ;;
+      unreadable_confirm_main) [ "$n" -ge 2 ] && { echo "HTTP 502" >&2; exit 1; } ;;
+      main_moved) printf '%s\n' "$STUB_MOVED_SHA"; exit 0 ;;                                   # main moved before the guard's first read
+      main_moved_confirm) [ "$n" -ge 2 ] && { printf '%s\n' "$STUB_MOVED_SHA"; exit 0; } ;;      # main moved during the pass
+    esac
+    printf '%s\n' "$STUB_MAIN_SHA" ;;
+  "api repos/"*"/pulls/"*".head.sha"*)                               # "<state> <head> <merge_commit_sha>"; read 1 = first, read 2 = confirming
     v=$(cnt verify)
     case "${STALE_MODE:-}" in
       unreadable) echo "HTTP 502" >&2; exit 1 ;;
-      still) printf 'open %s %s\n' "$STUB_SHA" "$STUB_MERGED_SHA" ;;  # GitHub never rebuilds the ref
-      recompute) if [ "$v" = 1 ]; then printf 'open %s %s\n' "$STUB_SHA" "$STUB_MERGED_SHA"; else printf 'open %s %s\n' "$STUB_SHA" "$STUB_FRESH_SHA"; fi ;;
+      unreadable_confirm_pr) [ "$v" -ge 2 ] && { echo "HTTP 502" >&2; exit 1; } ;;
+      hung) exec sleep 30 ;;                                          # never answers: only the deadline timeout ends it
+      late) sleep 3 ;;                                                # answers correctly but after the deadline (run with a no-op timeout shim)
+    esac
+    case "${STALE_MODE:-}" in
+      stale) printf 'open %s %s\n' "$STUB_SHA" "$STUB_MERGED_SHA" ;;  # GitHub never rebuilt the ref: still on the old main
       closed) printf 'closed %s %s\n' "$STUB_SHA" "$STUB_FRESH_SHA" ;;
       head_moved) printf 'open %s %s\n' ffffffffffffffffffffffffffffffffffffffff "$STUB_FRESH_SHA" ;;
       no_merge_sha) printf 'open %s \n' "$STUB_SHA" ;;
-      *) printf 'open %s %s\n' "$STUB_SHA" "$STUB_FRESH_SHA" ;;       # parents_mismatch, unreadable_parents, main_moved
+      pr_changed_confirm) if [ "$v" = 1 ]; then printf 'open %s %s\n' "$STUB_SHA" "$STUB_FRESH_SHA"; else printf 'open %s %s\n' "$STUB_SHA" "$STUB_MERGED_SHA"; fi ;;
+      *) printf 'open %s %s\n' "$STUB_SHA" "$STUB_FRESH_SHA" ;;       # fresh, parents_mismatch, unreadable_parents, main_moved*, hung_parents
     esac ;;
-  "api repos/"*"/pulls/"*"merge_commit_sha"*) printf '%s\n' "$STUB_MERGED_SHA" ;;   # first read: the stale merge commit
   "api repos/"*"/commits/"*)                                         # merge commit parents, sorted
     [ "${STALE_MODE:-}" = unreadable_parents ] && { echo "HTTP 502" >&2; exit 1; }
+    [ "${STALE_MODE:-}" = hung_parents ] && exec sleep 30
     sha=${args#*commits/}; sha=${sha%% *}
-    if [ "$sha" = "$STUB_FRESH_SHA" ] && [ "${STALE_MODE:-}" != parents_mismatch ]; then printf '%s %s\n' "$STUB_SHA" "$STUB_MAIN_SHA"   # rebuilt on current main
-    else printf '%s %s\n' "$STUB_SHA" "$STUB_BASE_SHA"; fi ;;                                                                            # still on the old main
+    if [ "$sha" = "$STUB_FRESH_SHA" ] && [ "${STALE_MODE:-}" != parents_mismatch ]; then printf '%s %s\n' "$STUB_SHA" "$STUB_MAIN_SHA"   # built on the overlap-checked main
+    else printf '%s %s\n' "$STUB_SHA" "$STUB_BASE_SHA"; fi ;;                                                                            # still on an old main
   "api repos/"*"/compare/"*)
     changed='[]'; [ "${GATE_MODE:-same}" != changed ] || changed='[{"filename":"lib/a.ts"}]'
     printf '{"status":"ahead","total_commits":1,"commits":[{"sha":"%s","parents":[{},{}],"commit":{"message":"Merge branch '\''main'\'' into topic"}}],"files":%s}\n' "$STUB_SHA" "$changed" ;;
@@ -132,8 +139,8 @@ EOF
 run_script() { # name, then script arguments; fixture env pre-set by caller
   local name="$1"; shift
   STUB_DIR="$T/$name"; mkdir -p "$STUB_DIR"; STUB_LOG="$STUB_DIR/gh.log"; : > "$STUB_LOG"
-  export STUB_DIR STUB_LOG STUB_SHA="$SHA" PM_ADMIT_RETRY_SLEEP=0 PM_ADMIT_STALE_POLL_SLEEP=0 PM_ADMIT_STALE_REFRESH_WAIT=3
-  OUT=$(PATH="$T/bin:$PATH" HOME="$T/home" bash "$SCRIPT" "$@" 2>&1); RC=$?
+  export STUB_DIR STUB_LOG STUB_SHA="$SHA" PM_ADMIT_RETRY_SLEEP=0 PM_ADMIT_STALE_DEADLINE="${STALE_DL:-4}"
+  OUT=$(PATH="${EXTRA_PATH:+$EXTRA_PATH:}$T/bin:$PATH" HOME="$T/home" bash "$SCRIPT" "$@" 2>&1); RC=$?
   LOG=$(cat "$STUB_LOG")
 }
 run_case() { local name="$1"; shift; run_script "$name" 11173 --no-update "$@"; }
@@ -336,69 +343,94 @@ OUT=$(PATH="$T/bin:$PATH" HOME="$T/home" bash "$SCRIPT" --check-12b-only 11173 2
 check 'cap: --check-12b-only does not read the cap' '! grep -q "/events" "$STUB_LOG" && ! grep -q ADMISSION_CAP <<<"$OUT"'
 unset CAP_EVENTS_JSON
 
-# ---- Stale test-merge ref: read-only recompute, never a PR state change (CTO REVISE of d644cece, C0ALZJHGE49 thread 1795543629.469469) ----
-# A confirmed stale refs/pull/N/merge is only re-read from GitHub (bounded). It is admitted ONLY when one read shows the PR OPEN, the head unchanged,
-# CURRENT main read fresh, and the merge commit's parents exactly {head, current main}, all unchanged on a confirming read. Anything else, including
-# any unreadable value, refuses stale_merge_ref (exit 3). No close/reopen, no main merge, no push, ever.
+# ---- Stale test-merge ref: ONE deadline-bounded read-only pass, fail closed (CTO REVISE #2 of b6d3f55c, C0ALZJHGE49 thread 1795543629.469469, ts 1795544911.112579) ----
+# The PR's test merge (refs/pull/N/merge) is verified in one pass of GitHub reads, every one bounded by the remaining deadline, BEFORE any admission write.
+# It is admitted ONLY when the PR is OPEN, the head is unchanged, main still equals the main that passed the overlap check (STUB_MAIN_SHA), the merge
+# commit's parents are exactly {head, that main}, and a confirming read agrees. Anything else, including any unreadable, hung or late read, refuses
+# stale_merge_ref (exit 3). No polling, no sleeps, no close/reopen, no main merge, no push.
 GATE_MODE=none; export GATE_MODE
-assert_stale_refused() { # name: exit 3, REFUSE stale_merge_ref, nothing admitted, no state change, no close/reopen advice
-  check "$1: exit 3 REFUSE stale_merge_ref, nothing admitted" '[ "$RC" = 3 ] && grep -q "^REFUSE stale_merge_ref #11173:" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && ! grep -q STALE_MERGE_REF_RECOMPUTED <<<"$OUT"'
-  check "$1: no ci-head label write" '! grep -qE -- "--add-label ci-head|label create" "$STUB_LOG"'
+assert_stale_refused() { # name: exit 3, REFUSE stale_merge_ref BEFORE any admission write, no state change, no close/reopen advice
+  check "$1: exit 3 REFUSE stale_merge_ref, nothing admitted" '[ "$RC" = 3 ] && grep -q "^REFUSE stale_merge_ref #11173:" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && ! grep -q MERGE_REF_VERIFIED <<<"$OUT"'
+  check "$1: refused before the activation label and before every admission write" '! grep -qE -- "--add-label|--remove-label|label create|pr edit" "$STUB_LOG"'
   check "$1: no PR state change, no main merge, no branch write" '! grep -qE "^gh pr (close|reopen)|update-branch|^git (merge|push|reset|rebase)|--force" "$STUB_LOG"'
   check "$1: the REFUSE text carries no close/reopen advice" '! grep -qiE "reopen|gh pr close" <<<"$OUT"'
 }
 
-echo "case: stale merge ref - GitHub rebuilds it on current main during the read-only poll, admitted"
-STALE_MODE=recompute; export STALE_MODE
-run_case stale_recompute --no-12b-gate --reason 'stale ref test'
-check 'stale_recompute: exit 0 and ADMITTED at the unchanged head' '[ "$RC" = 0 ] && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT"'
-check 'stale_recompute: logs STALE_MERGE_REF_RECOMPUTED with old merge, new merge, head and current main' 'grep -qx "STALE_MERGE_REF_RECOMPUTED pr=11173 old=$STUB_MERGED_SHA new=$STUB_FRESH_SHA head=$SHA main=$STUB_MAIN_SHA" <<<"$OUT"'
-check 'stale_recompute: polled again (rebuilt only on the second read) and read both merge parents' '[ "$(grep -c "^gh api repos/.*/commits/$STUB_FRESH_SHA" "$STUB_LOG")" -ge 1 ] && [ "$(cat "$STUB_DIR/cnt.verify")" -ge 3 ]'
-check 'stale_recompute: ci-head label added for the reviewed head' 'grep -q -- "--add-label ci-head:$SHA" "$STUB_LOG"'
-check 'stale_recompute: no PR state change, no main merge, no branch write' '! grep -qE "^gh pr (close|reopen)|update-branch|^git (merge|push|reset|rebase)|--force" "$STUB_LOG" && ! grep -q "main_merge: performed" <<<"$OUT"'
-unset STALE_MODE
+echo "case: fresh merge ref - verified on the overlap-checked main, admitted after ONE pass (2 PR reads, 2 main reads, 1 parents read), no polling"
+run_case stale_fresh --no-12b-gate --reason 'stale ref test'
+check 'stale_fresh: exit 0, MERGE_REF_VERIFIED binds head, overlap-checked main and merge sha' '[ "$RC" = 0 ] && grep -qx "MERGE_REF_VERIFIED pr=11173 head=$SHA main=$STUB_MAIN_SHA merge=$STUB_FRESH_SHA" <<<"$OUT"'
+check 'stale_fresh: ADMITTED at the reviewed head, ci-head label added after the check' '[ "$RC" = 0 ] && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT" && grep -q -- "--add-label ci-head:$SHA" "$STUB_LOG"'
+check 'stale_fresh: one pass only: 2 PR reads, 2 main reads, 1 parents read of the merge commit' '[ "$(cat "$STUB_DIR/cnt.verify")" = 2 ] && [ "$(cat "$STUB_DIR/cnt.main")" = 2 ] && [ "$(grep -c "^gh api repos/.*/commits/$STUB_FRESH_SHA" "$STUB_LOG")" = 1 ]'
+check 'stale_fresh: every guard read precedes the first admission write' '[ "$(grep -n "git/ref/heads/main" "$STUB_LOG" | tail -1 | cut -d: -f1)" -lt "$(grep -nE -- "--add-label|label create" "$STUB_LOG" | head -1 | cut -d: -f1)" ]'
+check 'stale_fresh: no PR state change, no main merge, no branch write' '! grep -qE "^gh pr (close|reopen)|update-branch|^git (merge|push|reset|rebase)|--force" "$STUB_LOG" && ! grep -q "main_merge: performed" <<<"$OUT"'
 
-echo "case: stale merge ref - never rebuilt, fail closed"
-STALE_MODE=still; export STALE_MODE
+echo "case: stale merge ref - GitHub has not rebuilt it on the overlap-checked main, refused after ONE pass with no polling"
+STALE_MODE=stale; export STALE_MODE
 run_case stale_still --no-12b-gate --reason 'stale ref test'
 assert_stale_refused stale_still
-check 'stale_still: REFUSE names the stale merge, the head, current-main parents and says no PR change was made' 'grep -q "^REFUSE stale_merge_ref #11173: test merge $STUB_MERGED_SHA is not verified to be built on current main (parents must be exactly head $SHA and the current main" <<<"$OUT" && grep -q "made NO change to the PR state" <<<"$OUT"'
-check 'stale_still: polled GitHub read-only more than once' '[ "$(cat "$STUB_DIR/cnt.verify")" -ge 2 ]'
+check 'stale_still: REFUSE names the stale merge, its parents, and the exact head and overlap-checked main it needed' 'grep -q "^REFUSE stale_merge_ref #11173: test merge $STUB_MERGED_SHA has parents \[$SHA $STUB_BASE_SHA\] but must be exactly the reviewed head and the overlap-checked main \[$SHA $STUB_MAIN_SHA\]" <<<"$OUT" && grep -q "made NO change to the PR" <<<"$OUT"'
+check 'stale_still: read once, never polled (1 PR read, 1 main read, 1 parents read)' '[ "$(cat "$STUB_DIR/cnt.verify")" = 1 ] && [ "$(cat "$STUB_DIR/cnt.main")" = 1 ] && [ "$(grep -c "^gh api repos/.*/commits/" "$STUB_LOG")" = 1 ]'
 unset STALE_MODE
 
-echo "case: stale merge ref - an unreadable PR read is UNKNOWN, fail closed"
-STALE_MODE=unreadable; export STALE_MODE
-run_case stale_unreadable --no-12b-gate --reason 'stale ref test'
-assert_stale_refused stale_unreadable
-STALE_MODE=unreadable_parents; export STALE_MODE
-run_case stale_unreadable_parents --no-12b-gate --reason 'stale ref test'
-assert_stale_refused stale_unreadable_parents
-STALE_MODE=no_merge_sha; export STALE_MODE
-run_case stale_no_merge_sha --no-12b-gate --reason 'stale ref test'
-assert_stale_refused stale_no_merge_sha
-unset STALE_MODE
-
-echo "case: stale merge ref - merge parents are not exactly {head, current main}, refused"
-STALE_MODE=parents_mismatch; export STALE_MODE
-run_case stale_parents_mismatch --no-12b-gate --reason 'stale ref test'
-assert_stale_refused stale_parents_mismatch
-check 'stale_parents_mismatch: a new merge sha alone is not trusted, its parents were read' 'grep -q "^gh api repos/.*/commits/$STUB_FRESH_SHA" "$STUB_LOG"'
-unset STALE_MODE
-
-echo "case: stale merge ref - PR closed, head moved, or main moved during the re-check, refused"
-for mode in closed head_moved main_moved; do
+echo "case: stale merge ref - EDGE 1: any unreadable PR, main, merge-ref or parents read is UNKNOWN and refuses BEFORE the activation label"
+for mode in unreadable unreadable_main unreadable_parents unreadable_confirm_pr unreadable_confirm_main no_merge_sha; do
   STALE_MODE=$mode; export STALE_MODE
   run_case "stale_$mode" --no-12b-gate --reason 'stale ref test'
   assert_stale_refused "stale_$mode"
+  case "$mode" in
+    unreadable_main) check "stale_$mode: REFUSE says UNKNOWN (read failed, timed out or returned past the deadline), never a guess" 'grep -q "^REFUSE stale_merge_ref #11173: main UNKNOWN (read failed, timed out or returned past the 4s deadline)" <<<"$OUT"' ;;
+    no_merge_sha) check "stale_$mode: REFUSE says GitHub has no test merge commit yet" 'grep -q "GitHub has no test merge commit for the PR yet" <<<"$OUT"' ;;
+  esac
 done
-check 'stale_main_moved: main is re-read fresh on every poll, never reused from the first read' '[ "$(grep -c "git/ref/heads/main" "$STUB_LOG")" -ge 3 ]'
 unset STALE_MODE
 
-echo "case: fresh merge ref - no polling, no close or reopen"
-run_case stale_none --no-12b-gate --reason 'stale ref test'
-check 'stale_none: admitted without touching the PR state' '[ "$RC" = 0 ] && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT" && ! grep -qE "^gh pr (close|reopen) " "$STUB_LOG" && ! grep -q STALE_MERGE_REF <<<"$OUT" && [ ! -f "$STUB_DIR/cnt.verify" ]'
+echo "case: stale merge ref - EDGE 2: a hung GitHub call is cut at the deadline and refuses (no polling, no waiting past it)"
+for mode in hung hung_parents; do
+  STALE_MODE=$mode; STALE_DL=2; export STALE_MODE STALE_DL
+  START=$(date +%s); run_case "stale_$mode" --no-12b-gate --reason 'stale ref test'; ELAPSED=$(( $(date +%s) - START ))
+  assert_stale_refused "stale_$mode"
+  check "stale_$mode: REFUSE says UNKNOWN past the 2s deadline" 'grep -q "UNKNOWN (read failed, timed out or returned past the 2s deadline)" <<<"$OUT"'
+  check "stale_$mode: returned near the 2s deadline, nowhere near the 30s hang" '[ "$ELAPSED" -le 8 ]'
+done
+unset STALE_MODE STALE_DL
+
+echo "case: stale merge ref - EDGE 2b: a call that SUCCEEDS but returns after the deadline counts as UNKNOWN and refuses"
+# A shim `timeout` that ignores its limit models a read that returns a valid answer late; only the post-read deadline check can refuse it.
+mkdir -p "$T/notimeout"
+cat > "$T/notimeout/timeout" <<'EOF'
+#!/usr/bin/env bash
+while [ "${1#--}" != "$1" ]; do shift; done   # drop --kill-after=N
+shift                                         # drop the duration: never enforced
+exec "$@"
+EOF
+chmod +x "$T/notimeout/timeout"
+STALE_MODE=late; STALE_DL=2; EXTRA_PATH="$T/notimeout"; export STALE_MODE STALE_DL EXTRA_PATH
+run_case stale_late --no-12b-gate --reason 'stale ref test'
+assert_stale_refused stale_late
+check 'stale_late: the valid-but-late answer was NOT trusted: REFUSE says UNKNOWN past the 2s deadline' 'grep -q "UNKNOWN (read failed, timed out or returned past the 2s deadline)" <<<"$OUT" && [ "$(cat "$STUB_DIR/cnt.verify")" = 1 ]'
+unset STALE_MODE STALE_DL EXTRA_PATH
+
+echo "case: stale merge ref - EDGE 3: main moved after the overlap review, refused for a fresh admission run (never re-read and trusted)"
+for mode in main_moved main_moved_confirm; do
+  STALE_MODE=$mode; export STALE_MODE
+  run_case "stale_$mode" --no-12b-gate --reason 'stale ref test'
+  assert_stale_refused "stale_$mode"
+  check "stale_$mode: REFUSE names the overlap-checked main, the moved main and asks for a fresh admission run" 'grep -q "overlap checked $STUB_MAIN_SHA, main is now $STUB_MOVED_SHA); a fresh admission run is needed" <<<"$OUT"'
+  [ "$mode" != main_moved ] || check 'stale_main_moved: stopped at the first main read, the merge commit parents were never read or trusted' '! grep -q "^gh api repos/.*/commits/" "$STUB_LOG"'
+done
+unset STALE_MODE
+
+echo "case: stale merge ref - merge parents mismatch, PR closed, head moved, or PR changed during the check, refused"
+for mode in parents_mismatch closed head_moved pr_changed_confirm; do
+  STALE_MODE=$mode; export STALE_MODE
+  run_case "stale_$mode" --no-12b-gate --reason 'stale ref test'
+  assert_stale_refused "stale_$mode"
+  [ "$mode" != parents_mismatch ] || check 'stale_parents_mismatch: a new merge sha alone is not trusted, its parents were read' 'grep -q "^gh api repos/.*/commits/$STUB_FRESH_SHA" "$STUB_LOG"'
+done
+unset STALE_MODE
 
 echo "case: static - the script never contains a PR close or reopen"
 check 'pm-admit-ci.sh has no gh pr close/reopen call and no refresh_stale_merge_ref' '! grep -qE "gh pr (close|reopen)|refresh_stale_merge_ref|STALE_MERGE_REF_REFRESHED" "$SCRIPT"'
+check 'pm-admit-ci.sh has no stale-ref polling loop, poll sleep or fail-open WARN, and no compare read' '! grep -qE "STALE_POLL_SLEEP|STALE_REFRESH_WAIT|verify_fresh_merge_ref|STALE_MERGE_REF_RECOMPUTED|stale-merge check unavailable|/compare/.*--jq .status" "$SCRIPT"'
 
 finish

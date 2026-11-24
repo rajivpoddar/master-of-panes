@@ -11,9 +11,10 @@
 # Admission cap (Rajiv C0ALZJHGE49 thread 1795324302.697259, ts 1795324706.834969 "yes"): after 2 admitted heads of the PR ended red with a
 # PR-caused classification, admission is refused (ADMISSION_CAP_2, exit 10) and the PR goes to the S131 handoff. See admission_cap_gate below;
 # CTO-approved re-admission: PM_ADMIT_CAP_OVERRIDE=cto:<slack ts> pm-admit-ci.sh <PR>.
-# Stale test-merge ref (CTO REVISE of d644cece, C0ALZJHGE49 thread 1795543629.469469, ts 1795543730.370159): this script never changes PR state. No close/reopen
-# (close queues e2e.yml teardown of the PR's Modal apps), no main merge, no push. A confirmed stale refs/pull/N/merge is only re-read from GitHub (read-only,
-# bounded) and admitted when verified fresh against CURRENT main; otherwise REFUSE stale_merge_ref (exit 3). See the guard below.
+# Stale test-merge ref (CTO REVISE of d644cece, C0ALZJHGE49 thread 1795543629.469469, ts 1795543730.370159; REVISE #2 ts 1795544911.112579): this script never
+# changes PR state. No close/reopen (close queues e2e.yml teardown of the PR's Modal apps), no main merge, no push. ONE deadline-bounded read-only pass,
+# bound to the SAME main sha that passed the overlap check, runs before any admission write; anything unreadable, late or mismatching is UNKNOWN and
+# REFUSEs stale_merge_ref (exit 3). See the guard below.
 set -euo pipefail
 CHECK_12B_ONLY=0; MERGE_ONLY=0
 case "${1:-}" in
@@ -477,6 +478,57 @@ plan_main_merge
 echo 'MAIN_MERGE: skipped reason=no_conflict_no_overlap'
 echo "PR #$PR head=$HEAD mergeable=$MERGEABLE"
 [ "$MERGEABLE" = "CONFLICTING" ] && { echo "REFUSE: conflict with main; route to slot"; exit 2; }
+# Stale test-merge guard (2026-11-21; CTO REVISE #2, C0ALZJHGE49 thread 1795543629.469469, ts 1795544911.112579).
+# GitHub can leave refs/pull/N/merge built on an old main for over an hour, so CI tests stale code (#14302/#14420/#14430/#14435/#14436 kept
+# failing on a lint already fixed on main). The PR's test merge must be verified built on the main that PASSED THE OVERLAP CHECK above.
+# - Fail closed: any unreadable main, PR or merge-ref read is UNKNOWN and REFUSEs here. Nothing reaches the activation label on an UNKNOWN.
+# - ONE read pass, no polling and no sleeps (probes found no evidence that waiting rebuilds a ref). Every GitHub read is bounded by the REMAINING
+#   deadline (PM_ADMIT_STALE_DEADLINE seconds, default 30, covering the whole pass) with timeout; a result that returns at or after the deadline
+#   counts as UNKNOWN (whole-second clock, so it errs early, never late).
+# - Bound to OVERLAP_MAIN_SHA, the main that plan_main_merge reviewed for overlap. If main has moved since, REFUSE: the overlap review no longer
+#   covers it and a fresh admission run is needed. Never re-read "current main" and trust that instead.
+# - No PR state change (a close queues e2e.yml teardown, which stops the PR's six Modal apps and can kill an in-flight E2E run), no main merge,
+#   no push (rule 62/S166). The guard runs before every admission write (label create, label cleanup, priority mirror, activation label).
+OVERLAP_MAIN_SHA="$MAIN_SHA"
+STALE_DEADLINE_SECS="${PM_ADMIT_STALE_DEADLINE:-30}"
+case "$STALE_DEADLINE_SECS" in ''|*[!0-9]*) STALE_DEADLINE_SECS=30 ;; esac
+[ "$STALE_DEADLINE_SECS" -ge 1 ] || STALE_DEADLINE_SECS=1
+STALE_DEADLINE_AT=$(( $(date +%s) + STALE_DEADLINE_SECS ))
+STALE_TIMEOUT_BIN=$(command -v timeout || command -v gtimeout || true)
+stale_refuse() {
+  echo "REFUSE stale_merge_ref #$PR: $1. Admission needs the PR's test merge verified on the overlap-checked main $OVERLAP_MAIN_SHA and made NO change to the PR (no PR state change, no main merge, no push). Re-run admission; if it keeps refusing, report it to the CTO"
+  exit 3
+}
+# stale_read <cmd...>: ONE GitHub read bounded by the remaining deadline. Prints stdout; returns 1 (UNKNOWN) when there is no timeout binary, the
+# deadline has passed, the call fails or is killed by the timeout, or the result returns at or after the deadline.
+stale_read() {
+  local remaining out
+  [ -n "$STALE_TIMEOUT_BIN" ] || return 1
+  remaining=$(( STALE_DEADLINE_AT - $(date +%s) ))
+  [ "$remaining" -ge 1 ] || return 1
+  out=$("$STALE_TIMEOUT_BIN" --kill-after=2 "$remaining" "$@" 2>/dev/null) || return 1
+  [ "$(date +%s)" -lt "$STALE_DEADLINE_AT" ] || return 1
+  printf '%s' "$out"
+}
+STALE_UNKNOWN="UNKNOWN (read failed, timed out or returned past the ${STALE_DEADLINE_SECS}s deadline)"
+STALE_PR_JQ='[.state, .head.sha, (.merge_commit_sha // "")] | join(" ")'
+printf '%s' "$OVERLAP_MAIN_SHA" | grep -Eq "$SHA_RE" || stale_refuse "the main sha from the overlap check is unreadable"
+STALE_LINE1=$(stale_read gh api "repos/$REPO/pulls/$PR" --jq "$STALE_PR_JQ") || stale_refuse "PR state, head and merge ref $STALE_UNKNOWN"
+read -r STALE_STATE STALE_HEAD MERGE_SHA <<<"$STALE_LINE1"
+[ "$STALE_STATE" = open ] || stale_refuse "PR is not open (state ${STALE_STATE:-unknown})"
+[ "$STALE_HEAD" = "$HEAD" ] || stale_refuse "PR head moved since review (reviewed $HEAD, GitHub now has ${STALE_HEAD:-unknown}); needs a fresh admission run"
+printf '%s' "$MERGE_SHA" | grep -Eq "$SHA_RE" || stale_refuse "GitHub has no test merge commit for the PR yet (merge_commit_sha empty or invalid)"
+STALE_MAIN_NOW=$(stale_read gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha) || stale_refuse "main $STALE_UNKNOWN"
+printf '%s' "$STALE_MAIN_NOW" | grep -Eq "$SHA_RE" || stale_refuse "main read returned an invalid sha"
+[ "$STALE_MAIN_NOW" = "$OVERLAP_MAIN_SHA" ] || stale_refuse "main moved since the overlap review (overlap checked $OVERLAP_MAIN_SHA, main is now $STALE_MAIN_NOW); a fresh admission run is needed"
+STALE_PARENTS=$(stale_read gh api "repos/$REPO/commits/$MERGE_SHA" --jq '[.parents[].sha] | sort | join(" ")') || stale_refuse "parents of test merge $MERGE_SHA $STALE_UNKNOWN"
+STALE_WANTED=$(printf '%s\n%s\n' "$HEAD" "$OVERLAP_MAIN_SHA" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
+[ "$STALE_PARENTS" = "$STALE_WANTED" ] || stale_refuse "test merge $MERGE_SHA has parents [$STALE_PARENTS] but must be exactly the reviewed head and the overlap-checked main [$STALE_WANTED], so GitHub has not rebuilt it on that main"
+STALE_LINE2=$(stale_read gh api "repos/$REPO/pulls/$PR" --jq "$STALE_PR_JQ") || stale_refuse "confirming PR read $STALE_UNKNOWN"
+[ "$STALE_LINE2" = "$STALE_LINE1" ] || stale_refuse "PR state, head or merge ref changed during the check"
+STALE_MAIN_AGAIN=$(stale_read gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha) || stale_refuse "confirming main read $STALE_UNKNOWN"
+[ "$STALE_MAIN_AGAIN" = "$OVERLAP_MAIN_SHA" ] || stale_refuse "main moved during the check (overlap checked $OVERLAP_MAIN_SHA, main is now $STALE_MAIN_AGAIN); a fresh admission run is needed"
+echo "MERGE_REF_VERIFIED pr=$PR head=$HEAD main=$OVERLAP_MAIN_SHA merge=$MERGE_SHA"
 # Even malformed-label cleanup is a write; don't do it on a refused head.
 clean_bad_ci_head_labels
 overlap_start "$HEAD"
@@ -512,74 +564,6 @@ LJ=$(gh_get pr_labels labels_json gh pr view "$PR" --repo "$REPO" --json labels)
 for old in $(printf '%s' "$LJ" | jq -r '.labels[].name|select(startswith("ci-head:"))'); do
   [ "$old" != "$L" ] && gh_do remove_old_ci_head gh pr edit "$PR" --repo "$REPO" --remove-label "$old"
 done
-# Stale test-merge guard (2026-11-21): GitHub can leave refs/pull/N/merge built on an old main for
-# over an hour, so CI tests stale code (#14302/#14420/#14430/#14435/#14436 kept failing on a lint already fixed
-# on main). Refuse to admit until the PR's merge commit contains current main.
-# No PR state change (CTO REVISE of d644cece, C0ALZJHGE49 thread 1795543629.469469, ts 1795543730.370159): closing queues e2e.yml teardown, which
-# stops the PR's six Modal apps and can kill an in-flight E2E run; a failed close plus an unreadable readback could also retry a landed close. So
-# on a CONFIRMED stale ref this script never closes, reopens, merges main into, or pushes to the PR (rule 62/S166). It only re-reads GitHub
-# (REST, read-only) for up to PM_ADMIT_STALE_REFRESH_WAIT seconds (default 60) in case GitHub rebuilds the test merge by itself, and admits ONLY
-# when one read passes verify_fresh_merge_ref below. Anything else, including any unreadable value, is UNKNOWN and fails closed with the
-# REFUSE stale_merge_ref (exit 3); no state change is ever attempted or retried.
-STALE_POLL_SLEEP="${PM_ADMIT_STALE_POLL_SLEEP:-5}"
-STALE_REFRESH_WAIT="${PM_ADMIT_STALE_REFRESH_WAIT:-60}"
-read_main_sha() { gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha 2>/dev/null || echo ""; }
-# check_merge_ref <tries>: sets MERGE_SHA and MERGE_OK=yes|no|unknown; polls GitHub, sleeping between tries.
-check_merge_ref() {
-  local tries="$1" _try
-  MERGE_OK=unknown; MERGE_SHA=""
-  for ((_try = 1; _try <= tries; _try++)); do
-    MERGE_SHA=$(gh api "repos/$REPO/pulls/$PR" --jq '.merge_commit_sha // ""' 2>/dev/null || echo "")
-    if [ -n "$MAIN_SHA" ] && [ -n "$MERGE_SHA" ]; then
-      CMP=$(gh api "repos/$REPO/compare/$MAIN_SHA...$MERGE_SHA" --jq .status 2>/dev/null || echo "")
-      case "$CMP" in ahead|identical) MERGE_OK=yes; return 0 ;; diverged|behind) MERGE_OK=no ;; esac
-    fi
-    sleep "$STALE_POLL_SLEEP"
-  done
-  return 0
-}
-# verify_fresh_merge_ref: returns 0 only when ONE read shows all of: PR OPEN, PR head == the reviewed head, CURRENT main read successfully now
-# (never the earlier value), the test merge commit's parents are exactly {reviewed head, current main}, and head, state, merge ref and main are
-# unchanged on a second read. Any unreadable or mismatching value returns 1 (UNKNOWN). Sets MERGE_SHA and MAIN_SHA only on success.
-pr_merge_line() { gh api "repos/$REPO/pulls/$PR" --jq '[.state, .head.sha, (.merge_commit_sha // "")] | join(" ")' 2>/dev/null; }
-verify_fresh_merge_ref() {
-  local line1 line2 st hd merge main main2 parents wanted
-  line1=$(pr_merge_line) || return 1
-  read -r st hd merge <<<"$line1"
-  [ "$st" = open ] && [ "$hd" = "$HEAD" ] || return 1
-  printf '%s' "$merge" | grep -Eq "$SHA_RE" || return 1
-  main=$(read_main_sha); printf '%s' "$main" | grep -Eq "$SHA_RE" || return 1
-  parents=$(gh api "repos/$REPO/commits/$merge" --jq '[.parents[].sha] | sort | join(" ")' 2>/dev/null) || return 1
-  wanted=$(printf '%s\n%s\n' "$HEAD" "$main" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
-  [ "$parents" = "$wanted" ] || return 1
-  line2=$(pr_merge_line) || return 1
-  [ "$line2" = "$line1" ] || return 1
-  main2=$(read_main_sha); [ "$main2" = "$main" ] || return 1
-  MERGE_SHA="$merge"; MAIN_SHA="$main"
-  return 0
-}
-MAIN_SHA=$(read_main_sha)
-check_merge_ref 4
-if [ "$MERGE_OK" = no ]; then
-  OLD_MERGE_SHA="$MERGE_SHA"; OLD_MAIN_SHA="$MAIN_SHA"
-  echo "NOTE stale test merge on #$PR: merge ${OLD_MERGE_SHA:-?} does not contain main $OLD_MAIN_SHA; re-reading GitHub read-only for up to ${STALE_REFRESH_WAIT}s (no PR state change)"
-  STALE_TRIES=$(( STALE_REFRESH_WAIT / (STALE_POLL_SLEEP > 0 ? STALE_POLL_SLEEP : 1) ))
-  [ "$STALE_TRIES" -ge 1 ] || STALE_TRIES=1
-  STALE_T0=$SECONDS; STALE_OK=0
-  for ((STALE_TRY = 1; STALE_TRY <= STALE_TRIES; STALE_TRY++)); do
-    if verify_fresh_merge_ref; then STALE_OK=1; break; fi
-    [ $((SECONDS - STALE_T0 + STALE_POLL_SLEEP)) -le "$STALE_REFRESH_WAIT" ] || break
-    sleep "$STALE_POLL_SLEEP"
-  done
-  if [ "$STALE_OK" = 1 ]; then
-    echo "STALE_MERGE_REF_RECOMPUTED pr=$PR old=$OLD_MERGE_SHA new=$MERGE_SHA head=$HEAD main=$MAIN_SHA"
-  else
-    overlap_finish
-    echo "REFUSE stale_merge_ref #$PR: test merge ${OLD_MERGE_SHA:-?} is not verified to be built on current main (parents must be exactly head $HEAD and the current main; main was $OLD_MAIN_SHA at the first read); re-read read-only for ${STALE_REFRESH_WAIT}s and made NO change to the PR state (a close queues e2e.yml teardown and can kill an in-flight E2E run, so none is attempted). Wait for GitHub to rebuild the merge ref and re-admit; if it stays stale, report it to the CTO"
-    exit 3
-  fi
-fi
-[ "$MERGE_OK" = unknown ] && echo "WARN stale-merge check unavailable for #$PR (API); continuing"
 # Same-head re-admission (2026-11-21, #14431): re-adding an existing label fires no "labeled"
 # event, so no new CI/E2E runs start. If runs for this head are still queued/in progress,
 # report that and stop. Otherwise remove the label first so the add below starts fresh runs.
