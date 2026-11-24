@@ -11,6 +11,8 @@
 # Admission cap (Rajiv C0ALZJHGE49 thread 1795324302.697259, ts 1795324706.834969 "yes"): after 2 admitted heads of the PR ended red with a
 # PR-caused classification, admission is refused (ADMISSION_CAP_2, exit 10) and the PR goes to the S131 handoff. See admission_cap_gate below;
 # CTO-approved re-admission: PM_ADMIT_CAP_OVERRIDE=cto:<slack ts> pm-admit-ci.sh <PR>.
+# Stale test-merge ref (PM ops tooling obligation 41643): a confirmed stale refs/pull/N/merge is refreshed ONCE by this script (close + reopen, bounded wait,
+# head unchanged, never a main merge or force-push), logged as STALE_MERGE_REF_REFRESHED pr=N old=<sha> new=<sha>; still stale keeps REFUSE stale_merge_ref (exit 3).
 set -euo pipefail
 CHECK_12B_ONLY=0; MERGE_ONLY=0
 case "${1:-}" in
@@ -511,21 +513,68 @@ for old in $(printf '%s' "$LJ" | jq -r '.labels[].name|select(startswith("ci-hea
 done
 # Stale test-merge guard (2026-11-21): GitHub can leave refs/pull/N/merge built on an old main for
 # over an hour, so CI tests stale code (#14302/#14420/#14430/#14435/#14436 kept failing on a lint already fixed
-# on main). Refuse to admit until the PR's merge commit contains current main; close/reopen forces a rebuild.
-MAIN_SHA=$(gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha 2>/dev/null || echo "")
-MERGE_OK=unknown
-for _try in 1 2 3 4; do
-  MERGE_SHA=$(gh api "repos/$REPO/pulls/$PR" --jq '.merge_commit_sha // ""' 2>/dev/null || echo "")
-  if [ -n "$MAIN_SHA" ] && [ -n "$MERGE_SHA" ]; then
-    CMP=$(gh api "repos/$REPO/compare/$MAIN_SHA...$MERGE_SHA" --jq .status 2>/dev/null || echo "")
-    case "$CMP" in ahead|identical) MERGE_OK=yes; break ;; diverged|behind) MERGE_OK=no ;; esac
-  fi
-  sleep 5
-done
-if [ "$MERGE_OK" = no ]; then
+# on main). Refuse to admit until the PR's merge commit contains current main.
+# Self-refresh (PM ops tooling obligation 41643, 2026-11-24; the manual close/reopen was needed 8+ times on 24 Nov):
+# on a CONFIRMED stale ref this script closes and reopens the PR ONCE (the head never changes: no main merge into the
+# branch, no force-push; rule 62/S166), polls up to PM_ADMIT_STALE_REFRESH_WAIT seconds (default 60) for GitHub to build
+# a test merge that contains current main, and re-runs the same check. Still stale (or unverifiable) after that one
+# attempt keeps the fail-closed REFUSE stale_merge_ref (exit 3). Only a verified-fresh merge ref continues to admission.
+STALE_POLL_SLEEP="${PM_ADMIT_STALE_POLL_SLEEP:-5}"
+STALE_REFRESH_WAIT="${PM_ADMIT_STALE_REFRESH_WAIT:-60}"
+# check_merge_ref <tries> [budget_seconds]: sets MERGE_SHA and MERGE_OK=yes|no|unknown; polls GitHub, sleeping between tries.
+# With a budget it also stops once that many wall-clock seconds have elapsed (API latency must not stretch the bound).
+check_merge_ref() {
+  local tries="$1" budget="${2:-0}" _try t0=$SECONDS
+  MERGE_OK=unknown; MERGE_SHA=""
+  for ((_try = 1; _try <= tries; _try++)); do
+    MERGE_SHA=$(gh api "repos/$REPO/pulls/$PR" --jq '.merge_commit_sha // ""' 2>/dev/null || echo "")
+    if [ -n "$MAIN_SHA" ] && [ -n "$MERGE_SHA" ]; then
+      CMP=$(gh api "repos/$REPO/compare/$MAIN_SHA...$MERGE_SHA" --jq .status 2>/dev/null || echo "")
+      case "$CMP" in ahead|identical) MERGE_OK=yes; return 0 ;; diverged|behind) MERGE_OK=no ;; esac
+    fi
+    if [ "$budget" -gt 0 ] && [ $((SECONDS - t0 + STALE_POLL_SLEEP)) -gt "$budget" ]; then break; fi
+    sleep "$STALE_POLL_SLEEP"
+  done
+  return 0
+}
+pr_state() { gh pr view "$PR" --repo "$REPO" --json state --jq .state 2>/dev/null || echo ""; }
+# refresh_stale_merge_ref: close then reopen the PR once. A failed CLOSE leaves the PR open (api_fail, harmless).
+# A failed REOPEN would leave the PR closed, so it retries three times and then fails loudly with the exact fix.
+refresh_stale_merge_ref() {
+  local n closed=0
+  for n in 1 2; do
+    if gh pr close "$PR" --repo "$REPO" >/dev/null 2>&1 || [ "$(pr_state)" = CLOSED ]; then closed=1; break; fi
+    echo "WARN github_api stale_refresh_close: attempt $n failed" >&2
+    [ "$n" = 1 ] && sleep "$GH_RETRY_SLEEP"
+  done
+  if [ "$closed" != 1 ]; then overlap_finish; api_fail stale_refresh_close; fi
+  for n in 1 2 3; do
+    if gh pr reopen "$PR" --repo "$REPO" >/dev/null 2>&1 || [ "$(pr_state)" = OPEN ]; then return 0; fi
+    echo "WARN github_api stale_refresh_reopen: attempt $n failed" >&2
+    [ "$n" -lt 3 ] && sleep "$GH_RETRY_SLEEP"
+  done
   overlap_finish
-  echo "REFUSE stale_merge_ref #$PR: test merge ${MERGE_SHA:-?} does not contain main $MAIN_SHA; run: gh pr close $PR && gh pr reopen $PR, then re-admit"
-  exit 3
+  echo "REFUSE: github_api_error stale_refresh_reopen; PR #$PR was CLOSED by the stale-merge-ref refresh and could not be reopened. Run NOW: gh pr reopen $PR --repo $REPO (nothing admitted)"
+  exit 7
+}
+MAIN_SHA=$(gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha 2>/dev/null || echo "")
+check_merge_ref 4
+if [ "$MERGE_OK" = no ]; then
+  OLD_MERGE_SHA="$MERGE_SHA"
+  echo "NOTE stale test merge on #$PR: merge ${OLD_MERGE_SHA:-?} does not contain main $MAIN_SHA; refreshing once (close + reopen, head unchanged)"
+  refresh_stale_merge_ref
+  FRESH_MAIN=$(gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha 2>/dev/null || echo "")
+  [ -z "$FRESH_MAIN" ] || MAIN_SHA="$FRESH_MAIN"
+  STALE_TRIES=$(( STALE_REFRESH_WAIT / (STALE_POLL_SLEEP > 0 ? STALE_POLL_SLEEP : 1) ))
+  [ "$STALE_TRIES" -ge 1 ] || STALE_TRIES=1
+  check_merge_ref "$STALE_TRIES" "$STALE_REFRESH_WAIT"
+  if [ "$MERGE_OK" = yes ] && [ "$MERGE_SHA" != "$OLD_MERGE_SHA" ]; then
+    echo "STALE_MERGE_REF_REFRESHED pr=$PR old=$OLD_MERGE_SHA new=$MERGE_SHA"
+  else
+    overlap_finish
+    echo "REFUSE stale_merge_ref #$PR: test merge ${MERGE_SHA:-?} is not confirmed to contain main $MAIN_SHA after one close+reopen refresh (waited up to ${STALE_REFRESH_WAIT}s); not retrying; check GitHub mergeability, then re-admit"
+    exit 3
+  fi
 fi
 [ "$MERGE_OK" = unknown ] && echo "WARN stale-merge check unavailable for #$PR (API); continuing"
 # Same-head re-admission (2026-11-21, #14431): re-adding an existing label fires no "labeled"

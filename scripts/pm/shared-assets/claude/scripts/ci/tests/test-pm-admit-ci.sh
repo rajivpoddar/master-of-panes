@@ -7,6 +7,7 @@ SHA=0123456789abcdef0123456789abcdef01234567
 export STUB_BASE_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 export STUB_MAIN_SHA=cccccccccccccccccccccccccccccccccccccccc
 export STUB_MERGED_SHA=dddddddddddddddddddddddddddddddddddddddd
+export STUB_FRESH_SHA=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 PASS=0; FAIL=0
 T=$(mktemp -d "${TMPDIR:-/tmp}/pm-admit-test.XXXXXX")
 
@@ -60,9 +61,16 @@ case "$args" in
     cat "${CAP_FIX:-/nonexistent}/runs.$sha" 2>/dev/null || printf '[{"workflow_runs":[]}]\n' ;;
   "api repos/"*"/actions/runs/"*"/jobs"*)
     printf '[{"jobs":[{"name":"typescript","conclusion":"failure","started_at":"2026-11-20T10:00:00Z","completed_at":"2026-11-20T10:20:00Z"}]}]\n' ;;
-  "api repos/"*"/compare/"*"--jq .status"*) printf 'ahead\n' ;;      # stale test-merge guard: current main is contained
+  "api repos/"*"/compare/"*"--jq .status"*)                           # stale test-merge guard; STALE_MODE drives it
+    case "${STALE_MODE:-}" in
+      refresh) if [ -f "$STUB_DIR/reopened" ]; then printf 'ahead\n'; else printf 'diverged\n'; fi ;;  # stale until the PR is reopened
+      still) printf 'diverged\n' ;;                                  # never refreshes
+      unverifiable_after_reopen) if [ -f "$STUB_DIR/reopened" ]; then exit 1; else printf 'diverged\n'; fi ;;  # compare API down after the refresh
+      *) printf 'ahead\n' ;;                                         # current main is contained
+    esac ;;
   "api repos/"*"/git/ref/heads/main"*) printf '%s\n' "$STUB_MAIN_SHA" ;;
-  "api repos/"*"/pulls/"*"merge_commit_sha"*) printf '%s\n' "$STUB_MERGED_SHA" ;;
+  "api repos/"*"/pulls/"*"merge_commit_sha"*)
+    if [ "${STALE_MODE:-}" = refresh ] && [ -f "$STUB_DIR/reopened" ]; then printf '%s\n' "$STUB_FRESH_SHA"; else printf '%s\n' "$STUB_MERGED_SHA"; fi ;;
   "api repos/"*"/compare/"*)
     changed='[]'; [ "${GATE_MODE:-same}" != changed ] || changed='[{"filename":"lib/a.ts"}]'
     printf '{"status":"ahead","total_commits":1,"commits":[{"sha":"%s","parents":[{},{}],"commit":{"message":"Merge branch '\''main'\'' into topic"}}],"files":%s}\n' "$STUB_SHA" "$changed" ;;
@@ -74,7 +82,8 @@ case "$args" in
       content=$(printf 'print('\''{"control_plane_only":true,"product_changed":false}'\'')\n' | base64 | tr -d '\n')
     else content=e30=; fi
     printf '{"content":"%s"}\n' "$content" ;;
-  "pr view"*"--json state"*) printf 'OPEN\n' ;;
+  "pr view"*"--json state"*)
+    if [ -f "$STUB_DIR/closed" ] && [ ! -f "$STUB_DIR/reopened" ]; then printf 'CLOSED\n'; else printf 'OPEN\n'; fi ;;
   "pr view"*"--json baseRefName"*) printf 'main\n' ;;
   "pr view"*"--json closingIssuesReferences"*) printf '11173\n' ;;
   "api -X PUT repos/"*"/update-branch -f expected_head_sha=$STUB_SHA")
@@ -89,6 +98,8 @@ case "$args" in
   "pr view"*"--json labels,closingIssuesReferences"*) printf '{"labels":[{"name":"P2"}],"closingIssuesReferences":[]}\n' ;;
   "pr view"*"--json labels"*) emit "$MODE_LABELS" "$LABELS_JSON" labels ;;
   "pr edit"*|"label create"*) [ "${MODE_WRITE:-ok}" = fail ] && exit 1; exit 0 ;;
+  "pr close"*) [ "${STALE_CLOSE_FAIL:-}" = 1 ] && exit 1; : > "$STUB_DIR/closed"; exit 0 ;;
+  "pr reopen"*) [ "${STALE_REOPEN_FAIL:-}" = 1 ] && exit 1; : > "$STUB_DIR/reopened"; exit 0 ;;
   *) exit 1 ;;
 esac
 EOF
@@ -107,7 +118,7 @@ EOF
 run_script() { # name, then script arguments; fixture env pre-set by caller
   local name="$1"; shift
   STUB_DIR="$T/$name"; mkdir -p "$STUB_DIR"; STUB_LOG="$STUB_DIR/gh.log"; : > "$STUB_LOG"
-  export STUB_DIR STUB_LOG STUB_SHA="$SHA" PM_ADMIT_RETRY_SLEEP=0
+  export STUB_DIR STUB_LOG STUB_SHA="$SHA" PM_ADMIT_RETRY_SLEEP=0 PM_ADMIT_STALE_POLL_SLEEP=0 PM_ADMIT_STALE_REFRESH_WAIT=3
   OUT=$(PATH="$T/bin:$PATH" HOME="$T/home" bash "$SCRIPT" "$@" 2>&1); RC=$?
   LOG=$(cat "$STUB_LOG")
 }
@@ -310,5 +321,52 @@ GATE_MODE=same VERDICT=PASS REVIEW_SHA=${SHA:0:7}; export GATE_MODE VERDICT REVI
 OUT=$(PATH="$T/bin:$PATH" HOME="$T/home" bash "$SCRIPT" --check-12b-only 11173 2>&1); RC=$?
 check 'cap: --check-12b-only does not read the cap' '! grep -q "/events" "$STUB_LOG" && ! grep -q ADMISSION_CAP <<<"$OUT"'
 unset CAP_EVENTS_JSON
+
+# ---- Stale test-merge ref self-refresh (PM ops tooling obligation 41643, 2026-11-24) ------------------------
+# A confirmed stale refs/pull/N/merge is refreshed ONCE by close + reopen (head unchanged), then re-checked.
+# Fresh after the refresh admits; still stale, unverifiable, or a failed close/reopen never admits. Never a main merge.
+GATE_MODE=none; export GATE_MODE
+echo "case: stale merge ref - refreshed once, then admitted"
+STALE_MODE=refresh; export STALE_MODE
+run_case stale_refresh --no-12b-gate --reason 'stale ref test'
+check 'stale_refresh: exit 0 and ADMITTED at the unchanged head' '[ "$RC" = 0 ] && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT"'
+check 'stale_refresh: logs STALE_MERGE_REF_REFRESHED with old and new merge shas' 'grep -qx "STALE_MERGE_REF_REFRESHED pr=11173 old=$STUB_MERGED_SHA new=$STUB_FRESH_SHA" <<<"$OUT"'
+check 'stale_refresh: exactly one close then one reopen, in that order' '[ "$(grep -c "^gh pr close " "$STUB_LOG")" = 1 ] && [ "$(grep -c "^gh pr reopen " "$STUB_LOG")" = 1 ] && [ "$(grep -n "^gh pr close " "$STUB_LOG" | cut -d: -f1)" -lt "$(grep -n "^gh pr reopen " "$STUB_LOG" | cut -d: -f1)" ]'
+check 'stale_refresh: ci-head label added only after the reopen' '[ "$(grep -n "^gh pr reopen " "$STUB_LOG" | cut -d: -f1)" -lt "$(grep -n -- "--add-label ci-head:$SHA" "$STUB_LOG" | cut -d: -f1)" ]'
+check 'stale_refresh: never merges main or rewrites the branch' '! grep -qE "update-branch|^git (merge|push|reset|rebase)|--force" "$STUB_LOG" && ! grep -q "main_merge: performed" <<<"$OUT"'
+unset STALE_MODE
+
+echo "case: stale merge ref - still stale after the one refresh, fail closed"
+STALE_MODE=still; export STALE_MODE
+run_case stale_still --no-12b-gate --reason 'stale ref test'
+check 'stale_still: exit 3 with REFUSE stale_merge_ref naming the single refresh' '[ "$RC" = 3 ] && grep -q "^REFUSE stale_merge_ref #11173: test merge $STUB_MERGED_SHA is not confirmed to contain main $STUB_MAIN_SHA after one close+reopen refresh" <<<"$OUT"'
+check 'stale_still: refresh attempted exactly once (no second close/reopen)' '[ "$(grep -c "^gh pr close " "$STUB_LOG")" = 1 ] && [ "$(grep -c "^gh pr reopen " "$STUB_LOG")" = 1 ]'
+check 'stale_still: nothing admitted, no ci-head label write' '! grep -q "ADMITTED" <<<"$OUT" && ! grep -qE -- "--add-label ci-head|label create" "$STUB_LOG" && ! grep -q STALE_MERGE_REF_REFRESHED <<<"$OUT"'
+unset STALE_MODE
+
+echo "case: stale merge ref - refresh leaves the merge ref unverifiable, fail closed"
+STALE_MODE=unverifiable_after_reopen; export STALE_MODE
+run_case stale_unverifiable --no-12b-gate --reason 'stale ref test'
+check 'stale_unverifiable: unknown after a CONFIRMED stale ref refuses (exit 3), never admits' '[ "$RC" = 3 ] && grep -q "^REFUSE stale_merge_ref #11173:" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT"'
+check 'stale_unverifiable: refreshed once, no ci-head label write' '[ "$(grep -c "^gh pr close " "$STUB_LOG")" = 1 ] && ! grep -qE -- "--add-label ci-head|label create" "$STUB_LOG"'
+unset STALE_MODE
+
+echo "case: stale merge ref - close fails, PR left open, refused"
+STALE_MODE=still STALE_CLOSE_FAIL=1; export STALE_MODE STALE_CLOSE_FAIL
+run_case stale_close_fail --no-12b-gate --reason 'stale ref test'
+check 'stale_close_fail: exit 7 REFUSE github_api_error stale_refresh_close' '[ "$RC" = 7 ] && grep -qx "REFUSE: github_api_error stale_refresh_close" <<<"$OUT"'
+check 'stale_close_fail: no reopen attempted, nothing admitted' '! grep -q "^gh pr reopen " "$STUB_LOG" && ! grep -q ADMITTED <<<"$OUT"'
+unset STALE_MODE STALE_CLOSE_FAIL
+
+echo "case: stale merge ref - reopen fails, loud REFUSE with the exact fix (PR must never be left closed silently)"
+STALE_MODE=still STALE_REOPEN_FAIL=1; export STALE_MODE STALE_REOPEN_FAIL
+run_case stale_reopen_fail --no-12b-gate --reason 'stale ref test'
+check 'stale_reopen_fail: exit 7 and the PR-left-CLOSED message names the reopen command' '[ "$RC" = 7 ] && grep -q "^REFUSE: github_api_error stale_refresh_reopen; PR #11173 was CLOSED" <<<"$OUT" && grep -q "gh pr reopen 11173 --repo Scribie/heydonna-app" <<<"$OUT"'
+check 'stale_reopen_fail: three reopen attempts, nothing admitted' '[ "$(grep -c "^gh pr reopen " "$STUB_LOG")" = 3 ] && ! grep -q ADMITTED <<<"$OUT"'
+unset STALE_MODE STALE_REOPEN_FAIL
+
+echo "case: fresh merge ref - no refresh, no close or reopen"
+run_case stale_none --no-12b-gate --reason 'stale ref test'
+check 'stale_none: admitted without touching the PR state' '[ "$RC" = 0 ] && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT" && ! grep -qE "^gh pr (close|reopen) " "$STUB_LOG" && ! grep -q STALE_MERGE_REF <<<"$OUT"'
 
 finish
