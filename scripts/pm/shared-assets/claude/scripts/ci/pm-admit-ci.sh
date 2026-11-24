@@ -11,8 +11,9 @@
 # Admission cap (Rajiv C0ALZJHGE49 thread 1795324302.697259, ts 1795324706.834969 "yes"): after 2 admitted heads of the PR ended red with a
 # PR-caused classification, admission is refused (ADMISSION_CAP_2, exit 10) and the PR goes to the S131 handoff. See admission_cap_gate below;
 # CTO-approved re-admission: PM_ADMIT_CAP_OVERRIDE=cto:<slack ts> pm-admit-ci.sh <PR>.
-# Stale test-merge ref (PM ops tooling obligation 41643): a confirmed stale refs/pull/N/merge is refreshed ONCE by this script (close + reopen, bounded wait,
-# head unchanged, never a main merge or force-push), logged as STALE_MERGE_REF_REFRESHED pr=N old=<sha> new=<sha>; still stale keeps REFUSE stale_merge_ref (exit 3).
+# Stale test-merge ref (CTO REVISE of d644cece, C0ALZJHGE49 thread 1795543629.469469, ts 1795543730.370159): this script never changes PR state. No close/reopen
+# (close queues e2e.yml teardown of the PR's Modal apps), no main merge, no push. A confirmed stale refs/pull/N/merge is only re-read from GitHub (read-only,
+# bounded) and admitted when verified fresh against CURRENT main; otherwise REFUSE stale_merge_ref (exit 3). See the guard below.
 set -euo pipefail
 CHECK_12B_ONLY=0; MERGE_ONLY=0
 case "${1:-}" in
@@ -514,17 +515,18 @@ done
 # Stale test-merge guard (2026-11-21): GitHub can leave refs/pull/N/merge built on an old main for
 # over an hour, so CI tests stale code (#14302/#14420/#14430/#14435/#14436 kept failing on a lint already fixed
 # on main). Refuse to admit until the PR's merge commit contains current main.
-# Self-refresh (PM ops tooling obligation 41643, 2026-11-24; the manual close/reopen was needed 8+ times on 24 Nov):
-# on a CONFIRMED stale ref this script closes and reopens the PR ONCE (the head never changes: no main merge into the
-# branch, no force-push; rule 62/S166), polls up to PM_ADMIT_STALE_REFRESH_WAIT seconds (default 60) for GitHub to build
-# a test merge that contains current main, and re-runs the same check. Still stale (or unverifiable) after that one
-# attempt keeps the fail-closed REFUSE stale_merge_ref (exit 3). Only a verified-fresh merge ref continues to admission.
+# No PR state change (CTO REVISE of d644cece, C0ALZJHGE49 thread 1795543629.469469, ts 1795543730.370159): closing queues e2e.yml teardown, which
+# stops the PR's six Modal apps and can kill an in-flight E2E run; a failed close plus an unreadable readback could also retry a landed close. So
+# on a CONFIRMED stale ref this script never closes, reopens, merges main into, or pushes to the PR (rule 62/S166). It only re-reads GitHub
+# (REST, read-only) for up to PM_ADMIT_STALE_REFRESH_WAIT seconds (default 60) in case GitHub rebuilds the test merge by itself, and admits ONLY
+# when one read passes verify_fresh_merge_ref below. Anything else, including any unreadable value, is UNKNOWN and fails closed with the
+# REFUSE stale_merge_ref (exit 3); no state change is ever attempted or retried.
 STALE_POLL_SLEEP="${PM_ADMIT_STALE_POLL_SLEEP:-5}"
 STALE_REFRESH_WAIT="${PM_ADMIT_STALE_REFRESH_WAIT:-60}"
-# check_merge_ref <tries> [budget_seconds]: sets MERGE_SHA and MERGE_OK=yes|no|unknown; polls GitHub, sleeping between tries.
-# With a budget it also stops once that many wall-clock seconds have elapsed (API latency must not stretch the bound).
+read_main_sha() { gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha 2>/dev/null || echo ""; }
+# check_merge_ref <tries>: sets MERGE_SHA and MERGE_OK=yes|no|unknown; polls GitHub, sleeping between tries.
 check_merge_ref() {
-  local tries="$1" budget="${2:-0}" _try t0=$SECONDS
+  local tries="$1" _try
   MERGE_OK=unknown; MERGE_SHA=""
   for ((_try = 1; _try <= tries; _try++)); do
     MERGE_SHA=$(gh api "repos/$REPO/pulls/$PR" --jq '.merge_commit_sha // ""' 2>/dev/null || echo "")
@@ -532,47 +534,48 @@ check_merge_ref() {
       CMP=$(gh api "repos/$REPO/compare/$MAIN_SHA...$MERGE_SHA" --jq .status 2>/dev/null || echo "")
       case "$CMP" in ahead|identical) MERGE_OK=yes; return 0 ;; diverged|behind) MERGE_OK=no ;; esac
     fi
-    if [ "$budget" -gt 0 ] && [ $((SECONDS - t0 + STALE_POLL_SLEEP)) -gt "$budget" ]; then break; fi
     sleep "$STALE_POLL_SLEEP"
   done
   return 0
 }
-pr_state() { gh pr view "$PR" --repo "$REPO" --json state --jq .state 2>/dev/null || echo ""; }
-# refresh_stale_merge_ref: close then reopen the PR once. A failed CLOSE leaves the PR open (api_fail, harmless).
-# A failed REOPEN would leave the PR closed, so it retries three times and then fails loudly with the exact fix.
-refresh_stale_merge_ref() {
-  local n closed=0
-  for n in 1 2; do
-    if gh pr close "$PR" --repo "$REPO" >/dev/null 2>&1 || [ "$(pr_state)" = CLOSED ]; then closed=1; break; fi
-    echo "WARN github_api stale_refresh_close: attempt $n failed" >&2
-    [ "$n" = 1 ] && sleep "$GH_RETRY_SLEEP"
-  done
-  if [ "$closed" != 1 ]; then overlap_finish; api_fail stale_refresh_close; fi
-  for n in 1 2 3; do
-    if gh pr reopen "$PR" --repo "$REPO" >/dev/null 2>&1 || [ "$(pr_state)" = OPEN ]; then return 0; fi
-    echo "WARN github_api stale_refresh_reopen: attempt $n failed" >&2
-    [ "$n" -lt 3 ] && sleep "$GH_RETRY_SLEEP"
-  done
-  overlap_finish
-  echo "REFUSE: github_api_error stale_refresh_reopen; PR #$PR was CLOSED by the stale-merge-ref refresh and could not be reopened. Run NOW: gh pr reopen $PR --repo $REPO (nothing admitted)"
-  exit 7
+# verify_fresh_merge_ref: returns 0 only when ONE read shows all of: PR OPEN, PR head == the reviewed head, CURRENT main read successfully now
+# (never the earlier value), the test merge commit's parents are exactly {reviewed head, current main}, and head, state, merge ref and main are
+# unchanged on a second read. Any unreadable or mismatching value returns 1 (UNKNOWN). Sets MERGE_SHA and MAIN_SHA only on success.
+pr_merge_line() { gh api "repos/$REPO/pulls/$PR" --jq '[.state, .head.sha, (.merge_commit_sha // "")] | join(" ")' 2>/dev/null; }
+verify_fresh_merge_ref() {
+  local line1 line2 st hd merge main main2 parents wanted
+  line1=$(pr_merge_line) || return 1
+  read -r st hd merge <<<"$line1"
+  [ "$st" = open ] && [ "$hd" = "$HEAD" ] || return 1
+  printf '%s' "$merge" | grep -Eq "$SHA_RE" || return 1
+  main=$(read_main_sha); printf '%s' "$main" | grep -Eq "$SHA_RE" || return 1
+  parents=$(gh api "repos/$REPO/commits/$merge" --jq '[.parents[].sha] | sort | join(" ")' 2>/dev/null) || return 1
+  wanted=$(printf '%s\n%s\n' "$HEAD" "$main" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
+  [ "$parents" = "$wanted" ] || return 1
+  line2=$(pr_merge_line) || return 1
+  [ "$line2" = "$line1" ] || return 1
+  main2=$(read_main_sha); [ "$main2" = "$main" ] || return 1
+  MERGE_SHA="$merge"; MAIN_SHA="$main"
+  return 0
 }
-MAIN_SHA=$(gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha 2>/dev/null || echo "")
+MAIN_SHA=$(read_main_sha)
 check_merge_ref 4
 if [ "$MERGE_OK" = no ]; then
-  OLD_MERGE_SHA="$MERGE_SHA"
-  echo "NOTE stale test merge on #$PR: merge ${OLD_MERGE_SHA:-?} does not contain main $MAIN_SHA; refreshing once (close + reopen, head unchanged)"
-  refresh_stale_merge_ref
-  FRESH_MAIN=$(gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha 2>/dev/null || echo "")
-  [ -z "$FRESH_MAIN" ] || MAIN_SHA="$FRESH_MAIN"
+  OLD_MERGE_SHA="$MERGE_SHA"; OLD_MAIN_SHA="$MAIN_SHA"
+  echo "NOTE stale test merge on #$PR: merge ${OLD_MERGE_SHA:-?} does not contain main $OLD_MAIN_SHA; re-reading GitHub read-only for up to ${STALE_REFRESH_WAIT}s (no PR state change)"
   STALE_TRIES=$(( STALE_REFRESH_WAIT / (STALE_POLL_SLEEP > 0 ? STALE_POLL_SLEEP : 1) ))
   [ "$STALE_TRIES" -ge 1 ] || STALE_TRIES=1
-  check_merge_ref "$STALE_TRIES" "$STALE_REFRESH_WAIT"
-  if [ "$MERGE_OK" = yes ] && [ "$MERGE_SHA" != "$OLD_MERGE_SHA" ]; then
-    echo "STALE_MERGE_REF_REFRESHED pr=$PR old=$OLD_MERGE_SHA new=$MERGE_SHA"
+  STALE_T0=$SECONDS; STALE_OK=0
+  for ((STALE_TRY = 1; STALE_TRY <= STALE_TRIES; STALE_TRY++)); do
+    if verify_fresh_merge_ref; then STALE_OK=1; break; fi
+    [ $((SECONDS - STALE_T0 + STALE_POLL_SLEEP)) -le "$STALE_REFRESH_WAIT" ] || break
+    sleep "$STALE_POLL_SLEEP"
+  done
+  if [ "$STALE_OK" = 1 ]; then
+    echo "STALE_MERGE_REF_RECOMPUTED pr=$PR old=$OLD_MERGE_SHA new=$MERGE_SHA head=$HEAD main=$MAIN_SHA"
   else
     overlap_finish
-    echo "REFUSE stale_merge_ref #$PR: test merge ${MERGE_SHA:-?} is not confirmed to contain main $MAIN_SHA after one close+reopen refresh (waited up to ${STALE_REFRESH_WAIT}s); not retrying; check GitHub mergeability, then re-admit"
+    echo "REFUSE stale_merge_ref #$PR: test merge ${OLD_MERGE_SHA:-?} is not verified to be built on current main (parents must be exactly head $HEAD and the current main; main was $OLD_MAIN_SHA at the first read); re-read read-only for ${STALE_REFRESH_WAIT}s and made NO change to the PR state (a close queues e2e.yml teardown and can kill an in-flight E2E run, so none is attempted). Wait for GitHub to rebuild the merge ref and re-admit; if it stays stale, report it to the CTO"
     exit 3
   fi
 fi
