@@ -654,6 +654,53 @@ class ControlPlaneExemptionTests(unittest.TestCase):
         self.assert_falls_through(control_plane_files=[
             {"filename": "docs/merge-gate.md"}, {"filename": "src/app.ts"}])
 
+    # PR #14787 shape: the shared classifier's marketing-only rule (every path
+    # under website/**) emits scope=control_plane_only with site_scoped=false, so
+    # the paths sit in the `site` glob group, not the control-plane groups.
+    # Site-only PRs have no paid ci.yml/e2e.yml run; the exact-head exemption is
+    # their gate. Product PRs without ci.yml must still refuse WORKFLOW_MISSING.
+    def test_site_only_paths_under_control_plane_receipt_are_exempt(self):
+        self.setup_world(control_plane_files=[
+            {"filename": "website/leaderboard/index.html"},
+            {"filename": "website/css/donna-doc.css"}])
+        result = merge.merge(CONTROL_PLANE_PR, CONTROL_PLANE_HEAD)
+        self.assertEqual(result["status"], "READY_TO_MERGE")
+        for slot in ("ci.yml", "e2e.yml"):
+            proof = result["workflows"][slot]
+            self.assertEqual(proof["exempt"], "control_plane_only")
+            self.assertIs(proof["site_only_paths"], True)
+            self.assertEqual((proof["run"], proof["scope_job_id"]),
+                             (CONTROL_PLANE_RUN_ID, CONTROL_PLANE_SCOPE_ID))
+
+    def test_docs_only_control_plane_exemption_carries_no_site_marker(self):
+        self.setup_world()
+        result = merge.merge(CONTROL_PLANE_PR, CONTROL_PLANE_HEAD)
+        self.assertNotIn("site_only_paths", result["workflows"]["ci.yml"])
+
+    def test_product_only_pr_without_ci_run_still_refuses(self):
+        self.assert_falls_through(control_plane_files=[{"filename": "app/page.tsx"}])
+
+    def test_site_plus_product_path_still_refuses(self):
+        self.assert_falls_through(control_plane_files=[
+            {"filename": "website/index.html"}, {"filename": "app/page.tsx"}])
+
+    def test_site_rename_from_product_path_still_refuses(self):
+        self.assert_falls_through(control_plane_files=[
+            {"filename": "website/new.html", "previous_filename": "app/old.tsx"}])
+
+    def test_site_only_paths_with_wrong_synthetic_second_parent_still_refuse(self):
+        self.assert_falls_through(
+            control_plane_files=[{"filename": "website/index.html"}],
+            workflow_head="0" * 40)
+
+    def test_site_only_paths_with_non_exempt_receipt_still_refuse(self):
+        self.assert_falls_through(
+            control_plane_files=[{"filename": "website/index.html"}],
+            site_log=control_plane_exemption_log(receipt={
+                "scope": "product", "paid_ci_exempt": False,
+                "control_plane_only": False, "product_changed": True,
+                "ci_required": True, "e2e_required": True}))
+
     def test_parent_without_control_plane_ci_exemption_is_red(self):
         rev = "0889385c7679198a10006c086c1da9b2c95b7d41"
         blob = subprocess.run(

@@ -763,12 +763,27 @@ def classifier_exemption(pr, workflow, run, scope, expected_scope="control_plane
     if workflow == SITE_EXEMPTION_WORKFLOW and expected_scope == "site" \
             and not site_paths_confined(pr, rules[1]):
         return None
+    site_only_paths = False
     if (workflow == SITE_EXEMPTION_WORKFLOW and expected_scope == "control_plane_only"
             and not control_plane_paths_confined(pr, rules[1])):
-        return None
-    return {"run": run["id"], "attempt": run.get("run_attempt", 1), "head": head,
-            "scope_job_id": scope["id"], "workflow_sha": workflow_sha,
-            "rules_sha256": receipt["rules_sha256"], "exempt": expected_scope}
+        # The shared classifier's marketing-only rule (every path under
+        # website/**) deliberately emits a scope=control_plane_only receipt with
+        # site_scoped=false while ownership stays "site" (change_scope.py
+        # site_deploy_only). Its paths sit in the trusted `site` glob group, not
+        # the control-plane groups, so the control-plane confinement above refused
+        # such a PR and it fell through to a paid ci.yml lookup (WORKFLOW_MISSING,
+        # PR #14787). Accept it ONLY when the complete file set (incl. rename
+        # sources) matches the trusted `site` globs alone; any app, product,
+        # app_ci, fixture or other path still fails closed.
+        if not site_only_paths_confined(pr, rules[1]):
+            return None
+        site_only_paths = True
+    proof = {"run": run["id"], "attempt": run.get("run_attempt", 1), "head": head,
+             "scope_job_id": scope["id"], "workflow_sha": workflow_sha,
+             "rules_sha256": receipt["rules_sha256"], "exempt": expected_scope}
+    if site_only_paths:
+        proof["site_only_paths"] = True
+    return proof
 
 
 def app_test_only_classifier_proof(pr, workflow, run, scope):
@@ -1594,6 +1609,11 @@ def site_paths_confined(pr, rules_bytes):
     """
     return paths_confined(pr, rules_bytes,
                           ("site", "control_plane_only", "control_plane_legacy"))
+
+
+def site_only_paths_confined(pr, rules_bytes):
+    """Require every changed path to match the trusted `site` classifier globs only."""
+    return paths_confined(pr, rules_bytes, ("site",))
 
 
 def control_plane_paths_confined(pr, rules_bytes):
