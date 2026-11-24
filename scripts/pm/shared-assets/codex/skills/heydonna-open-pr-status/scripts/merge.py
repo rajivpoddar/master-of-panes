@@ -1075,11 +1075,48 @@ def job_run_names(job, block):
     return [f"{job} ({shard})" for shard in shards]
 
 
+def step_script(step):
+    """The step's `run:` text when it is a one-line plain value or a literal block, else None.
+
+    The text is what the Actions log echoes for the step, so it is the step's identity in the log.
+    Folded, quoted or multi-line plain values are not read: the caller then has no identity.
+    """
+    for at, line in enumerate(step):
+        match = re.fullmatch(r"        run:[ \t]*(.*?)[ \t]*", line)
+        if match is None:
+            continue
+        value, rest = match.group(1), step[at + 1:]
+        if value in ("|", "|-", "|+"):
+            body = []
+            for raw in rest:
+                if raw.strip() and len(raw) - len(raw.lstrip()) <= 8:
+                    break
+                body.append(raw)
+            lead = next((len(raw) - len(raw.lstrip()) for raw in body if raw.strip()), None)
+            if lead is None or any(raw.strip() and raw[:lead].strip() for raw in body):
+                return None
+            return normalized_script([raw[lead:] if raw.strip() else "" for raw in body])
+        following = next((raw for raw in rest if raw.strip()), "")
+        if (not value or value[0] in "\"'>&*!|[{%@" or " #" in value
+                or len(following) - len(following.lstrip()) > 8):
+            return None
+        return normalized_script([value])
+    return None
+
+
+def normalized_script(lines):
+    """Script lines without trailing blanks, as one text; None for an empty script."""
+    text = "\n".join(line.rstrip() for line in lines).rstrip("\n")
+    return text or None
+
+
 def job_test_steps(block):
-    """(step names, runner kinds) of the job's unconditional pytest / node --test steps, or None.
+    """{step name: (runner kinds, run script)} of the job's unconditional test steps, or None.
 
     A step guarded by `if:` or `continue-on-error:` can legitimately skip or fail, so it is not
-    the job's execution proof. A test step with no name cannot be matched to the run's steps.
+    the job's execution proof. A test step with no name cannot be matched to the run's steps, a
+    name used twice is ambiguous, and one whose `run:` text cannot be read has no identity in
+    the log; each of those is None.
     """
     steps, current = [], None
     for line in block:
@@ -1090,7 +1127,7 @@ def job_test_steps(block):
             current = None
         elif current is not None:
             current.append(line)
-    names, kinds = [], set()
+    required = {}
     for step in steps:
         body = [line for line in step if not line.lstrip().startswith("#")]
         if not any(TEST_RUNNER.search(line) for line in body):
@@ -1100,15 +1137,17 @@ def job_test_steps(block):
         head = re.fullmatch(r"      - name:\s*(.+?)\s*", body[0])
         if head is None:
             return None
-        names.append(head.group(1).strip("'\""))
+        name, script = head.group(1).strip("'\""), step_script(step)
+        if script is None or name in required:
+            return None
         text = "\n".join(body)
-        kinds.update(kind for kind, marker in (("pytest", "-m pytest"), ("node", "node --test"))
-                     if marker in text)
-    return names, kinds
+        required[name] = ({kind for kind, marker in (("pytest", "-m pytest"), ("node", "node --test"))
+                           if marker in text}, script)
+    return required
 
 
 def python_lane_requirements(text):
-    """{run job name: (test step names, runner kinds)} for every Python-lane job, or None on doubt."""
+    """{run job name: {test step name: (kinds, script)}} for every Python lane, or None on doubt."""
     required = {}
     for job in workflow_job_ids(text):
         block = workflow_job_block(text, job)
@@ -1117,10 +1156,86 @@ def python_lane_requirements(text):
         if not PYTHON_LANE_GATE.search(job_condition(block)):
             continue
         names, tests = job_run_names(job, block), job_test_steps(block)
-        if names is None or tests is None or not tests[0]:
+        if names is None or not tests:
             return None
         required.update({name: tests for name in names})
     return required or None
+
+
+EXPRESSION = re.compile(r"\$\{\{.*?\}\}", re.S)
+
+
+def log_step_blocks(lines):
+    """[(echoed script, output lines)] for every `Run` group of a framing-stripped job log.
+
+    The `##[group]Run <first line>` title only repeats the script's first line, which the group
+    body then prints in full: a step's echo is that body up to its `shell:` trailer, and its own
+    output is everything after `##[endgroup]` up to the next group. Step names are not in the
+    raw log, so the echoed script is the only handle on which output belongs to which step.
+    """
+    blocks, at = [], 0
+    while at < len(lines):
+        if not lines[at].startswith("##[group]Run "):
+            at += 1
+            continue
+        echo = []
+        at += 1
+        while at < len(lines) and not lines[at].startswith("##[endgroup]"):
+            echo.append(lines[at])
+            at += 1
+        at += 1
+        output = []
+        while at < len(lines) and not lines[at].startswith("##[group]"):
+            output.append(lines[at])
+            at += 1
+        trailer = [i for i, line in enumerate(echo) if line.startswith("shell: ")]
+        blocks.append((normalized_script(echo[:trailer[-1]] if trailer else echo) or "", output))
+    return blocks
+
+
+def script_matches(template, echoed):
+    """True when the echoed script is the workflow's `run:` text with each ${{ }} expression valued.
+
+    The literal parts must appear in order, the first as the start and the last as the end, so a
+    script that merely shares a first line with the step (or a longer script that contains it)
+    is not that step. A template with no literal text matches nothing.
+    """
+    parts = EXPRESSION.split(template)
+    if not "".join(parts).strip():
+        return False
+    if len(parts) == 1:
+        return template == echoed
+    first, last = parts[0], parts[-1]
+    if len(echoed) < len(first) + len(last) or not echoed.startswith(first) or not echoed.endswith(last):
+        return False
+    at, stop = len(first), len(echoed) - len(last)
+    for part in parts[1:-1]:
+        found = echoed.find(part, at, stop)
+        if found < 0:
+            return False
+        at = found + len(part)
+    return True
+
+
+def step_executed(blocks, kinds, script):
+    """True when exactly one log block is this step's own and its own output proves a passing run.
+
+    The block is found by the step's script, never by the job's pooled output, so another step's
+    footer cannot stand in for a step that produced none. Its output must show nonzero passes for
+    each runner kind the step uses and no failure or error.
+    """
+    own = [output for echoed, output in blocks if script_matches(script, echoed)]
+    if len(own) != 1:
+        return False
+    passed, bad = pytest_totals(own[0])
+    node = {"pass": 0, "fail": 0}
+    for line in own[0]:
+        summary = NODE_SUMMARY.match(line.strip())
+        if summary:
+            node[summary.group(1)] += int(summary.group(2))
+    if bad or node["fail"]:
+        return False
+    return not (("pytest" in kinds and passed <= 0) or ("node" in kinds and node["pass"] <= 0))
 
 
 def python_lanes_executed(jobs, test_only):
@@ -1129,10 +1244,13 @@ def python_lanes_executed(jobs, test_only):
     The required set is read from the ci.yml bytes ci_required_set_proof bound (same blob at the
     trusted base and at the classifier's workflow sha): each job gated on a `lane_python*` output,
     expanded over its literal shard list. The run must report exactly that set. A missing shard,
-    an extra or duplicate one, a skipped one or one that did not succeed refuses. Each job's
-    unconditional test steps must have succeeded and its log must show nonzero passing results
-    with no failure (pytest footers, or the node --test summary), so a green job that executed
-    nothing is not proof. Any doubt about the workflow or a log is False.
+    an extra or duplicate one, a skipped one or one that did not succeed refuses. EACH of a
+    job's unconditional test steps must have succeeded and must have its own result: the step's
+    block in the job log is found by its `run:` script and that block's own output must show
+    nonzero passes with no failure (pytest footers, or the node --test summary). Totals are never
+    pooled across a job, so a sibling step's passing footer cannot vouch for a green step that
+    produced none, and a green step record alone is not proof. Any doubt about the workflow, a
+    log, or which block is which step is False.
     """
     try:
         selected = contents_identity(".github/workflows/ci.yml", test_only["workflow_sha"])
@@ -1147,10 +1265,9 @@ def python_lanes_executed(jobs, test_only):
     if sorted(reported) != sorted(required):
         return False
     for job in jobs:
-        spec = required.get(job["name"])
-        if spec is None:
+        steps = required.get(job["name"])
+        if steps is None:
             continue
-        steps, kinds = spec
         if not successful(job):
             return False
         for name in steps:
@@ -1158,18 +1275,10 @@ def python_lanes_executed(jobs, test_only):
             if len(ran) != 1 or not successful(ran[0]):
                 return False
         try:
-            lines = strip_log_framing(job_log(job["id"]))
+            blocks = log_step_blocks(strip_log_framing(job_log(job["id"])))
         except (Refusal, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
             return False
-        passed, bad = pytest_totals(lines)
-        node = {"pass": 0, "fail": 0}
-        for line in lines:
-            summary = NODE_SUMMARY.match(line.strip())
-            if summary:
-                node[summary.group(1)] += int(summary.group(2))
-        if bad or node["fail"]:
-            return False
-        if ("pytest" in kinds and passed <= 0) or ("node" in kinds and node["pass"] <= 0):
+        if not all(step_executed(blocks, kinds, script) for kinds, script in steps.values()):
             return False
     return True
 

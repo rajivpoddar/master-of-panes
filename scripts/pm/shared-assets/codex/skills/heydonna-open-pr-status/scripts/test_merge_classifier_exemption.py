@@ -1261,17 +1261,48 @@ def zero_gate_log(receipt=None, env=None):
     return "\n".join(lines) + "\n"
 
 
-def pytest_log(*footers):
+# The `run:` text of each required test step in python_workflow() below. The Actions log echoes a
+# step's script and nothing else names it, so these are how a log block is tied to its step.
+SCRIPT_AUDIO = "python -m pytest modal/audio/tests"
+SCRIPT_PROOFREADING = "python -m pytest scripts/proofreading"
+SCRIPT_GC = "python -m pytest scripts/tests/test_modal_gc.py"
+SCRIPT_DOCX = "python -m pytest modal/docx/tests"
+SCRIPT_CONTRACTS = "node --test scripts/ci/tests/*.test.mjs"
+
+
+def step_block(script, output):
+    """One step of a job log as Actions writes it.
+
+    `##[group]Run <first script line>` repeats the first line, the group body echoes the whole
+    script, then the `shell:` / `env:` trailer, `##[endgroup]`, and finally the step's own output.
+    """
+    first, *rest = script.splitlines()
+    lines = [f"{LOG_STAMP} ##[group]Run {first}", f"{LOG_STAMP} {first}"]
+    lines += [f"{LOG_STAMP} {line}" for line in rest]
+    lines += [f"{LOG_STAMP} shell: /usr/bin/bash -e {{0}}", f"{LOG_STAMP} env:",
+              f"{LOG_STAMP}   CI: true", f"{LOG_STAMP} ##[endgroup]"]
+    return "\n".join(lines) + "\n" + output
+
+
+def pytest_log(*footers, script=SCRIPT_AUDIO):
     lines = [f"{LOG_STAMP} ============================= test session starts =============================",
              f"{LOG_STAMP} collected 1473 items"]
     lines += [f"{LOG_STAMP} {footer}" for footer in footers]
-    return "\n".join(lines) + "\n"
+    return step_block(script, "\n".join(lines) + "\n")
 
 
-def node_log(passed=35, failed=0):
+def node_log(passed=35, failed=0, script=SCRIPT_CONTRACTS):
     lines = ["\u2714 contract one (1.2ms)", f"\u2139 tests {passed + failed}", "\u2139 suites 0",
              f"\u2139 pass {passed}", f"\u2139 fail {failed}", "\u2139 cancelled 0"]
-    return "\n".join(f"{LOG_STAMP} {line}" for line in lines) + "\n"
+    return step_block(script, "\n".join(f"{LOG_STAMP} {line}" for line in lines) + "\n")
+
+
+def python_lane_log(proofreading=None, gc=None):
+    """The `python` job's log: its two required steps, each with its own output, after a setup step."""
+    setup = step_block("pip install -r requirements.txt", f"{LOG_STAMP} Successfully installed pytest\n")
+    proofreading = pytest_log(FOOTER_0, script=SCRIPT_PROOFREADING) if proofreading is None else proofreading
+    gc = pytest_log(FOOTER_1_SECOND, script=SCRIPT_GC) if gc is None else gc
+    return setup + proofreading + gc
 
 
 def python_workflow(matrix="shard: [0, 1, 2, 3, 4, 5]", modal_name=None, extra=""):
@@ -1309,6 +1340,8 @@ jobs:
     steps:
       - name: Proofreading scorer unit tests
         run: python -m pytest scripts/proofreading
+      - name: Modal GC unit tests
+        run: python -m pytest scripts/tests/test_modal_gc.py
       - name: Optional experimental tests
         continue-on-error: true
         run: python -m pytest scripts/experimental
@@ -1355,7 +1388,8 @@ def zero_selection_jobs(shards=tuple(range(6)), lanes=tuple(LANE_IDS)):
                       conclusion="success" if shard == 0 else "skipped")]
         rows.append(dict(common, id=SHARD_IDS[shard], name=f"python-modal ({shard})",
                          conclusion="success", steps=steps))
-    lane_steps = {"python": ["Proofreading scorer unit tests", "Optional experimental tests"],
+    lane_steps = {"python": ["Proofreading scorer unit tests", "Modal GC unit tests",
+                             "Optional experimental tests"],
                   "python-docx": ["Modal docx unit tests"],
                   "python-contracts": ["CI parallel workflow contracts"]}
     for lane in lanes:
@@ -1369,8 +1403,8 @@ def lane_logs():
     logs = {SHARD_IDS[shard]: pytest_log(FOOTER_0 if shard == 0 else FOOTER_1)
             for shard in range(6)}
     logs[SHARD_IDS[1]] = pytest_log(FOOTER_1, FOOTER_1_SECOND)
-    logs[LANE_IDS["python"]] = pytest_log(FOOTER_0)
-    logs[LANE_IDS["python-docx"]] = pytest_log(FOOTER_1_SECOND)
+    logs[LANE_IDS["python"]] = python_lane_log()
+    logs[LANE_IDS["python-docx"]] = pytest_log(FOOTER_1_SECOND, script=SCRIPT_DOCX)
     logs[LANE_IDS["python-contracts"]] = node_log()
     return logs
 
@@ -1537,6 +1571,7 @@ class PythonOnlyZeroSelectionTests(unittest.TestCase):
         cases = (("python-modal (3)", "Modal audio unit tests"),
                  ("python-modal (5)", "Modal audio unit tests"),
                  ("python", "Proofreading scorer unit tests"),
+                 ("python", "Modal GC unit tests"),
                  ("python-docx", "Modal docx unit tests"),
                  ("python-contracts", "CI parallel workflow contracts"))
         for job, step in cases:
@@ -1557,16 +1592,99 @@ class PythonOnlyZeroSelectionTests(unittest.TestCase):
         self.assertIn("app_test_only", self.prove(jobs=rows))
 
     def test_every_required_job_needs_nonzero_passing_results(self):
-        no_tests = pytest_log("= no tests ran in 0.10s =")
-        failed = pytest_log("= 1 failed, 10 passed in 3.00s =")
-        cases = [(SHARD_IDS[4], no_tests), (SHARD_IDS[5], failed),
-                 (LANE_IDS["python"], no_tests), (LANE_IDS["python-docx"], failed),
+        none, broke = "= no tests ran in 0.10s =", "= 1 failed, 10 passed in 3.00s ="
+        cases = [(SHARD_IDS[4], pytest_log(none)), (SHARD_IDS[5], pytest_log(broke)),
+                 (LANE_IDS["python"], python_lane_log(proofreading=pytest_log(none, script=SCRIPT_PROOFREADING))),
+                 (LANE_IDS["python"], python_lane_log(gc=pytest_log(broke, script=SCRIPT_GC))),
+                 (LANE_IDS["python-docx"], pytest_log(broke, script=SCRIPT_DOCX)),
                  (LANE_IDS["python-contracts"], node_log(passed=0)),
                  (LANE_IDS["python-contracts"], node_log(passed=34, failed=1)),
-                 (LANE_IDS["python-contracts"], pytest_log(FOOTER_0))]  # node job, no node summary
+                 # a node step whose block shows a pytest footer but no node summary
+                 (LANE_IDS["python-contracts"], pytest_log(FOOTER_0, script=SCRIPT_CONTRACTS))]
         for job_id, text in cases:
-            with self.subTest(job_id=job_id):
+            with self.subTest(job_id=job_id, log=text.splitlines()[-2][-40:]):
                 self.assert_refused(job_logs=self.world()["job_logs"] | {job_id: text})
+
+    # --- MoP 2026-11-25, CTO REVISE #2 (C0ALZJHGE49 ts 1795556637.302569) ---
+    # A green step record is not proof the test command ran, and the job's pooled totals are not
+    # per-step proof: each required step must carry its OWN nonzero passing result.
+
+    def test_a_green_required_step_with_no_result_is_refused_while_its_sibling_passes(self):
+        # NEGATIVE CONTROL. `python` has two required steps, both recorded green. The proofreading
+        # step passes; the Modal GC step's block has no pytest footer at all. The old pooled count
+        # saw the sibling's footer and accepted the job.
+        silent_gc = step_block(SCRIPT_GC, f"{LOG_STAMP} (no test output)\n")
+        logs = self.world()["job_logs"] | {LANE_IDS["python"]: python_lane_log(gc=silent_gc)}
+        self.assert_refused(job_logs=logs)
+        pooled = merge.pytest_totals(merge.strip_log_framing(logs[LANE_IDS["python"]]))
+        self.assertGreater(pooled[0], 0, "the pooled totals alone would have vouched for the job")
+
+    def test_a_required_step_with_no_block_in_the_log_is_refused(self):
+        # The step record is green but its command never appears in the job log.
+        logs = self.world()["job_logs"] | {
+            LANE_IDS["python"]: python_lane_log(gc="")}
+        self.assert_refused(job_logs=logs)
+
+    def test_a_sibling_steps_footer_cannot_stand_in_for_another_step(self):
+        # GC's block is empty but sits right before a passing block of ANOTHER step.
+        silent_gc = step_block(SCRIPT_GC, "")
+        other = pytest_log(FOOTER_1_SECOND, script=SCRIPT_DOCX)
+        logs = self.world()["job_logs"] | {
+            LANE_IDS["python"]: python_lane_log(gc=silent_gc + other)}
+        self.assert_refused(job_logs=logs)
+
+    def test_each_steps_own_counts_decide_not_the_jobs_total(self):
+        # Passing in one step and failing in another is a failure even when passes dominate.
+        failing_gc = pytest_log("= 1 failed, 2000 passed in 9.00s =", script=SCRIPT_GC)
+        logs = self.world()["job_logs"] | {LANE_IDS["python"]: python_lane_log(gc=failing_gc)}
+        self.assert_refused(job_logs=logs)
+
+    def test_a_step_whose_script_appears_in_two_blocks_is_refused(self):
+        twice = pytest_log(FOOTER_0, script=SCRIPT_PROOFREADING) * 2
+        self.assert_refused(job_logs=self.world()["job_logs"] | {
+            LANE_IDS["python"]: python_lane_log(proofreading=twice)})
+
+    def test_a_longer_script_that_only_starts_like_the_step_is_not_the_step(self):
+        # The same first line with an extra command appended is a different step.
+        lookalike = pytest_log(FOOTER_0, script=SCRIPT_PROOFREADING + "\ntrue")
+        self.assert_refused(job_logs=self.world()["job_logs"] | {
+            LANE_IDS["python"]: python_lane_log(proofreading=lookalike)})
+
+    def test_each_steps_output_is_split_at_the_next_group(self):
+        lines = merge.strip_log_framing(self.world()["job_logs"][LANE_IDS["python"]])
+        blocks = merge.log_step_blocks(lines)
+        self.assertEqual([echo for echo, _ in blocks],
+                         ["pip install -r requirements.txt", SCRIPT_PROOFREADING, SCRIPT_GC])
+        by_script = {echo: merge.pytest_totals(output) for echo, output in blocks}
+        # The last step's output runs to the end of the log, with no later group to close it.
+        self.assertEqual(by_script, {"pip install -r requirements.txt": (0, 0),
+                                     SCRIPT_PROOFREADING: (1470, 0), SCRIPT_GC: (17, 0)})
+
+    def test_a_step_with_an_expression_in_its_script_matches_the_substituted_echo(self):
+        # Actions echoes the script with ${{ }} already valued; the workflow text keeps the template.
+        extra = """  python-newlane:
+    needs: scope
+    if: needs.scope.outputs.lane_python_newlane != 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: New lane unit tests
+        run: |
+          python -m pytest modal/newlane --junitxml=junit-${{ github.run_id }}.xml
+          echo "attempt ${{ github.run_attempt }} done"
+"""
+        workflow = (python_workflow() + extra).encode()
+        rows = zero_selection_jobs()
+        rows.append(dict(copy.deepcopy(next(r for r in rows if r["name"] == "python-docx")),
+                         id=8219130, name="python-newlane",
+                         steps=[{"name": "New lane unit tests", "status": "completed",
+                                 "conclusion": "success"}]))
+        echoed = ("python -m pytest modal/newlane --junitxml=junit-45478680523.xml\n"
+                  'echo "attempt 1 done"')
+        logs = self.world()["job_logs"] | {8219130: pytest_log(FOOTER_0, script=echoed)}
+        self.assertIn("app_test_only", self.prove(ci_yaml=workflow, jobs=rows, job_logs=logs))
+        wrong = self.world()["job_logs"] | {
+            8219130: pytest_log(FOOTER_0, script=echoed.replace("modal/newlane", "modal/other"))}
+        self.assert_refused(ci_yaml=workflow, jobs=rows, job_logs=wrong)
 
     def test_an_unreadable_job_log_refuses(self):
         # A shard whose log is absent falls back to the generic log, which has no pytest footer.
@@ -1601,7 +1719,7 @@ class PythonOnlyZeroSelectionTests(unittest.TestCase):
                          id=8219130, name="python-newlane",
                          steps=[{"name": "New lane unit tests", "status": "completed",
                                  "conclusion": "success"}]))
-        logs = self.world()["job_logs"] | {8219130: pytest_log(FOOTER_0)}
+        logs = self.world()["job_logs"] | {8219130: pytest_log(FOOTER_0, script="python -m pytest modal/newlane")}
         self.assertIn("app_test_only", self.prove(ci_yaml=workflow, jobs=rows, job_logs=logs))
 
     def test_a_matrix_that_cannot_be_expanded_from_the_workflow_text_refuses(self):
@@ -1627,9 +1745,12 @@ class PythonLaneRequirementTests(unittest.TestCase):
         required = merge.python_lane_requirements(python_workflow())
         self.assertEqual(sorted(required), sorted(
             [f"python-modal ({n})" for n in range(6)] + list(LANE_IDS)))
-        self.assertEqual(required["python-modal (4)"], (["Modal audio unit tests"], {"pytest"}))
-        self.assertEqual(required["python"], (["Proofreading scorer unit tests"], {"pytest"}))
-        self.assertEqual(required["python-contracts"], (["CI parallel workflow contracts"], {"node"}))
+        self.assertEqual(required["python-modal (4)"], {"Modal audio unit tests": ({"pytest"}, SCRIPT_AUDIO)})
+        self.assertEqual(required["python"], {
+            "Proofreading scorer unit tests": ({"pytest"}, SCRIPT_PROOFREADING),
+            "Modal GC unit tests": ({"pytest"}, SCRIPT_GC)})
+        self.assertEqual(required["python-contracts"],
+                         {"CI parallel workflow contracts": ({"node"}, SCRIPT_CONTRACTS)})
 
     def test_jobs_without_a_lane_python_gate_are_not_python_lanes(self):
         required = merge.python_lane_requirements(python_workflow())
@@ -1652,6 +1773,65 @@ class PythonLaneRequirementTests(unittest.TestCase):
 
     def test_a_job_defined_twice_gives_no_answer(self):
         self.assertIsNone(merge.python_lane_requirements(python_workflow() + python_workflow().split("jobs:\n", 1)[1]))
+
+    @staticmethod
+    def lane(step_lines):
+        return ("jobs:\n  python:\n    if: needs.scope.outputs.lane_python != 'false'\n    steps:\n"
+                + step_lines)
+
+    def test_a_literal_block_script_keeps_comments_and_drops_trailing_blanks(self):
+        # Actions echoes comment lines too, so they stay part of the step's identity.
+        required = merge.python_lane_requirements(self.lane(
+            "      - name: Tests\n        run: |\n          # warm the cache\n"
+            "          python -m pytest x \\\n            -q\n\n"))
+        self.assertEqual(required["python"]["Tests"][1], "# warm the cache\npython -m pytest x \\\n  -q")
+
+    def test_a_test_step_whose_run_text_cannot_be_read_gives_no_answer(self):
+        # A folded, quoted or multi-line plain value has no echoed form to match in the log.
+        for label, run in (("folded", "run: >\n          python -m pytest x\n"),
+                           ("quoted", 'run: "python -m pytest x"\n'),
+                           ("plain continued", "run: python -m pytest x\n          -q\n"),
+                           ("inline comment", "run: python -m pytest x # keep\n")):
+            with self.subTest(form=label):
+                self.assertIsNone(merge.python_lane_requirements(
+                    self.lane(f"      - name: Tests\n        {run}")))
+
+    def test_two_required_steps_with_the_same_name_give_no_answer(self):
+        self.assertIsNone(merge.python_lane_requirements(self.lane(
+            "      - name: Tests\n        run: python -m pytest a\n"
+            "      - name: Tests\n        run: python -m pytest b\n")))
+
+
+class ScriptMatchTests(unittest.TestCase):
+    """script_matches / log_step_blocks: tying a log block to the step that produced it."""
+
+    def test_a_literal_script_must_equal_the_echo(self):
+        self.assertTrue(merge.script_matches("python -m pytest x", "python -m pytest x"))
+        self.assertFalse(merge.script_matches("python -m pytest x", "python -m pytest x -q"))
+        self.assertFalse(merge.script_matches("python -m pytest x", "echo hi\npython -m pytest x"))
+
+    def test_expressions_match_any_value_but_the_literal_parts_are_fixed(self):
+        template = "run --shard ${{ matrix.shard }} --of 6"
+        self.assertTrue(merge.script_matches(template, "run --shard 3 --of 6"))
+        self.assertTrue(merge.script_matches(template, "run --shard  --of 6"))
+        self.assertFalse(merge.script_matches(template, "run --shard 3 --of 7"))
+        self.assertFalse(merge.script_matches(template, "x run --shard 3 --of 6"))
+        self.assertFalse(merge.script_matches(template, "run --shard 3"))
+
+    def test_expression_parts_cannot_overlap(self):
+        # The pieces must occur in order and without reusing text: "ab" needs both a and b.
+        self.assertFalse(merge.script_matches("a${{ x }}a", "a"))
+        self.assertTrue(merge.script_matches("a${{ x }}a", "aa"))
+
+    def test_a_template_with_no_literal_text_matches_nothing(self):
+        self.assertFalse(merge.script_matches("${{ matrix.cmd }}", "python -m pytest x"))
+        self.assertFalse(merge.script_matches("", ""))
+
+    def test_blocks_carry_their_own_output_up_to_the_next_group(self):
+        log = (step_block("echo one", f"{LOG_STAMP} out one\n") + step_block("echo two\necho three", f"{LOG_STAMP} out two\n"))
+        blocks = merge.log_step_blocks(merge.strip_log_framing(log))
+        self.assertEqual([(echo, [line.strip() for line in out]) for echo, out in blocks],
+                         [("echo one", ["out one"]), ("echo two\necho three", ["out two"])])
 
 
 class NodeSummaryTests(unittest.TestCase):
