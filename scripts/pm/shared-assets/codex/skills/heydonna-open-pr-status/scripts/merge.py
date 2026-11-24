@@ -502,14 +502,7 @@ def workflow_proof(pr, workflow, names):
         # ci.yml runs unit tests in sharded "unit-tests (N)" jobs; legacy runs used typescript.
         unit_shards = sorted(name for name in by_name if name.startswith("unit-tests ("))
         if workflow == "ci.yml":
-            if (test_only is not None and unit_selected_by_python_only_area(jobs, run, test_only)):
-                # The selector attested zero JS shards for a Python-only change and the Python
-                # lanes ran green: "Unit tests" is satisfied by selection, not by a step that
-                # the skipped native placeholder cannot have. MoP, 2026-11-25, #14809.
-                checks = ()
-            else:
-                checks = (tuple((name, "Unit tests") for name in unit_shards)
-                          or (("typescript", "Unit tests"),))
+            checks = tuple((name, "Unit tests") for name in unit_shards) or (("typescript", "Unit tests"),)
         else:
             checks = (
                 ("e2e", "Run E2E auto-process-critical"),
@@ -980,73 +973,6 @@ def native_unit_placeholder(job):
             and job.get("conclusion") == "skipped" and not job.get("steps"))
 
 
-# The only zero-schedule proofs the CI area selector issues (change_scope.select_unit_by_area):
-# every classified row is non-TypeScript, or there are no rows. An uncertain skip carries an
-# empty proof and is never a selection by file area.
-ZERO_SELECTION_PROOFS = frozenset({"non_ts_rows_only", "none_rows_only"})
-PYTEST_FOOTER = re.compile(
-    r"^=+ (?P<framed>.+?) in [0-9.]+s(?: \([0-9:]+\))? =+$"
-    r"|^(?P<quiet>\d+ \w+(?:, \d+ \w+)*) in [0-9.]+s(?: \([0-9:]+\))?$")
-PYTEST_COUNT = re.compile(r"(\d+) (passed|failed|errors?)\b")
-PYTHON_MODAL_SHARD = re.compile(r"python-modal \(\d+\)")
-
-
-def pytest_totals(lines):
-    """(passed, failed_or_errored) summed over every pytest footer in the log lines."""
-    passed = bad = 0
-    for line in lines:
-        footer = PYTEST_FOOTER.match(line.strip())
-        if footer is None:
-            continue
-        for count, kind in PYTEST_COUNT.findall(footer.group("framed") or footer.group("quiet")):
-            if kind == "passed":
-                passed += int(count)
-            else:
-                bad += int(count)
-    return passed, bad
-
-
-def python_modal_executed(jobs):
-    """True only when python-modal shards ran their unit tests to a nonzero, green pytest total.
-
-    The Python lanes are what a Python-only change actually runs, so a zero-JS schedule is
-    accepted as satisfied by selection only when at least one shard ran and every shard that
-    ran succeeded, with a successful unit-test step and a pytest footer that passed tests and
-    failed or errored none. A skipped shard was not selected. A successful job with no footer
-    (nothing executed) is not proof.
-    """
-    ran = [job for job in jobs if PYTHON_MODAL_SHARD.fullmatch(job["name"])
-           and job.get("conclusion") != "skipped"]
-    if not ran:
-        return False
-    for job in ran:
-        if not successful(job) or not any(
-                successful(step) and "unit tests" in str(step.get("name", "")).lower()
-                for step in job.get("steps", [])):
-            return False
-        try:
-            passed, bad = pytest_totals(strip_log_framing(job_log(job["id"])))
-        except (Refusal, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
-            return False
-        if passed <= 0 or bad:
-            return False
-    return True
-
-
-def unit_selected_by_python_only_area(jobs, run, test_only):
-    """True when the gate attested a zero-JS selection by area and the Python lanes executed.
-
-    Reads the selector's own attestation (unit-gate receipt: mode zero with a selector zero
-    proof, count 0, bound to this head, run and attempt); it never guesses from file paths.
-    The unit family must be exactly the one skipped native placeholder, so a selected JS shard
-    that did not execute, an uncertain or unknown selection and a legacy matrix all return False.
-    """
-    unit = [job for job in jobs if unit_family(job["name"])]
-    return (len(unit) == 1 and native_unit_placeholder(unit[0])
-            and unit_gate_attested_count(run, jobs, test_only, zero_only=True) == 0
-            and python_modal_executed(jobs))
-
-
 def workflow_job_block(text, job):
     """Body lines of one top-level workflow job, or None unless it is defined exactly once."""
     lines = text.splitlines()
@@ -1309,12 +1235,8 @@ def receipt_attempt_binds(receipt_attempt, run, gate, jobs):
     return attested == current
 
 
-def unit_gate_attested_count(run, jobs, required_set, zero_only=False):
+def unit_gate_attested_count(run, jobs, required_set):
     """Shard count the unit gate attested for THIS head, run and attempt, else None.
-
-    zero_only narrows the attestation to a zero-JS schedule the area selector proved
-    (mode zero with a ZERO_SELECTION_PROOFS proof); an uncertain skip or any scheduled
-    shard then returns None.
 
     Mirrors the gate's own validation of its schedule receipt. A receipt for another
     head or run, a failed or missing gate, or any doubt returns None. The receipt's
@@ -1352,8 +1274,6 @@ def unit_gate_attested_count(run, jobs, required_set, zero_only=False):
             or facts["UNIT_SELECT_RESULT"] != "success"
             or facts["UNIT_PRECHECKS_RESULT"] != "success"
             or facts["UNIT_TESTS_RESULT"] != ("skipped" if skip == "true" else "success")):
-        return None
-    if zero_only and (skip != "true" or mode != "zero" or proof not in ZERO_SELECTION_PROOFS):
         return None
     if skip == "true":
         if mode == "zero":
