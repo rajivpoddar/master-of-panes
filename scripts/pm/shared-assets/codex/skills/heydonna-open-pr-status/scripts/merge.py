@@ -35,6 +35,17 @@ def command(*args):
 API_RETRY_DELAY = 0.5
 
 
+class ReadFailed(Refusal):
+    """A GitHub read that failed on BOTH attempts: a non-zero gh exit or a
+    subprocess timeout. Typed so the proof path can name it, instead of leaking
+    a raw gh error or, for a timeout, an uncaught subprocess.TimeoutExpired."""
+
+
+class GitCommitsReadFailed(ReadFailed):
+    """git/commits/<sha> unreadable on both attempts (the parent read the
+    synthetic-merge ancestry check depends on)."""
+
+
 def read_with_retry(fn, *args):
     """One retry for a read the proof path would otherwise swallow into "unproven".
 
@@ -42,13 +53,32 @@ def read_with_retry(fn, *args):
     error (5xx, rate limit, network blip) on a compare / ref / file-list read
     inside the swallowing proofs used to look exactly like a failed proof and
     surfaced as a generic WORKFLOW_NOT_GREEN on a genuinely green run (PR #14762,
-    run 45385386399). A second failure still propagates, so the proof stays
-    fail-closed."""
+    run 45385386399). command() also runs gh with a 120 s timeout, and a
+    subprocess.TimeoutExpired is not a Refusal, so a timeout used to escape the
+    retry on the first attempt. Both a Refusal and a TimeoutExpired are retried
+    once; a second failure raises the typed ReadFailed (cause chained), so the
+    proof stays fail-closed and names what failed."""
     try:
         return fn(*args)
-    except Refusal:
+    except (Refusal, subprocess.TimeoutExpired):
         time.sleep(API_RETRY_DELAY)
+    try:
         return fn(*args)
+    except (Refusal, subprocess.TimeoutExpired) as exc:
+        cause = (f"timeout after {exc.timeout}s" if isinstance(exc, subprocess.TimeoutExpired)
+                 else str(exc))
+        raise ReadFailed(f"READ_FAILED attempts=2 read={' '.join(map(str, args))[:200]} "
+                         f"cause={cause[:200]}") from exc
+
+
+def commit_parents(sha):
+    """Parents of git/commits/<sha>, retried once; a persistent failure or
+    timeout raises the typed GitCommitsReadFailed. Callers feed the result to
+    merge_parent_base, whose ancestry and PR-head checks are unchanged."""
+    try:
+        return read_with_retry(api, f"git/commits/{sha}").get("parents", [])
+    except ReadFailed as exc:
+        raise GitCommitsReadFailed(str(exc)) from exc
 
 
 def api(path):
@@ -112,8 +142,7 @@ def legacy_ci_roster_authenticated(pr, run, jobs):
     base, execution = bindings["BASE_SHA"], bindings["WORKFLOW_SHA"]
     if not HEX40.fullmatch(base) or not HEX40.fullmatch(execution):
         return False
-    trusted = merge_parent_base(base, pr["head"]["sha"],
-                                api(f"git/commits/{execution}").get("parents", []))
+    trusted = merge_parent_base(base, pr["head"]["sha"], commit_parents(execution))
     if trusted is None:
         return False
     path = ".github/workflows/ci.yml"
@@ -442,6 +471,10 @@ def workflow_proof(pr, workflow, names):
             if workflow == "ci.yml" and len(scope_jobs) == 1:
                 try:
                     test_only = app_test_only_classifier_proof(pr, workflow, run, scope)
+                except GitCommitsReadFailed:
+                    # Typed, not a silent "no receipt": name it in the refusal.
+                    required_set_unproven.append("git_commits_read")
+                    test_only = None
                 except (Refusal, OSError, ValueError, KeyError,
                         subprocess.TimeoutExpired):
                     test_only = None
@@ -701,8 +734,8 @@ def classifier_exemption(pr, workflow, run, scope, expected_scope="control_plane
     if (head_sha != head or not event_binding_ok(bindings, run, pr)
             or not pr_binding_ok(bindings, run, pr)):
         return None
-    commit = api(f"git/commits/{workflow_sha}")
-    parents = [parent["sha"] for parent in commit.get("parents", [])]
+    commit_parent_rows = commit_parents(workflow_sha)
+    parents = [parent["sha"] for parent in commit_parent_rows]
     trusted_base = base_sha
     if workflow == SITE_EXEMPTION_WORKFLOW and expected_scope in ("site", "control_plane_only"):
         # BASE_SHA is the common merge base, while GitHub's synthetic merge
@@ -712,7 +745,7 @@ def classifier_exemption(pr, workflow, run, scope, expected_scope="control_plane
                 or parents[1] != head_sha):
             return None
     else:
-        trusted_base = merge_parent_base(base_sha, head_sha, commit.get("parents", []))
+        trusted_base = merge_parent_base(base_sha, head_sha, commit_parent_rows)
         if trusted_base is None:
             return None
     workflow_path = f".github/workflows/{workflow}"
@@ -774,8 +807,7 @@ def app_test_only_classifier_proof(pr, workflow, run, scope):
             or bindings["EVENT_NAME"] != "pull_request"
             or not pr_binding_ok(bindings, run, pr)):
         return None
-    commit = api(f"git/commits/{workflow_sha}")
-    trusted_base = merge_parent_base(base_sha, head_sha, commit.get("parents", []))
+    trusted_base = merge_parent_base(base_sha, head_sha, commit_parents(workflow_sha))
     if trusted_base is None:
         return None
     for path in (".github/workflows/ci.yml", "scripts/ci/change_scope.py",
@@ -878,8 +910,11 @@ def ci_required_set_proof(pr, run, scope, unproven=None):
         return fail("event_binding")
     if not pr_binding_ok(bindings, run, pr) or not native_pr_binding_ok(run, pr):
         return fail("pr_association")
-    trusted_base = merge_parent_base(
-        base, head, read_with_retry(api, f"git/commits/{workflow}").get("parents", []))
+    try:
+        workflow_parents = commit_parents(workflow)
+    except GitCommitsReadFailed:
+        return fail("git_commits_read")
+    trusted_base = merge_parent_base(base, head, workflow_parents)
     if trusted_base is None:
         return fail("merge_parent_base")
     for path in (".github/workflows/ci.yml", "scripts/ci/change_scope.py",

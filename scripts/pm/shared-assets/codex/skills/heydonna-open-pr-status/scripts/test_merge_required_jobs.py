@@ -4,6 +4,7 @@ import copy
 import importlib.util
 import json
 import os
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -242,23 +243,32 @@ def test_advanced_main_parent_still_refuses_anything_not_on_the_verified_base_br
 # (merge_parent_base, receipt_files_match_pr) turned ONE transient GitHub read error into
 # "unproven", and the unproven required-set then fell through to the legacy
 # typescript/python/test check, which can never pass on the sharded layout.
-def fail_reads(w, matches, times=1):
-    """Make the first `times` live reads whose path matches raise the module's Refusal."""
+def fail_reads(w, matches, times=1, timeout=False):
+    """Make the first `times` live reads whose path matches fail.
+
+    The failure is the module's Refusal (a non-zero gh exit), or, with
+    timeout=True, a subprocess.TimeoutExpired (command() runs gh with a 120 s
+    timeout; a TimeoutExpired is not a Refusal)."""
     state = {"left": times}
     real_api, real_command = w.api, w.command
+
+    def failure():
+        if timeout:
+            return subprocess.TimeoutExpired(cmd="gh api", timeout=120)
+        return w.guard.Refusal("HTTP 502: Bad Gateway")
 
     def flaky_api(path):
         if matches(path) and state["left"] > 0:
             state["left"] -= 1
             w.reads.append(path)
-            raise w.guard.Refusal("HTTP 502: Bad Gateway")
+            raise failure()
         return real_api(path)
 
     def flaky_command(*args):
         if matches(args[-1]) and state["left"] > 0:
             state["left"] -= 1
             w.commands.append(args)
-            raise w.guard.Refusal("HTTP 502: Bad Gateway")
+            raise failure()
         return real_command(*args)
 
     w.api, w.command = flaky_api, flaky_command
@@ -269,28 +279,125 @@ TRANSIENT_READS = {
     "advanced_parent_compare": lambda p: p == f"compare/{BASE}...{ADVANCED}",
     "verified_main_tip": lambda p: p == "git/ref/heads/main",
     "pr_file_list": lambda p: "/files?" in p,
+    "git_commits": lambda p: p.startswith("git/commits/"),
 }
+PERSISTENT_REFUSAL = (r"WORKFLOW_NOT_GREEN workflow=ci\.yml run=\d+ "
+                      r"required_set_unproven=(merge_parent_base|receipt_files_vs_pr|git_commits_read)")
 
 
+@pytest.mark.parametrize("timeout", [False, True], ids=["refusal", "timeout"])
 @pytest.mark.parametrize("read", sorted(TRANSIENT_READS))
-def test_one_transient_read_error_in_a_proof_is_retried_not_refused(read):
+def test_one_transient_read_error_in_a_proof_is_retried_not_refused(read, timeout):
     w = World()
     advance_main(w)
-    state = fail_reads(w, TRANSIENT_READS[read])
+    state = fail_reads(w, TRANSIENT_READS[read], timeout=timeout)
     result, _ = w.evaluate()
     assert state["left"] == 0  # the transient failure really fired
     assert result["status"] == "READY_TO_MERGE"
     assert result["workflows"]["ci.yml"]["classifier_required_set"]["python_changed"] is True
 
 
+@pytest.mark.parametrize("timeout", [False, True], ids=["refusal", "timeout"])
 @pytest.mark.parametrize("read", sorted(TRANSIENT_READS))
-def test_a_persistent_read_error_in_a_proof_still_refuses_and_names_the_check(read):
+def test_a_persistent_read_error_in_a_proof_still_refuses_and_names_the_check(read, timeout):
     w = World()
     advance_main(w)
-    fail_reads(w, TRANSIENT_READS[read], times=2)
-    with pytest.raises(RuntimeError, match=r"WORKFLOW_NOT_GREEN workflow=ci\.yml run=\d+ "
-                                           r"required_set_unproven=(merge_parent_base|receipt_files_vs_pr)"):
+    state = fail_reads(w, TRANSIENT_READS[read], times=2, timeout=timeout)
+    # RuntimeError only: a TimeoutExpired escaping the retry is not a RuntimeError.
+    with pytest.raises(RuntimeError, match=PERSISTENT_REFUSAL):
         w.evaluate()
+    assert state["left"] == 0  # both attempts were made
+
+
+def test_a_retried_git_commits_read_still_enforces_the_parent_binding():
+    # The retry only re-reads; it must not relax the exact-PR-head second-parent rule.
+    w = World()
+    w.parents[1] = "f" * 40
+    state = fail_reads(w, TRANSIENT_READS["git_commits"])
+    with pytest.raises(RuntimeError, match=r"required_set_unproven=merge_parent_base"):
+        w.evaluate()
+    assert state["left"] == 0
+
+
+def test_a_retried_git_commits_read_still_enforces_the_ancestry_check():
+    # First parent strictly ahead of BASE_SHA but off the verified base branch still refuses.
+    w = World()
+    advance_main(w)
+    w.main_tip = "9a8b7c6d" + "e" * 32
+    w.compares[f"compare/{w.main_tip}...{ADVANCED}"] = {"status": "diverged",
+                                                        "merge_base_commit": {"sha": BASE}}
+    state = fail_reads(w, TRANSIENT_READS["git_commits"], timeout=True)
+    with pytest.raises(RuntimeError, match=r"required_set_unproven=merge_parent_base"):
+        w.evaluate()
+    assert state["left"] == 0
+
+
+class Flaky:
+    """A read that raises each queued failure in turn, then returns `value`."""
+
+    def __init__(self, failures, value=None):
+        self.failures, self.value, self.calls = list(failures), value, 0
+
+    def __call__(self, *args):
+        self.calls += 1
+        if self.failures:
+            raise self.failures.pop(0)
+        return self.value
+
+
+def test_read_with_retry_raises_a_typed_failure_after_both_attempts():
+    guard = load()
+    first, last = guard.Refusal("HTTP 502: Bad Gateway"), guard.Refusal("HTTP 503: Unavailable")
+    read = Flaky([first, last])
+    with patch.object(guard, "API_RETRY_DELAY", 0):
+        with pytest.raises(guard.ReadFailed, match=r"READ_FAILED attempts=2 read=some/path cause=HTTP 503") as err:
+            guard.read_with_retry(read, "some/path")
+    assert isinstance(err.value, guard.Refusal) and read.calls == 2
+    assert err.value.__cause__ is last
+
+
+def test_read_with_retry_covers_a_subprocess_timeout():
+    guard = load()
+    timeout = subprocess.TimeoutExpired(cmd="gh api", timeout=120)
+    with patch.object(guard, "API_RETRY_DELAY", 0):
+        recovered = Flaky([timeout], value={"ok": True})
+        assert guard.read_with_retry(recovered, "some/path") == {"ok": True} and recovered.calls == 2
+        persistent = Flaky([timeout, timeout])
+        with pytest.raises(guard.ReadFailed, match=r"attempts=2 read=some/path cause=timeout after 120s"):
+            guard.read_with_retry(persistent, "some/path")
+        assert persistent.calls == 2
+
+
+def test_read_with_retry_does_not_retry_other_errors():
+    guard = load()
+    read = Flaky([ValueError("MAIN_REF_UNREADABLE")])
+    with patch.object(guard, "API_RETRY_DELAY", 0), pytest.raises(ValueError):
+        guard.read_with_retry(read, "some/path")
+    assert read.calls == 1
+
+
+@pytest.mark.parametrize("timeout", [False, True], ids=["refusal", "timeout"])
+def test_commit_parents_retries_once_then_raises_the_typed_git_commits_failure(timeout):
+    guard = load()
+    sha = "a" * 40
+    parents = [{"sha": "b" * 40}, {"sha": "c" * 40}]
+
+    def failure():
+        return (subprocess.TimeoutExpired(cmd="gh api", timeout=120) if timeout
+                else guard.Refusal("HTTP 502: Bad Gateway"))
+
+    with patch.object(guard, "API_RETRY_DELAY", 0):
+        transient = Flaky([failure()], value={"parents": parents})
+        with patch.object(guard, "api", transient):
+            assert guard.commit_parents(sha) == parents
+        assert transient.calls == 2
+        persistent = Flaky([failure(), failure()])
+        with patch.object(guard, "api", persistent):
+            with pytest.raises(guard.GitCommitsReadFailed, match=r"READ_FAILED attempts=2 read=git/commits/a{40}"):
+                guard.commit_parents(sha)
+        assert persistent.calls == 2
+    assert issubclass(guard.GitCommitsReadFailed, guard.ReadFailed)
+    assert issubclass(guard.ReadFailed, guard.Refusal)
 
 
 # A run with no native PR association never gets here: bound_attempt_jobs refuses it earlier
