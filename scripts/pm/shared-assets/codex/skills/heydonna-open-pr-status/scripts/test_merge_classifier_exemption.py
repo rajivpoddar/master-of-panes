@@ -230,9 +230,11 @@ class Stub:
     def __init__(self, world):
         self.world = world
         self.calls = []
+        self.api_calls = []
 
     def api(self, path):
         w = self.world
+        self.api_calls.append(path)
         if path.startswith("pulls/"):
             return w.get("pr", pr())
         if path == "git/ref/heads/main":
@@ -281,6 +283,9 @@ class Stub:
             if (w.get("rules_bytes") is not None and rel.endswith("rules.json")
                     and ref in (WORKFLOW_SHA, TEST_ONLY_WORKFLOW_SHA)):
                 content = base64.b64encode(w["rules_bytes"]).decode()
+            if (w.get("ci_yaml") is not None and rel.endswith("workflows/ci.yml")
+                    and ref == TEST_ONLY_WORKFLOW_SHA):
+                content = base64.b64encode(w["ci_yaml"]).decode()
             return {"sha": blob, "content": content}
         raise AssertionError(path)
 
@@ -1219,7 +1224,8 @@ class NativeEventBindingTests(unittest.TestCase):
 GATE_STEP = "Validate unit lane and scheduled jobs"
 PLACEHOLDER = "unit-tests (${{ matrix.shard }})"
 GATE_ID = 8219101
-SHARD_IDS = {0: 8219110, 1: 8219111}
+SHARD_IDS = {shard: 8219110 + shard for shard in range(6)}
+LANE_IDS = {"python": 8219120, "python-docx": 8219121, "python-contracts": 8219122}
 LOG_STAMP = "2026-11-24T20:17:22.1174262Z"
 FOOTER_0 = "= 1470 passed, 3 skipped, 10597 deselected, 678 warnings in 167.58s (0:02:47) =="
 FOOTER_1 = "= 1167 passed, 3 skipped, 10900 deselected, 816 warnings in 213.04s (0:03:33) =="
@@ -1262,21 +1268,111 @@ def pytest_log(*footers):
     return "\n".join(lines) + "\n"
 
 
-def zero_selection_jobs(shards=(0, 1)):
-    """#14809 shape: the one skipped native placeholder, an attesting gate, python-modal shards."""
+def node_log(passed=35, failed=0):
+    lines = ["\u2714 contract one (1.2ms)", f"\u2139 tests {passed + failed}", "\u2139 suites 0",
+             f"\u2139 pass {passed}", f"\u2139 fail {failed}", "\u2139 cancelled 0"]
+    return "\n".join(f"{LOG_STAMP} {line}" for line in lines) + "\n"
+
+
+def python_workflow(matrix="shard: [0, 1, 2, 3, 4, 5]", modal_name=None, extra=""):
+    """A minimal trusted ci.yml: the #14809 Python lanes, each gated on a lane_python output."""
+    return f"""name: CI
+jobs:
+  scope:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Classify
+        run: python3 scripts/ci/change_scope.py
+  python-modal:
+    needs: scope
+    if: >
+      (github.event_name == 'push' || needs.scope.outputs.python_changed != 'false') &&
+      (github.event_name == 'push' || needs.scope.outputs.lane_python_modal != 'false')
+    # six shards, files over 656s are item-split
+    strategy:
+      fail-fast: false
+      matrix:
+        {matrix}
+{extra}{f"    name: {modal_name}" + chr(10) if modal_name else ""}    runs-on: ubuntu-latest
+    steps:
+      - name: Install Python test dependencies
+        run: pip install -r requirements.txt
+      - name: Modal audio unit tests
+        run: python -m pytest modal/audio/tests
+      - name: Modal scorecards unit tests
+        if: matrix.shard == 0
+        run: python -m pytest modal/scorecards/tests
+  python:
+    needs: scope
+    if: needs.scope.outputs.lane_python != 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Proofreading scorer unit tests
+        run: python -m pytest scripts/proofreading
+      - name: Optional experimental tests
+        continue-on-error: true
+        run: python -m pytest scripts/experimental
+  python-docx:
+    needs: scope
+    if: needs.scope.outputs.lane_python_docx != 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Modal docx unit tests
+        run: python -m pytest modal/docx/tests
+  python-contracts:
+    needs: scope
+    if: needs.scope.outputs.lane_python_contracts != 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: CI parallel workflow contracts
+        run: node --test scripts/ci/tests/*.test.mjs
+  unit-gate:
+    needs: scope
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate unit lane and scheduled jobs
+        run: python3 scripts/ci/validate_unit_lane.py
+"""
+
+
+def zero_selection_jobs(shards=tuple(range(6)), lanes=tuple(LANE_IDS)):
+    """#14809 shape: the one skipped native placeholder, an attesting gate, every Python lane."""
     run = test_only_run()
     common = {"status": "completed", "run_id": run["id"], "run_attempt": run["run_attempt"],
               "head_sha": run["head_sha"]}
-    rows = test_only_jobs()
+    rows = [row for row in test_only_jobs() if row["name"] != "python"]
     rows.append(dict(common, id=GATE_ID - 1, name=PLACEHOLDER, conclusion="skipped", steps=[]))
     rows.append(dict(common, id=GATE_ID, name="unit-gate", conclusion="success",
                      steps=[{"name": GATE_STEP, "status": "completed", "conclusion": "success"}]))
+
+    def done(name):
+        return {"name": name, "status": "completed", "conclusion": "success"}
+
     for shard in shards:
+        # The scorecards step is conditional: it runs on shard 0 only, as in the real workflow.
+        steps = [done("Install Python test dependencies"), done("Modal audio unit tests"),
+                 dict(done("Modal scorecards unit tests"),
+                      conclusion="success" if shard == 0 else "skipped")]
         rows.append(dict(common, id=SHARD_IDS[shard], name=f"python-modal ({shard})",
-                         conclusion="success",
-                         steps=[{"name": "Modal audio unit tests", "status": "completed",
-                                 "conclusion": "success"}]))
+                         conclusion="success", steps=steps))
+    lane_steps = {"python": ["Proofreading scorer unit tests", "Optional experimental tests"],
+                  "python-docx": ["Modal docx unit tests"],
+                  "python-contracts": ["CI parallel workflow contracts"]}
+    for lane in lanes:
+        rows.append(dict(common, id=LANE_IDS[lane], name=lane, conclusion="success",
+                         steps=[done(step) for step in lane_steps[lane]]))
     return rows
+
+
+def lane_logs():
+    """Passing logs for every Python job the fixture workflow schedules."""
+    logs = {SHARD_IDS[shard]: pytest_log(FOOTER_0 if shard == 0 else FOOTER_1)
+            for shard in range(6)}
+    logs[SHARD_IDS[1]] = pytest_log(FOOTER_1, FOOTER_1_SECOND)
+    logs[LANE_IDS["python"]] = pytest_log(FOOTER_0)
+    logs[LANE_IDS["python-docx"]] = pytest_log(FOOTER_1_SECOND)
+    logs[LANE_IDS["python-contracts"]] = node_log()
+    return logs
 
 
 class PythonOnlyZeroSelectionTests(unittest.TestCase):
@@ -1293,11 +1389,10 @@ class PythonOnlyZeroSelectionTests(unittest.TestCase):
         world = {"pr": test_only_pr(), "workflow_parent": TEST_ONLY_BASE,
                  "workflow_head": TEST_ONLY_HEAD, "ci_runs": [test_only_run()],
                  "jobs": zero_selection_jobs(), "test_only_log": test_only_log(),
+                 "ci_yaml": python_workflow().encode(),
                  "app_test_files": [{"filename": "modal/audio/tests/test_x.py"}],
                  "e2e_runs": [],
-                 "job_logs": {GATE_ID: zero_gate_log(),
-                              SHARD_IDS[0]: pytest_log(FOOTER_0),
-                              SHARD_IDS[1]: pytest_log(FOOTER_1, FOOTER_1_SECOND)}}
+                 "job_logs": {GATE_ID: zero_gate_log(), **lane_logs()}}
         world.update(overrides)
         return world
 
@@ -1305,8 +1400,31 @@ class PythonOnlyZeroSelectionTests(unittest.TestCase):
         install(self.world(**overrides))
         return merge.workflow_proof(test_only_pr(), "ci.yml", NAMES)
 
+    def edited(self, name, conclusion=None, step=None, base=None):
+        """A copy of the run's jobs with one job (and optionally one of its steps) changed."""
+        rows = copy.deepcopy(base if base is not None else zero_selection_jobs())
+        for row in rows:
+            if row["name"] != name:
+                continue
+            if conclusion is not None:
+                row["conclusion"] = conclusion
+            for entry in row["steps"]:
+                if step is not None and entry["name"] == step[0]:
+                    entry["conclusion"] = step[1]
+        return rows
+
+    def without(self, *names):
+        return [row for row in zero_selection_jobs() if row["name"] not in names]
+
     def assert_refused(self, **overrides):
         with self.assertRaisesRegex(merge.Refusal, "TEST_EXECUTION_MISSING workflow=ci.yml"):
+            self.prove(**overrides)
+
+    def assert_not_accepted(self, **overrides):
+        # The legacy `python` job is also a required name: when it is missing or red the run is
+        # refused earlier as WORKFLOW_NOT_GREEN. Either way the exemption is not granted.
+        with self.assertRaisesRegex(merge.Refusal,
+                                    "(TEST_EXECUTION_MISSING|WORKFLOW_NOT_GREEN) workflow=ci.yml"):
             self.prove(**overrides)
 
     def test_zero_js_schedule_with_green_python_shards_is_accepted(self):
@@ -1355,16 +1473,196 @@ class PythonOnlyZeroSelectionTests(unittest.TestCase):
         self.assert_refused(jobs=zero_selection_jobs(shards=()))
 
     def test_python_shard_unit_step_not_successful_still_refuses(self):
-        rows = zero_selection_jobs()
-        for row in rows:
-            if row["name"] == "python-modal (0)":
-                row["steps"][0]["conclusion"] = "skipped"
-        self.assert_refused(jobs=rows)
+        self.assert_refused(jobs=self.edited("python-modal (0)", step=("Modal audio unit tests", "skipped")))
 
     def test_python_log_without_a_pytest_footer_still_refuses(self):
         logs = self.world()["job_logs"]
         logs.pop(SHARD_IDS[0])  # the stub falls back to a generic log with no pytest footer
         self.assert_refused(job_logs=logs)
+
+    # --- MoP 2026-11-25, CTO REVISE on 7db0c18b (C0ALZJHGE49 ts 1795555038.168409) ---
+    # The exemption must bind to the COMPLETE Python job set the authenticated workflow
+    # schedules, read from the trusted ci.yml bytes, never from a hand-kept list.
+
+    def test_all_six_shards_and_every_python_lane_are_accepted(self):
+        rows = zero_selection_jobs()
+        self.assertEqual([r["name"] for r in rows if r["name"].startswith("python-modal")],
+                         [f"python-modal ({n})" for n in range(6)])
+        # Shards 1-5 legitimately skip the shard-0-only scorecards step.
+        skipped = [r["name"] for r in rows if r["name"].startswith("python-modal")
+                   and any(s["conclusion"] == "skipped" for s in r["steps"])]
+        self.assertEqual(len(skipped), 5)
+        self.assertIn("app_test_only", self.prove())
+
+    def test_each_required_shard_missing_refuses(self):
+        for shard in range(6):
+            with self.subTest(missing_shard=shard):
+                self.assert_refused(jobs=self.without(f"python-modal ({shard})"))
+
+    def test_each_required_shard_skipped_refuses(self):
+        for shard in range(6):
+            with self.subTest(skipped_shard=shard):
+                name = f"python-modal ({shard})"
+                rows = self.edited(name, conclusion="skipped")
+                self.assert_refused(jobs=rows)
+
+    def test_the_old_two_shard_subset_no_longer_clears_the_fallback(self):
+        # 7db0c18b accepted shards 0 and 1 alone while the workflow schedules 0-5.
+        self.assert_refused(jobs=zero_selection_jobs(shards=(0, 1)))
+
+    def test_each_python_lane_job_missing_refuses(self):
+        for lane in LANE_IDS:
+            with self.subTest(missing_lane=lane):
+                self.assert_not_accepted(
+                    jobs=zero_selection_jobs(lanes=tuple(x for x in LANE_IDS if x != lane)))
+
+    def test_a_python_lane_job_that_did_not_succeed_refuses(self):
+        for lane in LANE_IDS:
+            for conclusion in ("skipped", "failure", "cancelled"):
+                with self.subTest(lane=lane, conclusion=conclusion):
+                    self.assert_not_accepted(jobs=self.edited(lane, conclusion=conclusion))
+
+    def test_a_shard_the_workflow_does_not_schedule_refuses(self):
+        rows = zero_selection_jobs()
+        rows.append(dict(copy.deepcopy(next(r for r in rows if r["name"] == "python-modal (1)")),
+                         id=8219116, name="python-modal (6)"))
+        self.assert_refused(jobs=rows)
+
+    def test_a_duplicate_shard_row_refuses(self):
+        rows = zero_selection_jobs()
+        rows.append(dict(copy.deepcopy(next(r for r in rows if r["name"] == "python-modal (3)")), id=8219117))
+        self.assert_refused(jobs=rows)
+
+    def test_every_required_test_step_must_have_succeeded(self):
+        cases = (("python-modal (3)", "Modal audio unit tests"),
+                 ("python-modal (5)", "Modal audio unit tests"),
+                 ("python", "Proofreading scorer unit tests"),
+                 ("python-docx", "Modal docx unit tests"),
+                 ("python-contracts", "CI parallel workflow contracts"))
+        for job, step in cases:
+            with self.subTest(job=job, step=step):
+                self.assert_refused(jobs=self.edited(job, step=(step, "skipped")))
+
+    def test_a_missing_required_test_step_refuses(self):
+        rows = self.edited("python-modal (2)")
+        for row in rows:
+            if row["name"] == "python-modal (2)":
+                row["steps"] = [s for s in row["steps"] if s["name"] != "Modal audio unit tests"]
+        self.assert_refused(jobs=rows)
+
+    def test_conditional_and_continue_on_error_steps_are_not_required(self):
+        # Scorecards (shard-0-only `if:`) and the continue-on-error step may skip or fail.
+        rows = self.edited("python-modal (0)", step=("Modal scorecards unit tests", "skipped"))
+        rows = self.edited("python", step=("Optional experimental tests", "failure"), base=rows)
+        self.assertIn("app_test_only", self.prove(jobs=rows))
+
+    def test_every_required_job_needs_nonzero_passing_results(self):
+        no_tests = pytest_log("= no tests ran in 0.10s =")
+        failed = pytest_log("= 1 failed, 10 passed in 3.00s =")
+        cases = [(SHARD_IDS[4], no_tests), (SHARD_IDS[5], failed),
+                 (LANE_IDS["python"], no_tests), (LANE_IDS["python-docx"], failed),
+                 (LANE_IDS["python-contracts"], node_log(passed=0)),
+                 (LANE_IDS["python-contracts"], node_log(passed=34, failed=1)),
+                 (LANE_IDS["python-contracts"], pytest_log(FOOTER_0))]  # node job, no node summary
+        for job_id, text in cases:
+            with self.subTest(job_id=job_id):
+                self.assert_refused(job_logs=self.world()["job_logs"] | {job_id: text})
+
+    def test_an_unreadable_job_log_refuses(self):
+        # A shard whose log is absent falls back to the generic log, which has no pytest footer.
+        logs = self.world()["job_logs"]
+        logs.pop(SHARD_IDS[3])
+        self.assert_refused(job_logs=logs)
+
+    def test_workflow_bytes_come_from_the_classifier_workflow_sha(self):
+        stub = install(self.world())
+        merge.workflow_proof(test_only_pr(), "ci.yml", NAMES)
+        self.assertIn(f"contents/.github/workflows/ci.yml?ref={TEST_ONLY_WORKFLOW_SHA}", stub.api_calls)
+
+    def test_an_unreadable_or_unparseable_workflow_refuses(self):
+        for bad in (b"x", b"", b"jobs:\n  python:\n    if: needs.scope.outputs.lane_python != 'false'\n"):
+            with self.subTest(workflow=bad[:20]):
+                self.assert_refused(ci_yaml=bad)
+
+    def test_a_new_python_lane_in_the_workflow_is_required_without_editing_the_helper(self):
+        # Rule 60: the required set is discovered from the workflow, not listed in merge.py.
+        extra = """  python-newlane:
+    needs: scope
+    if: needs.scope.outputs.lane_python_newlane != 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: New lane unit tests
+        run: python -m pytest modal/newlane
+"""
+        workflow = (python_workflow() + extra).encode()
+        self.assert_refused(ci_yaml=workflow)  # the run has no such job
+        rows = zero_selection_jobs()
+        rows.append(dict(copy.deepcopy(next(r for r in rows if r["name"] == "python-docx")),
+                         id=8219130, name="python-newlane",
+                         steps=[{"name": "New lane unit tests", "status": "completed",
+                                 "conclusion": "success"}]))
+        logs = self.world()["job_logs"] | {8219130: pytest_log(FOOTER_0)}
+        self.assertIn("app_test_only", self.prove(ci_yaml=workflow, jobs=rows, job_logs=logs))
+
+    def test_a_matrix_that_cannot_be_expanded_from_the_workflow_text_refuses(self):
+        cases = {"expression": "shard: ${{ fromJSON(needs.scope.outputs.shards) }}",
+                 "second axis": "shard: [0, 1]\n        os: [a, b]",
+                 "repeated shard": "shard: [0, 1, 1]",
+                 "non numeric": "shard: [a, b]"}
+        for label, matrix in cases.items():
+            with self.subTest(matrix=label):
+                self.assert_refused(ci_yaml=python_workflow(matrix=matrix).encode(),
+                                    jobs=zero_selection_jobs(shards=(0, 1)))
+        with self.subTest(matrix="include"):
+            workflow = python_workflow(matrix="shard: [0, 1]", extra="        include:\n          - shard: 2\n")
+            self.assert_refused(ci_yaml=workflow.encode(), jobs=zero_selection_jobs(shards=(0, 1, 2)))
+        with self.subTest(matrix="renamed job"):
+            self.assert_refused(ci_yaml=python_workflow(modal_name="Audio ${{ matrix.shard }}").encode())
+
+
+class PythonLaneRequirementTests(unittest.TestCase):
+    """python_lane_requirements: the required job/step set read from workflow text alone."""
+
+    def test_expands_the_literal_shards_and_names_the_unconditional_steps(self):
+        required = merge.python_lane_requirements(python_workflow())
+        self.assertEqual(sorted(required), sorted(
+            [f"python-modal ({n})" for n in range(6)] + list(LANE_IDS)))
+        self.assertEqual(required["python-modal (4)"], (["Modal audio unit tests"], {"pytest"}))
+        self.assertEqual(required["python"], (["Proofreading scorer unit tests"], {"pytest"}))
+        self.assertEqual(required["python-contracts"], (["CI parallel workflow contracts"], {"node"}))
+
+    def test_jobs_without_a_lane_python_gate_are_not_python_lanes(self):
+        required = merge.python_lane_requirements(python_workflow())
+        self.assertNotIn("unit-gate", required)
+        self.assertNotIn("scope", required)
+
+    def test_a_lane_with_no_unconditional_test_step_gives_no_answer(self):
+        workflow = """jobs:
+  python:
+    if: needs.scope.outputs.lane_python != 'false'
+    steps:
+      - name: Only conditional
+        if: always()
+        run: python -m pytest x
+"""
+        self.assertIsNone(merge.python_lane_requirements(workflow))
+
+    def test_a_workflow_with_no_python_lane_gives_no_answer(self):
+        self.assertIsNone(merge.python_lane_requirements("jobs:\n  scope:\n    steps:\n      - run: true\n"))
+
+    def test_a_job_defined_twice_gives_no_answer(self):
+        self.assertIsNone(merge.python_lane_requirements(python_workflow() + python_workflow().split("jobs:\n", 1)[1]))
+
+
+class NodeSummaryTests(unittest.TestCase):
+    def test_node_summary_lines_are_matched_after_log_framing(self):
+        lines = merge.strip_log_framing(node_log(passed=35))
+        found = {m.group(1): int(m.group(2)) for m in map(merge.NODE_SUMMARY.match, map(str.strip, lines)) if m}
+        self.assertEqual(found, {"pass": 35, "fail": 0})
+
+    def test_a_line_that_merely_mentions_pass_is_not_a_summary(self):
+        self.assertIsNone(merge.NODE_SUMMARY.match("\u2139 pass 35 of them"))
+        self.assertIsNone(merge.NODE_SUMMARY.match("tests pass 35"))
 
 
 class PytestFooterTests(unittest.TestCase):

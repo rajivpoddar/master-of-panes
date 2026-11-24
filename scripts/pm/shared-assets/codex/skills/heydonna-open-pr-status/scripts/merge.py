@@ -988,7 +988,6 @@ PYTEST_FOOTER = re.compile(
     r"^=+ (?P<framed>.+?) in [0-9.]+s(?: \([0-9:]+\))? =+$"
     r"|^(?P<quiet>\d+ \w+(?:, \d+ \w+)*) in [0-9.]+s(?: \([0-9:]+\))?$")
 PYTEST_COUNT = re.compile(r"(\d+) (passed|failed|errors?)\b")
-PYTHON_MODAL_SHARD = re.compile(r"python-modal \(\d+\)")
 
 
 def pytest_totals(lines):
@@ -1006,35 +1005,177 @@ def pytest_totals(lines):
     return passed, bad
 
 
-def python_modal_executed(jobs):
-    """True only when python-modal shards ran their unit tests to a nonzero, green pytest total.
+# A Python lane is any ci.yml job whose own `if:` is gated on a `lane_python*` scope output. The
+# set is read from the authenticated workflow bytes, never listed here (rule 60).
+PYTHON_LANE_GATE = re.compile(r"needs\.scope\.outputs\.lane_python\w*")
+WORKFLOW_JOB_ID = re.compile(r"  ([A-Za-z0-9_][A-Za-z0-9_-]*):\s*$")
+TEST_RUNNER = re.compile(r"-m pytest\b|\bnode --test\b")
+NODE_SUMMARY = re.compile(r"^(?:\u2139|#) (pass|fail) (\d+)$")
+SHARD_LIST = re.compile(r"shard:\s*\[\s*(\d+(?:\s*,\s*\d+)*)\s*\]\s*")
 
-    The Python lanes are what a Python-only change actually runs, so a zero-JS schedule is
-    accepted as satisfied by selection only when at least one shard ran and every shard that
-    ran succeeded, with a successful unit-test step and a pytest footer that passed tests and
-    failed or errored none. A skipped shard was not selected. A successful job with no footer
-    (nothing executed) is not proof.
+
+def workflow_job_ids(text):
+    """Top-level job ids under the one `jobs:` key, in file order."""
+    lines = text.splitlines()
+    starts = [i for i, line in enumerate(lines) if line.rstrip() == "jobs:"]
+    if len(starts) != 1:
+        return []
+    ids = []
+    for line in lines[starts[0] + 1:]:
+        if re.match(r"[^\s#]", line):
+            break
+        match = WORKFLOW_JOB_ID.fullmatch(line)
+        if match:
+            ids.append(match.group(1))
+    return ids
+
+
+def job_condition(block):
+    """The job-level `if:` expression: the key line plus its indented continuation."""
+    out, inside = [], False
+    for line in block:
+        if not inside:
+            if re.match(r"    if:", line):
+                inside = True
+                out.append(line)
+        elif not line.strip() or len(line) - len(line.lstrip()) > 4:
+            out.append(line)
+        else:
+            break
+    return "\n".join(out)
+
+
+def job_run_names(job, block):
+    """Names the job reports at run time, or None unless its matrix is one literal shard list.
+
+    An expression-valued matrix, `include`/`exclude`, a second axis, a renamed job or a repeated
+    shard cannot be expanded from the workflow text, so the expected set would be a guess.
     """
-    ran = [job for job in jobs if PYTHON_MODAL_SHARD.fullmatch(job["name"])
-           and job.get("conclusion") != "skipped"]
-    if not ran:
+    code = [line for line in block if not line.lstrip().startswith("#")]
+    if any(re.match(r"    name:", line) for line in code):
+        return None
+    at = [i for i, line in enumerate(code) if "matrix:" in line]
+    if not at:
+        return [job]
+    if len(at) != 1 or not re.fullmatch(r"      matrix:\s*", code[at[0]]):
+        return None
+    children = []
+    for line in code[at[0] + 1:]:
+        if not line.strip():
+            continue
+        if len(line) - len(line.lstrip()) <= 6:
+            break
+        children.append(line.strip())
+    literal = SHARD_LIST.fullmatch(children[0]) if len(children) == 1 else None
+    if literal is None:
+        return None
+    shards = re.split(r"\s*,\s*", literal.group(1))
+    if len(set(shards)) != len(shards):
+        return None
+    return [f"{job} ({shard})" for shard in shards]
+
+
+def job_test_steps(block):
+    """(step names, runner kinds) of the job's unconditional pytest / node --test steps, or None.
+
+    A step guarded by `if:` or `continue-on-error:` can legitimately skip or fail, so it is not
+    the job's execution proof. A test step with no name cannot be matched to the run's steps.
+    """
+    steps, current = [], None
+    for line in block:
+        if re.match(r"      - ", line):
+            current = [line]
+            steps.append(current)
+        elif re.match(r"    \S", line):
+            current = None
+        elif current is not None:
+            current.append(line)
+    names, kinds = [], set()
+    for step in steps:
+        body = [line for line in step if not line.lstrip().startswith("#")]
+        if not any(TEST_RUNNER.search(line) for line in body):
+            continue
+        if any(re.match(r"        (if|continue-on-error):", line) for line in body):
+            continue
+        head = re.fullmatch(r"      - name:\s*(.+?)\s*", body[0])
+        if head is None:
+            return None
+        names.append(head.group(1).strip("'\""))
+        text = "\n".join(body)
+        kinds.update(kind for kind, marker in (("pytest", "-m pytest"), ("node", "node --test"))
+                     if marker in text)
+    return names, kinds
+
+
+def python_lane_requirements(text):
+    """{run job name: (test step names, runner kinds)} for every Python-lane job, or None on doubt."""
+    required = {}
+    for job in workflow_job_ids(text):
+        block = workflow_job_block(text, job)
+        if block is None:
+            return None
+        if not PYTHON_LANE_GATE.search(job_condition(block)):
+            continue
+        names, tests = job_run_names(job, block), job_test_steps(block)
+        if names is None or tests is None or not tests[0]:
+            return None
+        required.update({name: tests for name in names})
+    return required or None
+
+
+def python_lanes_executed(jobs, test_only):
+    """True only when EVERY Python job the authenticated workflow schedules ran green with results.
+
+    The required set is read from the ci.yml bytes ci_required_set_proof bound (same blob at the
+    trusted base and at the classifier's workflow sha): each job gated on a `lane_python*` output,
+    expanded over its literal shard list. The run must report exactly that set. A missing shard,
+    an extra or duplicate one, a skipped one or one that did not succeed refuses. Each job's
+    unconditional test steps must have succeeded and its log must show nonzero passing results
+    with no failure (pytest footers, or the node --test summary), so a green job that executed
+    nothing is not proof. Any doubt about the workflow or a log is False.
+    """
+    try:
+        selected = contents_identity(".github/workflows/ci.yml", test_only["workflow_sha"])
+        required = (None if selected is None
+                    else python_lane_requirements(selected[1].decode("utf-8", "replace")))
+    except (Refusal, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
         return False
-    for job in ran:
-        if not successful(job) or not any(
-                successful(step) and "unit tests" in str(step.get("name", "")).lower()
-                for step in job.get("steps", [])):
+    if required is None:
+        return False
+    lane_ids = {name.split(" (", 1)[0] for name in required}
+    reported = [job["name"] for job in jobs if job["name"].split(" (", 1)[0] in lane_ids]
+    if sorted(reported) != sorted(required):
+        return False
+    for job in jobs:
+        spec = required.get(job["name"])
+        if spec is None:
+            continue
+        steps, kinds = spec
+        if not successful(job):
             return False
+        for name in steps:
+            ran = [step for step in job.get("steps", []) if step.get("name") == name]
+            if len(ran) != 1 or not successful(ran[0]):
+                return False
         try:
-            passed, bad = pytest_totals(strip_log_framing(job_log(job["id"])))
+            lines = strip_log_framing(job_log(job["id"]))
         except (Refusal, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
             return False
-        if passed <= 0 or bad:
+        passed, bad = pytest_totals(lines)
+        node = {"pass": 0, "fail": 0}
+        for line in lines:
+            summary = NODE_SUMMARY.match(line.strip())
+            if summary:
+                node[summary.group(1)] += int(summary.group(2))
+        if bad or node["fail"]:
+            return False
+        if ("pytest" in kinds and passed <= 0) or ("node" in kinds and node["pass"] <= 0):
             return False
     return True
 
 
 def unit_selected_by_python_only_area(jobs, run, test_only):
-    """True when the gate attested a zero-JS selection by area and the Python lanes executed.
+    """True when the gate attested a zero-JS selection by area and every Python lane executed.
 
     Reads the selector's own attestation (unit-gate receipt: mode zero with a selector zero
     proof, count 0, bound to this head, run and attempt); it never guesses from file paths.
@@ -1044,7 +1185,7 @@ def unit_selected_by_python_only_area(jobs, run, test_only):
     unit = [job for job in jobs if unit_family(job["name"])]
     return (len(unit) == 1 and native_unit_placeholder(unit[0])
             and unit_gate_attested_count(run, jobs, test_only, zero_only=True) == 0
-            and python_modal_executed(jobs))
+            and python_lanes_executed(jobs, test_only))
 
 
 def workflow_job_block(text, job):
