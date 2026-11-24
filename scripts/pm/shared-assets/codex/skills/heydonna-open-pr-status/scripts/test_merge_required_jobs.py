@@ -111,8 +111,10 @@ class World:
 
     def evaluate(self):
         guard = load()
+        self.guard = guard  # lets a stub raise the module's own Refusal class
         with patch.object(guard, "api", self.api), patch.object(guard, "pages", self.pages), \
                 patch.object(guard, "command", self.command), \
+                patch.object(guard, "API_RETRY_DELAY", 0), \
                 patch.object(guard, "workflow_requirements", side_effect=AssertionError("Unbound policy fallback")), \
                 patch.object(guard.subprocess, "run", side_effect=AssertionError("Live subprocess")):
             return guard.merge(10992, HEAD), guard
@@ -233,6 +235,86 @@ def test_advanced_main_parent_still_refuses_anything_not_on_the_verified_base_br
         w.main_tip = "not-a-sha"
     with pytest.raises(RuntimeError):  # Refusal only; an AssertionError would be a vacuous pass
         w.evaluate()
+
+
+# PR #14762, run 45385386399 (CTO ts 1795523538.906679): a genuinely green, authentic
+# native-receipt run was refused as a generic WORKFLOW_NOT_GREEN. The swallowing proofs
+# (merge_parent_base, receipt_files_match_pr) turned ONE transient GitHub read error into
+# "unproven", and the unproven required-set then fell through to the legacy
+# typescript/python/test check, which can never pass on the sharded layout.
+def fail_reads(w, matches, times=1):
+    """Make the first `times` live reads whose path matches raise the module's Refusal."""
+    state = {"left": times}
+    real_api, real_command = w.api, w.command
+
+    def flaky_api(path):
+        if matches(path) and state["left"] > 0:
+            state["left"] -= 1
+            w.reads.append(path)
+            raise w.guard.Refusal("HTTP 502: Bad Gateway")
+        return real_api(path)
+
+    def flaky_command(*args):
+        if matches(args[-1]) and state["left"] > 0:
+            state["left"] -= 1
+            w.commands.append(args)
+            raise w.guard.Refusal("HTTP 502: Bad Gateway")
+        return real_command(*args)
+
+    w.api, w.command = flaky_api, flaky_command
+    return state
+
+
+TRANSIENT_READS = {
+    "advanced_parent_compare": lambda p: p == f"compare/{BASE}...{ADVANCED}",
+    "verified_main_tip": lambda p: p == "git/ref/heads/main",
+    "pr_file_list": lambda p: "/files?" in p,
+}
+
+
+@pytest.mark.parametrize("read", sorted(TRANSIENT_READS))
+def test_one_transient_read_error_in_a_proof_is_retried_not_refused(read):
+    w = World()
+    advance_main(w)
+    state = fail_reads(w, TRANSIENT_READS[read])
+    result, _ = w.evaluate()
+    assert state["left"] == 0  # the transient failure really fired
+    assert result["status"] == "READY_TO_MERGE"
+    assert result["workflows"]["ci.yml"]["classifier_required_set"]["python_changed"] is True
+
+
+@pytest.mark.parametrize("read", sorted(TRANSIENT_READS))
+def test_a_persistent_read_error_in_a_proof_still_refuses_and_names_the_check(read):
+    w = World()
+    advance_main(w)
+    fail_reads(w, TRANSIENT_READS[read], times=2)
+    with pytest.raises(RuntimeError, match=r"WORKFLOW_NOT_GREEN workflow=ci\.yml run=\d+ "
+                                           r"required_set_unproven=(merge_parent_base|receipt_files_vs_pr)"):
+        w.evaluate()
+
+
+# A run with no native PR association never gets here: bound_attempt_jobs refuses it earlier
+# (SUBSTANTIVE_RUN_NOT_BOUND), so "pr_association" is not a reachable cause of this refusal.
+@pytest.mark.parametrize("change,reason", [
+    ("receipt_flag", "receipt_flags"), ("tooling_blob", "tooling_identity"),
+    ("rules_digest", "rules_digest"), ("extra_pr_file", "receipt_files_vs_pr")])
+def test_a_failed_required_set_proof_names_the_failing_check_and_stays_refused(change, reason):
+    w = World()
+    if change == "receipt_flag": w.receipt(ts_changed="false")
+    elif change == "tooling_blob":
+        w.blobs[f"contents/scripts/ci/change_scope.py?ref={FIXTURE['bindings']['WORKFLOW_SHA']}"] = "f" * 40
+    elif change == "rules_digest": w.receipt(rules_sha256="f" * 64)
+    elif change == "extra_pr_file": w.files.append({"filename": "app/runtime.ts"})
+    with pytest.raises(RuntimeError, match=rf"WORKFLOW_NOT_GREEN workflow=ci\.yml run=\d+ required_set_unproven={reason}"):
+        w.evaluate()
+
+
+def test_a_non_native_receipt_names_no_unproven_check():
+    w = World()
+    w.receipt(scope="unknown")  # no native required-set receipt: legacy layout, nothing to name
+    with pytest.raises(RuntimeError) as err:
+        w.evaluate()
+    assert "required_set_unproven" not in str(err.value)
 
 
 @pytest.mark.parametrize("name", ["python", "python-contracts", "python-docx",

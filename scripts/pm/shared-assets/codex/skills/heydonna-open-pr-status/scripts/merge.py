@@ -8,6 +8,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
@@ -29,6 +30,25 @@ def command(*args):
     if result.returncode:
         raise Refusal(result.stderr.strip() or result.stdout.strip() or "command failed")
     return result.stdout
+
+
+API_RETRY_DELAY = 0.5
+
+
+def read_with_retry(fn, *args):
+    """One retry for a read the proof path would otherwise swallow into "unproven".
+
+    command() raises Refusal for any non-zero gh exit, so a transient GitHub
+    error (5xx, rate limit, network blip) on a compare / ref / file-list read
+    inside the swallowing proofs used to look exactly like a failed proof and
+    surfaced as a generic WORKFLOW_NOT_GREEN on a genuinely green run (PR #14762,
+    run 45385386399). A second failure still propagates, so the proof stays
+    fail-closed."""
+    try:
+        return fn(*args)
+    except Refusal:
+        time.sleep(API_RETRY_DELAY)
+        return fn(*args)
 
 
 def api(path):
@@ -412,6 +432,7 @@ def workflow_proof(pr, workflow, names):
             raise Refusal(f"WORKFLOW_NOT_GREEN workflow={workflow} run={run['id']}")
         by_name = {job["name"]: job for job in jobs}
         test_only = None
+        required_set_unproven = []
         if scope is not None and successful(scope):
             exempt = classifier_exemption(pr, workflow, run, scope)
             if exempt is not None:
@@ -425,7 +446,7 @@ def workflow_proof(pr, workflow, names):
                         subprocess.TimeoutExpired):
                     test_only = None
             if workflow == "ci.yml" and len(scope_jobs) == 1:
-                required_set = ci_required_set_proof(pr, run, scope)
+                required_set = ci_required_set_proof(pr, run, scope, required_set_unproven)
                 if required_set is not None:
                     verify_ci_required_jobs(run, jobs, required_set)
                     return {"run": run["id"], "attempt": run.get("run_attempt", 1),
@@ -437,7 +458,13 @@ def workflow_proof(pr, workflow, names):
                     if not (test_only is not None and name == "python"
                             and by_name.get(name, {}).get("conclusion") == "skipped")]
         if not successful(run) or not all(successful(by_name.get(name, {})) for name in required):
-            raise Refusal(f"WORKFLOW_NOT_GREEN workflow={workflow} run={run['id']}")
+            # A native required-set receipt whose proof came back unproven falls
+            # through to this legacy typescript/python/test check, which cannot
+            # pass on the sharded layout. Name the unproven sub-check instead of
+            # reporting a green run as red (#14762).
+            detail = (f" required_set_unproven={required_set_unproven[0]}"
+                      if required_set_unproven else "")
+            raise Refusal(f"WORKFLOW_NOT_GREEN workflow={workflow} run={run['id']}{detail}")
         # These steps distinguish real test execution from successful wrapper jobs.
         # ci.yml runs unit tests in sharded "unit-tests (N)" jobs; legacy runs used typescript.
         unit_shards = sorted(name for name in by_name if name.startswith("unit-tests ("))
@@ -636,8 +663,8 @@ def merge_parent_base(base_sha, head_sha, parents):
     if shas[0] == base_sha:
         return base_sha
     try:
-        compared = api(f"compare/{base_sha}...{shas[0]}")
-        main_tip = api("git/ref/heads/main")["object"]["sha"]
+        compared = read_with_retry(api, f"compare/{base_sha}...{shas[0]}")
+        main_tip = read_with_retry(api, "git/ref/heads/main")["object"]["sha"]
     except (Refusal, ValueError, KeyError, TypeError):
         return None
     if not (isinstance(compared, dict) and compared.get("status") == "ahead"):
@@ -647,7 +674,7 @@ def merge_parent_base(base_sha, head_sha, parents):
     if shas[0] == main_tip:
         return shas[0]
     try:
-        on_base_branch = api(f"compare/{main_tip}...{shas[0]}")
+        on_base_branch = read_with_retry(api, f"compare/{main_tip}...{shas[0]}")
     except (Refusal, ValueError):
         return None
     if isinstance(on_base_branch, dict) and on_base_branch.get("status") == "behind":
@@ -783,8 +810,8 @@ def receipt_files_match_pr(pr, receipt):
         if (not isinstance(changed, list) or not changed
                 or not all(isinstance(path, str) and path for path in changed)):
             return False
-        pages_json = json.loads(command(
-            "gh", "api", "--paginate", "--slurp",
+        pages_json = json.loads(read_with_retry(
+            command, "gh", "api", "--paginate", "--slurp",
             f"repos/{REPO}/pulls/{pr['number']}/files?per_page=100"))
         if not isinstance(pages_json, list) or not pages_json:
             return False
@@ -806,8 +833,19 @@ def receipt_files_match_pr(pr, receipt):
         return False
 
 
-def ci_required_set_proof(pr, run, scope):
-    """Bind language gates to the same trusted native CI receipt, never PR prose."""
+def ci_required_set_proof(pr, run, scope, unproven=None):
+    """Bind language gates to the same trusted native CI receipt, never PR prose.
+
+    Returns None when unproven. When a native required-set receipt was found but
+    a later sub-check failed, the failing check's code is appended to `unproven`
+    so the caller can name it in the refusal; a run with no native receipt (the
+    legacy layout) records nothing."""
+    unproven = unproven if unproven is not None else []
+
+    def fail(reason):
+        unproven.append(reason)
+        return None
+
     lines = strip_log_framing(job_log(scope["id"]))
     receipts = [classifier_receipt_object(lines, name)
                 for name in ("product", "mixed", "editor_product")]
@@ -818,40 +856,43 @@ def ci_required_set_proof(pr, run, scope):
                 "control_plane_only": False, "product_changed": True,
                 "ci_infra_scoped": False}
     if any(receipt.get(key) is not value for key, value in expected.items()):
-        return None
+        return fail("receipt_flags")
     flags = ("ts_changed", "python_changed", "e2e_required")
     if any(type(receipt.get(key)) is not bool for key in flags):
-        return None
+        return fail("receipt_flags")
     if not (receipt["ts_changed"] or receipt["python_changed"]):
-        return None
+        return fail("receipt_no_language")
     bindings = classifier_bindings(lines)
     if bindings is None:
-        return None
+        return fail("bindings_unparsed")
     base, head, workflow = (bindings["BASE_SHA"], bindings["HEAD_SHA"],
                             bindings["WORKFLOW_SHA"])
     if not (HEX40.fullmatch(base) and HEX40.fullmatch(workflow)):
-        return None
+        return fail("bindings_shape")
     if (head != pr["head"]["sha"] or run.get("head_sha") != head
             or run.get("head_branch") != pr["head"]["ref"]
             or run.get("path", "").split("@")[0] != ".github/workflows/ci.yml"
-            or not successful(run) or not successful(scope)
-            or not event_binding_ok(bindings, run, pr)
-            or not pr_binding_ok(bindings, run, pr)
-            or not native_pr_binding_ok(run, pr)):
-        return None
-    trusted_base = merge_parent_base(base, head, api(f"git/commits/{workflow}").get("parents", []))
+            or not successful(run) or not successful(scope)):
+        return fail("run_binding")
+    if not event_binding_ok(bindings, run, pr):
+        return fail("event_binding")
+    if not pr_binding_ok(bindings, run, pr) or not native_pr_binding_ok(run, pr):
+        return fail("pr_association")
+    trusted_base = merge_parent_base(
+        base, head, read_with_retry(api, f"git/commits/{workflow}").get("parents", []))
     if trusted_base is None:
-        return None
+        return fail("merge_parent_base")
     for path in (".github/workflows/ci.yml", "scripts/ci/change_scope.py",
                  "scripts/ci/change-scope-rules.json"):
         before, selected = contents_identity(path, trusted_base), contents_identity(path, workflow)
         if before is None or selected is None or before[0] != selected[0]:
-            return None
+            return fail("tooling_identity")
     rules = contents_identity("scripts/ci/change-scope-rules.json", workflow)
     import hashlib
-    if (rules is None or hashlib.sha256(rules[1]).hexdigest() != receipt.get("rules_sha256")
-            or not receipt_files_match_pr(pr, receipt)):
-        return None
+    if rules is None or hashlib.sha256(rules[1]).hexdigest() != receipt.get("rules_sha256"):
+        return fail("rules_digest")
+    if not receipt_files_match_pr(pr, receipt):
+        return fail("receipt_files_vs_pr")
     return {"head": head, "run": run["id"], "attempt": run.get("run_attempt", 1),
             "scope_job_id": scope["id"], "workflow_sha": workflow,
             "rules_sha256": receipt["rules_sha256"],
