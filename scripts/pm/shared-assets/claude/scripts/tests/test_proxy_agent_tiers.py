@@ -1,9 +1,11 @@
-"""Three-level model routing in proxy-agent.sh (Rajiv C0ALZJHGE49 thread 1795351517.305319: ts 1795354409.166279 levels and types,
-ts 1795355545.905379 final mapping and Grok-first TOP; principle ts 1795353913.416459 "stronger models should drive weaker ones").
+"""Three-level model routing in proxy-agent.sh (Rajiv C0ALZJHGE49 thread 1795351517.305319: ts 1795354409.166279 levels and types;
+principle ts 1795353913.416459 "stronger models should drive weaker ones"; 24 Nov value-per-$ order Rajiv D0AMF0XE6TS thread
+1795485653.099709, ts 1795486375.339929: Opus (77x) first, Grok (11-13x) last; OpenCode ring pinned to a single id, glm-5.3).
 
-    TOP  grok-4.7 -> claude-opus-5-5 -> gpt-6.2-sol
-    MID  OpenCode (deepseek-v4.1-flash -> glm-5.3 -> hy4-flash-free) -> claude-sonnet-5-5 -> gpt-6.1-terra   (NO ornith since 24 Nov)
-    LOW  ornith-1.5-35b-a3b -> gpt-6-luna -> claude-haiku-5-5   (light lanes only; the only level that lists ornith)
+    TOP  claude-opus-5-5 -> claude-fable-5-2 -> gpt-6.2-sol -> sarvam-kimi-k3 -> grok-4.7
+    MID  glm-5.3 -> deepseek-v4.1-flash -> hy4-flash-free -> claude-sonnet-5-5 -> gpt-6.1-terra   (NO ornith since 24 Nov; NO Sarvam: LOW only)
+    LOW  ornith-1.5-35b-a3b -> sarvam-glm-5.3 -> sarvam-deepseek-v4.1-flash -> sarvam-105b -> sarvam-gemma4 -> gpt-6-luna -> claude-haiku-5-5
+         (light lanes only; the only level that lists ornith and the Sarvam serverless ids)
 
 Drives the REAL functions, extracted by NAME from the script under test (PROXY_AGENT_TEST_SCRIPT overrides the path), one bash process per
 launch. Environment-touching helpers are stubbed: curl (Spark health), sleep, the live Claude count, the cooldown probe (proxy_agent_sub_usable),
@@ -69,10 +71,13 @@ DROP = {'CLAUDE_PROXY_CAP', 'GROK_PROXY_CAP', 'OPENCODE_PROXY_CAP', 'CODEX_PROXY
         'INKLING_PROXY_CAP', 'SARVAM_PROXY_CAP', 'SARVAM_KIMI_ENABLED', 'PROXY_AGENT_SARVAM_KIMI_STATE_FILE', 'PROXY_AGENT_SARVAM_ROTATION_FILE', 'PROXY_AGENT_CAP_OVERRIDE', 'PROXY_AGENT_DRY_RUN', 'PROXY_AGENT_STUB_POOL_LIVE', 'PROXY_AGENT_OPENCODE_ROTATION_FILE',
         'PROXY_AGENT_TYPE', 'SPARK_UP', 'BLOCKED', 'REAL_EMERGENCY', 'PROXY_AGENT_NO_SUBSCRIPTION', 'PA_EMERGENCY_VERDICT', 'UNAVAILABLE', 'PROBEFAIL'}
 
-LOW = ['inkling-2-mini', 'gpt-6-luna', 'claude-haiku-5-5']
-MID = ['inkling-2-mini', 'deepseek-v4.1-flash', 'glm-5.3', 'hy4-flash-free', 'sarvam-glm-5.3', 'sarvam-deepseek-v4.1-flash', 'sarvam-105b', 'sarvam-gemma4',
-       'claude-sonnet-5-5', 'gpt-6.1-terra']
-TOP = ['grok-4.7', 'sarvam-kimi-k3', 'claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol']
+LOW = ['ornith-1.5-35b-a3b', 'sarvam-glm-5.3', 'sarvam-deepseek-v4.1-flash', 'sarvam-105b', 'sarvam-gemma4', 'gpt-6-luna', 'claude-haiku-5-5']
+# 24 Nov value-per-$ order (Rajiv D0AMF0XE6TS thread 1795485653.099709, ts 1795486375.339929): MID starts on glm-5.3 (the OpenCode
+# ring now holds only that id, PROXY_AGENT_OPENCODE_RING="glm-5.3", so DeepSeek/hy4 are fallbacks, not the start), TOP is Opus first
+# and Grok last. The order is pinned here as literals on purpose: deriving LOW/MID/TOP from proxy_agent_tier_models would make every
+# walk and cooled-chain below compare the script against itself (tautology, no regression detection). These lists ARE the contract.
+MID = ['glm-5.3', 'deepseek-v4.1-flash', 'hy4-flash-free', 'claude-sonnet-5-5', 'gpt-6.1-terra']
+TOP = ['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol', 'sarvam-kimi-k3', 'grok-4.7']
 # base_env forces SARVAM_KIMI_ENABLED=1 so the whole chain is exercised here; test_proxy_agent_sarvam_pool.py covers the availability gate itself.
 KIMI = 'sarvam-kimi-k3'
 SARVAM_IDS = ['sarvam-glm-5.3', 'sarvam-deepseek-v4.1-flash', 'sarvam-105b', 'sarvam-gemma4']
@@ -152,9 +157,15 @@ class LevelTable(unittest.TestCase):
         self.assertEqual((got.type, got.tier, got.model), ('vendor-new-agent', 'MID', MID[0]))
 
     def test_level_lists(self):
+        # TYPE unset strips ornith from LOW (the strip only keeps it for LOW-level lanes), so the bare-list read of LOW
+        # is the Sarvam ladder; each level's own lane sees the full list (Selection walks pin those).
         for level, expected in (('LOW', LOW), ('MID', MID), ('TOP', TOP)):
             with self.subTest(level=level):
-                self.assertEqual(sh('proxy_agent_tier_models ' + level).split(), expected + [MUSE])
+                bare = sh('proxy_agent_tier_models ' + level).split()
+                if level == 'LOW':
+                    self.assertEqual(bare, [m for m in LOW if m != 'ornith-1.5-35b-a3b'] + [MUSE])
+                else:
+                    self.assertEqual(bare, expected + [MUSE])
 
     def test_no_codex_flag_drops_gpt_ids_from_every_level(self):
         with tempfile.TemporaryDirectory() as home:
@@ -163,7 +174,10 @@ class LevelTable(unittest.TestCase):
             (state / 'proxy-no-codex').write_text('')
             for level, expected in (('LOW', LOW), ('MID', MID), ('TOP', TOP)):
                 with self.subTest(level=level):
-                    self.assertEqual(sh('proxy_agent_tier_models ' + level, home=home).split(), [m for m in expected + [MUSE] if not m.startswith('gpt-')])
+                    bare = sh('proxy_agent_tier_models ' + level, home=home).split()
+                    if level == 'LOW':
+                        expected = [m for m in LOW if m != 'ornith-1.5-35b-a3b']
+                    self.assertEqual(bare, [m for m in expected + [MUSE] if not m.startswith('gpt-')])
 
     def test_retired_tier_names_are_not_pickable(self):
         for tier in RETIRED_TIERS:
@@ -215,38 +229,40 @@ class Selection(unittest.TestCase):
             got = route(role, unavailable=chain, **kw)
             self.assertEqual((got.model, got.reason, got.rc), (chain[-1], 'fallback_last', '0'))
 
-    def test_top_order_grok_then_opus_then_sol(self):
+    def test_top_order_opus_then_fable_then_sol_then_kimi_then_grok(self):
         self.walk('hd-planner', TOP)
         self.walk('pm-admission-reviewer', TOP)
 
-    def test_mid_order_spark_then_opencode_then_claude_then_terra(self):
+    def test_mid_order_glm_then_deepseek_then_hy4_then_claude_then_terra(self):
         self.walk('hd-builder', MID)
         self.walk('hd-proof-qa', MID)
 
-    def test_low_order_spark_then_luna_then_haiku(self):
+    def test_low_order_ornith_then_sarvam_then_luna_then_haiku(self):
         self.walk('cleanup-pr-runner', LOW)
 
     def test_fallback_last_stays_inside_the_level(self):
         # Everything cooled: the best-effort pick is the LAST id of the SAME level, never an id of another level.
         self.assertEqual(route('hd-builder', unavailable=MID + [MUSE]).model, 'gpt-6.1-terra')
         self.assertEqual(route('cleanup-pr-runner', unavailable=LOW).model, 'claude-haiku-5-5')
-        self.assertEqual(route('hd-planner', unavailable=TOP).model, 'gpt-6.2-sol')
+        self.assertEqual(route('hd-planner', unavailable=TOP).model, 'grok-4.7')
 
     def test_spark_down_skips_ornith_on_mid_and_low(self):
         got = route('hd-builder', spark=False)
-        self.assertEqual((got.model, got.reason), ('deepseek-v4.1-flash', 'cooled:inkling-2-mini:host_down'))
+        self.assertEqual((got.model, got.reason), ('glm-5.3', 'first_usable'))  # ornith is not listed in MID at all (24 Nov)
         got = route('cleanup-pr-runner', spark=False)
-        self.assertEqual((got.model, got.reason), ('gpt-6-luna', 'cooled:inkling-2-mini:host_down'))
+        self.assertEqual((got.model, got.reason), ('sarvam-glm-5.3', 'cooled:ornith-1.5-35b-a3b:host_down'))
 
     def test_free_model_guard_keeps_hy4_for_builders_and_provers_only(self):
-        cooled = ['inkling-2-mini', 'deepseek-v4.1-flash', 'glm-5.3']
+        cooled = ['glm-5.3', 'deepseek-v4.1-flash']
         self.assertEqual(route('hd-builder', unavailable=cooled).model, 'hy4-flash-free')
         self.assertEqual(route('hd-proof-qa', unavailable=cooled).model, 'hy4-flash-free')
+        got = route('claude', unavailable=cooled)
+        self.assertEqual(got.model, 'claude-sonnet-5-5')
+        self.assertIn('hy4-flash-free:free_model_guard', got.reason)
+        # Sarvam ids sit in LOW only now (Rajiv ts 1795420232.692599), so a cooled non-builder MID lane goes straight to Claude.
         got = route('claude', unavailable=cooled + SARVAM_IDS)
         self.assertEqual(got.model, 'claude-sonnet-5-5')
         self.assertIn('hy4-flash-free:free_model_guard', got.reason)
-        # With Sarvam usable, a non-builder lands on the first Sarvam id (after OpenCode) before Claude.
-        self.assertEqual(route('claude', unavailable=cooled).model, 'sarvam-glm-5.3')
 
     def test_judgment_lanes_start_on_claude_not_the_local_model(self):
         for role in JUDGMENT_MID:
@@ -254,12 +270,17 @@ class Selection(unittest.TestCase):
                 self.assertEqual(route(role).model, 'claude-sonnet-5-5')
         # A P0 launch (PA_P0_REF, captured from the P0:<issue> override at launch) makes any lane a judgment lane; it gets no cap bypass.
         self.assertEqual(route('claude', PA_P0_REF='P0:13907').model, 'claude-sonnet-5-5')
-        self.assertEqual(route('hd-investigator').model, 'grok-4.7')
+        self.assertEqual(route('hd-investigator').model, 'claude-opus-5-5')
 
-    def test_opencode_rotation_still_cycles_inside_mid(self):
+    def test_opencode_ring_is_pinned_to_glm_single_id(self):
+        # Rajiv 24 Nov ts 1795486375.339929: PROXY_AGENT_OPENCODE_RING holds only glm-5.3, so MID no longer rotates onto DeepSeek
+        # (fewer than two ring ids present: proxy_agent_opencode_rotate returns the list unchanged). DeepSeek/hy4 stay as fallbacks.
+        self.assertEqual(var('PROXY_AGENT_OPENCODE_RING').split('=', 1)[1].split('#', 1)[0].strip().strip('"'), 'glm-5.3')
         with tempfile.TemporaryDirectory() as home:
             got = [route('hd-builder', spark=False, home=home).model for _ in range(4)]
-        self.assertEqual(got, ['deepseek-v4.1-flash', 'glm-5.3', 'hy4-flash-free', 'deepseek-v4.1-flash'])
+            cursor = pathlib.Path(home) / '.claude/state/proxy-opencode-rotation'
+            self.assertEqual(cursor.read_text().strip(), 'glm-5.3')  # the pick still records itself; rotation stays a no-op reorder
+        self.assertEqual(got, ['glm-5.3', 'glm-5.3', 'glm-5.3', 'glm-5.3'])
 
     def test_top_and_low_never_touch_the_rotation_cursor(self):
         with tempfile.TemporaryDirectory() as home:
@@ -284,7 +305,7 @@ class FullLevelRefuses(unittest.TestCase):
         # TOP is fully available here: the refusal is not because nothing exists, it is because MID work does not run on TOP.
         got = route('hd-builder', blocked=MID)
         self.assertEqual(got.rc, '75')
-        self.assertTrue(all(m not in got.err for m in ('model=grok-4.7', 'model=claude-opus-5-5', 'model=gpt-6.2-sol')))
+        self.assertTrue(all(m not in got.err for m in ('model=claude-opus-5-5', 'model=claude-fable-5-2', 'model=gpt-6.2-sol')))
 
     def test_full_low_refuses_and_never_falls_to_mid_or_top(self):
         got = route('cleanup-pr-runner', blocked=LOW + [MUSE])
@@ -296,8 +317,10 @@ class FullLevelRefuses(unittest.TestCase):
 
     def test_real_pool_caps_at_zero_refuse_mid(self):
         # The real proxy_agent_pool_blocked (not the stub): every MID pool at cap 0, TOP pools untouched in name only (claude/codex pools are shared with MID).
-        got = route('hd-builder', blocked=None, SPARK_PROXY_CAP=0, INKLING_PROXY_CAP=0, OPENCODE_PROXY_CAP=0, SARVAM_PROXY_CAP=0, CLAUDE_PROXY_CAP=0, CODEX_PROXY_CAP=0)
+        # hd-builder keeps the approved free-model exception, so it still launches on hy4-flash-free; the refusal case is pinned on non-free lanes.
+        got = route('claude', blocked=None, SPARK_PROXY_CAP=0, INKLING_PROXY_CAP=0, OPENCODE_PROXY_CAP=0, SARVAM_PROXY_CAP=0, CLAUDE_PROXY_CAP=0, CODEX_PROXY_CAP=0)
         self.assertEqual((got.rc, got.model), ('75', 'auto'))
+        self.assertIn('REFUSED', got.err)
 
 
 class Escalation(unittest.TestCase):
@@ -311,7 +334,7 @@ class Escalation(unittest.TestCase):
         for rung in (2, 3, 9):
             with self.subTest(rung=rung):
                 got = route('hd-builder', rung=rung)
-                self.assertEqual((got.tier, got.model, got.rung, got.rc), ('TOP', 'grok-4.7', '3', '0'))
+                self.assertEqual((got.tier, got.model, got.rung, got.rc), ('TOP', 'claude-opus-5-5', '3', '0'))
                 self.assertNotIn('ignored', got.err)
 
     def test_prover_rungs(self):
@@ -319,13 +342,13 @@ class Escalation(unittest.TestCase):
         for rung in (2, 3):
             with self.subTest(rung=rung):
                 got = route('hd-proof-qa', rung=rung)
-                self.assertEqual((got.tier, got.model, got.rung), ('TOP', 'grok-4.7', '2'))
+                self.assertEqual((got.tier, got.model, got.rung), ('TOP', 'claude-opus-5-5', '2'))
 
     def test_other_mid_roles_escalate_one_level_per_rung(self):
         for role in ('claude', 'vendor-new-agent'):
             with self.subTest(role=role):
                 got = route(role, rung=2)
-                self.assertEqual((got.tier, got.model, got.rung), ('TOP', 'grok-4.7', ''))
+                self.assertEqual((got.tier, got.model, got.rung), ('TOP', 'claude-opus-5-5', ''))
 
     def test_low_role_rung_two_is_mid_and_rung_three_is_top(self):
         self.assertEqual(route('cleanup-pr-runner', rung=2).tier, 'MID')
@@ -340,17 +363,18 @@ class Escalation(unittest.TestCase):
         # Full MID refuses by default (FullLevelRefuses); the explicit --rung 2 is what reaches TOP.
         self.assertEqual(route('hd-builder', blocked=MID).rc, '75')
         got = route('hd-builder', rung=2, blocked=MID)
-        self.assertEqual((got.rc, got.tier, got.model), ('0', 'TOP', 'grok-4.7'))
+        self.assertEqual((got.rc, got.tier, got.model), ('0', 'TOP', 'claude-opus-5-5'))
 
     def test_explicit_opus_is_a_top_lever(self):
         for role, rung in (('hd-builder', '3'), ('hd-proof-qa', '2'), ('growth', ''), ('claude', '')):
             with self.subTest(role=role):
                 got = route(role, model='opus')
-                self.assertEqual((got.tier, got.model, got.rung), ('TOP', 'grok-4.7', rung))
-                # With Grok cooled the same lever lands on Opus, then on Sol.
-                self.assertEqual(route(role, model='opus', unavailable=['grok-4.7', KIMI]).model, 'claude-opus-5-5')
-                self.assertEqual(route(role, model='opus', unavailable=['grok-4.7', KIMI, 'claude-opus-5-5']).model, 'claude-fable-5-2')
-                self.assertEqual(route(role, model='opus', unavailable=['grok-4.7', KIMI, 'claude-opus-5-5', 'claude-fable-5-2']).model, 'gpt-6.2-sol')
+                self.assertEqual((got.tier, got.model, got.rung), ('TOP', 'claude-opus-5-5', rung))
+                # With Opus cooled the same lever walks the rest of TOP in the value-per-$ order (24 Nov): Fable, Sol, Kimi, then Grok.
+                self.assertEqual(route(role, model='opus', unavailable=['claude-opus-5-5']).model, 'claude-fable-5-2')
+                self.assertEqual(route(role, model='opus', unavailable=['claude-opus-5-5', 'claude-fable-5-2']).model, 'gpt-6.2-sol')
+                self.assertEqual(route(role, model='opus', unavailable=['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol']).model, KIMI)
+                self.assertEqual(route(role, model='opus', unavailable=['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol', KIMI]).model, 'grok-4.7')
 
     def test_explicit_sol_is_the_exact_62_id_and_stays_raw(self):
         for role, rung in (('hd-builder', '3'), ('hd-proof-qa', '2'), ('hd-planner', ''), ('growth', '')):
@@ -387,7 +411,8 @@ class Aliases(unittest.TestCase):
         for alias in ('luna', 'haiku'):
             with self.subTest(alias=alias):
                 self.assertEqual(route('hd-builder', model=alias).tier, 'LOW')
-        self.assertEqual(route('growth', model='luna', spark=False).model, 'gpt-6-luna')
+        # With Spark up, the LOW start is ornith; with Spark down the walk continues into the Sarvam ids before luna.
+        self.assertEqual(route('growth', model='luna', spark=False, unavailable=SARVAM_IDS).model, 'gpt-6-luna')
 
     def test_terra_and_sonnet_are_mid(self):
         for alias in ('terra', 'sonnet'):
@@ -401,50 +426,54 @@ class Aliases(unittest.TestCase):
 
     def test_nested_alias_exports_follow_the_levels_without_opencode_or_spark(self):
         got = route('claude')
-        # LOW nested drops ornith (a Spark id), MID nested drops Spark and OpenCode, TOP nested keeps grok first.
-        self.assertEqual((got.haiku, got.sonnet, got.opus), ('gpt-6-luna', 'claude-sonnet-5-5', 'grok-4.7'))
-        got = route('claude', unavailable=['grok-4.7'])
-        self.assertEqual(got.opus, 'claude-opus-5-5')
-        got = route('claude', unavailable=['grok-4.7', 'claude-opus-5-5'])
+        # LOW nested drops ornith and the Sarvam ids (Spark/Sarvam), MID nested drops OpenCode, TOP nested is Opus first (24 Nov value order).
+        self.assertEqual((got.haiku, got.sonnet, got.opus), ('gpt-6-luna', 'claude-sonnet-5-5', 'claude-opus-5-5'))
+        got = route('claude', unavailable=['claude-opus-5-5'])
         self.assertEqual(got.opus, 'claude-fable-5-2')
-        got = route('claude', unavailable=['grok-4.7', 'claude-opus-5-5', 'claude-fable-5-2'])
+        got = route('claude', unavailable=['claude-opus-5-5', 'claude-fable-5-2'])
         self.assertEqual(got.opus, 'gpt-6.2-sol')
+        got = route('claude', unavailable=['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol', KIMI])
+        self.assertEqual(got.opus, 'grok-4.7')
 
 
 class GrokTop(unittest.TestCase):
-    def test_grok_cooldown_402_falls_to_kimi_then_opus_then_fable_then_sol(self):
-        got = route('hd-planner', unavailable=['grok-4.7'])
-        self.assertEqual((got.model, got.reason), (KIMI, 'cooled:grok-4.7'))
-        got = route('hd-planner', unavailable=['grok-4.7', KIMI])
-        self.assertEqual((got.model, got.reason), ('claude-opus-5-5', 'cooled:grok-4.7,' + KIMI))
-        got = route('hd-planner', unavailable=['grok-4.7', KIMI, 'claude-opus-5-5'])
-        self.assertEqual((got.model, got.reason), ('claude-fable-5-2', 'cooled:grok-4.7,%s,claude-opus-5-5' % KIMI))
-        got = route('hd-planner', unavailable=['grok-4.7', KIMI, 'claude-opus-5-5', 'claude-fable-5-2'])
-        self.assertEqual((got.model, got.reason), ('gpt-6.2-sol', 'cooled:grok-4.7,%s,claude-opus-5-5,claude-fable-5-2' % KIMI))
+    """Grok is the LAST id of TOP now (24 Nov value-per-$ order): these pin the cooldown levers that demote everything ahead of it."""
+
+    def test_grok_cooldown_402_falls_through_the_top_ladder_to_grok(self):
+        got = route('hd-planner', unavailable=['claude-opus-5-5'])
+        self.assertEqual((got.model, got.reason), ('claude-fable-5-2', 'cooled:claude-opus-5-5'))
+        got = route('hd-planner', unavailable=['claude-opus-5-5', 'claude-fable-5-2'])
+        self.assertEqual((got.model, got.reason), ('gpt-6.2-sol', 'cooled:claude-opus-5-5,claude-fable-5-2'))
+        got = route('hd-planner', unavailable=['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol'])
+        self.assertEqual((got.model, got.reason), (KIMI, 'cooled:claude-opus-5-5,claude-fable-5-2,gpt-6.2-sol'))
+        got = route('hd-planner', unavailable=['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol', KIMI])
+        self.assertEqual((got.model, got.reason), ('grok-4.7', 'cooled:claude-opus-5-5,claude-fable-5-2,gpt-6.2-sol,%s' % KIMI))
 
     def test_failed_probe_is_unavailable_not_exhausted(self):
-        got = route('hd-planner', probefail=['grok-4.7'])
-        self.assertEqual((got.model, got.reason), (KIMI, 'cooled:grok-4.7:probe_failed'))
-        got = route('hd-planner', unavailable=['grok-4.7', KIMI], probefail=['claude-opus-5-5'])
-        self.assertEqual((got.model, got.reason), ('claude-fable-5-2', 'cooled:grok-4.7,%s,claude-opus-5-5:probe_failed' % KIMI))
+        got = route('hd-planner', probefail=['claude-opus-5-5'])
+        self.assertEqual((got.model, got.reason), ('claude-fable-5-2', 'cooled:claude-opus-5-5:probe_failed'))
+        got = route('hd-planner', unavailable=['claude-opus-5-5', 'claude-fable-5-2'], probefail=['gpt-6.2-sol'])
+        self.assertEqual((got.model, got.reason), (KIMI, 'cooled:claude-opus-5-5,claude-fable-5-2,gpt-6.2-sol:probe_failed'))
         got = route('hd-planner', probefail=TOP)
-        self.assertEqual((got.model, got.reason), ('gpt-6.2-sol', 'fallback_last'))
+        self.assertEqual((got.model, got.reason), ('grok-4.7', 'fallback_last'))
 
     def test_grok_cap_zero_means_pool_off_even_for_cap_exempt_roles(self):
+        # GROK_PROXY_CAP=0 switches the Grok pool off. Grok sits LAST in TOP (24 Nov), so an uncooled walk stops at Opus before ever
+        # reaching it; the skip must fire when the walk DOES reach Grok, and before `last` is set, so the pick is Kimi, never a
+        # pool that is off.
         for role in ('hd-planner', 'pm-admission-reviewer', 'growth'):
             for cap in ('0', '00'):
                 with self.subTest(role=role, cap=cap):
                     got = route(role, GROK_PROXY_CAP=cap)
-                    self.assertEqual((got.model, got.reason), (KIMI, 'cooled:grok-4.7:pool_cap'))
+                    self.assertEqual((got.model, got.reason), ('claude-opus-5-5', 'first_usable'))
+                    got = route(role, GROK_PROXY_CAP=cap, unavailable=['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol', KIMI])
+                    self.assertEqual((got.model, got.reason), (KIMI, 'fallback_last'))
                     self.assertIn('pool_cap skip model=grok-4.7', got.err)
-        # Never the fallback pick either.
-        got = route('hd-planner', GROK_PROXY_CAP=0, unavailable=[KIMI, 'claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol'])
-        self.assertEqual(got.model, 'gpt-6.2-sol')
-        self.assertEqual(got.reason, 'fallback_last')
 
-    def test_grok_cap_above_zero_or_unset_keeps_grok_first(self):
-        self.assertEqual(route('hd-planner').model, 'grok-4.7')
-        self.assertEqual(route('hd-planner', GROK_PROXY_CAP=3).model, 'grok-4.7')
+    def test_grok_cap_above_zero_or_unset_keeps_grok_reachable(self):
+        self.assertNotEqual(route('hd-planner').model, 'grok-4.7')  # Opus first (24 Nov value order)
+        self.assertEqual(route('hd-planner', unavailable=['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol', KIMI]).model, 'grok-4.7')
+        self.assertEqual(route('hd-planner', GROK_PROXY_CAP=3, unavailable=['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol', KIMI]).model, 'grok-4.7')
 
     def test_grok_402_records_exact_model_cooldown(self):
         self.assertIn('grok-4.7) slot=grok_exhausted_until;;', SOURCE)
@@ -517,7 +546,7 @@ class Compat(unittest.TestCase):
 
     def test_compat_pm_hotfix_selects_like_new_roles(self):
         got = route('pm-hotfix', 'MODE: PLAN')
-        self.assertEqual((got.type, got.tier, got.model), ('hd-planner', 'TOP', 'grok-4.7'))
+        self.assertEqual((got.type, got.tier, got.model), ('hd-planner', 'TOP', 'claude-opus-5-5'))
         got = route('pm-hotfix', 'MODE: IMPLEMENT')
         self.assertEqual((got.type, got.tier, got.model), ('hd-builder', 'MID', MID[0]))
         got = route('pm-hotfix', 'MODE: REWORK', rung=2)
@@ -532,7 +561,8 @@ class EmergencyGate(unittest.TestCase):
         self.assertEqual(sh(body, REAL_EMERGENCY='1', UNAVAILABLE=' '.join(self.ids)), 'rc=0 blocker=')
 
     def test_gate_reads_all_three_levels(self):
-        body = 'proxy_agent_emergency_open; echo "rc=$? blocker=${PA_EMERGENCY_BLOCKER:-}"'
+        body = 'TYPE=cleanup-pr-runner; proxy_agent_emergency_open; echo "rc=$? blocker=${PA_EMERGENCY_BLOCKER:-}"'
+        # TYPE is a LOW-level lane so the ornith entry of LOW survives the strip; every other blocker is level-independent.
         for usable in self.ids:
             with self.subTest(usable=usable):
                 cooled = [i for i in self.ids if i != usable]

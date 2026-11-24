@@ -1259,7 +1259,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "ba43029f1afc0199875d727c3d92d70c5a52cbb608bb9a0aa861e6c992ba3b31",
+      "sha256": "bc5d6771ba23e9fd87196e96e91e217fd84b9b02a35f5b9b4fc5c566b560f6f3",
       "source_path": "claude/scripts/tests/test_proxy_agent_tiers.py"
     },
     {
