@@ -314,6 +314,9 @@ class Stub:
         if self.world.get("log_failure"):
             raise merge.Refusal("LOG_FETCH_FAILED")
         path = args[-1]
+        for job_id, text in self.world.get("job_logs", {}).items():
+            if path.endswith(f"/actions/jobs/{job_id}/logs"):
+                return text
         if "/pulls/" in path and "/files?" in path:
             files = self.world.get("site_files", [{"filename": "website/index.html"}])
             if str(TEST_ONLY_NUMBER) in path:
@@ -1211,6 +1214,170 @@ class NativeEventBindingTests(unittest.TestCase):
         native["pull_requests"] = [{"number": TEST_ONLY_NUMBER}]
         self.assertIsNone(merge.app_test_only_classifier_proof(
             test_only_pr(), "ci.yml", native, test_only_jobs()[0]))
+
+
+GATE_STEP = "Validate unit lane and scheduled jobs"
+PLACEHOLDER = "unit-tests (${{ matrix.shard }})"
+GATE_ID = 8219101
+SHARD_IDS = {0: 8219110, 1: 8219111}
+LOG_STAMP = "2026-11-24T20:17:22.1174262Z"
+FOOTER_0 = "= 1470 passed, 3 skipped, 10597 deselected, 678 warnings in 167.58s (0:02:47) =="
+FOOTER_1 = "= 1167 passed, 3 skipped, 10900 deselected, 816 warnings in 213.04s (0:03:33) =="
+FOOTER_1_SECOND = "======================== 17 passed, 1 warning in 3.31s ========================="
+
+
+def zero_gate_log(receipt=None, env=None):
+    """The unit gate's real log for a zero-JS schedule (run 45478680523 shape).
+
+    Timestamped env lines, a multi-line UNIT_SCHEDULE object whose first line alone is
+    timestamped, and one unit_jobs_verified event. A None override deletes that key.
+    """
+    run_id = str(test_only_run()["id"])
+    rec = {"skip_matrix": True, "scheduled_count": 0, "mode": "zero",
+           "zero_proof": "non_ts_rows_only", "reason": "zero_proof", "predicted_s": [],
+           "head": TEST_ONLY_HEAD, "run_id": run_id, "run_attempt": "1"}
+    facts = {"CI_EXECUTION_SHA": TEST_ONLY_HEAD, "UNIT_SELECT_RESULT": "success",
+             "UNIT_PRECHECKS_RESULT": "success", "UNIT_TESTS_RESULT": "skipped",
+             "UNIT_SCHEDULED_COUNT": "0", "EXPECTED_RUN_ID": run_id,
+             "UNIT_JOB_HEAD_SHA": TEST_ONLY_HEAD}
+    event = {"event": "unit_jobs_verified", "run_id": run_id, "head_sha": TEST_ONLY_HEAD,
+             "declared_count": 0, "observed_jobs": []}
+    for target, changes in ((rec, receipt), (facts, env)):
+        for key, value in (changes or {}).items():
+            target.pop(key, None) if value is None else target.__setitem__(key, value)
+    body = json.dumps(rec, indent=2).splitlines()
+    pairs = list(facts.items())
+    lines = [f"{LOG_STAMP} env:"]
+    lines += [f"{LOG_STAMP}   {key}: {value}" for key, value in pairs[:4]]
+    lines += [f"{LOG_STAMP}   UNIT_SCHEDULE: {body[0]}"] + body[1:]
+    lines += [f"{LOG_STAMP}   {key}: {value}" for key, value in pairs[4:]]
+    lines += [f"{LOG_STAMP} ##[endgroup]", f"{LOG_STAMP} " + json.dumps(event, separators=(",", ":"))]
+    return "\n".join(lines) + "\n"
+
+
+def pytest_log(*footers):
+    lines = [f"{LOG_STAMP} ============================= test session starts =============================",
+             f"{LOG_STAMP} collected 1473 items"]
+    lines += [f"{LOG_STAMP} {footer}" for footer in footers]
+    return "\n".join(lines) + "\n"
+
+
+def zero_selection_jobs(shards=(0, 1)):
+    """#14809 shape: the one skipped native placeholder, an attesting gate, python-modal shards."""
+    run = test_only_run()
+    common = {"status": "completed", "run_id": run["id"], "run_attempt": run["run_attempt"],
+              "head_sha": run["head_sha"]}
+    rows = test_only_jobs()
+    rows.append(dict(common, id=GATE_ID - 1, name=PLACEHOLDER, conclusion="skipped", steps=[]))
+    rows.append(dict(common, id=GATE_ID, name="unit-gate", conclusion="success",
+                     steps=[{"name": GATE_STEP, "status": "completed", "conclusion": "success"}]))
+    for shard in shards:
+        rows.append(dict(common, id=SHARD_IDS[shard], name=f"python-modal ({shard})",
+                         conclusion="success",
+                         steps=[{"name": "Modal audio unit tests", "status": "completed",
+                                 "conclusion": "success"}]))
+    return rows
+
+
+class PythonOnlyZeroSelectionTests(unittest.TestCase):
+    """MoP 2026-11-25, #14809 (CTO C0ALZJHGE49 ts 1795553466.149459).
+
+    A test-only PR whose Python test change schedules zero JavaScript shards leaves the
+    native `unit-tests (${{ matrix.shard }})` placeholder skipped with no steps. The legacy
+    "Unit tests" step check then refused a green run (TEST_EXECUTION_MISSING). That check is
+    satisfied by selection only when the unit gate itself attests a zero schedule by file
+    area and the Python lanes executed; everything else keeps refusing.
+    """
+
+    def world(self, **overrides):
+        world = {"pr": test_only_pr(), "workflow_parent": TEST_ONLY_BASE,
+                 "workflow_head": TEST_ONLY_HEAD, "ci_runs": [test_only_run()],
+                 "jobs": zero_selection_jobs(), "test_only_log": test_only_log(),
+                 "app_test_files": [{"filename": "modal/audio/tests/test_x.py"}],
+                 "e2e_runs": [],
+                 "job_logs": {GATE_ID: zero_gate_log(),
+                              SHARD_IDS[0]: pytest_log(FOOTER_0),
+                              SHARD_IDS[1]: pytest_log(FOOTER_1, FOOTER_1_SECOND)}}
+        world.update(overrides)
+        return world
+
+    def prove(self, **overrides):
+        install(self.world(**overrides))
+        return merge.workflow_proof(test_only_pr(), "ci.yml", NAMES)
+
+    def assert_refused(self, **overrides):
+        with self.assertRaisesRegex(merge.Refusal, "TEST_EXECUTION_MISSING workflow=ci.yml"):
+            self.prove(**overrides)
+
+    def test_zero_js_schedule_with_green_python_shards_is_accepted(self):
+        result = self.prove()
+        self.assertEqual(result["head"], TEST_ONLY_HEAD)
+        self.assertIn("app_test_only", result)
+
+    def test_uncertain_selection_still_refuses(self):
+        # An uncertain skip is a fail-safe, not a selection by file area: its proof is empty.
+        log = zero_gate_log(receipt={"mode": "uncertain", "zero_proof": None,
+                                     "reason": "selector_unavailable"})
+        self.assert_refused(job_logs=self.world()["job_logs"] | {GATE_ID: log})
+
+    def test_zero_proof_outside_the_selector_set_still_refuses(self):
+        log = zero_gate_log(receipt={"zero_proof": "anything_goes"})
+        self.assert_refused(job_logs=self.world()["job_logs"] | {GATE_ID: log})
+
+    def test_selected_js_shard_that_did_not_execute_still_refuses(self):
+        rows = zero_selection_jobs()
+        rows[:] = [row for row in rows if row["name"] != PLACEHOLDER]
+        common = {"status": "completed", "run_id": test_only_run()["id"], "run_attempt": 1,
+                  "head_sha": TEST_ONLY_HEAD}
+        rows.append(dict(common, id=GATE_ID - 1, name="unit-tests (1)", conclusion="success",
+                         steps=[{"name": "Set up job", "status": "completed",
+                                 "conclusion": "success"}]))
+        self.assert_refused(jobs=rows)
+
+    def test_gate_for_another_head_still_refuses(self):
+        log = zero_gate_log(receipt={"head": "0" * 40}, env={"UNIT_JOB_HEAD_SHA": "0" * 40})
+        self.assert_refused(job_logs=self.world()["job_logs"] | {GATE_ID: log})
+
+    def test_missing_gate_attestation_still_refuses(self):
+        rows = [row for row in zero_selection_jobs() if row["name"] != "unit-gate"]
+        self.assert_refused(jobs=rows)
+
+    def test_python_shard_with_no_tests_executed_still_refuses(self):
+        logs = self.world()["job_logs"] | {SHARD_IDS[0]: pytest_log("= no tests ran in 0.10s =")}
+        self.assert_refused(job_logs=logs)
+
+    def test_python_shard_with_a_failed_test_still_refuses(self):
+        failed = "= 3 failed, 1470 passed, 3 skipped in 167.58s (0:02:47) =="
+        logs = self.world()["job_logs"] | {SHARD_IDS[0]: pytest_log(failed)}
+        self.assert_refused(job_logs=logs)
+
+    def test_no_python_shard_ran_still_refuses(self):
+        self.assert_refused(jobs=zero_selection_jobs(shards=()))
+
+    def test_python_shard_unit_step_not_successful_still_refuses(self):
+        rows = zero_selection_jobs()
+        for row in rows:
+            if row["name"] == "python-modal (0)":
+                row["steps"][0]["conclusion"] = "skipped"
+        self.assert_refused(jobs=rows)
+
+    def test_python_log_without_a_pytest_footer_still_refuses(self):
+        logs = self.world()["job_logs"]
+        logs.pop(SHARD_IDS[0])  # the stub falls back to a generic log with no pytest footer
+        self.assert_refused(job_logs=logs)
+
+
+class PytestFooterTests(unittest.TestCase):
+    def test_footers_sum_across_framed_and_quiet_forms(self):
+        lines = merge.strip_log_framing(pytest_log(FOOTER_1, FOOTER_1_SECOND))
+        self.assertEqual(merge.pytest_totals(lines), (1184, 0))
+
+    def test_failed_and_errored_counts_are_reported(self):
+        lines = ["= 2 failed, 5 passed, 1 error in 3.00s =", "5 passed, 1 xfailed in 1.00s"]
+        self.assertEqual(merge.pytest_totals(lines), (10, 3))
+
+    def test_a_line_that_merely_mentions_passed_is_not_a_footer(self):
+        self.assertEqual(merge.pytest_totals(["tests/test_x.py::t 5 passed in the log"]), (0, 0))
 
 
 class ManifestMappingTests(unittest.TestCase):
