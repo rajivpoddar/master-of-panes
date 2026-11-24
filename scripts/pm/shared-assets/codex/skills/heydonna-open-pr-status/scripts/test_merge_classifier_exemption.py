@@ -246,6 +246,11 @@ class Stub:
                    "html_url": "https://example.invalid/compare", "files": []}
             if "compare_status" in w:
                 out["status"] = w["compare_status"]
+            # Per-path compare responses (CTO REVISE ts 1795510573.793869: the
+            # advanced parent must be bound to the verified base-branch tip).
+            for prefix, status in w.get("compare_statuses", {}).items():
+                if path.startswith("compare/" + prefix + "..."):
+                    out["status"] = status
             return out
         if path.startswith("git/commits/"):
             sha = path.split("/", 2)[2]
@@ -808,11 +813,16 @@ class AdvancedMainFirstParentTests(unittest.TestCase):
     """PR #14727, run 45334892718: BASE_SHA is the event-time base, but the synthetic
     merge commit was built on main after it advanced, so its first parent is a strict
     descendant of BASE_SHA. That run is genuine and must keep its proof; anything that
-    is not strictly ahead, or whose second parent is not the exact head, must not."""
+    is not strictly ahead AND part of the verified base-branch history, or whose
+    second parent is not the exact head, must not (CTO REVISE, C0ALZJHGE49 ts
+    1795510573.793869: a descendant on a side branch must never become the trust
+    reference)."""
 
     def scenario(self, **overrides):
         world = {"workflow_parent": ADVANCED_FIRST_PARENT, "workflow_head": TEST_ONLY_HEAD,
                  "compare_status": "ahead",
+                 # The advanced parent is the GitHub-verified base-branch tip.
+                 "main": ADVANCED_FIRST_PARENT,
                  "app_test_files": [{"filename": "convex/__tests__/prmHunksMigration.test.ts"}]}
         world.update(overrides)
         return world
@@ -825,7 +835,8 @@ class AdvancedMainFirstParentTests(unittest.TestCase):
 
     def test_control_plane_proof_accepts_first_parent_strictly_ahead(self):
         result = prove_control_plane({"workflow_parent": ADVANCED_FIRST_PARENT,
-                                      "compare_status": "ahead"})
+                                      "compare_status": "ahead",
+                                      "main": ADVANCED_FIRST_PARENT})
         self.assertIsNotNone(result)
         self.assertEqual(result["exempt"], "control_plane_only")
 
@@ -834,12 +845,43 @@ class AdvancedMainFirstParentTests(unittest.TestCase):
             workflow_parent=TEST_ONLY_BASE, forbid_compare=True)))
         self.assertIsNotNone(prove_control_plane({"forbid_compare": True}))
 
+    def test_first_parent_ahead_but_ancestor_of_the_verified_tip_is_on_main(self):
+        # The merge was built on an older main tip; the verified tip moved on.
+        tip = "d4e5f6a7" + "b" * 32
+        self.assertIsNotNone(prove_test_only(self.scenario(
+            main=tip, compare_statuses={tip: "behind"})))
+        self.assertIsNotNone(prove_control_plane({"workflow_parent": ADVANCED_FIRST_PARENT,
+                                                  "compare_status": "ahead",
+                                                  "main": tip,
+                                                  "compare_statuses": {tip: "behind"}}))
+
+    def test_side_branch_descendant_of_the_event_base_refuses(self):
+        # The CTO REVISE control: strictly ahead of BASE_SHA, but OUTSIDE the
+        # base-branch history (tip compare diverged). Its workflow/classifier
+        # blobs must never become the trust reference.
+        tip = "9a8b7c6d" + "e" * 32
+        self.assertIsNone(prove_test_only(self.scenario(
+            main=tip, compare_statuses={tip: "diverged"})))
+        self.assertIsNone(prove_control_plane({"workflow_parent": ADVANCED_FIRST_PARENT,
+                                               "compare_status": "ahead",
+                                               "main": tip,
+                                               "compare_statuses": {tip: "diverged"}}))
+        # An unavailable or non-conclusive tip ancestry also refuses (fail closed).
+        self.assertIsNone(prove_test_only(self.scenario(
+            main=tip, compare_statuses={tip: "ahead"})))
+        self.assertIsNone(prove_test_only(self.scenario(main="not-a-sha")))
+        self.assertIsNone(prove_control_plane({"workflow_parent": ADVANCED_FIRST_PARENT,
+                                               "compare_status": "ahead",
+                                               "main": tip,
+                                               "compare_statuses": {tip: "identical"}}))
+
     def test_first_parent_not_strictly_ahead_refuses(self):
         for status in ("behind", "diverged", "identical"):
             with self.subTest(status=status):
                 self.assertIsNone(prove_test_only(self.scenario(compare_status=status)))
                 self.assertIsNone(prove_control_plane({"workflow_parent": ADVANCED_FIRST_PARENT,
-                                                       "compare_status": status}))
+                                                       "compare_status": status,
+                                                       "main": ADVANCED_FIRST_PARENT}))
 
     def test_unprovable_ancestry_refuses(self):
         no_status = self.scenario()
@@ -852,6 +894,7 @@ class AdvancedMainFirstParentTests(unittest.TestCase):
         self.assertIsNone(prove_test_only(self.scenario(workflow_head="0" * 40)))
         self.assertIsNone(prove_control_plane({"workflow_parent": ADVANCED_FIRST_PARENT,
                                                "compare_status": "ahead",
+                                               "main": ADVANCED_FIRST_PARENT,
                                                "workflow_head": "0" * 40}))
 
     def test_trusted_tooling_must_match_at_the_first_parent_the_merge_was_built_on(self):
@@ -859,6 +902,7 @@ class AdvancedMainFirstParentTests(unittest.TestCase):
             drifted_refs={ADVANCED_FIRST_PARENT})))
         self.assertIsNone(prove_control_plane({"workflow_parent": ADVANCED_FIRST_PARENT,
                                                "compare_status": "ahead",
+                                               "main": ADVANCED_FIRST_PARENT,
                                                "drifted_refs": {ADVANCED_FIRST_PARENT}}))
 
 

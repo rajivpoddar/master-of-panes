@@ -39,6 +39,8 @@ class World:
         self.files = copy.deepcopy(FIXTURE["files"])
         self.parents = FIXTURE["parents"][:]
         self.compare = {"merge_base_commit": {"sha": BASE}}  # no "status": never proves ahead
+        self.compares = {}  # per-path compare responses (advanced-parent binding)
+        self.main_tip = BASE  # GitHub-verified base-branch tip; BASE by default
         self.blobs = copy.deepcopy(FIXTURE["blob_shas"])
         self.rules = FIXTURE["rules"]
         self.e2e = dict(self.run, id=40075590960, path=".github/workflows/e2e.yml")
@@ -70,9 +72,14 @@ class World:
         if path == "pulls/10992":
             return self.pr
         if path == "git/ref/heads/main":
-            return {"object": {"sha": BASE}}
+            if self.main_tip is None:
+                # A transport error the production guard must catch and refuse on.
+                raise ValueError("MAIN_REF_UNREADABLE")
+            return {"object": {"sha": self.main_tip}}
         if path.startswith("compare/"):
-            return self.compare
+            row = dict(self.compares.get(path, {"merge_base_commit": {"sha": BASE}}))
+            row.setdefault("html_url", "https://example.invalid/compare")
+            return row
         if path.startswith("git/commits/"):
             return {"parents": [{"sha": sha} for sha in self.parents]}
         if path in self.blobs:
@@ -131,11 +138,36 @@ TRUSTED_FILES = (".github/workflows/ci.yml", "scripts/ci/change_scope.py",
 
 
 def advance_main(w, status="ahead"):
-    """Rebuild the fixture so the merge commit's first parent is a newer main tip."""
+    """Rebuild the fixture so the merge commit's first parent is a newer main tip.
+
+    The advanced parent is the verified base-branch tip itself, so both compare
+    reads conclude: BASE...ADVANCED is "ahead" (strict descent from the event
+    base) and no tip compare is needed (parent == tip)."""
     w.parents[0] = ADVANCED
+    w.main_tip = ADVANCED
     for name in TRUSTED_FILES:  # same trusted tooling at the newer tip
         w.blobs[f"contents/{name}?ref={ADVANCED}"] = w.blobs[f"contents/{name}?ref={BASE}"]
-    w.compare = {"status": status, "merge_base_commit": {"sha": BASE}}
+    w.compares[f"compare/{BASE}...{ADVANCED}"] = {"status": status,
+                                                  "merge_base_commit": {"sha": BASE}}
+    # merge()'s own head...main delta compare: the PR head contains the advanced
+    # main line, so the proof control is not confused with a main-delta hold.
+    w.compares[f"compare/{HEAD}...{ADVANCED}"] = {"status": "behind",
+                                                  "merge_base_commit": {"sha": ADVANCED}}
+
+
+def advance_main_behind_tip(w):
+    """The advanced parent is an ancestor of the verified tip (still on main)."""
+    advance_main(w)
+    behind_tip = "d4e5f6a7" + "b" * 32
+    w.main_tip = behind_tip
+    for name in TRUSTED_FILES:  # trusted tooling unchanged across the older tip
+        w.blobs[f"contents/{name}?ref={behind_tip}"] = w.blobs[f"contents/{name}?ref={BASE}"]
+    w.compares[f"compare/{behind_tip}...{ADVANCED}"] = {"status": "behind",
+                                                        "merge_base_commit": {"sha": ADVANCED}}
+    # merge()'s own head...main delta compare: the PR head still contains the
+    # main line (no MAIN_DELTA_REVIEW_REQUIRED for this control).
+    w.compares[f"compare/{HEAD}...{behind_tip}"] = {"status": "behind",
+                                                    "merge_base_commit": {"sha": behind_tip}}
 
 
 def test_first_parent_ahead_of_event_base_keeps_the_proof():
@@ -148,26 +180,57 @@ def test_first_parent_ahead_of_event_base_keeps_the_proof():
     assert any(path == f"compare/{BASE}...{ADVANCED}" for path in w.reads)
 
 
+def test_first_parent_ahead_but_behind_the_verified_tip_keeps_the_proof():
+    w = World()
+    advance_main_behind_tip(w)
+    result, _ = w.evaluate()
+    assert result["status"] == "READY_TO_MERGE"
+    assert f"compare/{w.main_tip}...{ADVANCED}" in w.reads
+
+
 def test_exact_base_first_parent_never_reads_compare():
     w = World()
     w.evaluate()
+    # No ANCESTRY compare for an exact-BASE parent (merge() itself still reads
+    # its own head...main delta compare at the end, which is not ancestry).
     assert not any(path.startswith(f"compare/{BASE}...") for path in w.reads)
+    assert f"compare/{w.main_tip}..." not in "\n".join(w.reads)
 
 
 @pytest.mark.parametrize("change", ["behind", "diverged", "identical", "no_status",
                                     "wrong_head_parent", "tooling_drift_at_first_parent",
-                                    "short_first_parent"])
-def test_advanced_main_parent_still_refuses_anything_not_strictly_ahead_and_bound(change):
+                                    "short_first_parent", "side_branch_descendant",
+                                    "tip_compare_no_status", "main_ref_unreadable",
+                                    "main_ref_not_hex"])
+def test_advanced_main_parent_still_refuses_anything_not_on_the_verified_base_branch(change):
     w = World()
     advance_main(w, status=change if change in ("behind", "diverged", "identical") else "ahead")
     if change == "no_status":
-        w.compare = {"merge_base_commit": {"sha": BASE}}
+        w.compares[f"compare/{BASE}...{ADVANCED}"] = {"merge_base_commit": {"sha": BASE}}
     elif change == "wrong_head_parent":
         w.parents[1] = "f" * 40
     elif change == "tooling_drift_at_first_parent":
         w.blobs[f"contents/scripts/ci/change_scope.py?ref={ADVANCED}"] = "f" * 40
     elif change == "short_first_parent":
         w.parents[0] = "c2411b55"
+    elif change == "side_branch_descendant":
+        # Strictly ahead of BASE_SHA but NOT on the base-branch history: the
+        # tip compare must report anything but "behind" (CTO REVISE ts
+        # 1795510573.793869). Its workflow/classifier blobs never become the
+        # trust reference.
+        w.main_tip = "9a8b7c6d" + "e" * 32
+        w.compares[f"compare/{w.main_tip}...{ADVANCED}"] = {"status": "diverged",
+                                                            "merge_base_commit": {"sha": BASE}}
+    elif change == "tip_compare_no_status":
+        w.main_tip = "9a8b7c6d" + "e" * 32
+        w.compares[f"compare/{w.main_tip}...{ADVANCED}"] = {"merge_base_commit": {"sha": BASE}}
+    elif change == "main_ref_unreadable":
+        # git/ref/heads/main raises (unreadable verified tip): fail closed.
+        w.compares[f"compare/{BASE}...{ADVANCED}"] = {"status": "ahead",
+                                                      "merge_base_commit": {"sha": BASE}}
+        w.main_tip = None  # api() raises Refusal for this stub shape
+    elif change == "main_ref_not_hex":
+        w.main_tip = "not-a-sha"
     with pytest.raises(RuntimeError):  # Refusal only; an AssertionError would be a vacuous pass
         w.evaluate()
 

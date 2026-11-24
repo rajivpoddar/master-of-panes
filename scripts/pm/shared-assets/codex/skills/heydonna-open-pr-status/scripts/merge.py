@@ -618,10 +618,16 @@ def merge_parent_base(base_sha, head_sha, parents):
     2da0d1f7, first parent c2411b55, two commits ahead), the first parent is a
     strict descendant of BASE_SHA, not BASE_SHA itself. That is not a defect in
     the run, so an exact [base, head] parent match is not required. The second
-    parent must still be the exact PR head, and a differing first parent must be
-    strictly ahead of BASE_SHA; the trusted-tooling identity checks then compare
-    against that first parent (the tip the merge was built on). Anything else
-    (wrong head, unrelated or behind first parent, unreadable compare) is None.
+    parent must still be the exact PR head, and a differing first parent must
+    be BOTH a strict descendant of BASE_SHA and part of the protected base
+    branch: it must equal the GitHub-verified target base branch tip
+    (git/ref/heads/main) or be its ancestor (CTO REVISE, C0ALZJHGE49 ts
+    1795510573.793869). Descent alone is not enough - a descendant on a side
+    branch can satisfy compare-status "ahead", and its workflow/classifier
+    blobs would then become the trust reference. If the verified tip is
+    unreadable, or the compare against BASE_SHA or the tip is unavailable or
+    not conclusive, the advanced path refuses (fail closed). The exact
+    BASE_SHA first parent still needs no compare at all.
     """
     shas = [parent.get("sha") if isinstance(parent, dict) else None for parent in parents]
     if (len(shas) != 2 or shas[1] != head_sha
@@ -631,9 +637,20 @@ def merge_parent_base(base_sha, head_sha, parents):
         return base_sha
     try:
         compared = api(f"compare/{base_sha}...{shas[0]}")
+        main_tip = api("git/ref/heads/main")["object"]["sha"]
+    except (Refusal, ValueError, KeyError, TypeError):
+        return None
+    if not (isinstance(compared, dict) and compared.get("status") == "ahead"):
+        return None
+    if not (isinstance(main_tip, str) and HEX40.fullmatch(main_tip)):
+        return None
+    if shas[0] == main_tip:
+        return shas[0]
+    try:
+        on_base_branch = api(f"compare/{main_tip}...{shas[0]}")
     except (Refusal, ValueError):
         return None
-    if isinstance(compared, dict) and compared.get("status") == "ahead":
+    if isinstance(on_base_branch, dict) and on_base_branch.get("status") == "behind":
         return shas[0]
     return None
 
