@@ -11,7 +11,7 @@
 #                 SDK built-ins such as general-purpose or claude work only if a matching
 #                 definition file exists; list those directories for currently valid types.
 #   <prompt-file> complete one-shot brief (native named-peer steering remains available)
-#   --model M     auto: three levels, first usable id wins (type -> level in proxy_agent_type_level, unlisted = MID; Rajiv C0ALZJHGE49 thread 1795351517.305319): TOP grok-4.7 > sarvam-kimi-k3 (gated until Sarvam enables it) > claude-opus-5-5 > gpt-6.2-sol; MID ornith > OpenCode (deepseek, glm, hy4; rotating start) > Sarvam (glm, deepseek, 105b, gemma4; cap SARVAM_PROXY_CAP=4; rotating start) > claude-sonnet-5-5 > gpt-6.1-terra; LOW ornith > gpt-6-luna > claude-haiku-5-5
+#   --model M     auto: three levels, first usable id wins (type -> level in proxy_agent_type_level, unlisted = MID; Rajiv C0ALZJHGE49 thread 1795351517.305319): TOP grok-4.7 > sarvam-kimi-k3 (gated until Sarvam enables it) > claude-opus-5-5 > gpt-6.2-sol; MID OpenCode (deepseek, glm, hy4; rotating start; NO ornith, 24 Nov) > Sarvam (glm, deepseek, 105b, gemma4; cap SARVAM_PROXY_CAP=4; rotating start) > claude-sonnet-5-5 > gpt-6.1-terra; LOW (light lanes only) ornith > gpt-6-luna > claude-haiku-5-5
 #                 aliases: luna/haiku LOW, terra/sonnet MID, opus TOP; sol = exact gpt-6.2-sol (S149, no tier picker); fable, astra exact
 #                 Escalate a stalled run with --rung N or --model; a full level refuses rc 75 and never falls up to TOP; raw model ids pass through unchanged.
 #                 or any raw CLIProxyAPI model id (unknown ids get a 200k window + stderr warning)
@@ -1737,11 +1737,21 @@ proxy_agent_is_unresolved_auto() {
 # Type -> level table: the ONE place a role gets its model level (Rajiv C0ALZJHGE49 thread 1795351517.305319: ts 1795354409.166279 levels and types, ts 1795355545.905379 final mapping;
 # principle ts 1795353913.416459: "stronger models should drive weaker ones. so planning should be on top tier, build/proover on mid/low"). Anything not listed is MID.
 # A role leaves its level only on an explicit escalation (--rung 2+, --model opus / sol), never by default and never because its own level is full.
+# LOW = the LIGHT lanes: the same set that may run in the sandbox fence (Rajiv 24 Nov: D0AMF0XE6TS thread 1795469138.551439, ts 1795483655.065659 "lets just keep it only for light work";
+# C0ALZJHGE49 thread 1795481047.444089, ts 1795484559.513619 "drop the 23 Nov burn directive. ornith keeps stalling. only give with light workload. uses sandbox only for light workload as well.").
+# Light = disk/file cleanup and deletion (cleanup-pr-runner), triage (pm-triage-agent, pm-backlog-promoter alias) and the heartbeat/digest brief of the generic claude type.
+# Ornith (Spark) is listed ONLY in the LOW tier (proxy_agent_tier_models), so only these lanes ever get it. Judgment/read-only investigators (customer-artifact-investigator,
+# e2e-failure-investigator) start on Claude anyway (proxy_agent_is_judgment_lane) and stay MID.
 proxy_agent_type_level() {
+  local _first=""
   case "$1" in
     hd-planner|hd-investigator|pm-admission-reviewer|*-reviewer|explore-issue-agent|growth|donna-influencer|marketing-site-builder|blog-post-builder) printf '%s' TOP;;
-    cleanup-pr-runner) printf '%s' LOW;;
-    claude|pm-triage-agent|hd-builder|hd-proof-qa|remote-test-runner|remote-qa-runner|ci-repair-agent|customer-artifact-investigator|e2e-failure-investigator|mop-main-repair|autoscaler-main-repair|pm-ops-tooling|main-red-skip|superproofer) printf '%s' MID;;
+    cleanup-pr-runner|pm-triage-agent|pm-backlog-promoter) printf '%s' LOW;;
+    claude)
+      # The heartbeat/digest brief is light ops work (same first-line test as proxy_agent_cap_exempt); every other generic claude brief stays MID.
+      if [[ -r "${ROLE_BRIEF:-}" ]]; then IFS= read -r _first < "$ROLE_BRIEF" || true; fi
+      if [[ "$_first" =~ ^MODE:[[:space:]]*(heartbeat|digest)($|[[:space:]]) ]]; then printf '%s' LOW; else printf '%s' MID; fi;;
+    hd-builder|hd-proof-qa|remote-test-runner|remote-qa-runner|ci-repair-agent|customer-artifact-investigator|e2e-failure-investigator|mop-main-repair|autoscaler-main-repair|pm-ops-tooling|main-red-skip|superproofer) printf '%s' MID;;
     *) printf '%s' MID;;
   esac
 }
@@ -1752,16 +1762,17 @@ proxy_agent_type_level() {
 #   TOP  grok-4.7 -> sarvam-kimi-k3 -> claude-opus-5-5 -> claude-fable-5-2 -> gpt-6.2-sol (ts 1795355545.905379: "grok can be used for top whenever it's available"; Grok is balance-metered, a 402 cools it, GROK_PROXY_CAP=0 = off;
 #        Rajiv 23 Nov 00:19 "Kimi should be top tier": Sarvam Kimi K3 is second, behind its availability gate proxy_agent_sarvam_kimi_gated until Sarvam enables the Provisioned Throughput model)
 #   MID  ... after the OpenCode ids come the Sarvam serverless ids sarvam-glm-5.3 / sarvam-deepseek-v4.1-flash / sarvam-105b / sarvam-gemma4 (own cap SARVAM_PROXY_CAP, default 4; the start rotates per launch, proxy_agent_sarvam_rotate)
-#   MID  ornith-1.5-35b-a3b (Spark, free) -> OpenCode Go deepseek-v4.1-flash / glm-5.3 / hy4-flash-free (the start rotates per launch, proxy_agent_opencode_rotate; hy4 stays behind the
+#   MID  OpenCode Go deepseek-v4.1-flash / glm-5.3 / hy4-flash-free (the start rotates per launch, proxy_agent_opencode_rotate; hy4 stays behind the
 #        free-model guard, so only hd-builder / hd-proof-qa take it; glm-5.3 per Rajiv D0AMF0XE6TS thread 1795327362.644159, ts 1795327535.503889) -> claude-sonnet-5-5 -> gpt-6.1-terra
-#   LOW  ornith-1.5-35b-a3b -> gpt-6-luna -> claude-haiku-5-5
+#        NO ornith: 24 Nov (C0ALZJHGE49 thread 1795481047.444089, ts 1795484559.513619) removed Spark from MID; "ornith keeps stalling. only give with light workload."
+#   LOW  ornith-1.5-35b-a3b -> Sarvam -> gpt-6-luna -> claude-haiku-5-5 (the ONLY tier that lists ornith, and only light lanes may take it: see proxy_agent_type_level)
 # Every level ends with the emergency-only Muse Spark entry (proxy_agent_is_emergency_muse). The old tier names (LIGHT, PLAN, BUILD1-3, PROOF1-2, REVIEW) are retired.
 proxy_agent_tier_models() {
   local models _m _kept=""
   case "$1" in
     LOW) models="ornith-1.5-35b-a3b sarvam-glm-5.3 sarvam-deepseek-v4.1-flash sarvam-105b sarvam-gemma4 gpt-6-luna claude-haiku-5-5 muse-spark-1.3-contributor";;  # Sarvam = light work only (Rajiv C0ALZJHGE49 ts 1795420232.692599: "sarvam looks to be quite useless if we max out the monthly in 2d. maybe we should use it only for light work.")  # Spark (free) stays first for LOW: OpenCode monthly burn 0.35 vs 0.10 %/h budget (23 Nov 08:30)
-    MID) models="deepseek-v4.1-flash glm-5.3 hy4-flash-free ornith-1.5-35b-a3b claude-sonnet-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;  # Sarvam moved to LOW only (Rajiv ts 1795420232.692599)
-    TOP) models="grok-4.7 sarvam-kimi-k3 claude-opus-5-5 claude-fable-5-2 gpt-6.2-sol muse-spark-1.3-contributor";;
+    MID) models="glm-5.3 deepseek-v4.1-flash hy4-flash-free claude-sonnet-5-5 gpt-6.1-terra muse-spark-1.3-contributor";;  # Sarvam moved to LOW only (Rajiv ts 1795420232.692599); ornith LOW only (Rajiv ts 1795484559.513619, 24 Nov)
+    TOP) models="claude-opus-5-5 claude-fable-5-2 gpt-6.2-sol sarvam-kimi-k3 grok-4.7 muse-spark-1.3-contributor";;  # Rajiv D0AMF0XE6TS thread 1795485653.099709, ts 1795486375.339929 (24 Nov): value-per-$ order, Opus (77x) first, Grok (11-13x) last
     *) return 1;;
   esac
   # No Codex for proxies (Rajiv ts 1794834402.077499): drop gpt-* from every rung while the flag file exists.
@@ -1769,12 +1780,14 @@ proxy_agent_tier_models() {
     for _m in $models; do [[ "$_m" == gpt-* ]] || _kept="${_kept:+$_kept }$_m"; done
     models="$_kept"
   fi
-  # Ornith (Spark) is ops-only: no builder / QA / training / planning lanes (Rajiv D0AMF0XE6TS thread 1795447123.664959, ts 1795447582.126499 "ok",
-  # approving PM review ts 1795447142: 7/7 ops lanes DONE, 1/10 long build/QA/training lanes clean, 5 stalled). Admission, cleanup, batches, triage, investigators keep it.
-  case "${TYPE:-}" in hd-builder|hd-proof-qa|pm-hotfix|pm-proof-qa|superproofer|hd-planner|hd-investigator)
+  # Ornith (Spark) is LIGHT-lane only (Rajiv 24 Nov, C0ALZJHGE49 thread 1795481047.444089, ts 1795484559.513619: "ornith keeps stalling. only give with light workload."; supersedes the
+  # 21 Nov ops-only exclusion list, D0AMF0XE6TS thread 1795447123.664959, ts 1795447582.126499). It is no longer in MID or TOP, so this strip covers the one remaining leak: a heavy
+  # lane (builder, prover, planner, investigator, admission, ...) that escalates DOWN with an explicit `--model luna|haiku` would otherwise land on the LOW list's ornith first.
+  # A lane keeps it only when its own level is LOW (proxy_agent_type_level: cleanup, triage, heartbeat/digest). The 21 Nov list is a subset of this rule.
+  if [[ "$(proxy_agent_type_level "${TYPE:-}")" != LOW ]]; then
     _kept=""; for _m in $models; do case "$_m" in ornith-1.5-35b-a3b|qwen3.8-flash-next) ;; *) _kept="${_kept:+$_kept }$_m";; esac; done
-    models="$_kept";;
-  esac
+    models="$_kept"
+  fi
   printf '%s\n' "$models"
 }
 # Emergency Muse gate (CTO REVISE 2026-11-17, C0ALZJHGE49 thread 1794931098.013929, ts 1794932145.795929): Muse is emergency-only
@@ -1825,7 +1838,7 @@ proxy_agent_emergency_open() {
 # ring id AFTER it. The rotation only reorders which ring id sits in which of the ring-id SLOTS of the tier list: ornith, Claude and Codex ids keep their
 # places, and the pick loop still skips a cooled, pool-capped, burn-refused or free-model-guarded id, so a skipped id never stalls the ring. A dry run reads
 # the file but never writes it. Concurrent launches can read the same cursor (the write is atomic, the read-modify-write is not): at worst two launches share a start.
-PROXY_AGENT_OPENCODE_RING="deepseek-v4.1-flash glm-5.3 hy4-flash-free"
+PROXY_AGENT_OPENCODE_RING="glm-5.3"  # Rajiv 24 Nov ts 1795486375.339929: GLM-5.3 first (50x) instead of rotating onto DeepSeek V4.1 Flash (10x); DeepSeek/hy4 stay as tier fallbacks
 proxy_agent_opencode_rotation_file() { printf '%s' "${PROXY_AGENT_OPENCODE_ROTATION_FILE:-$HOME/.claude/state/proxy-opencode-rotation}"; }
 # Prints $1 (space-separated tier models) with its ring ids rotated to start after the last recorded pick. Fewer than two ring ids present: unchanged.
 proxy_agent_opencode_rotate() {
@@ -1925,7 +1938,7 @@ proxy_agent_pick_tier() {
     # inkling and gpt-6-luna are dropped.
     _kept=""
     # Kimi K3 (Rajiv 23 Nov 00:19 "Kimi should be top tier") sits right after Grok, before Opus, still behind its availability gate below.
-    for _pref in grok-4.7 sarvam-kimi-k3 claude-opus-5-5 claude-fable-5-2 claude-sonnet-5-5 gpt-6.1-terra gpt-6.2-sol; do
+    for _pref in claude-opus-5-5 claude-fable-5-2 claude-sonnet-5-5 gpt-6.2-sol gpt-6.1-terra sarvam-kimi-k3 grok-4.7; do
       for _m in $models; do [[ "$_m" == "$_pref" ]] && _kept="${_kept:+$_kept }$_m"; done
     done
     for _m in $models; do
@@ -2343,12 +2356,16 @@ proxy_agent_select() {
   # OpenCode-first pin downgrade (Rajiv C0ALZJHGE49 thread 1795401861.605899, ts 1795402350.568009: "why is the opencode pool still underused?
   # fix th proxy agent script inplace."). Most routine launches carried an exact claude-sonnet-5-5 pin (tier=RAW), which skipped the MID
   # picker and so the OpenCode pool. A routine Sonnet pin now resolves as the MID tier (OpenCode first, Sonnet still in the list).
-  # Kept on the pin: judgment/P0 lanes, hd-proof-qa (needs image input; glm-5.3/Sarvam reject images), unfenced non-builder lanes
-  # (launch-agent: unfenced = GPT/Claude only, builders excepted) and PROXY_AGENT_PIN_STRICT=1.
+  # Kept on the pin: judgment/P0 lanes, hd-proof-qa (needs image input; glm-5.3/Sarvam reject images), EVERY unfenced lane
+  # (PROXY_AGENT_SANDBOX=0, builders included: launch-agent unfenced = GPT/Claude only, plus the hy4-flash-free builder/prover exception)
+  # and PROXY_AGENT_PIN_STRICT=1. 24 Nov fence ruling (Rajiv D0AMF0XE6TS thread 1795469138.551439, ts 1795483655.065659: "lets just keep it
+  # only for light work"): an explicit exact Claude pin on an unfenced lane is honored, never downgraded; before it needed PIN_STRICT=1.
   if [[ "$requested" == claude-sonnet-5-5 && "${PROXY_AGENT_PIN_STRICT:-0}" != 1 && "$TYPE" != hd-proof-qa ]] && ! proxy_agent_is_judgment_lane \
-     && { [[ "${PROXY_AGENT_SANDBOX:-1}" != 0 ]] || [[ "$TYPE" == hd-builder ]]; }; then
+     && [[ "${PROXY_AGENT_SANDBOX:-1}" != 0 ]]; then
     printf 'proxy-agent: pin claude-sonnet-5-5 -> MID tier (OpenCode first; PROXY_AGENT_PIN_STRICT=1 keeps the pin)\n' >&2
     requested=sonnet
+  elif [[ "$requested" == claude-sonnet-5-5 && "${PROXY_AGENT_SANDBOX:-1}" == 0 ]]; then
+    printf 'proxy-agent: pin claude-sonnet-5-5 kept (unfenced lane, PROXY_AGENT_SANDBOX=0: exact Claude pin honored, no MID downgrade)\n' >&2
   fi
   case "$requested" in
     auto)
@@ -2512,6 +2529,27 @@ proxy_agent_review_cap() {
       return 76;;
   esac
 }
+# Fence policy (Rajiv D0AMF0XE6TS thread 1795469138.551439, ts 1795483655.065659, 24 Nov: "lets just keep it only for light work"):
+# PROXY_AGENT_SANDBOX=1 is for LIGHT work only (disk/file cleanup and deletion, triage, read-only investigators). Builders, provers/QA,
+# admission and box lanes run unfenced: a fenced lane cannot SSH to a box or fetch. The default is unchanged (the heredoc below still
+# reads an unset variable as ON); this gate only refuses an EXPLICIT fence request on a heavy type and warns when a heavy type would
+# inherit the default. rc 2 = config failure (PROXY_AGENT_FAILED), never rc 75 (that queues CAPACITY_WAIT for a policy refusal).
+# Runs after proxy_agent_resolve_type (pm-hotfix/pm-proof-qa compat types are gated as hd-builder/hd-proof-qa) and before any burn probe.
+proxy_agent_fence_policy() {
+  local sb="${PROXY_AGENT_SANDBOX:-}"
+  case "$TYPE" in
+    hd-builder|hd-proof-qa|remote-qa-runner|remote-test-runner|ci-repair-agent)
+      if [[ -n "$sb" && "$sb" != 0 ]]; then
+        printf 'PROXY_AGENT_FAILED reason=fence_refused_heavy_lane type=%s (PROXY_AGENT_SANDBOX=%s: the fence is for light work only; builders, provers/QA, admission and box lanes cannot SSH or fetch fenced; launch with PROXY_AGENT_SANDBOX=0)\n' "$TYPE" "$sb" >&2
+        return 2
+      fi
+      if [[ -z "$sb" ]]; then
+        printf 'proxy-agent: WARNING fence policy: type=%s is a heavy lane but PROXY_AGENT_SANDBOX is unset (the launcher default is fence ON); pass PROXY_AGENT_SANDBOX=0\n' "$TYPE" >&2
+      fi;;
+  esac
+  printf 'proxy-agent: fence policy light-work-only (PROXY_AGENT_SANDBOX=1 only for cleanup/deletion, triage, read-only investigators; builders, provers/QA, admission and box lanes unfenced) type=%s PROXY_AGENT_SANDBOX=%s\n' "$TYPE" "${sb:-unset}" >&2
+}
+proxy_agent_fence_policy || exit $?
 proxy_agent_select || exit 75  # includes the primary burn check (proxy_agent_primary_burn_check), before alias probes
 # Direct DeepSeek emergency gate, on the CANONICAL router identity and BEFORE the dry-run return (CTO REVISE of fbdfbdc, C0ALZJHGE49
 # thread 1795038046.056679, ts 1795038184.764339). The earlier gate matched the raw $MODEL after the dry-run exit, so a supported suffix
@@ -2874,6 +2912,20 @@ fi
 ARGS=(-p --name "${PROXY_AGENT_NAME:-proxy-$TYPE-$STAMP}" --model "$LAUNCH_MODEL" --max-turns "$MAX_TURNS" --output-format stream-json --verbose
       --dangerously-skip-permissions --setting-sources "$SETTING_SOURCES" --settings "$SAFETY_SETTINGS"
       --append-system-prompt "$BODY")
+# Rajiv 24 Nov (C0ALZJHGE49 thread 1795484652.282149, ts 1795485883.899159 "sandbox should be used only for the light lanes";
+# ts 1795486074.466839 "update the script yourself"): GPT/Codex-model lanes reach the model through CLIProxyAPI, whose Codex
+# translation carries Codex's own sandbox/approval framing, so the model assumes it can't write ~/.claude, SSH or run the app-server
+# even when this launcher's fence is OFF (24 Nov proof: proxy-tool-lru-selfcheck, sandbox_enabled=false, zero EPERM, yet "BLOCKED by
+# the proxy sandbox"). State the real sandbox state explicitly for unfenced GPT lanes; fenced (light) lanes keep their fence.
+if [[ "$MODEL_ID" == gpt-* && "${PROXY_AGENT_SANDBOX:-1}" == 0 ]]; then
+  ARGS[${#ARGS[@]}-1]="$BODY
+
+SANDBOX STATE (authoritative, set by the launcher): this lane is UNSANDBOXED (PROXY_AGENT_SANDBOX=0; Claude Code sandbox disabled).
+Ignore any Codex 'workspace-write', 'read-only' or 'network restricted' sandbox description or approval policy you may have been told
+about: it does not apply here. You may write any path the brief needs (including ~/.claude/scripts, ~/.claude/state and repo .git),
+use the network, run ssh (remote boxes, dgx-spark) and start the Codex review companion. A real permission error is reported with
+the exact command and EPERM text; never assume a block without trying."
+fi
 if [[ -n "$TOOLS" && "$TOOLS" != "*" && "$TOOLS" != "All tools" ]]; then
   ARGS+=(--allowedTools "$TOOLS")
 fi

@@ -106,61 +106,24 @@ if bash "$_RB_HOOK" --hourly-batch "$CLAIM/routine-batch.json" </dev/null > "$CL
 else
   echo "ROUTINE_BATCH_SKIPPED the routine batch could not be built ($(head -c 160 "$CLAIM/routine-batch.export" 2>/dev/null | tr '\n\r' '  ')); the report posts without it"
 fi
-# Overflow tables as native thread replies (Rajiv C0ALZJHGE49 thread 1795351517.305319, ts 1795353266.972289: "why did these two
-# tables not get converted to slack boldkit format like the top one?"). Slack allows ONE native table block per message, and the
-# sender renders every later table in the same message as plain pipe text, so the Burn and OpenCode Go tables (built by the same
-# _pipe_table helper as the pace table) showed as raw pipes. The first table stays in the parent; each later table, with its one-line
-# intro, goes out as a thread reply under the parent, so each is its own message with its own native table block. A table over
-# Slack's 100-row block limit is paged into several replies with the header repeated. Columns and content are unchanged.
-# Failure-safe: any splitter problem leaves N_TABLE_REPLIES=0 and the unsplit report is posted exactly as before.
-IFS= read -r -d '' _SPLIT_PY <<'PY' || true
-import re, sys
-claim, src, out = sys.argv[1:4]
-ROW = re.compile(r'^\s*\|[^\n]*\|[^\n]*\|')    # same row / separator tests as slack-send.sh convert_text_to_blocks
-SEP = re.compile(r'^\s*\|[-:\s|]+\|')
-MAX_BODY_ROWS = 99                               # a Slack table block holds 100 rows, header row included
-lines = open(src, encoding='utf-8').read().split('\n')
-runs, i = [], 0
-while i < len(lines):
-    if ROW.match(lines[i]):
-        j = i
-        while j < len(lines) and ROW.match(lines[j]):
-            j += 1
-        runs.append((i, j))
-        i = j
-    else:
-        i += 1
-drop, replies = set(), []
-for start, end in runs[1:]:                      # the first table stays in the parent
-    run = lines[start:end]
-    body = [l for l in run[1:] if not SEP.match(l)]
-    if not body:
-        continue                                 # header only: nothing to render natively, leave it in the parent
-    rule = [run[1]] if SEP.match(run[1]) else []
-    first = start
-    intro = []
-    if start >= 2 and lines[start - 1].strip() and not lines[start - 2].strip():
-        intro, first = [lines[start - 1]], start - 1     # a one-line paragraph right above the table is its intro
-    for page in range(0, len(body), MAX_BODY_ROWS):
-        replies.append('\n'.join((intro if page == 0 else []) + [run[0]] + rule + body[page:page + MAX_BODY_ROWS]) + '\n')
-    drop.update(range(first, end))
-if replies:
-    parent, dropped = [], False
-    for idx, line in enumerate(lines):
-        if idx in drop:
-            dropped = True
-            continue
-        if dropped and not line.strip() and parent and not parent[-1].strip():
-            dropped = False                      # the removal left two blank lines in a row: keep one
-            continue
-        dropped = False
-        parent.append(line)
-    for n, text in enumerate(replies, 1):
-        open('%s/table-reply-%d.txt' % (claim, n), 'w', encoding='utf-8').write(text)
-    open(out, 'w', encoding='utf-8').write('\n'.join(parent))
-print(len(replies))
-PY
-N_TABLE_REPLIES=$(python3 -I -c "$_SPLIT_PY" "$CLAIM" /tmp/heartbeat-1h-post.txt /tmp/heartbeat-1h-post.parent.txt 2>/dev/null) || N_TABLE_REPLIES=0
+# Overflow tables (Rajiv C0ALZJHGE49 thread 1795351517.305319, ts 1795353266.972289: later tables were thread
+# replies so each could be its own native Slack table; Slack allows ONE native table block per message).
+# Superseded for three tables (Rajiv C0ALZJHGE49 thread 1795488293.729669, ts 1795488682.501089: "move these
+# tables to the main report rather than a reply to the thread"): Burn, OpenCode Go and the proxy
+# Lane | Model | Liveness table stay in the parent. slack-send.sh still makes the first table (pace) native
+# and renders the three as plain pipe text in that same message. Any OTHER later table is still one thread
+# reply per table. The Hourly per-PR status reply is a different sender and is not split here.
+# chat.postMessage rejects text over 40,000 characters. Never truncate the parent to fit: report the length
+# and do not send. A splitter crash (any rc other than 2) leaves N_TABLE_REPLIES=0 and posts the unsplit report.
+SPLIT_RC=0
+N_TABLE_REPLIES=$(python3 -I /Users/rajiv/.claude/scripts/pm/heartbeat/hourly_table_split.py \
+  "$CLAIM" /tmp/heartbeat-1h-post.txt /tmp/heartbeat-1h-post.parent.txt) || SPLIT_RC=$?
+if [ "$SPLIT_RC" -eq 2 ]; then
+  echo "HOURLY_PARENT_TOO_LONG chars=$N_TABLE_REPLIES limit=40000 (not truncated, not posted)"
+  EXIT_REASON="parent_over_slack_text_limit chars=$N_TABLE_REPLIES"
+  exit 1
+fi
+if [ "$SPLIT_RC" -ne 0 ]; then N_TABLE_REPLIES=0; fi
 case "$N_TABLE_REPLIES" in ''|*[!0-9]*) N_TABLE_REPLIES=0 ;; esac
 PARENT_BODY=/tmp/heartbeat-1h-post.txt
 if [ "$N_TABLE_REPLIES" -gt 0 ] && head -1 /tmp/heartbeat-1h-post.parent.txt | grep -Eq '^(<@[A-Z0-9]+> *)?\*Hourly'; then

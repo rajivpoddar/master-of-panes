@@ -753,7 +753,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-sakshi-heartbeat-runtime-closure",
-      "sha256": "52764493f6ef7fbaa2ffa5220f34272924221fcc12ffe3f6aa16707f538acf74",
+      "sha256": "d05a97079253b008b0e991fc1420f021605de03d3e53ed9cef7bef6e063c194c",
       "source_path": "claude/scripts/pm-hourly-post.sh"
     },
     {
@@ -865,6 +865,15 @@
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-known-codes.json"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/pm/heartbeat/hourly_table_split.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-sakshi-heartbeat-runtime-closure",
+      "sha256": "2a6900c0c244f39e62ffecfe2a805859baf8f209ec120a28833fa0c74fc28040",
+      "source_path": "claude/scripts/pm/heartbeat/hourly_table_split.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/pm/heartbeat/issue-lifecycle.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -951,7 +960,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "7ea83cd7ab29e68aa542002400b4e83e0818f74b895b5ec73457088340e3099c",
+      "sha256": "5cb7bde0728444231770f5d2cc24ed52b5d5660b3b64167d7dcd3fb1a7b4d3d5",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -1250,7 +1259,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "ef524d812af2663f9828ea4a6eacd1041ee60e58c6e0abad32a4ad2af84acbb0",
+      "sha256": "ba43029f1afc0199875d727c3d92d70c5a52cbb608bb9a0aa861e6c992ba3b31",
       "source_path": "claude/scripts/tests/test_proxy_agent_tiers.py"
     },
     {
@@ -2301,7 +2310,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 252,
+    "selected_count": 253,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",

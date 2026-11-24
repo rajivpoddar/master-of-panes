@@ -2,8 +2,8 @@
 ts 1795355545.905379 final mapping and Grok-first TOP; principle ts 1795353913.416459 "stronger models should drive weaker ones").
 
     TOP  grok-4.7 -> claude-opus-5-5 -> gpt-6.2-sol
-    MID  ornith-1.5-35b-a3b -> OpenCode (deepseek-v4.1-flash -> glm-5.3 -> hy4-flash-free) -> claude-sonnet-5-5 -> gpt-6.1-terra
-    LOW  ornith-1.5-35b-a3b -> gpt-6-luna -> claude-haiku-5-5
+    MID  OpenCode (deepseek-v4.1-flash -> glm-5.3 -> hy4-flash-free) -> claude-sonnet-5-5 -> gpt-6.1-terra   (NO ornith since 24 Nov)
+    LOW  ornith-1.5-35b-a3b -> gpt-6-luna -> claude-haiku-5-5   (light lanes only; the only level that lists ornith)
 
 Drives the REAL functions, extracted by NAME from the script under test (PROXY_AGENT_TEST_SCRIPT overrides the path), one bash process per
 launch. Environment-touching helpers are stubbed: curl (Spark health), sleep, the live Claude count, the cooldown probe (proxy_agent_sub_usable),
@@ -81,11 +81,12 @@ MUSE = 'muse-spark-1.3-contributor'
 TOP_TYPES = ['hd-planner', 'hd-investigator', 'pm-admission-reviewer', 'codex-code-reviewer', 'codex-plan-reviewer', 'pm-plan-reviewer',
              'heydonna-ux-reviewer', 'pipeline-contract-reviewer', 'explore-issue-agent', 'growth', 'donna-influencer',
              'marketing-site-builder', 'blog-post-builder']
-LOW_TYPES = ['cleanup-pr-runner']
-MID_TYPES = ['claude', 'pm-triage-agent', 'hd-builder', 'hd-proof-qa', 'remote-test-runner', 'remote-qa-runner', 'ci-repair-agent',
+# 24 Nov (Rajiv C0ALZJHGE49 ts 1795484559.513619): LOW = the light lanes (cleanup, triage); ornith is listed only there.
+LOW_TYPES = ['cleanup-pr-runner', 'pm-triage-agent', 'pm-backlog-promoter']
+MID_TYPES = ['claude', 'hd-builder', 'hd-proof-qa', 'remote-test-runner', 'remote-qa-runner', 'ci-repair-agent',
              'customer-artifact-investigator', 'e2e-failure-investigator', 'mop-main-repair', 'autoscaler-main-repair', 'pm-ops-tooling',
              'main-red-skip', 'superproofer']
-UNLISTED_TYPES = ['vendor-new-agent', 'plan-agent', 'fullstack-dev', 'pm-backlog-promoter', 'pm-hotfix-typo']
+UNLISTED_TYPES = ['vendor-new-agent', 'plan-agent', 'fullstack-dev', 'pm-hotfix-typo']
 # Judgment lanes start on Claude and never on the local model (proxy_agent_is_judgment_lane).
 JUDGMENT_MID = ['ci-repair-agent', 'e2e-failure-investigator', 'customer-artifact-investigator']
 RETIRED_TIERS = ['PLAN', 'LIGHT', 'BUILD1', 'BUILD2', 'BUILD3', 'PROOF1', 'PROOF2', 'REVIEW', 'RAW']
@@ -271,7 +272,7 @@ class FullLevelRefuses(unittest.TestCase):
     """A full level REFUSES (rc 75, the PM queues the launch). It never borrows from the level above or below."""
 
     def test_full_mid_refuses_and_never_falls_to_top(self):
-        for role in ('hd-builder', 'hd-proof-qa', 'claude', 'pm-triage-agent', 'ci-repair-agent', 'vendor-new-agent'):
+        for role in ('hd-builder', 'hd-proof-qa', 'claude', 'ci-repair-agent', 'vendor-new-agent'):
             with self.subTest(role=role):
                 got = route(role, blocked=MID + [MUSE])
                 self.assertEqual(got.rc, '75')
@@ -321,7 +322,7 @@ class Escalation(unittest.TestCase):
                 self.assertEqual((got.tier, got.model, got.rung), ('TOP', 'grok-4.7', '2'))
 
     def test_other_mid_roles_escalate_one_level_per_rung(self):
-        for role in ('claude', 'pm-triage-agent', 'vendor-new-agent'):
+        for role in ('claude', 'vendor-new-agent'):
             with self.subTest(role=role):
                 got = route(role, rung=2)
                 self.assertEqual((got.tier, got.model, got.rung), ('TOP', 'grok-4.7', ''))
@@ -453,10 +454,12 @@ class PoolCaps(unittest.TestCase):
     def test_pool_cap_skips_triage_but_not_the_exempt_list(self):
         # Rajiv ts 1794921123.696379: pm-triage-agent and pm-backlog-promoter are NOT exempt. Spark is down and OpenCode is off, so the Claude cap is reached.
         blocked = dict(spark=False, CLAUDE_PROXY_CAP='0', OPENCODE_PROXY_CAP='0', SARVAM_PROXY_CAP='0')
-        got = route('pm-triage-agent', **blocked)
+        # 24 Nov: triage and the promoter alias moved to LOW (light lanes), so the non-exempt MID cap case is pinned on claude and an unlisted type
+        # (hd-builder keeps the approved hy4-flash-free builder exception and would land there); cap exemption itself is unchanged.
+        got = route('claude', **blocked)
         self.assertEqual(got.model, 'gpt-6.1-terra')
         self.assertIn('claude-sonnet-5-5:pool_cap', got.reason)
-        got = route('pm-backlog-promoter', **blocked)
+        got = route('vendor-new-agent', **blocked)
         self.assertIn('claude-sonnet-5-5:pool_cap', got.reason)
         # ci repair, 12b and a P0 override stay on the first Claude model. Counted as telemetry, not queued. (OpenCode pool cap 0 still applies to everyone.)
         for role in ('ci-repair-agent', 'e2e-failure-investigator', 'main-red-skip', 'cleanup-pr-runner', 'pm-ops-tooling', 'mop-main-repair',
@@ -468,7 +471,7 @@ class PoolCaps(unittest.TestCase):
             with self.subTest(role=role):
                 self.assertNotIn('pool_cap', route(role, CLAUDE_PROXY_CAP='0').reason)
         # A P0 override no longer lifts a pool cap (Rajiv C0ALZJHGE49 ts 1795439359.022079): the P0 preempts at admission instead (test_proxy_preempt.py).
-        self.assertIn('claude-sonnet-5-5:pool_cap', route('pm-triage-agent', PROXY_AGENT_CAP_OVERRIDE='P0:13907', **blocked).reason)
+        self.assertIn('claude-sonnet-5-5:pool_cap', route('claude', PROXY_AGENT_CAP_OVERRIDE='P0:13907', **blocked).reason)
         self.assertNotIn('claude-sonnet-5-5:pool_cap', route('claude', 'MODE: heartbeat', **blocked).reason)
 
     def test_spark_proxy_cap_is_read_from_proxy_caps_env(self):
@@ -561,6 +564,54 @@ class ModelHelpers(unittest.TestCase):
         out = sh('proxy_agent_canonical_id sol; proxy_agent_canonical_id gpt-6.2-sol; proxy_agent_canonical_id gpt-6.1-sol; '
                  'proxy_agent_canonical_id terra; proxy_agent_alias_for_id gpt-6.1-terra').split('\n')
         self.assertEqual(out, ['gpt-6.2-sol', 'gpt-6.2-sol', 'gpt-6.1-sol', 'gpt-6.1-terra', 'terra'])
+
+
+class OrnithLightOnly(unittest.TestCase):
+    """24 Nov (Rajiv C0ALZJHGE49 thread 1795481047.444089, ts 1795484559.513619): ornith only for light work. MID and TOP never list or pick it."""
+    ORNITH = 'ornith-1.5-35b-a3b'
+    LIGHT = ['cleanup-pr-runner', 'pm-triage-agent', 'pm-backlog-promoter']
+    NOT_LIGHT = ['hd-builder', 'hd-proof-qa', 'ci-repair-agent', 'remote-test-runner', 'remote-qa-runner', 'mop-main-repair', 'autoscaler-main-repair',
+                 'pm-ops-tooling', 'e2e-failure-investigator', 'customer-artifact-investigator', 'vendor-new-agent', 'claude']
+
+    def test_only_the_low_level_lists_ornith(self):
+        lines = [l for l in extract('proxy_agent_tier_models').splitlines() if re.match(r'\s+(LOW|MID|TOP)\) models="', l)]
+        self.assertEqual(len(lines), 3)
+        for line in lines:
+            with self.subTest(level=line.strip()[:3]):
+                self.assertEqual(self.ORNITH in line, line.strip().startswith('LOW)'))
+
+    def test_light_lanes_map_to_low_and_start_on_ornith(self):
+        for role in self.LIGHT:
+            with self.subTest(role=role):
+                self.assertEqual(sh('proxy_agent_type_level "%s"' % role), 'LOW')
+                self.assertEqual(sh('TYPE="%s"; proxy_agent_tier_models LOW' % role).split()[0], self.ORNITH)
+                got = route(role)
+                self.assertEqual((got.tier, got.model), ('LOW', self.ORNITH))
+
+    def test_heartbeat_and_digest_briefs_are_light(self):
+        for brief in ('MODE: heartbeat', 'MODE: digest'):
+            with self.subTest(brief=brief):
+                got = route('claude', brief)
+                self.assertEqual((got.tier, got.model), ('LOW', self.ORNITH))
+
+    def test_mid_launches_never_pick_or_list_ornith(self):
+        for role in self.NOT_LIGHT:
+            with self.subTest(role=role):
+                self.assertNotIn(self.ORNITH, sh('TYPE="%s"; proxy_agent_tier_models MID' % role).split())
+                got = route(role)  # Spark is up, so ornith would win if it were still listed
+                self.assertNotEqual(got.model, self.ORNITH)
+                self.assertNotIn('ornith', got.reason)
+
+    def test_non_light_types_lose_ornith_even_when_asked_for_the_low_level(self):
+        for role in self.NOT_LIGHT:
+            with self.subTest(role=role):
+                self.assertNotIn(self.ORNITH, sh('TYPE="%s"; proxy_agent_tier_models LOW' % role).split())
+
+    def test_top_never_lists_ornith(self):
+        for role in ('hd-planner', 'hd-investigator', 'pm-admission-reviewer', 'growth'):
+            with self.subTest(role=role):
+                self.assertNotIn(self.ORNITH, sh('TYPE="%s"; proxy_agent_tier_models TOP' % role).split())
+                self.assertNotEqual(route(role).model, self.ORNITH)
 
 
 if __name__ == '__main__':
