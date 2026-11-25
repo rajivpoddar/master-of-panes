@@ -404,7 +404,9 @@ plan_main_merge() {
 # because a changed selector means the PR's CI ran the OLD selection even when no PR file overlaps (CTO REVISE of MoP 9518bf9d, same thread, ts 1795586027.634509;
 # e.g. 73499dfb..6ee67558 changed scripts/ci/change_scope.py; CTO REVISE #2 of MoP 494a207e, ts 1795587520.404159: a durations-only change must refuse too). The
 # inputs are DISCOVERED by pm-admit-ci-inputs.py from the workflows' own references at M and at main (rule 60: no hand-kept list). An unreadable discovery, or a
-# trusted read in a workflow that cannot be resolved to a file, is UNKNOWN and refuses (fail closed). The ancestry, file and input reads are local git reads under the
+# recognized trusted read (git show|cat-file|archive|ls-tree, a contents-API ?ref= read, --path with --ref) whose revision or path the helper cannot resolve to a file,
+# is UNKNOWN and refuses (fail closed): the helper resolves the FULL operand, including a REV:PATH held in a shell variable or a step env entry, and exits 1 with no
+# stdout for anything it cannot resolve (CTO REVISE of MoP ce4f381b, ts 1795629066.866119: an unresolved variable-held read was skipped and the empty result read as eligible). The ancestry, file and input reads are local git reads under the
 # same deadline (no new GitHub read). The rule that admitted the PR is printed as MERGE_REF_RULE and, for the waiver, appended to pm-admit-skip.log; the waiver's
 # receipt is rule=stale_merge_ref_waived:no_overlap.
 stale_refuse() {

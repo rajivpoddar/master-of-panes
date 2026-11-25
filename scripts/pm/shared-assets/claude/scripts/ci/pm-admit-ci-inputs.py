@@ -19,12 +19,26 @@ The set is DISCOVERED from the repository (rule 60: no hand-kept file list), at 
   5. every file a PR-triggered workflow READS OUT OF A GIT REVISION, from any directory (CTO REVISE of
      MoP 494a207e, ts 1795587520.404159: ci.yml reads scripts/ci/unit-shards/durations.json from
      WORKFLOW_SHA, a data file that is neither executed nor beside an executed script). A trusted
-     read is `git show|cat-file|archive|ls-tree REV:PATH`, a contents-API `contents/PATH?ref=`, or the
-     `--path PATH` of a statement that names a `--ref`. PATH may use a shell variable that a literal
-     `for VAR in a b c; do` loop earlier in the same file binds (`$path`, `scripts/ci/$item`); every
-     expansion is an input. A trusted read whose path cannot be resolved to a file at that commit
-     (an unbound or reassigned variable, a non-literal loop list, a missing file) is UNRESOLVED, and
-     any UNRESOLVED read makes the whole run UNKNOWN: exit 1, no stdout (fail closed).
+     read is a `git show|cat-file|archive|ls-tree` command (global options such as `-C dir` or
+     `--no-pager` allowed; text inside a quoted string or a comment is not a command), a
+     contents-API `contents/PATH?ref=`, or the `--path PATH` of a statement that names a `--ref`.
+     The FULL operand is resolved (CTO REVISE of MoP ce4f381b, ts 1795629066.866119: a revision and
+     path held together in one shell variable were silently skipped): `REV:PATH` is split after
+     every variable in the operand is expanded, so `SPEC="$WORKFLOW_SHA:scripts/x.json"; git show
+     "$SPEC"` reads scripts/x.json. A variable takes its value from the nearest earlier literal
+     assignment or `for VAR in a b c; do` loop in the SAME step (the value may itself use other
+     variables, expanded the same way), else from the step's, job's or workflow's `env:` entry (a
+     `${{ github.workflow_sha }}` style expression is a revision, never a path); every expansion is
+     an input, and a directory read lists every file in it. A recognized read is UNRESOLVED, and any
+     UNRESOLVED read makes the whole run UNKNOWN (exit 1, no stdout, fail closed), when: a variable
+     or expression in its path has no literal value (unbound, set by `$(...)`, `read`, `+=`, a
+     glob or an env expression); an operand is a bare variable that is not known to be a revision
+     (it may hold `REV:PATH`); an operand is a command substitution; `cat-file --batch` takes its
+     objects from stdin; the git read sits inside `eval` or `sh -c`; or the path is not a file or
+     directory at that commit. A read that cannot leave `.github/` needs no resolution (every
+     `.github` file is already an input).
+     Not recognized, by definition: files a workflow reads from the PR's own checkout, a command
+     name held in a variable, and git commands other than show, cat-file, archive and ls-tree.
 Discovery runs at BOTH commits, so a file added or removed by the change is still caught.
 
 Usage: pm-admit-ci-inputs.py --repo <git dir> --base <older main sha> --main <newer main sha>
@@ -53,18 +67,39 @@ EXEC_RE = re.compile(
     + r"|(?:^|[;&|(]|\brun:)[ \t]*(?:-[ \t]+)?" + WORKSPACE + r"(?!" + INTERP + r"[ \t])" + PATH,
     re.M,
 )
-# Trusted reads (rule 5): a path a workflow takes out of a git revision, with optional $var pieces.
-VARPATH = r"(?:[A-Za-z0-9_@.+/-]|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)+"
-REV = r"(?:\$\{\{[^}\n]*\}\}|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|[0-9a-f]{40}|HEAD|FETCH_HEAD|origin/[A-Za-z0-9_./-]+)"
-GIT_READ_RE = re.compile(r"\bgit[ \t]+(?:-C[ \t]+\S+[ \t]+)?(?:show|cat-file|archive|ls-tree)\b([^\n;&|>]*)")
-REV_PATH_RE = re.compile(r"(?<![\w$])" + REV + r"[\"']?:(?!/)(" + VARPATH + r")")
-CONTENTS_RE = re.compile(r"/contents/(" + VARPATH + r")\?ref=")
-OPT_PATH_RE = re.compile(r"--path(?:[ \t]+|=)[\"']?(" + VARPATH + r")")
+# Trusted reads (rule 5). A resolved operand is a string in which every variable or expression with no literal value is
+# a MARK-delimited marker (MARK + payload + MARK); a payload never holds a colon, so the first colon splits REV from PATH.
+MARK = "\x00"
+MAX_ALTERNATIVES = 256
+MAX_DEPTH = 8
+GIT_READ_RE = re.compile(
+    r"(?<![\w.$-])(?:/[\w./-]*/)?git"
+    r"(?:[ \t]+(?:(?:-C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env)[ \t]+\S+|--[a-z][a-z-]*(?:=\S*)?|-[pP]))*"
+    r"[ \t]+(show|cat-file|archive|ls-tree)(?![\w-])"
+)
+# a git read inside `eval "..."` or `sh -c '...'` is a quoted string, so its operands are never resolved: UNRESOLVED
+EVAL_GIT_RE = re.compile(r"(?<![\w.$-])(?:eval|(?:ba|z|da|k)?sh[ \t]+-\w*c)(?![\w-])[^\n]*\bgit\b[^\n]*?[ \t](?:show|cat-file|archive|ls-tree)(?![\w-])")
+CONTENTS_RE = re.compile(r"/contents/([^\s\"'`?]*)\?[^\s\"']*\bref=")
+OPT_PATH_RE = re.compile(r"--path(?:[ \t]+|=)")
 REF_STMT_RE = re.compile(r"--ref\b|WORKFLOW_SHA|workflow[_-]sha")
 FOR_RE = re.compile(r"\bfor[ \t]+([A-Za-z_]\w*)[ \t]+in[ \t]+([^;\n]*?)[ \t]*(?:;[ \t]*|\n[ \t]*)do\b")
-LITERAL_WORD_RE = re.compile(r"[A-Za-z0-9_@.+/-]+")
-ASSIGN_RE = re.compile(r"(?<![\w$.-])([A-Za-z_]\w*)=")
-RHS_RE = re.compile(r"\"([^\"$`\\\n]*)\"|'([^'\n]*)'|([A-Za-z0-9_@.+/-]+)(?=[\s;)&|]|$)")
+ASSIGN_RE = re.compile(r"(?<![\w$.-])([A-Za-z_]\w*)(\+?)=")
+READ_RE = re.compile(r"(?<![\w$.-])read(?![\w-])([^\n;|&<>]*)")
+REV_CMD_RE = re.compile(r"[\"']?\$\([ \t]*git[ \t]+(?:-C[ \t]+\S+[ \t]+)?(?:rev-parse|merge-base|rev-list|describe)(?![\w-])")
+PIECE_RE = re.compile(r"\$\{\{(.*?)\}\}|\$\{([A-Za-z_]\w*)\}|\$([A-Za-z_]\w*|[0-9@*#?!])")
+SIMPLE_VAR_RE = re.compile(r"\$(?:[A-Za-z_]\w*|[0-9@*#?!])")
+MARKER_RE = re.compile(MARK + r"([^" + MARK + r"]*)" + MARK)
+# payloads that are a revision, never a path: GitHub's sha/ref expressions (and `a || b` of them), the GitHub-provided GITHUB_SHA style
+# variables, and a variable set from `$(git rev-parse|merge-base|rev-list|describe ...)`
+REV_TERM = r"(?:github\.(?:sha|workflow_sha|base_ref|head_ref|ref|ref_name|event\.(?:before|after|pull_request\.(?:base|head)\.(?:sha|ref)|merge_group\.(?:base|head)_(?:sha|ref)))|GITHUB_(?:SHA|REF|REF_NAME|BASE_REF|HEAD_REF|WORKFLOW_SHA))"
+REV_PAYLOAD_RE = re.compile(r"gh=" + REV_TERM + r"(?: \|\| " + REV_TERM + r")*|cmd=rev")
+GH_VARS = {"GITHUB_SHA", "GITHUB_REF", "GITHUB_REF_NAME", "GITHUB_BASE_REF", "GITHUB_HEAD_REF", "GITHUB_WORKFLOW_SHA"}
+REV_SUFFIX_RE = re.compile(r"(?:\^\{[a-z]*\}|~\d*|\^\d*|@\{[^}]*\})$")
+REV_PREFIX_RE = re.compile(r"(?:origin/|refs/(?:heads|tags|remotes|pull)/|remotes/|tags/)")
+OPTION_VALUE = {"archive": {"--format", "-o", "--output", "--prefix", "--remote", "--exec"}}
+ENV_KEY_RE = re.compile(r"(?m)^([ \t]*)env:[ \t]*$")
+ENV_ITEM_RE = re.compile(r"([ \t]+)([A-Za-z_]\w*):[ \t]*(.*?)[ \t]*$")
+STEPS_RE = re.compile(r"(?m)^([ \t]*)steps:[ \t]*$")
 TOKEN_RE = re.compile(r"(?<![\w./@-])" + WORKSPACE + r"((?:\./)?" + PATH_CH + r"+(?:/" + PATH_CH + r"+)+)")
 USES_RE = re.compile(r"(?m)^[ \t]*(?:-[ \t]+)?uses:[ \t]*['\"]?\./(\.github/[A-Za-z0-9_@./-]+?)['\"]?[ \t]*(?:#.*)?$")
 PR_TRIGGER_RE = re.compile(r"\bpull_request(?:_target)?\b")
@@ -127,61 +162,365 @@ def pr_scope(github, wf_text):
     return scope
 
 
-def _bound_words(joined, var, pos):
-    """The literal words VAR holds at pos: the nearest earlier `for VAR in a b c; do` (all of them) or literal `VAR=word`
-    (one). None when VAR is unbound, the nearest binding is not literal (`$(...)`, another variable, a glob) or a
-    non-literal list."""
-    best = None  # (offset of the binding, words or None)
-    for m in FOR_RE.finditer(joined, 0, pos):
-        if m.group(1) == var:
-            words = [w.strip("\"'") for w in m.group(2).split()]
-            best = (m.start(), words if words and all(LITERAL_WORD_RE.fullmatch(w) for w in words) else None)
-    for m in ASSIGN_RE.finditer(joined, 0, pos):
-        if m.group(1) == var and (best is None or m.start() > best[0]):
-            rhs = RHS_RE.match(joined, m.end())
-            lit = next((g for g in rhs.groups() if g), None) if rhs else None
-            best = (m.start(), [lit] if lit else None)
-    return None if best is None else best[1]
+def code_mask(text):
+    """text with the inside of quoted strings and trailing comments blanked (same length), so a command is only found where the shell
+    would run it: `git show` in echo "git show failed" is a message, but `$(git show ...)` inside a double quote is code. Quote state
+    resets at each newline, so a stray apostrophe in a comment can only expose more text, never hide a later command."""
+    lines = []
+    for line in text.split("\n"):
+        out, stack, i, n = [], [], 0, len(line)
+        while i < n:
+            c, top = line[i], (stack[-1] if stack else "")
+            if top == "'":
+                out.append(c if c == "'" else "\x01")
+                if c == "'":
+                    stack.pop()
+            elif top == '"':
+                if c == "\\" and i + 1 < n:
+                    out.append("\x01\x01")
+                    i += 1
+                elif c == '"':
+                    out.append(c)
+                    stack.pop()
+                elif c == "$" and line.startswith("$(", i):
+                    out.append("$(")
+                    stack.append("(")
+                    i += 1
+                elif c == "`":
+                    out.append(c)
+                    stack.append("`")
+                else:
+                    out.append("\x01")
+            elif c == "\\" and i + 1 < n:
+                out.append(line[i:i + 2])
+                i += 1
+            elif c in "'\"":
+                out.append(c)
+                stack.append(c)
+            elif c == "`":
+                out.append(c)
+                if top == "`":
+                    stack.pop()
+                else:
+                    stack.append("`")
+            elif c == "(":
+                out.append(c)
+                stack.append("(")
+            elif c == ")":
+                out.append(c)
+                if top == "(":
+                    stack.pop()
+            elif c == "#" and (i == 0 or line[i - 1] in " \t;&|("):
+                out.append("\x01" * (n - i))
+                break
+            else:
+                out.append(c)
+            i += 1
+        lines.append("".join(out))
+    return "\n".join(lines)
+
+
+def skip_parens(text, i):
+    """Index just after the parenthesised group whose '(' is the first one at or after i (quotes inside are not interpreted)."""
+    depth, j = 0, text.find("(", i)
+    if j < 0:
+        return len(text)
+    while j < len(text):
+        if text[j] == "(":
+            depth += 1
+        elif text[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return len(text)
+
+
+def dollar(text, i):
+    """(piece, end) for the expansion that starts at text[i] == '$'. piece is None when it cannot be resolved statically (command
+    substitution, arithmetic, a parameter operator such as ${x:-y} or ${#x}); a `${{ expr }}` or variable reference is kept as is."""
+    if text.startswith("${{", i):
+        j = text.find("}}", i)
+        return (None, len(text)) if j < 0 else (text[i:j + 2], j + 2)
+    if text.startswith("$(", i):
+        return None, skip_parens(text, i)
+    if text.startswith("${", i):
+        j = text.find("}", i)
+        if j < 0:
+            return None, len(text)
+        name = text[i + 2:j]
+        return ("${" + name + "}" if re.fullmatch(r"[A-Za-z_]\w*", name) else None), j + 1
+    m = SIMPLE_VAR_RE.match(text, i)
+    return (m.group(0), m.end()) if m else ("$", i + 1)
+
+
+def shell_word(text, i):
+    """(template, end) for the shell word starting at text[i]. Quotes and escapes are removed; a variable reference or `${{ expr }}`
+    stays in the template. The template is None when the word is not statically resolvable: a command substitution or backtick, a
+    parameter operator, an unquoted glob, or a `$` inside single quotes."""
+    n, out, opaque = len(text), [], False
+    while i < n and text[i] not in " \t\n;&|<>)":
+        c = text[i]
+        if c == "$":
+            piece, i = dollar(text, i)
+            if piece is None:
+                opaque = True
+            else:
+                out.append(piece)
+        elif c == "`":
+            j = text.find("`", i + 1)
+            i, opaque = (n if j < 0 else j + 1), True
+        elif c == "\\":
+            if i + 1 < n and text[i + 1] != "\n":
+                out.append(text[i + 1])
+            i += 2
+        elif c == "'":
+            j = text.find("'", i + 1)
+            j = n if j < 0 else j
+            opaque = opaque or "$" in text[i + 1:j]
+            out.append(text[i + 1:j])
+            i = j + 1
+        elif c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                d = text[i]
+                if d == "$":
+                    piece, i = dollar(text, i)
+                    if piece is None:
+                        opaque = True
+                    else:
+                        out.append(piece)
+                elif d == "`":
+                    j = text.find("`", i + 1)
+                    i, opaque = (n if j < 0 else j + 1), True
+                elif d == "\\" and i + 1 < n and text[i + 1] in '"\\$`':
+                    opaque = opaque or text[i + 1] in "$`"
+                    out.append(text[i + 1])
+                    i += 2
+                else:
+                    out.append(d)
+                    i += 1
+            i += 1
+        else:
+            opaque = opaque or c in "*?["
+            out.append(c)
+            i += 1
+    return (None if opaque else "".join(out)), min(i, n)
+
+
+def shell_words(text, i):
+    """[(template, start, end)] for the words from text[i] to the end of the simple command (an unquoted ; & | < > ) or a newline)."""
+    words, n = [], len(text)
+    while True:
+        while i < n and text[i] in " \t":
+            i += 1
+        if i >= n or text[i] in "\n;&|<>)":
+            return words
+        template, end = shell_word(text, i)
+        if end <= i:
+            return words
+        if not (template is not None and template.isdigit() and text[end:end + 1] in ("<", ">")):  # `2>/dev/null` is a redirect, not an operand
+            words.append((template, i, end))
+        i = end
+
+
+def step_spans(text):
+    """[(start, end)] offsets of every item of a `steps:` list."""
+    spans = []
+    for m in STEPS_RE.finditer(text):
+        base, item_indent, start, pos = len(m.group(1)), None, None, m.end() + 1
+        while pos < len(text):
+            eol = text.find("\n", pos)
+            eol = len(text) if eol < 0 else eol
+            line = text[pos:eol]
+            if line.strip():
+                indent = len(line) - len(line.lstrip(" \t"))
+                item = line.lstrip().startswith("-")
+                if item_indent is None:
+                    if not item or indent < base:
+                        break
+                    item_indent = indent
+                if indent < item_indent or (indent == item_indent and not item):
+                    break
+                if indent == item_indent:
+                    if start is not None:
+                        spans.append((start, pos))
+                    start = pos
+            pos = eol + 1
+        if start is not None:
+            spans.append((start, min(pos, len(text))))
+    return spans
+
+
+def yaml_envs(text, steps):
+    """[(name, value, step span or None)] for every `env:` mapping: a step's own carries that step, a job's or the workflow's None."""
+    found = []
+    for m in ENV_KEY_RE.finditer(text):
+        base = len(m.group(1))
+        span = next(((lo, hi) for lo, hi in steps if lo <= m.start() < hi), None)
+        pos = m.end() + 1
+        while pos < len(text):
+            eol = text.find("\n", pos)
+            eol = len(text) if eol < 0 else eol
+            line = text[pos:eol]
+            if line.strip():
+                item = ENV_ITEM_RE.fullmatch(line)
+                if item is None or len(item.group(1)) <= base:
+                    break
+                value = item.group(3)
+                if len(value) >= 2 and value[0] in "'\"" and value[-1] == value[0]:
+                    value = value[1:-1]
+                else:
+                    value = re.sub(r"[ \t]+#.*$", "", value)
+                if value and value[0] not in "|>":
+                    found.append((item.group(2), value, span))
+            pos = eol + 1
+    return found
+
+
+class Scope:
+    """A workflow file's variables: what literal values a variable can have where a trusted read sits (its own step, else env:)."""
+
+    def __init__(self, text):
+        self.text = text
+        self.mask = code_mask(text)  # bindings are only found where the shell would run them, never inside a quoted string
+        self.steps = step_spans(text)
+        self.envs = yaml_envs(text, self.steps)
+
+    def span(self, pos):
+        return next(((lo, hi) for lo, hi in self.steps if lo <= pos < hi), None)
+
+    def expand(self, template, pos, depth=0):
+        """Every string `template` can expand to at pos. A piece with no literal value is a MARK marker (payload: the variable name,
+        `gh=<expression>`, `cmd=rev` for a revision from git, or `opaque`)."""
+        out, i = [""], 0
+        for m in PIECE_RE.finditer(template):
+            if m.group(1) is not None:
+                alts = [MARK + "gh=" + re.sub(r"\s+", " ", m.group(1).strip()).replace(":", "~") + MARK]
+            else:
+                alts = self.bind(m.group(2) or m.group(3), pos, depth)
+            out = [o + template[i:m.start()] + a for o in out for a in alts]
+            if len(out) > MAX_ALTERNATIVES:
+                return [MARK + "many" + MARK]
+            i = m.end()
+        return [o + template[i:] for o in out]
+
+    def bind(self, name, pos, depth):
+        """The values VAR can hold at pos: the nearest earlier binding in the same step (`for VAR in ...; do`, `VAR=word`; a `read`
+        or `+=` is opaque), else its env: entry, else a GitHub-provided variable, else an unbound marker."""
+        opaque = [MARK + "opaque" + MARK]
+        if depth > MAX_DEPTH:
+            return opaque
+        span = self.span(pos)
+        lo = span[0] if span else 0
+        best = None  # (offset, kind, match)
+        for kind, matches in (("for", FOR_RE.finditer(self.mask, lo, pos)), ("assign", ASSIGN_RE.finditer(self.mask, lo, pos)),
+                              ("read", READ_RE.finditer(self.mask, lo, pos))):
+            for m in matches:
+                named = name in re.findall(r"[A-Za-z_]\w*", m.group(1)) if kind == "read" else m.group(1) == name
+                if named and (best is None or m.start() > best[0]):
+                    best = (m.start(), kind, m)
+        if best is None:
+            return self.env_values(name, span, depth)
+        _, kind, m = best
+        if kind == "read" or (kind == "assign" and m.group(2)):
+            return opaque
+        if kind == "for":
+            alts = []
+            for template, _, _ in shell_words(self.text[m.start(2):m.end(2)], 0):
+                alts += opaque if template is None else self.expand(template, m.start(), depth + 1)
+            return alts or opaque
+        template, _ = shell_word(self.text, m.end())  # the same offsets in the unmasked text
+        if template is None:
+            return [MARK + "cmd=rev" + MARK] if REV_CMD_RE.match(self.text, m.end()) else opaque
+        return self.expand(template, m.start(), depth + 1)
+
+    def env_values(self, name, span, depth):
+        own = [v for n, v, sp in self.envs if n == name and sp is not None and sp == span]
+        values = own or [v for n, v, sp in self.envs if n == name and sp is None]
+        if not values:
+            return [MARK + ("gh=" + name if name in GH_VARS else name) + MARK]
+        return [alt for v in values for alt in self.expand(v, 0, depth + 1)]
+
+
+def is_revision(operand):
+    """An operand with an unresolved piece that is nevertheless a revision, not a REV:PATH: a rev suffix (^{commit}, ~1, @{1}), a
+    ref-name prefix, or only revision-valued variables and expressions."""
+    payloads = MARKER_RE.findall(operand)
+    return bool(REV_SUFFIX_RE.search(operand) or REV_PREFIX_RE.match(operand)
+                or (payloads and all(REV_PAYLOAD_RE.fullmatch(p) for p in payloads)))
 
 
 def trusted_reads(wf, body, tree):
-    """(paths, problems): every file the workflow text reads out of a git revision, expanded through literal for-loops and
-    literal assignments. A read of a directory is a read of every file in it. A read that cannot be resolved to a file in
-    tree is a problem (UNRESOLVED), except a read that cannot leave .github/ (every .github file is an input already)."""
+    """(paths, problems): every file the workflow text reads out of a git revision, with the whole operand resolved (see the module
+    docstring, rule 5). A read of a directory is a read of every file in it. A recognized read that cannot be resolved is a problem
+    (UNRESOLVED), except a path that cannot leave .github/ (every .github file is an input already)."""
     joined = re.sub(r"(?m)^[ \t]*#.*$", "", re.sub(r"\\[ \t]*\r?\n[ \t]*", " ", body))
-    found = []  # (offset of the path expression, expression)
-    for g in GIT_READ_RE.finditer(joined):
-        for m in REV_PATH_RE.finditer(g.group(1)):
-            found.append((g.start(1) + m.start(1), m.group(1)))
+    scope = Scope(joined)
+    paths, problems = set(), []
+
+    def path_read(shown, resolved):
+        if MARK in resolved:
+            if not _norm(resolved[:resolved.index(MARK)]).startswith(".github/"):
+                problems.append(f"{wf}: '{shown}' has a variable or expression with no literal value in its path")
+            return
+        v = _norm(resolved).rstrip("/")
+        below = [t for t in tree if t.startswith(v + "/")] if v else []
+        if v in tree and tree[v][1] in ("100644", "100755"):
+            paths.add(v)
+        elif below:  # a directory: every file in it is read
+            paths.update(below)
+        else:
+            problems.append(f"{wf}: '{v}' (from '{shown}') is not a file or directory at this commit")
+
+    def object_read(shown, template, pos):  # a git object operand: REV:PATH reads PATH, a bare revision reads no file
+        if template is None:
+            problems.append(f"{wf}: '{shown}' is a command substitution, so the object it names cannot be resolved")
+            return
+        for operand in scope.expand(template, pos):
+            colon = operand.find(":")
+            if colon >= 0:
+                path_read(shown, operand[colon + 1:])
+            elif MARK in operand and not is_revision(operand) and not _norm(operand[:operand.index(MARK)]).startswith(".github/"):
+                problems.append(f"{wf}: '{shown}' is a variable with no literal value; it may hold a REV:PATH")
+
+    def pathspec_read(shown, template, pos):
+        if template is None:
+            problems.append(f"{wf}: '{shown}' is a command substitution, so the path it names cannot be resolved")
+            return
+        for resolved in scope.expand(template, pos):
+            path_read(shown, resolved)
+
+    masked = scope.mask
+    for g in GIT_READ_RE.finditer(masked):  # only where the shell would run it, never inside a quoted string
+        sub, objects, specs, ddash, first, skip = g.group(1), [], [], False, True, False
+        for template, a, b in shell_words(joined, g.end()):
+            if skip:
+                skip = False
+            elif template == "--" and not ddash:
+                ddash = True
+            elif template is not None and template.startswith("-") and not ddash:
+                skip = template in OPTION_VALUE.get(sub, ())
+                if sub == "cat-file" and template.startswith("--batch"):
+                    problems.append(f"{wf}: 'git cat-file {template}' reads its objects from stdin, so they cannot be resolved")
+            else:
+                (specs if ddash or (sub in ("archive", "ls-tree") and not first) else objects).append((joined[a:b], template, a))
+                first = False
+        for shown, template, pos in objects:
+            object_read(shown, template, pos)
+        for shown, template, pos in specs:
+            pathspec_read(shown, template, pos)
+    for m in EVAL_GIT_RE.finditer(joined):
+        if masked[m.start()] == joined[m.start()]:  # the eval / sh -c itself is code (its quoted argument is what holds the git read)
+            problems.append(f"{wf}: a git read inside eval or sh -c ('{joined[m.start():m.start() + 50]}') cannot be resolved")
     for m in CONTENTS_RE.finditer(joined):
-        found.append((m.start(1), m.group(1)))
+        pathspec_read(m.group(1), None if re.search(r"\$\(|`|[*\[]", m.group(1)) else m.group(1), m.start(1))
     for stmt in re.finditer(r"[^\n]+", joined):
         if REF_STMT_RE.search(stmt.group(0)):
             for m in OPT_PATH_RE.finditer(stmt.group(0)):
-                found.append((stmt.start() + m.start(1), m.group(1)))
-    paths, problems = set(), []
-    for pos, expr in found:
-        pending, resolved = [expr], []
-        while pending:
-            cur = pending.pop()
-            var = re.search(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", cur)
-            if var is None:
-                resolved.append(cur)
-                continue
-            words = _bound_words(joined, var.group(1), pos)
-            if words is not None:
-                pending += [cur[:var.start()] + w + cur[var.end():] for w in words]
-            elif not _norm(cur[:var.start()]).startswith(".github/"):
-                problems.append(f"{wf}: ${var.group(1)} in '{expr}' is not bound to a literal path")
-        for v in resolved:
-            v = _norm(v).rstrip("/")
-            below = [t for t in tree if t.startswith(v + "/")] if v else []
-            if v in tree and tree[v][1] in ("100644", "100755"):
-                paths.add(v)
-            elif below:  # a directory: every file in it is read
-                paths.update(below)
-            else:
-                problems.append(f"{wf}: '{v}' (from '{expr}') is not a file or directory at this commit")
+                start = stmt.start() + m.end()
+                template, end = shell_word(joined, start)
+                pathspec_read(joined[start:end], template, start)
     return paths, problems
 
 

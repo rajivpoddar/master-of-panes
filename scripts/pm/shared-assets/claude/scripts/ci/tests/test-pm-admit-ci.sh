@@ -152,6 +152,11 @@ if [[ "$*" = *pm-ops.py* ]]; then
 fi
 if [[ "$*" = *pm-admit-ci-inputs.py* ]]; then   # the trusted-CI-input helper: changed inputs come from LAG_CI_INPUTS_CHANGED ('%b'), LAG_CI_INPUTS_FAIL=1 is an unreadable discovery
   printf 'ci-inputs %s\n' "$*" >> "$STUB_LOG"
+  if [ -n "${LAG_REAL_REPO:-}" ]; then   # guard-level cases: run the REAL helper on a real temp git repo (the guard's stub shas are swapped for LAG_REAL_*); the stub git is taken off PATH for it
+    helper=""; for a in "$@"; do case "$a" in *pm-admit-ci-inputs.py) helper="$a" ;; esac; done
+    d=$(cd "$(dirname "$0")" && pwd); p=":$PATH:"; p="${p//:$d:/:}"; p="${p#:}"; p="${p%:}"
+    PATH="$p" exec "$REAL_PYTHON" -I "$helper" --repo "$LAG_REAL_REPO" --base "$LAG_REAL_BASE" --main "$LAG_REAL_MAIN"
+  fi
   [ "${LAG_CI_INPUTS_FAIL:-}" != 1 ] || exit 1
   printf '%b' "${LAG_CI_INPUTS_CHANGED:-}"
   exit 0
@@ -547,6 +552,50 @@ LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' L
 assert_stale_refused lag_ci_inputs_unreadable
 check 'lag_ci_inputs_unreadable: REFUSE says the trusted shared CI inputs main changed since the older parent are UNKNOWN; nothing admitted' 'grep -q "the trusted shared CI inputs main changed since $STUB_LAG_SHA are UNKNOWN (read failed, timed out or returned past the 4s deadline)" <<<"$OUT" && ! grep -q "^ADMITTED" <<<"$OUT" && ! grep -qE -- "--add-label|label create" "$STUB_LOG"'
 check 'lag_ci_inputs_unreadable: the UNKNOWN refusal also names the unresolvable trusted-file reference as a cause (the helper exits 1 for it; CTO REVISE #2 "unresolved inputs failing closed")' 'grep -q "or a workflow reads a trusted file the discovery could not resolve" <<<"$OUT"'
+
+# ---- Round 3 (CTO REVISE of MoP ce4f381b, C0ALZJHGE49 thread 1795567441.556059, ts 1795629066.866119): a revision and path held in a shell variable ----
+# These cases run the REAL pm-admit-ci-inputs.py through the REAL guard on a real temp git repo whose pull_request workflow reads durations.json out of
+# WORKFLOW_SHA through a variable (`SPEC="$WORKFLOW_SHA:scripts/ci/unit-shards/durations.json"; git show "$SPEC"`). The candidate helper silently skipped that read
+# (exit 0, no output), which the guard took as "no CI input changed". Expected: a durations-only change REFUSES, unrelated drift is ADMITTED, and a recognized read
+# the helper cannot resolve is UNKNOWN and REFUSES.
+REAL_GIT=$(command -v git)
+rgit() { "$REAL_GIT" -C "$REAL_REPO" -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false "$@"; }
+real_commit() { rgit add -A >/dev/null && rgit commit -q -m "$1" --allow-empty && rgit rev-parse HEAD; }
+mk_real_repo() { # <name> <run block of the pull_request workflow>; sets REAL_REPO and REAL_BASE (the older main)
+  REAL_REPO="$T/real-$1"
+  mkdir -p "$REAL_REPO/.github/workflows" "$REAL_REPO/scripts/ci/unit-shards" "$REAL_REPO/lib"
+  "$REAL_GIT" -C "$REAL_REPO" init -q -b main
+  { printf 'on:\n  pull_request:\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - name: s\n        run: |\n'; printf '%s\n' "$2" | sed 's/^/          /'; } > "$REAL_REPO/.github/workflows/ci.yml"
+  printf '{"a": 1}\n' > "$REAL_REPO/scripts/ci/unit-shards/durations.json"
+  printf 'x = 1\n' > "$REAL_REPO/lib/other.ts"
+  REAL_BASE=$(real_commit base)
+}
+INDIRECT_RUN='SPEC="$WORKFLOW_SHA:scripts/ci/unit-shards/durations.json"
+git show "$SPEC" > "$trusted/durations.json"'
+
+echo "case: lagging merge ref (real helper, real repo) - main changed ONLY durations.json, which the workflow reads through a REV:PATH variable: REFUSED at the guard naming the path"
+mk_real_repo indirect_durations "$INDIRECT_RUN"
+printf '{"a": 2}\n' > "$REAL_REPO/scripts/ci/unit-shards/durations.json"; REAL_MAIN=$(real_commit 'durations only')
+LAG_REAL_REPO="$REAL_REPO" LAG_REAL_BASE="$REAL_BASE" LAG_REAL_MAIN="$REAL_MAIN" LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' LAG_MAIN_FILES='scripts/ci/unit-shards/durations.json\n' \
+  run_lag lag_real_indirect_durations --no-12b-gate --reason 'lagging ref test'
+assert_stale_refused lag_real_indirect_durations
+check 'lag_real_indirect_durations: REFUSE says a trusted CI input changed and names exactly scripts/ci/unit-shards/durations.json (the real helper followed the variable)' 'grep -q "lagging-ref rule not met: trusted CI input changed: main changed 1 shared CI input file(s) that decide what runs since that parent $STUB_LAG_SHA, so CI ran the older selection even though no PR file overlaps: scripts/ci/unit-shards/durations.json\. Admission needs" <<<"$OUT"'
+check 'lag_real_indirect_durations: the real helper ran once, nothing admitted, no lagging rule line or audit entry' '[ "$(grep -c "^ci-inputs " "$STUB_LOG")" = 1 ] && ! grep -q "^MERGE_REF_RULE" <<<"$OUT" && ! grep -q "^ADMITTED" <<<"$OUT"'
+
+echo "case: lagging merge ref (real helper, real repo) - the same workflow, main drifted only in an unrelated file: ADMITTED"
+mk_real_repo indirect_unrelated "$INDIRECT_RUN"
+printf 'x = 2\n' > "$REAL_REPO/lib/other.ts"; REAL_MAIN=$(real_commit 'unrelated drift')
+LAG_REAL_REPO="$REAL_REPO" LAG_REAL_BASE="$REAL_BASE" LAG_REAL_MAIN="$REAL_MAIN" LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' LAG_MAIN_FILES='lib/other.ts\n' \
+  run_lag lag_real_indirect_unrelated --no-12b-gate --reason 'lagging ref test'
+check 'lag_real_indirect_unrelated: exit 0, ADMITTED, the lagging rule line reports ci_inputs_changed=0, the real helper ran once' '[ "$RC" = 0 ] && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT" && grep -q "^MERGE_REF_RULE rule=stale_merge_ref_waived:no_overlap .* ci_inputs_changed=0$" <<<"$OUT" && [ "$(grep -c "^ci-inputs " "$STUB_LOG")" = 1 ]'
+
+echo "case: lagging merge ref (real helper, real repo) - the workflow has a trusted read the helper cannot resolve (\$SPEC never set), main drifted only in an unrelated file: UNKNOWN refuses, never eligible"
+mk_real_repo unresolved_read 'git show "$SPEC" > "$trusted/durations.json"'
+printf 'x = 3\n' > "$REAL_REPO/lib/other.ts"; REAL_MAIN=$(real_commit 'unrelated drift')
+LAG_REAL_REPO="$REAL_REPO" LAG_REAL_BASE="$REAL_BASE" LAG_REAL_MAIN="$REAL_MAIN" LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' LAG_MAIN_FILES='lib/other.ts\n' \
+  run_lag lag_real_unresolved_read --no-12b-gate --reason 'lagging ref test'
+assert_stale_refused lag_real_unresolved_read
+check 'lag_real_unresolved_read: REFUSE says the trusted shared CI inputs are UNKNOWN and names the unresolvable trusted-file reference as the cause; nothing admitted, no label write' 'grep -q "the trusted shared CI inputs main changed since $STUB_LAG_SHA are UNKNOWN (read failed, timed out or returned past the 4s deadline) (or a workflow reads a trusted file the discovery could not resolve)" <<<"$OUT" && ! grep -q "^ADMITTED" <<<"$OUT" && ! grep -q "^MERGE_REF_RULE" <<<"$OUT" && ! grep -qE -- "--add-label|label create" "$STUB_LOG"'
 
 echo "case: exact main parent - the CI-input helper is not run (nothing lagged)"
 run_case lag_exact_no_helper --no-12b-gate --reason 'lagging ref test'
