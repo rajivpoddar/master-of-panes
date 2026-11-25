@@ -13,7 +13,7 @@ PROCESS = re.compile(r'(?:^|\s)\S*/claude\s+-p\s+--name\s+([A-Za-z0-9._-]+)\s+--
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z')
 
 
-def count_processes(processes, root, claude_only=False):
+def count_processes(processes, root, claude_only=False, ultra_only=False):
     count = 0
     for line in processes.splitlines():
         match = PROCESS.search(line)
@@ -21,6 +21,10 @@ def count_processes(processes, root, claude_only=False):
             continue
         name, model = match.groups()
         if claude_only and not model.startswith('claude-'):
+            continue
+        # 25 Nov: the dev@scribie ULTRA credential is its own pool (ultra/<model> via the CLIProxyAPI prefix route); it never
+        # counts against the team Claude pool, and the team Claude count never counts it.
+        if ultra_only and not model.startswith('ultra/'):
             continue
         if not NAME.fullmatch(name) or name in ('.', '..'):
             raise ValueError('invalid proxy name')
@@ -40,7 +44,7 @@ def main():
     try:
         root = Path(os.environ.get('PROXY_AGENT_RUN_STATE_DIR', str(Path.home() / '.local/state/proxy-agent-runs')))
         output = subprocess.check_output(['/bin/ps', '-axo', 'command='], text=True, errors='replace')  # a non-UTF-8 argv made ps output undecodable → UnicodeDecodeError → caps unreadable (23 Nov)
-        print(count_processes(output, root, sys.argv[1] == 'claude'))
+        print(count_processes(output, root, sys.argv[1] == 'claude', sys.argv[1] == 'ultra'))
     except (OSError, ValueError, IndexError, subprocess.SubprocessError) as exc:
         print('proxy-agent: cap metadata unavailable: ' + type(exc).__name__, file=sys.stderr)
         print(999)

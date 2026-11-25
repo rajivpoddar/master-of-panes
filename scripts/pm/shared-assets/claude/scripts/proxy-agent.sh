@@ -731,7 +731,7 @@ model = os.environ.get("PROXY_AGENT_CLAUDE_PROBE_MODEL", "")
 # Both local Spark aliases must be probe-able: without it an id that is not in this list returns "fail" and is
 # recorded as probe_failed, so the lane is cooled and falls through to a PAID model even though the Spark is healthy and the
 # gate above already proved the checkpoint is served. /v1/messages through CLIProxyAPI answers it 200 (verified 22 Nov).
-if model not in ("claude-opus-5-5-high", "claude-sonnet-5-5-high", "gemini-4-argon-high", "gemini-3.8-flash-high", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-high", "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "grok-4.7", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-sol(xhigh)", "gpt-6-astra", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-fable-5-2", "hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor", "inkling-2-mini", "ornith-1.5-35b-a3b", "qwen3.8-flash-next", "sarvam-glm-5.3", "sarvam-deepseek-v4.1-flash", "sarvam-105b", "sarvam-gemma4", "sarvam-kimi-k3"):
+if model not in ("claude-opus-5-5-high", "claude-sonnet-5-5-high", "gemini-4-argon-high", "gemini-3.8-flash-high", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-high", "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "grok-4.7", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-sol(xhigh)", "gpt-6-astra", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-fable-5-2", "ultra/claude-opus-5-5", "ultra/claude-sonnet-5-5", "ultra/claude-haiku-5-5", "hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor", "inkling-2-mini", "ornith-1.5-35b-a3b", "qwen3.8-flash-next", "sarvam-glm-5.3", "sarvam-deepseek-v4.1-flash", "sarvam-105b", "sarvam-gemma4", "sarvam-kimi-k3"):
     finish("fail", 0)
 
 state_dir = os.environ.get("PROXY_AGENT_STATE_DIR") or os.path.expanduser("~/.cache/proxy-agent")
@@ -1596,7 +1596,7 @@ _PROXY_TOTAL_CAP_ENV="${PROXY_AGENT_TOTAL_CAP:-}"
 if [[ -r "$HOME/.claude/state/proxy-caps.env" ]]; then
   while IFS== read -r _k _v; do
     case "$_k" in
-      PROXY_AGENT_TOTAL_CAP|PROXY_AGENT_CLAUDE_CAP|PM_SUBAGENT_CAP|CODEX_PROXY_CAP|CLAUDE_PROXY_CAP|GROK_PROXY_CAP|OPENCODE_PROXY_CAP|HY4_PROXY_CAP|SARVAM_PROXY_CAP|SPARK_PROXY_CAP) [[ -z "${!_k:-}" && "$_v" =~ ^[0-9]+$ ]] && printf -v "$_k" %s "$_v";;
+      PROXY_AGENT_TOTAL_CAP|PROXY_AGENT_CLAUDE_CAP|PM_SUBAGENT_CAP|CODEX_PROXY_CAP|CLAUDE_PROXY_CAP|GROK_PROXY_CAP|OPENCODE_PROXY_CAP|HY4_PROXY_CAP|SARVAM_PROXY_CAP|SPARK_PROXY_CAP|ULTRA_PROXY_CAP) [[ -z "${!_k:-}" && "$_v" =~ ^[0-9]+$ ]] && printf -v "$_k" %s "$_v";;
       PROXY_BURN_GATE) [[ -z "${!_k:-}" && ( "$_v" == enforce || "$_v" == shadow ) ]] && printf -v "$_k" %s "$_v";;
     esac
   done < "$HOME/.claude/state/proxy-caps.env"
@@ -1783,8 +1783,8 @@ proxy_agent_tier_models() {
   local models _m _kept=""
   case "$1" in
     LOW) models="ornith-1.5-35b-a3b sarvam-glm-5.3 sarvam-deepseek-v4.1-flash sarvam-105b sarvam-gemma4 gpt-6-luna claude-haiku-5-5";;  # muse (OpenCode Go) dropped until the 30 Nov weekly reset (Rajiv ts 1795515247.892709);  # Sarvam = light work only (Rajiv C0ALZJHGE49 ts 1795420232.692599: "sarvam looks to be quite useless if we max out the monthly in 2d. maybe we should use it only for light work.")  # Spark (free) stays first for LOW: OpenCode monthly burn 0.35 vs 0.10 %/h budget (23 Nov 08:30)
-    MID) models="hy4-flash-free claude-sonnet-5-5 gpt-6.1-terra";;  # OpenCode Go weekly 62% at 1.87 vs 0.28 %/h budget: paid OpenCode ids (glm, deepseek, muse) out of MID until the Mon 30 Nov 05:30 IST reset (Rajiv D0AMF0XE6TS thread 1795513877.716279, ts 1795515247.892709 "ok"); was: glm-5.3 deepseek-v4.1-flash hy4-flash-free claude-sonnet-5-5 gpt-6.1-terra muse-spark-1.3-contributor;  # Sarvam moved to LOW only (Rajiv ts 1795420232.692599); ornith LOW only (Rajiv ts 1795484559.513619, 24 Nov)
-    TOP) models="claude-opus-5-5 claude-fable-5-2 gpt-6.2-sol sarvam-kimi-k3 grok-4.7 muse-spark-1.3-contributor";;  # Rajiv D0AMF0XE6TS thread 1795485653.099709, ts 1795486375.339929 (24 Nov): value-per-$ order, Opus (77x) first, Grok (11-13x) last
+    MID) models="hy4-flash-free claude-sonnet-5-5 ultra/claude-sonnet-5-5 gpt-6.1-terra";;  # OpenCode Go weekly 62% at 1.87 vs 0.28 %/h budget: paid OpenCode ids (glm, deepseek, muse) out of MID until the Mon 30 Nov 05:30 IST reset (Rajiv D0AMF0XE6TS thread 1795513877.716279, ts 1795515247.892709 "ok"); was: glm-5.3 deepseek-v4.1-flash hy4-flash-free claude-sonnet-5-5 gpt-6.1-terra muse-spark-1.3-contributor;  # Sarvam moved to LOW only (Rajiv ts 1795420232.692599); ornith LOW only (Rajiv ts 1795484559.513619, 24 Nov)
+    TOP) models="claude-opus-5-5 ultra/claude-opus-5-5 claude-fable-5-2 gpt-6.2-sol sarvam-kimi-k3 grok-4.7 muse-spark-1.3-contributor";;  # Rajiv D0AMF0XE6TS thread 1795485653.099709, ts 1795486375.339929 (24 Nov): value-per-$ order, Opus (77x) first, Grok (11-13x) last
     *) return 1;;
   esac
   # No Codex for proxies (Rajiv ts 1794834402.077499): drop gpt-* from every rung while the flag file exists.
@@ -1936,7 +1936,8 @@ proxy_agent_pick_tier() {
   if proxy_agent_is_capped "$TYPE"; then claude_live="$(proxy_agent_live_count claude)"; fi
   models="$(proxy_agent_tier_models "$tier")" || return 1
   if [[ "$nested" == nested ]]; then
-    for _m in $models; do proxy_agent_is_opencode_id "$_m" || proxy_agent_is_sarvam_id "$_m" || _kept="${_kept:+$_kept }$_m"; done
+    # ultra/* never rides a nested alias either (25 Nov): the cap counter sees primary `claude -p --model ultra/...` processes only, so a nested child on the Ultra credential would burn it uncounted.
+    for _m in $models; do proxy_agent_is_opencode_id "$_m" || proxy_agent_is_sarvam_id "$_m" || [[ "$_m" == ultra/* ]] || _kept="${_kept:+$_kept }$_m"; done
     models="$_kept"
   fi
   # Judgment-work guard (Rajiv C0ALZJHGE49 thread 1795311834.216809, ts 1795315628.438539: "move claude before codex. prefer claude or
@@ -1950,11 +1951,11 @@ proxy_agent_pick_tier() {
     # inkling and gpt-6-luna are dropped.
     _kept=""
     # Kimi K3 (Rajiv 23 Nov 00:19 "Kimi should be top tier") sits right after Grok, before Opus, still behind its availability gate below.
-    for _pref in claude-opus-5-5 claude-fable-5-2 claude-sonnet-5-5 gpt-6.2-sol gpt-6.1-terra sarvam-kimi-k3 grok-4.7; do
+    for _pref in claude-opus-5-5 ultra/claude-opus-5-5 claude-fable-5-2 claude-sonnet-5-5 ultra/claude-sonnet-5-5 gpt-6.2-sol gpt-6.1-terra sarvam-kimi-k3 grok-4.7; do  # ultra/* (dev@scribie ULTRA, 25 Nov) rides right behind the team id of the same model
       for _m in $models; do [[ "$_m" == "$_pref" ]] && _kept="${_kept:+$_kept }$_m"; done
     done
     for _m in $models; do
-      case "$_m" in ornith-1.5-35b-a3b|qwen3.8-flash-next|inkling-2-mini|gpt-6-luna|grok-4.7|sarvam-kimi-k3|claude-opus-5-5|claude-fable-5-2|claude-sonnet-5-5|gpt-6.1-terra|gpt-6.2-sol) continue;; esac
+      case "$_m" in ornith-1.5-35b-a3b|qwen3.8-flash-next|inkling-2-mini|gpt-6-luna|grok-4.7|sarvam-kimi-k3|claude-opus-5-5|claude-fable-5-2|claude-sonnet-5-5|ultra/claude-opus-5-5|ultra/claude-sonnet-5-5|gpt-6.1-terra|gpt-6.2-sol) continue;; esac
       _kept="${_kept:+$_kept }$_m"
     done
     models="$_kept"
@@ -2099,6 +2100,9 @@ proxy_agent_burn_refused() {
     # ts 1795371734.283449 "use opus and grok for top tier. calude team accounts have enough headroom" and ts 1795371948.713479 "we have to keep the nubmer of
     # agents below the cap and use all modles. if we hit limits, switch to the next account which headroom. if everything is maxxed out, let me know.")
     claude-*) return 1;;
+    # dev@scribie ULTRA route (CLIProxyAPI prefix `ultra`): ULTRA_PROXY_CAP (fixed 4) + a 429 cooldown decide until the hourly burn rate has data
+    # (Rajiv D0AMF0XE6TS thread 1795576437.379619, ts 1795590119.110289: "set the cap to 4 initially and measure the burn rate in hourlies").
+    ultra/claude-*) return 1;;
   esac
   # OpenCode Go has no %/h budget meter: OPENCODE_PROXY_CAP and a 402/429 cooldown decide.
   if proxy_agent_is_opencode_id "$1"; then return 1; fi
@@ -2154,7 +2158,7 @@ for line in out.splitlines():
     # Same cut as proxy_agent_router_identity: lowercase, drop the first '(' or '[' suffix, trim.
     # A decorated OpenCode primary must count toward OPENCODE_PROXY_CAP (CTO REVISE ts 1795010788.320629).
     model = re.split(r"[(\[]", raw.lower(), 1)[0].strip()
-    kind = "claude" if model.startswith("claude-") else "codex" if model.startswith("gpt-") else "grok" if model.startswith("grok") else "spark" if model in ("ornith-1.5-35b-a3b", "qwen3.8-flash-next") else "inkling" if model == "inkling-2-mini" else "hy4" if model == "hy4-flash-free" else "opencode" if model in ("deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor") else "sarvam" if model in ("sarvam-glm-5.3", "sarvam-deepseek-v4.1-flash", "sarvam-105b", "sarvam-gemma4", "sarvam-kimi-k3") else ""
+    kind = "ultra" if model.startswith("ultra/") else "claude" if model.startswith("claude-") else "codex" if model.startswith("gpt-") else "grok" if model.startswith("grok") else "spark" if model in ("ornith-1.5-35b-a3b", "qwen3.8-flash-next") else "inkling" if model == "inkling-2-mini" else "hy4" if model == "hy4-flash-free" else "opencode" if model in ("deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor") else "sarvam" if model in ("sarvam-glm-5.3", "sarvam-deepseek-v4.1-flash", "sarvam-105b", "sarvam-gemma4", "sarvam-kimi-k3") else ""
     if kind == pool:
         n += 1
 print(n)
@@ -2177,6 +2181,8 @@ proxy_agent_pool_blocked() {
   id="$(proxy_agent_router_identity "$1")"
   case "$id" in
     claude-*) pool=claude; cap="${CLAUDE_PROXY_CAP:-${PROXY_AGENT_CLAUDE_CAP:-5}}";;
+    # dev@scribie ULTRA credential, own route + own cap (25 Nov): never counted in, or governed by, the team Claude pool.
+    ultra/claude-*) pool=ultra; cap="${ULTRA_PROXY_CAP:-4}";;
     gpt-*) pool=codex; cap="${CODEX_PROXY_CAP:-8}";;
     grok-4.7|grok) pool=grok; cap="${GROK_PROXY_CAP:-8}";;
     # hy4-flash-free has its own cap, outside the OpenCode Go cap (Rajiv C0ALZJHGE49 thread 1795416243.378619, ts 1795418976.792619: "yes, exempt it. add a spearate cap for hy4"; free tier keeps running while the Go limit refuses glm/deepseek).
@@ -2189,13 +2195,13 @@ proxy_agent_pool_blocked() {
     *) return 1;;
   esac
   # The Sarvam pool, like OpenCode, has no role exemption: paid credits with no meter, so the cap applies to cap-exempt roles and a P0 override too.
-  if [[ "$pool" != opencode && "$pool" != hy4 && "$pool" != sarvam ]] && proxy_agent_cap_exempt "$TYPE"; then return 1; fi
+  if [[ "$pool" != opencode && "$pool" != hy4 && "$pool" != sarvam && "$pool" != ultra ]] && proxy_agent_cap_exempt "$TYPE"; then return 1; fi  # ultra: hard cap, no role exemption (25 Nov: cap 4 while the burn rate is measured)
   case "$cap" in ''|*[!0-9]*) return 1;; esac
   # OpenCode / Sarvam cap 0 means the pool is off: blocked without counting, so an unreadable process list cannot let a launch through.
-  if [[ ( "$pool" == opencode || "$pool" == hy4 || "$pool" == sarvam ) && "$cap" =~ ^0+$ ]]; then return 0; fi
+  if [[ ( "$pool" == opencode || "$pool" == hy4 || "$pool" == sarvam || "$pool" == ultra ) && "$cap" =~ ^0+$ ]]; then return 0; fi
   if ! live="$(proxy_agent_pool_live "$pool")"; then
     printf 'proxy-agent: pool_cap UNAVAILABLE pool=%s\n' "$pool" >&2
-    if [[ "$pool" == claude ]]; then printf 'proxy-agent: pool_cap fail-closed pool=claude (live count unreadable)\n' >&2; return 0; fi
+    if [[ "$pool" == claude || "$pool" == ultra ]]; then printf 'proxy-agent: pool_cap fail-closed pool=%s (live count unreadable)\n' "$pool" >&2; return 0; fi
     if [[ "$pool" == opencode || "$pool" == hy4 || "$pool" == sarvam || "$pool" == spark || "$pool" == inkling ]]; then return 0; fi
     return 1
   fi
@@ -2290,6 +2296,12 @@ proxy_agent_primary_pool_guard() {
         return 75
       fi
       return 0;;
+    ultra/claude-*)
+      if PA_P0_ARMED=1 proxy_agent_pool_blocked "$_guard_id"; then
+        printf 'proxy-agent: REFUSED primary %s (ultra pool_cap)\n' "$_guard_id" >&2
+        return 75
+      fi
+      return 0;;
     grok-4.7|grok)
       if PA_P0_ARMED=1 proxy_agent_pool_blocked "$_guard_id"; then
         printf 'proxy-agent: REFUSED primary %s (grok pool_cap)\n' "$_guard_id" >&2
@@ -2337,6 +2349,8 @@ proxy_agent_primary_burn_check() {
   if proxy_agent_is_opencode_id "$_burn_model"; then return 0; fi
   # Sarvam Token Factory: no %/h meter (cap + cooldown only), same as OpenCode.
   if proxy_agent_is_sarvam_id "$_burn_model"; then return 0; fi
+  # dev@scribie ULTRA route (25 Nov): ULTRA_PROXY_CAP + cooldown decide, as in proxy_agent_burn_refused; proxy-burn-shadow.py has no `ultra/` pool and answered pool=unknown, so an explicit --model ultra/... was refused rc 75 in enforce mode.
+  case "$_burn_model" in ultra/claude-*) return 0;; esac
   python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$_burn_model" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >&2 || _burn_rc=$?
   if [[ "$_burn_rc" -ne 0 ]]; then
     printf 'proxy-burn: mode=%s decision=would_refuse rc=%s\n' "$PROXY_BURN_GATE" "$_burn_rc" >&2
@@ -2500,6 +2514,7 @@ resolve_model() {
     sarvam-gemma4) echo "sarvam-gemma4 262144 32000";;
     # Keep the local Spark proxy window on both aliases.
     ornith-1.5-35b-a3b|qwen3.8-flash-next) echo "$1 240000 16384";;
+    ultra/claude-opus-5-5|ultra/claude-sonnet-5-5|ultra/claude-haiku-5-5) echo "$1 200000 64000";;  # dev@scribie ULTRA route: same window/output as the team id
     gpt-6.2-sol)  echo "gpt-6.2-sol 1050000 128000";;  # Rajiv D0AMF0XE6TS ts 1794940288.370549; exact id only, not in any tier ladder
     gpt-6-luna|gpt-6.1-terra|gpt-6.1-sol|gpt-6-astra|grok-4.7|gemini-4-argon-high|gemini-3.8-flash-high|gemini-4-hydrogen-xhigh|claude-opus-5-5-high|claude-sonnet-5-5-high|claude-haiku-5-5|claude-sonnet-5-5|claude-opus-5-5|claude-fable-5-2)
                   resolve_model "$(proxy_agent_alias_for_id "$1")";;
@@ -2678,6 +2693,7 @@ proxy_agent_log_emergency_muse sonnet "${SONNET_MODEL:-}"
 proxy_agent_log_emergency_muse opus "${OPUS_MODEL:-}"
 case "$MODEL" in
   ag-opus|ag-sonnet|luna|terra|sol|astra|grok|hydrogen|ernie|gemini-pro|gemini-flash|gpt-6-luna|gpt-6.1-terra|gpt-6.1-sol|gpt-6.2-sol|gpt-6.2-sol\(*\)|gpt-6-astra|grok-4.7|gemini-4-argon-high|gemini-3.8-flash-high|gemini-4-hydrogen-xhigh|claude-opus-5-5-high|claude-sonnet-5-5-high|haiku|sonnet|opus|fable|claude-haiku-5-5|claude-sonnet-5-5|claude-opus-5-5|claude-fable-5-2) ;;
+  ultra/claude-opus-5-5|ultra/claude-sonnet-5-5|ultra/claude-haiku-5-5) ;;  # dev@scribie ULTRA credential via the CLIProxyAPI `ultra` prefix route
   inkling-2-mini) ;;  # local Inkling 2 Mini (DGX Spark vLLM via CLIProxyAPI openai-compat "inkling-spark"), 262144-token window
   ornith-1.5-35b-a3b|qwen3.8-flash-next) ;; # same local Spark vLLM service via CLIProxyAPI
   hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor) ;;  # OpenCode Go via CLIProxyAPI; conservative 200000/32000 window until a source is added
@@ -2916,6 +2932,14 @@ if proxy_agent_is_capped "$TYPE"; then
     if [[ "${_live_claude:-999}" -ge "$PROXY_AGENT_CLAUDE_CAP" ]]; then
       # ENFORCED for an explicit claude --model (Rajiv ts 1795439210.427769): refuse rc 75 so the launcher queues CAPACITY_WAIT.
       printf 'PROXY_AGENT_REFUSED reason=claude_cap model=%s (%s live >= %s)\n' "$MODEL_ID" "$_live_claude" "$PROXY_AGENT_CLAUDE_CAP" >&2
+      exit 75
+    fi
+  fi
+  if [[ "$MODEL_ID" == ultra/claude-* ]]; then
+    # Same enforcement for the ULTRA route against its own cap (default 4). cap 0 = route off; an unreadable count (999) refuses.
+    _live_ultra="$(proxy_agent_live_count ultra)"
+    if [[ "${_live_ultra:-999}" -ge "${ULTRA_PROXY_CAP:-4}" ]]; then
+      printf 'PROXY_AGENT_REFUSED reason=ultra_cap model=%s (%s live >= %s)\n' "$MODEL_ID" "$_live_ultra" "${ULTRA_PROXY_CAP:-4}" >&2
       exit 75
     fi
   fi

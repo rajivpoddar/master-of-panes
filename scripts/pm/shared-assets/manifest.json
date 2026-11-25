@@ -852,7 +852,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "cfb919966804fe89b418f89d7ef3ec23f109f763a4344f81b1856900d4a8a511",
+      "sha256": "360182cfad47019bfeab2aab058b8d77b27a0a2d07c33767b78ad8ed197c3a5e",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -969,7 +969,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "08e48bc81110e08ec5406e0d87765cfdf6cdfb5b1911458c812f05f66bf3e66f",
+      "sha256": "d4a4284b39116641868b4ac74fdf098dee08a2baf77c67693f9c58c174a5a95b",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -987,7 +987,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "1f60ecbd5b47818e25ec8dfc4ca9a3607fc6b39f9371bbbde51e513c9ed85bf9",
+      "sha256": "3dbbff6c7fac671d634cfd027fa240367ddc85d5672e3097d374e4b5c6d91a5d",
       "source_path": "claude/scripts/proxy-cap-count.py"
     },
     {
@@ -1259,7 +1259,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "64ff39551bf888d62166a4babd87ad79647178e575f77f874b242a5766dfadee",
+      "sha256": "df9fe63c83b2eb5cc1c897b5df782e3664a1e9421a0978fad2ca720dc8958ac7",
       "source_path": "claude/scripts/tests/test_proxy_agent_sarvam_pool.py"
     },
     {
@@ -1268,7 +1268,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "4d45eb1fafe9a35355d6469227a80eadd6b409d2da15d509a4fa44be49a6cb2a",
+      "sha256": "4e548358c6966e14f0e08615952909c5bd08b428d4470f5ce46a338337182eef",
       "source_path": "claude/scripts/tests/test_proxy_agent_tiers.py"
     },
     {
@@ -1277,7 +1277,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "4137fa5a9ec0ea17a685270c0d06a12820dc1ce6c2bb1ef9fcd3b828736a059c",
+      "sha256": "f5a1ddfc62b7315115d0f32c1f1703d1a6f3c0f6221bd1d251f90d243e8b0bc6",
       "source_path": "claude/scripts/tests/test_proxy_claude_cap.py"
     },
     {

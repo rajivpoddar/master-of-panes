@@ -3468,14 +3468,116 @@ def _pace_table_lines(resolved: list[tuple]) -> list[str]:
     return "\n".join([*block, *notes]).replace("@", "-").splitlines()
 
 
-def pace_table(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = PACE_CONFIG,
-               state: Path = PACE_STATE, persist: bool = False, sampled: bool = True) -> str:
-    """The Pace block that sits directly under the *Hourly line of every 1h report. Same calculation as pace_status.
-    Never raises: a failed check reads one UNKNOWN line."""
+# dev@scribie ULTRA Claude credential (own CLIProxyAPI `ultra` prefix route, its own pool and cap; Rajiv D0AMF0XE6TS thread
+# 1795576437.379619, ts 1795590119.110289, 25 Nov: "set the cap to 4 initially and measure the burn rate in hourlies").
+# usage-snapshot.py logs it as claude:ultra-<login>:session|weekly, so its numbers never mix into the team pool rows.
+# The line is plain prose under the pace table (not a fold prefix: no bullet, no leading space, * or _) and never shows the login.
+ULTRA_PACE_ROW = re.compile(r"^claude:ultra-[^\s:]+:(?P<window>session|weekly)$")
+# 25 Nov (Rajiv D0AMF0XE6TS thread 1795576437.379619, ts 1795596913.805979): the Ultra line reports burn AND target/ETA. The target
+# and ETA use the Pace rows' method (observation-time basis, weekly reset as the horizon). Whole-percent steps dominate a short
+# baseline, so the Ultra line flags the rate "thin data" under 3h (the team Pace rows keep PACE_THIN_HOURS).
+ULTRA_THIN_HOURS = 3.0
+
+
+def _ultra_cap_text(caps_file: Path) -> str:
     try:
-        return "\n".join(_pace_table_lines(_pace_resolve(now, snapshot, config, state, persist, sampled)))
+        for line in caps_file.read_text().splitlines():
+            name, _, value = line.partition("=")
+            if name.strip() == "ULTRA_PROXY_CAP":
+                return value.strip() if re.fullmatch(r"[0-9]+", value.strip()) else "UNKNOWN"
+    except OSError:
+        return "UNKNOWN"
+    return "UNKNOWN"
+
+
+def _ultra_target_clause(used: float, rate: float | None, sampled: float, reset: float | None) -> str:
+    """Target %/h, burn-vs-target verdict and runs-out time for the Ultra line. Same basis as _pace_clause: the horizon is the
+    weekly reset and every figure runs from the sample time. Missing input reads UNKNOWN, never a number.
+
+    ABOVE and "lasts to reset" come from the one rate-vs-target comparison, so they cannot disagree."""
+    if reset is None or reset <= sampled:
+        return "target UNKNOWN (no live weekly reset), runs out UNKNOWN"
+    ceiling = (100 - used) / ((reset - sampled) / 3600)
+    target = f"target {ceiling:.2f} %/h"
+    if rate is None:
+        return f"{target} → UNKNOWN, runs out UNKNOWN"
+    if used >= 100:
+        return f"{target} → ABOVE, limit reached"
+    if rate <= ceiling:
+        return f"{target} → BELOW, lasts to reset"
+    runs_out = min(sampled + (100 - used) / rate * 3600, reset)
+    return f"{target} → ABOVE, runs out {_ist(runs_out, '%a %d %b %H:%M')} at this burn"
+
+
+def ultra_pace_line(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, caps_file: Path | None = None) -> str:
+    """One line for the Ultra route: 5h and weekly used %, weekly burn %/h, target %/h with ABOVE/BELOW, the runs-out time (or
+    "lasts to reset"), sample age. Never raises.
+
+    Burn is the rolling rate since the first sample of the CURRENT weekly window (same rule as the Pace rows: whole-percent
+    steps make last-hour deltas flip), UNKNOWN until the baseline is PACE_MIN_WINDOW_HOURS old, flagged "thin data" under
+    ULTRA_THIN_HOURS, and never zero-filled. Target/ABOVE/BELOW/runs-out derive from that burn (see _ultra_target_clause).
+    A missing or stale sample, or a missing 5h window (the Ultra usage endpoint can omit it), reads n/a/UNAVAILABLE with the
+    reason, never a number."""
+    head = f"Ultra route (dev-scribie, cap {_ultra_cap_text(caps_file or PROXY_CAPS_FILE)})"
+    try:
+        ts_now = now.timestamp()
+        latest: dict[str, tuple] = {}
+        weekly_rows: list[tuple] = []
+        with open(snapshot) as handle:
+            for raw in handle:
+                try:
+                    row = json.loads(raw)
+                except ValueError:
+                    continue
+                match = ULTRA_PACE_ROW.match(row.get("key", "")) if isinstance(row, dict) and isinstance(row.get("key"), str) else None
+                ts, pct = row.get("ts") if match else None, row.get("pct") if match else None
+                if not match or not _pace_number(ts) or not _pace_number(pct) or not 0 <= pct <= 100:
+                    continue
+                reset = float(row["reset"]) if _pace_number(row.get("reset")) else None
+                sample = (float(ts), float(pct), reset)
+                window = match.group("window")
+                if window not in latest or ts >= latest[window][0]:
+                    latest[window] = sample
+                if window == "weekly":
+                    weekly_rows.append(sample)
+        weekly = latest.get("weekly")
+        if weekly is None or not 0 <= ts_now - weekly[0] <= USAGE_SAMPLE_MAX_AGE:
+            return f"{head}: UNAVAILABLE (no Ultra usage sample in the last {USAGE_SAMPLE_MAX_AGE // 3600}h)"
+        sampled, used, reset = weekly
+        session = latest.get("session")
+        if session is None or not 0 <= ts_now - session[0] <= USAGE_SAMPLE_MAX_AGE or (session[2] is not None and session[2] <= ts_now):
+            five_hour = "5h n/a (no current 5h window from the usage endpoint)"
+        else:
+            five_hour = f"5h {session[1]:g}% used" + (f" (resets {_ist(session[2], '%H:%M')})" if session[2] is not None else "")
+        weekly_part = f"weekly {used:g}% used" + (f" (resets {_ist(reset, '%a %d %b %H:%M')})" if reset is not None and reset > sampled else "")
+        same = [r for r in weekly_rows if reset is not None and _pace_same_window(r[2], reset) and r[0] <= sampled]
+        base = min(same, key=lambda r: r[0]) if same else None
+        hours = (sampled - base[0]) / 3600 if base else 0.0
+        rate = None
+        if base is None:
+            burn = "burn UNKNOWN (no weekly window to baseline against)"
+        elif hours < PACE_MIN_WINDOW_HOURS:
+            burn = f"burn UNKNOWN (baseline only {hours:.1f}h old)"
+        elif used < base[1]:
+            burn = "burn UNKNOWN (usage fell since the baseline)"
+        else:
+            rate = (used - base[1]) / hours
+            burn = f"burn {rate:.2f} %/h over {hours:.1f}h" + (", thin data" if hours < ULTRA_THIN_HOURS else "")
+        target = _ultra_target_clause(used, rate, sampled, reset)
+        return f"{head}: {five_hour} · {weekly_part} · {burn} · {target} · sample {(ts_now - sampled) / 3600:.1f}h old"
     except Exception as exc:
-        return f"Pace: UNKNOWN ({type(exc).__name__}, pace check failed)"
+        return f"{head}: UNAVAILABLE ({type(exc).__name__}, Ultra usage read failed)"
+
+
+def pace_table(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = PACE_CONFIG,
+               state: Path = PACE_STATE, persist: bool = False, sampled: bool = True, ultra: bool = False) -> str:
+    """The Pace block that sits directly under the *Hourly line of every 1h report. Same calculation as pace_status.
+    Never raises: a failed check reads one UNKNOWN line. ultra=True (the 1h report) adds the Ultra route line below it."""
+    try:
+        block = "\n".join(_pace_table_lines(_pace_resolve(now, snapshot, config, state, persist, sampled)))
+    except Exception as exc:
+        block = f"Pace: UNKNOWN ({type(exc).__name__}, pace check failed)"
+    return f"{block}\n{ultra_pace_line(now, snapshot)}" if ultra else block
 
 
 def claude_memory_line(arm: bool, now: datetime) -> str:
@@ -4647,7 +4749,7 @@ def main() -> int:
     langsmith = None  # LangSmith ingest dropped from the hourly (Rajiv ts 1792806414.519859)
     burn = burn_status(datetime.now(timezone.utc)) if args.mode == "1h" else None
     pace = (pace_table(datetime.now(timezone.utc), persist=usage_sample_claim_ok(args.sample_usage_claim),
-                       sampled=not any(f.startswith("usage:") for f in failures))
+                       sampled=not any(f.startswith("usage:") for f in failures), ultra=True)
             if args.mode == "1h" else None)
     memory_line = None
     if args.mode == "1h":

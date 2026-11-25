@@ -2,8 +2,8 @@
 principle ts 1795353913.416459 "stronger models should drive weaker ones"; 24 Nov value-per-$ order Rajiv D0AMF0XE6TS thread
 1795485653.099709, ts 1795486375.339929: Opus (77x) first, Grok (11-13x) last; OpenCode ring pinned to a single id, glm-5.3).
 
-    TOP  claude-opus-5-5 -> claude-fable-5-2 -> gpt-6.2-sol -> sarvam-kimi-k3 -> grok-4.7
-    MID  glm-5.3 -> deepseek-v4.1-flash -> hy4-flash-free -> claude-sonnet-5-5 -> gpt-6.1-terra   (NO ornith since 24 Nov; NO Sarvam: LOW only)
+    TOP  claude-opus-5-5 -> ultra/claude-opus-5-5 -> claude-fable-5-2 -> gpt-6.2-sol -> sarvam-kimi-k3 -> grok-4.7
+    MID  glm-5.3 -> deepseek-v4.1-flash -> hy4-flash-free -> claude-sonnet-5-5 -> ultra/claude-sonnet-5-5 -> gpt-6.1-terra   (NO ornith since 24 Nov; NO Sarvam: LOW only)
     LOW  ornith-1.5-35b-a3b -> sarvam-glm-5.3 -> sarvam-deepseek-v4.1-flash -> sarvam-105b -> sarvam-gemma4 -> gpt-6-luna -> claude-haiku-5-5
          (light lanes only; the only level that lists ornith and the Sarvam serverless ids)
 
@@ -68,7 +68,7 @@ if [[ -z "${REAL_EMERGENCY:-}" ]]; then proxy_agent_emergency_open() { return 1;
 PRELUDE = '\n'.join([var('PROXY_AGENT_OPENCODE_RING'), var('PROXY_AGENT_SARVAM_RING'), var('PROXY_AGENT_FREE_TRIAL_IDS')] + [extract(f) for f in FUNCS]) + '\n' + STUBS
 
 DROP = {'CLAUDE_PROXY_CAP', 'GROK_PROXY_CAP', 'OPENCODE_PROXY_CAP', 'CODEX_PROXY_CAP', 'SPARK_PROXY_CAP', 'QWEN_PROXY_CAP',
-        'INKLING_PROXY_CAP', 'SARVAM_PROXY_CAP', 'SARVAM_KIMI_ENABLED', 'PROXY_AGENT_SARVAM_KIMI_STATE_FILE', 'PROXY_AGENT_SARVAM_ROTATION_FILE', 'PROXY_AGENT_CAP_OVERRIDE', 'PROXY_AGENT_DRY_RUN', 'PROXY_AGENT_STUB_POOL_LIVE', 'PROXY_AGENT_OPENCODE_ROTATION_FILE',
+        'INKLING_PROXY_CAP', 'ULTRA_PROXY_CAP', 'SARVAM_PROXY_CAP', 'SARVAM_KIMI_ENABLED', 'PROXY_AGENT_SARVAM_KIMI_STATE_FILE', 'PROXY_AGENT_SARVAM_ROTATION_FILE', 'PROXY_AGENT_CAP_OVERRIDE', 'PROXY_AGENT_DRY_RUN', 'PROXY_AGENT_STUB_POOL_LIVE', 'PROXY_AGENT_OPENCODE_ROTATION_FILE',
         'PROXY_AGENT_TYPE', 'SPARK_UP', 'BLOCKED', 'REAL_EMERGENCY', 'PROXY_AGENT_NO_SUBSCRIPTION', 'PA_EMERGENCY_VERDICT', 'UNAVAILABLE', 'PROBEFAIL'}
 
 LOW = ['ornith-1.5-35b-a3b', 'sarvam-glm-5.3', 'sarvam-deepseek-v4.1-flash', 'sarvam-105b', 'sarvam-gemma4', 'gpt-6-luna', 'claude-haiku-5-5']
@@ -76,8 +76,15 @@ LOW = ['ornith-1.5-35b-a3b', 'sarvam-glm-5.3', 'sarvam-deepseek-v4.1-flash', 'sa
 # ring now holds only that id, PROXY_AGENT_OPENCODE_RING="glm-5.3", so DeepSeek/hy4 are fallbacks, not the start), TOP is Opus first
 # and Grok last. The order is pinned here as literals on purpose: deriving LOW/MID/TOP from proxy_agent_tier_models would make every
 # walk and cooled-chain below compare the script against itself (tautology, no regression detection). These lists ARE the contract.
-MID = ['glm-5.3', 'deepseek-v4.1-flash', 'hy4-flash-free', 'claude-sonnet-5-5', 'gpt-6.1-terra']
-TOP = ['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol', 'sarvam-kimi-k3', 'grok-4.7']
+# 25 Nov: the dev@scribie ULTRA credential (own CLIProxyAPI `ultra` prefix route, own pool, ULTRA_PROXY_CAP 4; Rajiv D0AMF0XE6TS
+# thread 1795576437.379619, ts 1795590119.110289) sits right after the team id of the same model in MID and TOP: it takes over when the team
+# id is capped or cooled, and the team pool never sees it. It is not a claude-* id, so a team cap, a team 429 and the team switch ignore it.
+ULTRA_SONNET, ULTRA_OPUS = 'ultra/claude-sonnet-5-5', 'ultra/claude-opus-5-5'
+MID = ['glm-5.3', 'deepseek-v4.1-flash', 'hy4-flash-free', 'claude-sonnet-5-5', ULTRA_SONNET, 'gpt-6.1-terra']
+TOP = ['claude-opus-5-5', ULTRA_OPUS, 'claude-fable-5-2', 'gpt-6.2-sol', 'sarvam-kimi-k3', 'grok-4.7']
+# "Team Opus/Sonnet is out" now also needs the Ultra id of the same model out, or the walk lands on Ultra first (that is the design).
+OPUS_DOWN = ['claude-opus-5-5', ULTRA_OPUS]
+SONNET_DOWN = ['claude-sonnet-5-5', ULTRA_SONNET]
 # base_env forces SARVAM_KIMI_ENABLED=1 so the whole chain is exercised here; test_proxy_agent_sarvam_pool.py covers the availability gate itself.
 KIMI = 'sarvam-kimi-k3'
 SARVAM_IDS = ['sarvam-glm-5.3', 'sarvam-deepseek-v4.1-flash', 'sarvam-105b', 'sarvam-gemma4']
@@ -318,7 +325,7 @@ class FullLevelRefuses(unittest.TestCase):
     def test_real_pool_caps_at_zero_refuse_mid(self):
         # The real proxy_agent_pool_blocked (not the stub): every MID pool at cap 0, TOP pools untouched in name only (claude/codex pools are shared with MID).
         # hd-builder keeps the approved free-model exception, so it still launches on hy4-flash-free; the refusal case is pinned on non-free lanes.
-        got = route('claude', blocked=None, SPARK_PROXY_CAP=0, INKLING_PROXY_CAP=0, OPENCODE_PROXY_CAP=0, SARVAM_PROXY_CAP=0, CLAUDE_PROXY_CAP=0, CODEX_PROXY_CAP=0)
+        got = route('claude', blocked=None, SPARK_PROXY_CAP=0, INKLING_PROXY_CAP=0, OPENCODE_PROXY_CAP=0, SARVAM_PROXY_CAP=0, CLAUDE_PROXY_CAP=0, CODEX_PROXY_CAP=0, ULTRA_PROXY_CAP=0)
         self.assertEqual((got.rc, got.model), ('75', 'auto'))
         self.assertIn('REFUSED', got.err)
 
@@ -371,10 +378,11 @@ class Escalation(unittest.TestCase):
                 got = route(role, model='opus')
                 self.assertEqual((got.tier, got.model, got.rung), ('TOP', 'claude-opus-5-5', rung))
                 # With Opus cooled the same lever walks the rest of TOP in the value-per-$ order (24 Nov): Fable, Sol, Kimi, then Grok.
-                self.assertEqual(route(role, model='opus', unavailable=['claude-opus-5-5']).model, 'claude-fable-5-2')
-                self.assertEqual(route(role, model='opus', unavailable=['claude-opus-5-5', 'claude-fable-5-2']).model, 'gpt-6.2-sol')
-                self.assertEqual(route(role, model='opus', unavailable=['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol']).model, KIMI)
-                self.assertEqual(route(role, model='opus', unavailable=['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol', KIMI]).model, 'grok-4.7')
+                self.assertEqual(route(role, model='opus', unavailable=['claude-opus-5-5']).model, ULTRA_OPUS)  # 25 Nov: the Ultra Opus is the overflow behind the team Opus
+                self.assertEqual(route(role, model='opus', unavailable=OPUS_DOWN).model, 'claude-fable-5-2')
+                self.assertEqual(route(role, model='opus', unavailable=OPUS_DOWN + ['claude-fable-5-2']).model, 'gpt-6.2-sol')
+                self.assertEqual(route(role, model='opus', unavailable=OPUS_DOWN + ['claude-fable-5-2', 'gpt-6.2-sol']).model, KIMI)
+                self.assertEqual(route(role, model='opus', unavailable=OPUS_DOWN + ['claude-fable-5-2', 'gpt-6.2-sol', KIMI]).model, 'grok-4.7')
 
     def test_explicit_sol_is_the_exact_62_id_and_stays_raw(self):
         for role, rung in (('hd-builder', '3'), ('hd-proof-qa', '2'), ('hd-planner', ''), ('growth', '')):
@@ -429,7 +437,9 @@ class Aliases(unittest.TestCase):
         # LOW nested drops ornith and the Sarvam ids (Spark/Sarvam), MID nested drops OpenCode, TOP nested is Opus first (24 Nov value order).
         self.assertEqual((got.haiku, got.sonnet, got.opus), ('gpt-6-luna', 'claude-sonnet-5-5', 'claude-opus-5-5'))
         got = route('claude', unavailable=['claude-opus-5-5'])
-        self.assertEqual(got.opus, 'claude-fable-5-2')
+        self.assertEqual(got.opus, 'claude-fable-5-2')  # nested aliases never take the Ultra id: the cap counter sees primaries only
+        got = route('claude', unavailable=['claude-sonnet-5-5'])
+        self.assertEqual(got.sonnet, 'gpt-6.1-terra')
         got = route('claude', unavailable=['claude-opus-5-5', 'claude-fable-5-2'])
         self.assertEqual(got.opus, 'gpt-6.2-sol')
         got = route('claude', unavailable=['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol', KIMI])
@@ -441,19 +451,21 @@ class GrokTop(unittest.TestCase):
 
     def test_grok_cooldown_402_falls_through_the_top_ladder_to_grok(self):
         got = route('hd-planner', unavailable=['claude-opus-5-5'])
-        self.assertEqual((got.model, got.reason), ('claude-fable-5-2', 'cooled:claude-opus-5-5'))
-        got = route('hd-planner', unavailable=['claude-opus-5-5', 'claude-fable-5-2'])
-        self.assertEqual((got.model, got.reason), ('gpt-6.2-sol', 'cooled:claude-opus-5-5,claude-fable-5-2'))
-        got = route('hd-planner', unavailable=['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol'])
-        self.assertEqual((got.model, got.reason), (KIMI, 'cooled:claude-opus-5-5,claude-fable-5-2,gpt-6.2-sol'))
-        got = route('hd-planner', unavailable=['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol', KIMI])
-        self.assertEqual((got.model, got.reason), ('grok-4.7', 'cooled:claude-opus-5-5,claude-fable-5-2,gpt-6.2-sol,%s' % KIMI))
+        self.assertEqual((got.model, got.reason), (ULTRA_OPUS, 'cooled:claude-opus-5-5'))
+        got = route('hd-planner', unavailable=OPUS_DOWN)
+        self.assertEqual((got.model, got.reason), ('claude-fable-5-2', 'cooled:claude-opus-5-5,' + ULTRA_OPUS))
+        got = route('hd-planner', unavailable=OPUS_DOWN + ['claude-fable-5-2'])
+        self.assertEqual((got.model, got.reason), ('gpt-6.2-sol', 'cooled:claude-opus-5-5,%s,claude-fable-5-2' % ULTRA_OPUS))
+        got = route('hd-planner', unavailable=OPUS_DOWN + ['claude-fable-5-2', 'gpt-6.2-sol'])
+        self.assertEqual((got.model, got.reason), (KIMI, 'cooled:claude-opus-5-5,%s,claude-fable-5-2,gpt-6.2-sol' % ULTRA_OPUS))
+        got = route('hd-planner', unavailable=OPUS_DOWN + ['claude-fable-5-2', 'gpt-6.2-sol', KIMI])
+        self.assertEqual((got.model, got.reason), ('grok-4.7', 'cooled:claude-opus-5-5,%s,claude-fable-5-2,gpt-6.2-sol,%s' % (ULTRA_OPUS, KIMI)))
 
     def test_failed_probe_is_unavailable_not_exhausted(self):
         got = route('hd-planner', probefail=['claude-opus-5-5'])
-        self.assertEqual((got.model, got.reason), ('claude-fable-5-2', 'cooled:claude-opus-5-5:probe_failed'))
-        got = route('hd-planner', unavailable=['claude-opus-5-5', 'claude-fable-5-2'], probefail=['gpt-6.2-sol'])
-        self.assertEqual((got.model, got.reason), (KIMI, 'cooled:claude-opus-5-5,claude-fable-5-2,gpt-6.2-sol:probe_failed'))
+        self.assertEqual((got.model, got.reason), (ULTRA_OPUS, 'cooled:claude-opus-5-5:probe_failed'))
+        got = route('hd-planner', unavailable=OPUS_DOWN + ['claude-fable-5-2'], probefail=['gpt-6.2-sol'])
+        self.assertEqual((got.model, got.reason), (KIMI, 'cooled:claude-opus-5-5,%s,claude-fable-5-2,gpt-6.2-sol:probe_failed' % ULTRA_OPUS))
         got = route('hd-planner', probefail=TOP)
         self.assertEqual((got.model, got.reason), ('grok-4.7', 'fallback_last'))
 
@@ -466,14 +478,14 @@ class GrokTop(unittest.TestCase):
                 with self.subTest(role=role, cap=cap):
                     got = route(role, GROK_PROXY_CAP=cap)
                     self.assertEqual((got.model, got.reason), ('claude-opus-5-5', 'first_usable'))
-                    got = route(role, GROK_PROXY_CAP=cap, unavailable=['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol', KIMI])
+                    got = route(role, GROK_PROXY_CAP=cap, unavailable=OPUS_DOWN + ['claude-fable-5-2', 'gpt-6.2-sol', KIMI])
                     self.assertEqual((got.model, got.reason), (KIMI, 'fallback_last'))
                     self.assertIn('pool_cap skip model=grok-4.7', got.err)
 
     def test_grok_cap_above_zero_or_unset_keeps_grok_reachable(self):
         self.assertNotEqual(route('hd-planner').model, 'grok-4.7')  # Opus first (24 Nov value order)
-        self.assertEqual(route('hd-planner', unavailable=['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol', KIMI]).model, 'grok-4.7')
-        self.assertEqual(route('hd-planner', GROK_PROXY_CAP=3, unavailable=['claude-opus-5-5', 'claude-fable-5-2', 'gpt-6.2-sol', KIMI]).model, 'grok-4.7')
+        self.assertEqual(route('hd-planner', unavailable=OPUS_DOWN + ['claude-fable-5-2', 'gpt-6.2-sol', KIMI]).model, 'grok-4.7')
+        self.assertEqual(route('hd-planner', GROK_PROXY_CAP=3, unavailable=OPUS_DOWN + ['claude-fable-5-2', 'gpt-6.2-sol', KIMI]).model, 'grok-4.7')
 
     def test_grok_402_records_exact_model_cooldown(self):
         self.assertIn('grok-4.7) slot=grok_exhausted_until;;', SOURCE)
@@ -482,7 +494,7 @@ class GrokTop(unittest.TestCase):
 class PoolCaps(unittest.TestCase):
     def test_pool_cap_skips_triage_but_not_the_exempt_list(self):
         # Rajiv ts 1794921123.696379: pm-triage-agent and pm-backlog-promoter are NOT exempt. Spark is down and OpenCode is off, so the Claude cap is reached.
-        blocked = dict(spark=False, CLAUDE_PROXY_CAP='0', OPENCODE_PROXY_CAP='0', SARVAM_PROXY_CAP='0')
+        blocked = dict(spark=False, CLAUDE_PROXY_CAP='0', OPENCODE_PROXY_CAP='0', SARVAM_PROXY_CAP='0', ULTRA_PROXY_CAP='0')  # Ultra off too: a full team pool otherwise overflows onto it (UltraRoute pins that)
         # 24 Nov: triage and the promoter alias moved to LOW (light lanes), so the non-exempt MID cap case is pinned on claude and an unlisted type
         # (hd-builder keeps the approved hy4-flash-free builder exception and would land there); cap exemption itself is unchanged.
         got = route('claude', **blocked)
@@ -642,6 +654,78 @@ class OrnithLightOnly(unittest.TestCase):
             with self.subTest(role=role):
                 self.assertNotIn(self.ORNITH, sh('TYPE="%s"; proxy_agent_tier_models TOP' % role).split())
                 self.assertNotEqual(route(role).model, self.ORNITH)
+
+
+class UltraRoute(unittest.TestCase):
+    """dev@scribie ULTRA credential (own `ultra/` CLIProxyAPI prefix route; Rajiv D0AMF0XE6TS thread 1795576437.379619, ts 1795590119.110289:
+    "set the cap to 4 initially and measure the burn rate in hourlies"). Overflow right behind the team id of the same model, own pool and own
+    hard cap, invisible to the team Claude pool. The picker tests below drive the REAL proxy_agent_pool_blocked: PROXY_AGENT_STUB_POOL_LIVE is
+    one number for every pool, so each case separates the pools by their caps (CLAUDE_PROXY_CAP vs ULTRA_PROXY_CAP), not by the count."""
+    OPENCODE = ['glm-5.3', 'deepseek-v4.1-flash']  # out of MID while the OpenCode hold runs; listing them keeps these cases independent of it
+    MID_BEFORE_TEAM_SONNET = OPENCODE + ['hy4-flash-free']
+
+    def test_team_id_still_wins_when_it_is_usable(self):
+        self.assertEqual(route('hd-planner').model, 'claude-opus-5-5')
+        self.assertEqual(route('claude', unavailable=self.MID_BEFORE_TEAM_SONNET).model, 'claude-sonnet-5-5')
+
+    def test_ultra_is_the_overflow_right_behind_the_team_id(self):
+        got = route('hd-planner', unavailable=['claude-opus-5-5'])
+        self.assertEqual((got.tier, got.model, got.reason), ('TOP', ULTRA_OPUS, 'cooled:claude-opus-5-5'))
+        got = route('claude', unavailable=self.MID_BEFORE_TEAM_SONNET + ['claude-sonnet-5-5'])
+        self.assertEqual((got.tier, got.model), ('MID', ULTRA_SONNET))
+        # ...and only then the next provider.
+        self.assertEqual(route('claude', unavailable=self.MID_BEFORE_TEAM_SONNET + SONNET_DOWN).model, 'gpt-6.1-terra')
+
+    def test_judgment_lanes_keep_ultra_behind_its_team_id_not_at_the_end(self):
+        # proxy_agent_pick_tier reorders judgment lanes onto Claude first; the ultra ids must travel with their team ids.
+        for role in JUDGMENT_MID:
+            with self.subTest(role=role):
+                self.assertEqual(route(role, unavailable=['claude-sonnet-5-5']).model, ULTRA_SONNET)
+                self.assertNotEqual(route(role, unavailable=SONNET_DOWN).model, ULTRA_SONNET)
+
+    def test_ultra_cap_applies_to_every_role_including_the_cap_exempt_ones(self):
+        # Team pool wide open (cap 99), Ultra full (4 live of 4): the walk skips Ultra with a pool_cap reason and moves on to Fable.
+        for role in ('hd-planner', 'pm-admission-reviewer', 'growth'):
+            with self.subTest(role=role):
+                got = route(role, unavailable=['claude-opus-5-5'], PROXY_AGENT_STUB_POOL_LIVE='4', CLAUDE_PROXY_CAP='99', ULTRA_PROXY_CAP='4')
+                self.assertEqual(got.model, 'claude-fable-5-2')
+                self.assertIn('%s:pool_cap' % ULTRA_OPUS, got.reason)
+
+    def test_ultra_under_cap_is_taken(self):
+        got = route('hd-planner', unavailable=['claude-opus-5-5'], PROXY_AGENT_STUB_POOL_LIVE='3', CLAUDE_PROXY_CAP='99', ULTRA_PROXY_CAP='4')
+        self.assertEqual(got.model, ULTRA_OPUS)
+
+    def test_cap_zero_switches_the_route_off_without_counting(self):
+        for role in ('hd-planner', 'growth'):
+            with self.subTest(role=role):
+                got = route(role, unavailable=['claude-opus-5-5'], PROXY_AGENT_STUB_POOL_LIVE='0', ULTRA_PROXY_CAP='0')
+                self.assertEqual(got.model, 'claude-fable-5-2')
+                self.assertIn('%s:pool_cap' % ULTRA_OPUS, got.reason)
+
+    def test_unset_cap_defaults_to_four(self):
+        blocked = lambda live: sh('TYPE=hd-planner; proxy_agent_pool_blocked %s && echo blocked || echo open' % ULTRA_OPUS,
+                                  PROXY_AGENT_STUB_POOL_LIVE=live, CLAUDE_PROXY_CAP='99')
+        self.assertEqual((blocked('3'), blocked('4')), ('open', 'blocked'))
+
+    def test_unreadable_count_fails_closed_not_open(self):
+        out = sh('TYPE=growth; proxy_agent_pool_blocked %s && echo blocked || echo open' % ULTRA_OPUS, PROXY_AGENT_STUB_POOL_LIVE='unreadable')
+        self.assertEqual(out, 'blocked')
+
+    def test_team_cap_never_governs_ultra_and_ultra_cap_never_governs_team(self):
+        body = 'TYPE=hd-planner; proxy_agent_pool_blocked %s && echo blocked || echo open'
+        # Team Claude pool full (cap 0), Ultra open: the team id is blocked, the ultra id is not.
+        self.assertEqual(sh(body % 'claude-opus-5-5', PROXY_AGENT_STUB_POOL_LIVE='0', CLAUDE_PROXY_CAP='0', ULTRA_PROXY_CAP='4'), 'blocked')
+        self.assertEqual(sh(body % ULTRA_OPUS, PROXY_AGENT_STUB_POOL_LIVE='0', CLAUDE_PROXY_CAP='0', ULTRA_PROXY_CAP='4'), 'open')
+        # Ultra off (cap 0), team open: the other way round.
+        self.assertEqual(sh(body % ULTRA_OPUS, PROXY_AGENT_STUB_POOL_LIVE='0', CLAUDE_PROXY_CAP='4', ULTRA_PROXY_CAP='0'), 'blocked')
+        self.assertEqual(sh(body % 'claude-opus-5-5', PROXY_AGENT_STUB_POOL_LIVE='0', CLAUDE_PROXY_CAP='4', ULTRA_PROXY_CAP='0'), 'open')
+
+    def test_nested_haiku_sonnet_opus_aliases_never_take_the_ultra_id(self):
+        # The cap counter sees primary `claude -p --model ultra/...` processes only, so a nested child on the Ultra credential would be uncounted.
+        got = route('claude', unavailable=['claude-sonnet-5-5', 'claude-opus-5-5'])
+        self.assertNotIn(got.sonnet, (ULTRA_SONNET, ULTRA_OPUS))
+        self.assertNotIn(got.opus, (ULTRA_SONNET, ULTRA_OPUS))
+        self.assertEqual((got.sonnet, got.opus), ('gpt-6.1-terra', 'claude-fable-5-2'))
 
 
 if __name__ == '__main__':

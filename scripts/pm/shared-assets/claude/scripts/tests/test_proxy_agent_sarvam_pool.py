@@ -132,7 +132,7 @@ class Base(unittest.TestCase):
                    INKLING_HEALTH_URL='http://127.0.0.1:1/metrics', UNAVAILABLE='', RC2='', BLOCKED='', NESTED='', TIER='MID', ROLE='claude')
         for k in ('PROXY_AGENT_DRY_RUN', 'PROXY_AGENT_SARVAM_ROTATION_FILE', 'PROXY_AGENT_OPENCODE_ROTATION_FILE', 'SARVAM_KIMI_ENABLED',
                   'PROXY_AGENT_SARVAM_KIMI_STATE_FILE', 'PROXY_AGENT_SARVAM_KIMI_RETRY_S', 'SARVAM_PROXY_CAP', 'OPENCODE_PROXY_CAP',
-                  'CLAUDE_PROXY_CAP', 'CODEX_PROXY_CAP', 'GROK_PROXY_CAP', 'PROXY_AGENT_CAP_OVERRIDE', 'ROLE_BRIEF', 'LIVE_SARVAM'):
+                  'CLAUDE_PROXY_CAP', 'CODEX_PROXY_CAP', 'GROK_PROXY_CAP', 'ULTRA_PROXY_CAP', 'PROXY_AGENT_CAP_OVERRIDE', 'ROLE_BRIEF', 'LIVE_SARVAM'):
             env.pop(k, None)
         env.update({k: str(v) for k, v in extra.items()})
         return env
@@ -192,7 +192,7 @@ class SarvamPick(Base):
         self.assertIn(f'{RING[0]}:pool_cap', reason)
 
     def test_everything_capped_refuses_75_with_no_model(self):
-        model, reason, rc = self.pick(OPENCODE_PROXY_CAP=0, SARVAM_PROXY_CAP=0, CLAUDE_PROXY_CAP=0, CODEX_PROXY_CAP=0)
+        model, reason, rc = self.pick(OPENCODE_PROXY_CAP=0, SARVAM_PROXY_CAP=0, CLAUDE_PROXY_CAP=0, CODEX_PROXY_CAP=0, ULTRA_PROXY_CAP=0)  # 25 Nov: the Ultra route is a pool of its own
         self.assertEqual((model, rc), ('', 75))
 
     def test_successive_launches_cycle_the_ring_and_wrap(self):
@@ -267,7 +267,7 @@ class KimiPick(Base):
         for want in expected:
             for role in ('hd-planner', 'claude'):
                 with self.subTest(role=role, want=want):
-                    model, _, rc = self.pick(UNAVAILABLE=cooled, SARVAM_KIMI_ENABLED=1, TIER='TOP', ROLE=role)
+                    model, _, rc = self.pick(UNAVAILABLE=cooled, SARVAM_KIMI_ENABLED=1, TIER='TOP', ROLE=role, ULTRA_PROXY_CAP=0)  # Ultra route off: this walks the team/provider order only
                     self.assertEqual((model, rc), (want, 0))
             cooled = f'{cooled} {want}'.strip()
 
