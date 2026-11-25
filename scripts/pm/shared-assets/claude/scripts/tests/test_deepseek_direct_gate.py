@@ -23,7 +23,7 @@ import pytest
 
 GATE = Path(__file__).parents[1] / 'deepseek-direct-gate.py'
 FLASH = 'deepseek-direct/deepseek-flash'
-USAGE = 'PROXY_AGENT_USAGE model=%s results=1 input_tokens=100000 output_tokens=30000 cache_read_tokens=6000000 cache_creation_tokens=0\n' % FLASH
+USAGE = 'PROXY_AGENT_USAGE model=%s results=1 input_tokens=100000 output_tokens=30000 cache_read_tokens=6000000 cache_creation_tokens=0 check=strict\n' % FLASH
 USAGE_USD = 100000 * 0.30 / 1e6 + 6000000 * 0.006 / 1e6 + 30000 * 1.20 / 1e6  # the published peak rates: miss, cache hit, output (docstring of the gate)
 RESULT = json.dumps({'duration_api_ms': 1, 'usage': {'input_tokens': 100000, 'output_tokens': 30000, 'cache_read_input_tokens': 6000000, 'cache_creation_input_tokens': 0},
                      'total_cost_usd': 4.38, 'type': 'result'}) + '\n'  # a real lane's shape: Claude Code priced it 4.38 for 0.102 of DeepSeek usage
@@ -246,6 +246,71 @@ def test_reconcile_can_charge_the_reservation_in_full_for_one_lane_or_all(lab):
     assert abs(one['reconciled'][0]['charged_usd'] - RESERVE) < 1e-4
     rest = json.loads(gate(lab, 'reconcile', '--all', '--charge-reservation', check=0).stdout)
     assert [r['name'] for r in rest['reconciled']] == ['L1'] and abs(state_of(lab)['spent_usd'] - 2 * RESERVE) < 1e-4 and rest['held_usd'] == 0
+
+
+# CTO REVISE of 56d3ff19 (ts 1795605169.603049): ONE strict usage check for settlement and continuation. Empty, malformed or otherwise unverified usage retains the reservation.
+OLD_SUMMARY = 'results=1 input_tokens=0 output_tokens=0 cache_read_tokens=0 cache_creation_tokens=0'  # what the pre-fix launcher printed for an empty or malformed usage object
+UNVERIFIED = {
+    'empty object': {},
+    'input_tokens malformed, alone': {'input_tokens': 'lots'},
+    'input_tokens malformed, output valid': {'input_tokens': 'lots', 'output_tokens': 5},
+    'input_tokens is a bool': {'input_tokens': True, 'output_tokens': 5},
+    'input_tokens is a float': {'input_tokens': 1000.5, 'output_tokens': 5},
+    'input_tokens negative': {'input_tokens': -1, 'output_tokens': 5},
+    'output_tokens missing': {'input_tokens': 1000},
+    'cache count malformed': {'input_tokens': 1000, 'output_tokens': 5, 'cache_read_input_tokens': 'x'},
+    'cache count null': {'input_tokens': 1000, 'output_tokens': 5, 'cache_creation_input_tokens': None},
+    'zero prompt': {'input_tokens': 0, 'output_tokens': 0},
+    'not an object': 'lots',
+}
+
+
+@pytest.mark.parametrize('usage', list(UNVERIFIED.values()), ids=list(UNVERIFIED))
+def test_strict_usage_rejects_every_unverified_shape(usage):
+    assert G.strict_usage(usage) is None
+
+
+def test_strict_usage_accepts_verified_positive_usage_and_defaults_absent_cache_counts():
+    assert G.strict_usage({'input_tokens': 1000, 'output_tokens': 200}) == {'input_tokens': 1000, 'output_tokens': 200, 'cache_read_input_tokens': 0, 'cache_creation_input_tokens': 0}
+    assert G.strict_usage({'input_tokens': 0, 'output_tokens': 0, 'cache_read_input_tokens': 50000})['cache_read_input_tokens'] == 50000
+
+
+def test_the_usage_line_parser_trusts_only_strict_lines_with_a_positive_prompt(tmp_path):
+    logf = tmp_path / 'l.log'
+    for text, ok in ((USAGE, True), ('PROXY_AGENT_USAGE model=%s %s\n' % (FLASH, OLD_SUMMARY), False),  # an all-zero summary
+                     (USAGE.replace(' check=strict', ''), False),  # a line from a launcher that counted any usage object
+                     (USAGE.replace('results=1', 'results=0'), False), ('PROXY_AGENT_USAGE model=%s unavailable\n' % FLASH, False)):
+        logf.write_text(text)
+        assert (G.usage_from_log(str(logf)) is not None) == ok, text
+
+
+@pytest.mark.parametrize('summary', [None, OLD_SUMMARY, OLD_SUMMARY + ' check=strict'], ids=['stream only', 'old launcher summary', 'zero summary even if tagged'])
+@pytest.mark.parametrize('usage', list(UNVERIFIED.values()), ids=list(UNVERIFIED))
+def test_unverified_usage_retains_the_reservation_at_settlement_and_refuses_a_continuation(lab, usage, summary):
+    """The same strict check on both paths. Settlement: spent_usd stays 0 and the whole reserve stays held. Continuation: refused (segment_unreconciled), never admitted."""
+    result = json.dumps({'usage': usage, 'total_cost_usd': 4.38, 'type': 'result'}) + '\n'
+    log = 'PROXY_AGENT_USAGE model=%s %s\n' % (FLASH, summary) if summary else 'PROXY_AGENT_USAGE model=%s unavailable\n' % FLASH
+    for path in ('continue', 'settle'):
+        sub = lab[0] / path
+        sub.mkdir()
+        state2 = lab[1] / path
+        state2.mkdir()
+        lab2 = (sub, state2, {**lab[2], 'PROXY_AGENT_DSD_STATE_DIR': str(state2)})  # each path gets its own state dir
+        init(lab2)
+        launcher = fake_launcher(sub)
+        try:
+            files = lane_files(sub, 'L1', result, log)
+            assert admit(lab2, 'L1', '--pid', str(launcher.pid), *files).returncode == 0
+            gate(lab2, 'started', '--name', 'L1', check=0)
+            if path == 'continue':
+                cont = admit(lab2, 'L1', '--continue', '--pid', str(launcher.pid), *files)
+                assert cont.returncode == 2 and 'reason=deepseek_direct_segment_unreconciled' in cont.stdout, cont.stdout
+            else:
+                gate(lab2, 'settle', '--name', 'L1', '--model', FLASH, '--log', files[3], check=0)
+                assert state_of(lab2)['spent_usd'] == 0.0
+                assert abs(ledger_of(lab2)['held']['L1']['usd'] - RESERVE) < 1e-4
+        finally:
+            launcher.kill()
 
 
 def test_a_result_event_without_usage_is_unreadable_not_zero(lab):

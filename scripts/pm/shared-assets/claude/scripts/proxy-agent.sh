@@ -3422,12 +3422,21 @@ read -r RC < "$JOB_DIR/rc"
 if [[ "$RC" -ne 0 ]] && ! proxy_agent_uses_claude_account "$MODEL_ID"; then
   proxy_agent_note_log_exhaustion "$MODEL_ID" "$LOG" "$OUT" || true
 fi
-# Direct DeepSeek (25 Nov): report the lane's token usage from the stream-json result events (summed; a continuation adds one each). Printed to stderr and appended to the
-# lane log, before the DONE line; "unavailable" when the stream carries no usage. Never changes the rc.
+# Direct DeepSeek (25 Nov): report the lane's token usage from the stream-json result events whose usage passes the gate's strict_usage() (summed; a continuation adds one
+# each). Printed to stderr and appended to the lane log, before the DONE line; "unavailable" when no result carries verified usage. Never changes the rc.
 if proxy_agent_is_deepseek_direct_id "$MODEL_ID"; then
-  python3 -I - "$JSONL" "$MODEL_ID" "$LOG" <<'PY' >&2 || true
-import json, sys
-path, model, log = sys.argv[1:4]
+  python3 -I - "$JSONL" "$MODEL_ID" "$LOG" "$DSD_GATE" <<'PY' >&2 || true
+import importlib.util, json, sys
+path, model, log, gate = sys.argv[1:5]
+# ONE strict usage check, shared with the gate (CTO REVISE of 56d3ff19, ts 1795605169.603049): this is the gate's own strict_usage(). An empty, malformed or unverified
+# usage object is not counted, so it can never become results=1 input_tokens=0. If the gate cannot be loaded there is no check, and so no verified usage (fail closed).
+try:
+    spec = importlib.util.spec_from_file_location("dsd_gate", gate)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    strict_usage = mod.strict_usage
+except Exception:
+    strict_usage = lambda u: None
 keys = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
 tot = dict.fromkeys(keys, 0)
 n = 0
@@ -3440,19 +3449,18 @@ try:
                 d = json.loads(line)
             except ValueError:
                 continue
-            u = d.get("usage") if d.get("type") == "result" else None
-            if isinstance(u, dict):
+            u = strict_usage(d.get("usage")) if d.get("type") == "result" else None
+            if u is not None:
                 n += 1
                 for k in keys:
-                    if isinstance(u.get(k), int):
-                        tot[k] += u[k]
+                    tot[k] += u[k]
 except OSError:
     pass
 if n:
-    msg = "PROXY_AGENT_USAGE model=%s results=%d input_tokens=%d output_tokens=%d cache_read_tokens=%d cache_creation_tokens=%d" % (
+    msg = "PROXY_AGENT_USAGE model=%s results=%d input_tokens=%d output_tokens=%d cache_read_tokens=%d cache_creation_tokens=%d check=strict" % (
         model, n, tot[keys[0]], tot[keys[1]], tot[keys[2]], tot[keys[3]])
 else:
-    msg = "PROXY_AGENT_USAGE model=%s unavailable (no result event with usage in the stream)" % model
+    msg = "PROXY_AGENT_USAGE model=%s unavailable (no result event with verified usage in the stream)" % model
 print(msg)
 try:
     with open(log, "a") as fh:

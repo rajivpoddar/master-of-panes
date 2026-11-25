@@ -36,8 +36,9 @@ Every paid SEGMENT (a start, or one continuation) reserves an enforceable maximu
              On success it prints PROXY_AGENT_DSD_GRANT ... max_budget_usd=<N> and writes N to --grant-file; the launcher fails closed if it cannot read it.
   started    The runner calls it right before it spawns claude. A lane that never got there (a later refusal, a tmux failure) spent nothing and is RELEASED when
              it ends; only a started lane can be held.
-  settle     Lane end. Exact when every segment has a result event (or the PROXY_AGENT_USAGE line covers every segment): spent_usd += the priced usage and the
-             reservation is freed. Otherwise (killed lane, usage unavailable) the known part is added and the unknown segments' RESERVATIONS STAY HELD against the
+  settle     Lane end. Exact when every segment has a result event with VERIFIED usage (strict_usage: integer input and output tokens, non-negative integer cache
+             counts, a positive prompt; an empty object, a string, a bool, a float, a negative or a missing field is NOT verified) or the PROXY_AGENT_USAGE line
+             (check=strict, built by the launcher with the same strict_usage) covers every segment: spent_usd += the priced usage and the reservation is freed. Otherwise (killed lane, usage unavailable) the known part is added and the unknown segments' RESERVATIONS STAY HELD against the
              budget, never settled at 0 and never at an estimate, until reconcile. A segment that ended on the budget stop (subtype error_max_budget_usd) is exact
              for the requests it reports, but its usage OMITS the request that crossed the cap (measured; its total_cost_usd includes it, and error_max_turns reports
              every request): one worst request per such segment is held until reconcile.
@@ -356,6 +357,34 @@ def _int(v):
     return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else 0
 
 
+USAGE_REQUIRED = ('input_tokens', 'output_tokens')
+USAGE_OPTIONAL = ('cache_read_input_tokens', 'cache_creation_input_tokens')
+
+
+def strict_usage(u):
+    """THE usage check: one function, used by the stream scan (settlement AND continuation), by the PROXY_AGENT_USAGE line parser, and imported by the launcher to
+    build that line. CTO REVISE of 56d3ff19 (ts 1795605169.603049): empty, malformed or otherwise unverified usage must RETAIN the reservation, never release it at 0.
+    A usage is verified only if it is an object whose input_tokens and output_tokens are present and are non-negative integers (a bool, a string, a float, null or a
+    negative is malformed), whose cache_read_input_tokens / cache_creation_input_tokens are, when present, non-negative integers too, and whose prompt
+    (input + cache read + cache creation) is positive: every billed request has a prompt, so a zero one proves nothing. Returns the four integer counts, else None."""
+    if not isinstance(u, dict):
+        return None
+    out = {}
+    for k in USAGE_REQUIRED + USAGE_OPTIONAL:
+        if k not in u:
+            if k in USAGE_REQUIRED:
+                return None
+            out[k] = 0
+            continue
+        v = u[k]
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            return None
+        out[k] = v
+    if out['input_tokens'] + out['cache_read_input_tokens'] + out['cache_creation_input_tokens'] <= 0:
+        return None
+    return out
+
+
 def _content_chars(content):
     n = 0
     for block in content if isinstance(content, list) else []:
@@ -415,13 +444,13 @@ def scan_file(path, acc):
                     acc['a_cc'] += _int(u.get('cache_creation_input_tokens'))
                     acc['a_out'] += max(_int(u.get('output_tokens')), est)
                 elif d.get('type') == 'result':
-                    u = d.get('usage') if isinstance(d.get('usage'), dict) else {}
-                    if not any(k in u for k in ('input_tokens', 'output_tokens')):  # a result with no usage object proves nothing: its spend is unreadable, not zero
+                    u = strict_usage(d.get('usage'))
+                    if u is None:  # empty, malformed or unverified usage proves nothing: the segment's spend is unreadable, not zero
                         continue
-                    acc['r_in'] += _int(u.get('input_tokens'))
-                    acc['r_out'] += _int(u.get('output_tokens'))
-                    acc['r_cr'] += _int(u.get('cache_read_input_tokens'))
-                    acc['r_cc'] += _int(u.get('cache_creation_input_tokens'))
+                    acc['r_in'] += u['input_tokens']
+                    acc['r_out'] += u['output_tokens']
+                    acc['r_cr'] += u['cache_read_input_tokens']
+                    acc['r_cc'] += u['cache_creation_input_tokens']
                     acc['r_n'] = acc.get('r_n', 0) + 1
                     if d.get('subtype') == 'error_max_budget_usd':  # measured: this result's usage omits the request that crossed the cap, its total_cost_usd includes it
                         acc['r_capped'] = acc.get('r_capped', 0) + 1
@@ -495,7 +524,8 @@ def stream_estimate(lane, frac):
     return max(stream, lane_results(lane)[0])
 
 
-USAGE_RE = re.compile(r'PROXY_AGENT_USAGE model=(\S+) results=(\d+) input_tokens=(\d+) output_tokens=(\d+) cache_read_tokens=(\d+) cache_creation_tokens=(\d+)')
+# check=strict marks a line built by the launcher with strict_usage(); a line without it (an older launcher counted any usage object, even {}) is not trusted.
+USAGE_RE = re.compile(r'PROXY_AGENT_USAGE model=(\S+) results=(\d+) input_tokens=(\d+) output_tokens=(\d+) cache_read_tokens=(\d+) cache_creation_tokens=(\d+) check=strict\b')
 
 
 def usage_from_log(path):
@@ -513,7 +543,10 @@ def usage_from_log(path):
     if not found:
         return None
     _model, n, i, o, cr, cc = found[-1]
-    return {'in': int(i), 'out': int(o), 'cr': int(cr), 'cc': int(cc), 'n': int(n)}
+    u = strict_usage({'input_tokens': int(i), 'output_tokens': int(o), 'cache_read_input_tokens': int(cr), 'cache_creation_input_tokens': int(cc)})
+    if u is None or int(n) < 1:  # an all-zero summary is not verified usage
+        return None
+    return {'in': u['input_tokens'], 'out': u['output_tokens'], 'cr': u['cache_read_input_tokens'], 'cc': u['cache_creation_input_tokens'], 'n': int(n)}
 
 
 # ---- ledger operations (call under the lock) -------------------------------------------------------------------------------------------

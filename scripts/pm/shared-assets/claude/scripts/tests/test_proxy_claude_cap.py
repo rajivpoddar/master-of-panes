@@ -316,12 +316,17 @@ def test_an_explicit_deepseek_direct_model_at_its_cap_is_refused_75_with_its_own
     assert not (home / 'prompt-seen.txt').exists()
 
 
-def _recording_claude(tmp, usage=True):
-    """The lab's fake claude, plus: its argv is written to HOME/claude-argv.json and its result event carries usage and Claude Code's total_cost_usd."""
+VALID_USAGE = {'input_tokens': 1000, 'output_tokens': 200, 'cache_read_input_tokens': 50000, 'cache_creation_input_tokens': 0}
+
+
+def _recording_claude(tmp, usage=VALID_USAGE, subtype=None):
+    """The lab's fake claude, plus: its argv is written to HOME/claude-argv.json and its result event carries the given usage object (None: no usage key at all), Claude
+    Code's total_cost_usd and, optionally, a subtype such as error_max_budget_usd."""
     src = launch_states.FAKE_CLAUDE
     src = src.replace("name = sys.argv[sys.argv.index('--name') + 1]", "name = sys.argv[sys.argv.index('--name') + 1]\nopen(os.path.join(os.environ['HOME'], 'claude-argv.json'), 'w').write(json.dumps(sys.argv[1:]))")
-    if usage:
-        src = src.replace("{'type': 'result', 'result': text}", "{'type': 'result', 'result': text, 'total_cost_usd': 0.5, 'usage': {'input_tokens': 1000, 'output_tokens': 200, 'cache_read_input_tokens': 50000, 'cache_creation_input_tokens': 0}}")
+    if usage is not None:
+        extra = (", 'subtype': %r" % subtype) if subtype else ''
+        src = src.replace("{'type': 'result', 'result': text}", "{'type': 'result', 'result': text, 'total_cost_usd': 0.5, 'usage': json.loads(%r)%s}" % (json.dumps(usage), extra))
         assert 'total_cost_usd' in src
     assert 'claude-argv.json' in src
     (tmp / 'bin/claude').write_text(src)
@@ -363,6 +368,38 @@ def test_a_deepseek_direct_lane_whose_usage_is_unreadable_keeps_its_reservation_
     held = ledger['held']['proxy-test-dsd-nousage']
     assert ledger['lanes'] == {} and abs(held['usd'] - (gate_mod.segment_max(DSD) + gate_mod.worst_request_usd(DSD))) < 1e-4
     assert json.loads((home / '.claude/state/deepseek-direct-bench.json').read_text())['spent_usd'] == 0.0
+
+
+# CTO REVISE of 56d3ff19 (ts 1795605169.603049): the launcher and the gate share ONE strict usage check (the launcher imports the gate's strict_usage).
+@pytest.mark.parametrize('usage', [{}, {'input_tokens': 'lots'}, {'input_tokens': 'lots', 'output_tokens': 5}, {'input_tokens': True, 'output_tokens': 5}],
+                         ids=['empty usage object', 'malformed input_tokens alone', 'malformed input_tokens with valid output', 'input_tokens is a bool'])
+def test_a_deepseek_direct_lane_with_empty_or_malformed_usage_keeps_its_reservation_held(lab, usage):
+    """Pre-fix, the launcher counted any usage object: results=1 input_tokens=0 ..., which the gate settled at 0 and released."""
+    tmp, home, _ = lab
+    prepare(lab, 'hd-builder')
+    env = dsd_lab(lab)
+    _recording_claude(tmp, usage=usage)
+    done = run(lab, 'hd-builder', 'proxy-test-dsd-badusage', DSD, live=0, **env)
+    assert done.returncode == 0, done.stderr
+    assert 'PROXY_AGENT_USAGE model=deepseek-direct/deepseek-flash unavailable' in done.stderr and 'results=1 input_tokens=0' not in done.stderr
+    assert 'PROXY_AGENT_DSD_GATE held name=proxy-test-dsd-badusage' in done.stderr
+    ledger = json.loads((home / '.claude/state/deepseek-direct-lanes.json').read_text())
+    assert ledger['lanes'] == {} and abs(ledger['held']['proxy-test-dsd-badusage']['usd'] - (gate_mod.segment_max(DSD) + gate_mod.worst_request_usd(DSD))) < 1e-4
+    assert json.loads((home / '.claude/state/deepseek-direct-bench.json').read_text())['spent_usd'] == 0.0
+
+
+def test_a_deepseek_direct_lane_that_ended_on_the_budget_stop_settles_what_it_reports_and_holds_the_crossing_request(lab):
+    """Control: valid usage on a result whose subtype is error_max_budget_usd (the cap fired): exact for what it reports, one worst-case request held."""
+    tmp, home, _ = lab
+    prepare(lab, 'hd-builder')
+    env = dsd_lab(lab)
+    _recording_claude(tmp, subtype='error_max_budget_usd')
+    done = run(lab, 'hd-builder', 'proxy-test-dsd-capped', DSD, live=0, **env)
+    assert done.returncode == 0 and 'results=1 input_tokens=1000 output_tokens=200 cache_read_tokens=50000 cache_creation_tokens=0 check=strict' in done.stderr, done.stderr
+    ledger = json.loads((home / '.claude/state/deepseek-direct-lanes.json').read_text())
+    assert abs(ledger['held']['proxy-test-dsd-capped']['usd'] - gate_mod.worst_request_usd(DSD)) < 1e-4
+    spent = json.loads((home / '.claude/state/deepseek-direct-bench.json').read_text())['spent_usd']
+    assert abs(spent - (1000 * 0.30 + 50000 * 0.006 + 200 * 1.20) / 1e6) < 1e-6
 
 
 def test_near_the_ceiling_a_launch_gets_a_smaller_enforced_cap_and_at_the_ceiling_none(lab):
@@ -410,6 +447,8 @@ def test_the_launcher_has_one_admission_captures_no_cap_and_enforces_the_grant_o
     # CTO a5c85804: the reserved maximum is enforced: the start command and the resume command both carry --max-budget-usd, and no grant means no launch.
     assert "printf -- '--max-budget-usd %q ' \"$PA_DSD_BUDGET\"" in src and '$' + '{pa_dsd_budget:+--max-budget-usd "$pa_dsd_budget"} --resume' in src
     assert src.count('--grant-file') == 2 and 'reason=deepseek_direct_no_grant' in src and ' started --name ' in src
+    # ONE strict usage check: the launcher's PROXY_AGENT_USAGE summary imports the gate's strict_usage and counts nothing else (no isinstance(u, dict) count of its own).
+    assert 'strict_usage = mod.strict_usage' in src and 'isinstance(u, dict)' not in src and 'check=strict' in src
 
 
 def test_every_deepseek_direct_id_is_wired_and_none_is_in_a_tier_list():
