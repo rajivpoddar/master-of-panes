@@ -129,7 +129,7 @@ Rules the composer enforces:
 
 ## Housekeeping (silent side jobs)
 
-Run after posting. None of these produce post lines. Report only failures.
+Run after posting. None of these produce post lines. Report only failures. Run each command exactly as written (python3 / bash prefixes included); never paste Python into the shell directly (a bare `import` resolves to ImageMagick on this Mac and fails, 25 Nov).
 
 ```bash
 bash /Users/rajiv/.claude/scripts/sakshi-heartbeat.sh            # session-age probe → /tmp/sakshi-heartbeat.json
