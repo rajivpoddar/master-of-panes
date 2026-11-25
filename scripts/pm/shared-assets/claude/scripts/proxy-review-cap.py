@@ -87,6 +87,22 @@ def is_debug_brief(brief):
     return False
 
 
+def round_counts(stage, receipts, reservations):
+    """Shared by launch admission and the read-only hourly report."""
+    # A matching receipt and reservation are one review, including reposts of
+    # that receipt. An untagged receipt cannot silently free a reserved slot.
+    reserved = set(reservations)
+    tokens = [token for key, token in receipts.items() if key != S153_ROUND_TWO]
+    if stage == "qa":
+        # Only posted, distinct verdicts occupy a QA round.
+        occupied = tokens.count(None) + len({token for token in tokens if token is not None})
+    else:
+        receipt_count = tokens.count(None) + len({token for token in tokens if token is not None} - reserved)
+        # A disposition attests to round two without double-counting it.
+        occupied = max(receipt_count + len(reserved), 2 if S153_ROUND_TWO in receipts else 0)
+    return occupied, len(tokens), len(reserved)
+
+
 def check(conn, stage, pr, reserve, debug=False):
     key = (pr, stage)
     label = f"stage={stage} pr={pr}"
@@ -99,21 +115,8 @@ def check(conn, stage, pr, reserve, debug=False):
     except (OSError, subprocess.SubprocessError, ValueError):
         return 76, f"REVIEW_CAP_UNKNOWN {label} reason=github_history_unavailable", ""
     receipts.update(current)
-
-    # A matching receipt and reservation are one review, including reposts of
-    # that receipt. An untagged receipt cannot silently free a reserved slot.
-    reserved = set(reservations)
-    tokens = [token for key, token in receipts.items() if key != S153_ROUND_TWO]
-    if stage == "qa":
-        # Posted verdicts only. A reposted receipt (same token) is still one review; reservations are
-        # kept for pairing and diagnostics but never occupy a QA round.
-        occupied = tokens.count(None) + len({token for token in tokens if token is not None})
-    else:
-        receipt_count = tokens.count(None) + len({token for token in tokens if token is not None} - reserved)
-        # The disposition attests that round two already happened. It sets a floor
-        # rather than adding another receipt if the verdict is also in history.
-        occupied = max(receipt_count + len(reserved), 2 if S153_ROUND_TWO in receipts else 0)
-    summary = f"{label} revise_rounds={occupied} receipts={len(tokens)} reservations={len(reserved)}"
+    occupied, receipt_count, reservation_count = round_counts(stage, receipts, reservations)
+    summary = f"{label} revise_rounds={occupied} receipts={receipt_count} reservations={reservation_count}"
     token = ""
     if occupied >= 2 and stage == "qa" and debug:
         # MODE: DEBUG never posts a verdict, so it takes no reservation and gets no receipt token.

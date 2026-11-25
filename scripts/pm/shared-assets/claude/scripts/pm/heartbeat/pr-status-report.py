@@ -27,12 +27,16 @@ DB = Path(os.environ.get('PM_OPS_DB', str(
 REPO = 'heydonna-app/heydonna-app'
 RED = {'FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'}
 PROXY_LOG_DIR = Path('/tmp/proxy-agent')
+PROXY_RUN_DIR = Path(os.environ.get('PROXY_AGENT_RUN_STATE_DIR', str(HOME / '.local/state/proxy-agent-runs')))
 PROXY_PROCESS = re.compile(
-    r'^\s*\d+\s+(?:\S*/)?claude\s+-p\s+--name\s+'
-    r'(proxy-([a-z0-9-]+)-\d{8}T\d{6}Z-\d+)(?=\s|$)')
+    r'^\s*(\d+)\s+(?:\S*/)?claude\s+-p\s+--name\s+'
+    r'([A-Za-z0-9][A-Za-z0-9._-]{0,79})(?=\s|$)')
 PROXY_LAUNCH = re.compile(
     r'^\[(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\] LAUNCH name=(\S+) '
     r'ISSUE:\S+ PR:([1-9]\d*|UNKNOWN)(?=\s|$)')
+BRIEF_PR = re.compile(r'^[ \t]*PR[ \t]*:[ \t]*#?([1-9]\d*)\b', re.I | re.M)
+FOOTER = 'PM: process with Skill(hourly-per-pr-processing) in this thread.'
+GH_ERRORS = (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError)
 PROXY_STAGE = {'pm-admission-reviewer': '12b', 'hd-proof-qa': 'QA', 'pm-proof-qa': 'QA',
                'hd-builder': 'build/rework', 'pm-hotfix': 'rework'}
 
@@ -40,6 +44,10 @@ _REVIEW_GATE_SPEC = importlib.util.spec_from_file_location(
     'pm_admit_12b_report', Path(__file__).resolve().parents[2] / 'ci/pm-admit-12b.py')
 _REVIEW_GATE = importlib.util.module_from_spec(_REVIEW_GATE_SPEC)
 _REVIEW_GATE_SPEC.loader.exec_module(_REVIEW_GATE)
+_CAP_SPEC = importlib.util.spec_from_file_location(
+    'proxy_review_cap_report', Path(__file__).resolve().parents[2] / 'proxy-review-cap.py')
+_CAP = importlib.util.module_from_spec(_CAP_SPEC)
+_CAP_SPEC.loader.exec_module(_CAP)
 
 try:  # exact-head copy-only receipts (#13451); a load failure keeps full CI/E2E required, never crashes the report
     _COPY_ONLY_SPEC = importlib.util.spec_from_file_location(
@@ -79,11 +87,60 @@ def fetch_checks(head, retry_delay=3):
     return None
 
 
-def live_proxy_lanes(log_dir):
-    """One process snapshot; bind only live names with an explicit launcher PR."""
+def lane_binding(pid, name, log_dir, run_dir):
+    base = run_dir / name
     try:
-        result = subprocess.run(['pgrep', '-fl', 'claude -p --name proxy-'],
-                                capture_output=True, text=True, timeout=5)
+        manifest = json.loads((base / 'manifest.json').read_text())
+    except (OSError, ValueError):
+        manifest = {}
+    if not isinstance(manifest, dict) or manifest.get('name') != name:
+        manifest = {}
+    if manifest and manifest.get('state') not in ('queued', 'running'):
+        return None  # never resurrect a completed manifest from the logs
+    if str(manifest.get('pid')) == pid:
+        pr = str(manifest.get('pr', ''))
+        if not re.fullmatch(r'[1-9]\d*', pr):
+            for path in (base / 'active/original-brief.txt', Path(manifest.get('brief') or '/dev/null')):
+                try:
+                    with path.open(encoding='utf-8', errors='replace') as handle:
+                        refs = set(BRIEF_PR.findall(handle.read(200000)))
+                except OSError:
+                    continue
+                if len(refs) == 1:
+                    pr = refs.pop()
+                break
+        if re.fullmatch(r'[1-9]\d*', pr):
+            return manifest.get('started_at', ''), int(pr), manifest.get('type', '')
+
+    # Older lanes and same-name continuation PIDs can still be tied to the
+    # launch header, never to an incidental PR mention or digits in the name.
+    out = manifest.get('out')
+    paths = ([Path(out).with_suffix('.log')] if out else
+             [log_dir / f'{name}.log', *log_dir.glob(f'*-{name}-*-????????T??????Z.log')])
+    launches = []
+    for path in paths:
+        try:
+            with path.open(encoding='utf-8', errors='replace') as handle:
+                launch = PROXY_LAUNCH.match(handle.readline(2048))
+        except OSError:
+            continue
+        if launch and launch[2] == name:
+            role = manifest.get('type') or path.name.partition(f'-{name}-')[0]
+            if path.name == f'{name}.log':
+                role = re.sub(r'-\d{8}T\d{6}Z-\d+$', '', name.removeprefix('proxy-'))
+            launches.append((launch[1], launch[3], role))
+    if launches:
+        started_at, pr, role = max(launches)
+        if pr != 'UNKNOWN':
+            return started_at, int(pr), role
+    return None
+
+
+def live_proxy_lanes(log_dir, run_dir=None):
+    """One process snapshot; only a live Claude process can own an explicit PR."""
+    try:
+        result = subprocess.run(['pgrep', '-fl', 'claude -p --name '],
+                                capture_output=True, encoding='utf-8', errors='replace', timeout=5)
         if result.returncode == 1:  # no matches
             return {}
         result.check_returncode()
@@ -96,59 +153,80 @@ def live_proxy_lanes(log_dir):
         process = PROXY_PROCESS.match(line)
         if not process:
             continue
-        name, role = process.groups()
-        # The launcher normally writes <type>-<name>-<pid>-<stamp>.log.
-        paths = [log_dir / f'{name}.log', *log_dir.glob(f'*-{name}-*-????????T??????Z.log')]
-        launches = []
-        for path in paths:
-            try:
-                with path.open(encoding='utf-8', errors='replace') as handle:
-                    launch = PROXY_LAUNCH.match(handle.readline(2048))
-            except OSError:
-                continue
-            if launch and launch[2] == name:
-                launches.append((launch[1], launch[3]))
-        if launches:
-            launched_at, pr = max(launches)
-            if pr != 'UNKNOWN':
-                entry = (launched_at, name, PROXY_STAGE.get(role, role))
-                owners[int(pr)] = max(entry, owners.get(int(pr), entry))
+        pid, name = process.groups()
+        binding = lane_binding(pid, name, log_dir, run_dir or PROXY_RUN_DIR)
+        if binding:
+            started_at, pr, role = binding
+            entry = (stamp(started_at) or dt.datetime.min.replace(tzinfo=dt.timezone.utc),
+                     name, PROXY_STAGE.get(role, role))
+            owners[pr] = max(entry, owners.get(pr, entry))
     return {pr: (name, stage) for pr, (_, name, stage) in owners.items()}
+
+
+def mergeability(pr):
+    value = pr.get('mergeable')
+    return value if value in MERGEABLE_OK or value == 'CONFLICTING' else None
+
+
+def fetch_pr(item):
+    number = str(item['number'])
+    for attempt in range(2):
+        try:
+            pr = gh('pr', 'view', number, '--repo', REPO, '--json',
+                    'number,isDraft,headRefOid,headRefName,labels,mergeable,reviewDecision')
+            break
+        except GH_ERRORS as exc:
+            print(f'WARN pr view #{number} failed (attempt {attempt + 1}): {exc}', file=sys.stderr)
+            if attempt == 0:
+                time.sleep(3)
+    else:
+        pr = {'number': item['number'], 'isDraft': bool(item.get('draft')),
+              'headRefOid': item['head']['sha'], 'headRefName': item['head']['ref'],
+              'labels': [{'name': x['name']} for x in item.get('labels', [])]}
+    if pr.get('mergeable') == 'UNKNOWN':
+        try:
+            retry = gh('pr', 'view', number, '--repo', REPO, '--json', 'headRefOid,mergeable')
+            if retry['headRefOid'] == pr['headRefOid'] and mergeability(retry):
+                pr['mergeable'] = retry['mergeable']
+        except GH_ERRORS as exc:
+            print(f'WARN mergeability recheck #{number}: {exc}', file=sys.stderr)
+    if not mergeability(pr):
+        pr.pop('mergeable', None)
+    pr['createdAt'] = item.get('created_at')
+    return pr
+
+
+def fetch_comments(number):
+    try:
+        # REST IDs match the cap ledger; paginate rather than trusting a slice of GitHub history.
+        return [c for page in gh('api', '--paginate', '--slurp',
+                f'repos/{REPO}/issues/{number}/comments?per_page=100') for c in page]
+    except GH_ERRORS as exc:
+        print(f'WARN PR comments #{number}: {exc}', file=sys.stderr)
+        return None
+
+
+def fetch_draft_tip(head):
+    try:
+        return gh('api', f'repos/{REPO}/commits/{head}')['commit']['committer']['date']
+    except GH_ERRORS as exc:
+        print(f'WARN draft tip {head[:12]}: {exc}', file=sys.stderr)
+        return None
 
 
 def collect():
     # REST pagination includes drafts and has no fixed PR-count cutoff.
     pages = gh('api', '--paginate', '--slurp', f'repos/{REPO}/pulls?state=open&per_page=100')
-    prs = []
-    checks = {}
+    prs, checks = [], {}
     for page in pages:
         for item in page:
-            pr = None
-            for attempt in range(2):
-                try:
-                    pr = gh('pr', 'view', str(item['number']), '--repo', REPO, '--json',
-                            'number,isDraft,headRefOid,headRefName,labels,mergeable,comments')
-                    break
-                except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError) as exc:
-                    print(f'WARN pr view #{item["number"]} failed (attempt {attempt + 1}): {exc}', file=sys.stderr)
-                    if attempt == 0:
-                        time.sleep(3)
-            if pr is None:
-                # Fall back to the REST list row; mergeable is unknown.
-                pr = {'number': item['number'], 'isDraft': bool(item.get('draft')),
-                      'headRefOid': item['head']['sha'], 'headRefName': item['head']['ref'],
-                      'labels': [{'name': x['name']} for x in item.get('labels', [])],
-                      'mergeable': 'UNKNOWN'}
+            pr = fetch_pr(item)
+            pr['comments'] = fetch_comments(pr['number'])
             prs.append(pr)
             # Check-runs endpoint is pinned to the SHA, not branch/latest workflow.
             checks[pr['number']] = fetch_checks(pr['headRefOid'])
     with urllib.request.urlopen('http://127.0.0.1:3100/slots', timeout=10) as response:
         slots = json.load(response)['slots']
-    for slot in slots:
-        checkout = HOME / f'Downloads/projects/heydonna-app-{3000 + int(slot["slot"])}'
-        branch = subprocess.run(['git', '-C', str(checkout), 'branch', '--show-current'],
-                                capture_output=True, text=True, timeout=10)
-        slot['checkout_branch'] = branch.stdout.strip() if branch.returncode == 0 else None
     with sqlite3.connect(f'file:{DB}?mode=ro', uri=True, timeout=5) as con:
         con.row_factory = sqlite3.Row
         obligations = [dict(row) for row in con.execute(
@@ -170,10 +248,43 @@ def collect():
     for pr in prs:
         if pr['number'] in proxies:
             pr['live_proxy'] = proxies[pr['number']]
+        elif pr['isDraft']:
+            pr['tip_at'] = fetch_draft_tip(pr['headRefOid'])
+    annotate_review_caps(prs)
     return prs, checks, slots, obligations
 
 
-def latest_checks(runs, head):
+def annotate_review_caps(prs):
+    ledger = HOME / '.claude/state/proxy-review-cap.sqlite3'
+    try:
+        saved = {}
+        if ledger.exists():
+            with sqlite3.connect(ledger.as_uri() + '?mode=ro', uri=True, timeout=5) as con:
+                saved = {(number, stage): (json.loads(receipts), json.loads(reserved))
+                         for number, stage, receipts, reserved in con.execute(
+                             'SELECT pr, stage, receipts, reservations FROM rounds')}
+        for pr in prs:
+            comments = pr.get('comments')
+            if comments is None:
+                continue  # incomplete history is not a cap verdict
+            stage = 'qa' if pr['isDraft'] else '12b'
+            head = pr['headRefOid']
+            if stage == '12b':
+                markers = pm_markers(comments)
+                if f'ci-head:{head}' in {label['name'] for label in pr['labels']} or (
+                        markers and markers[-1][0] == 'PASS' and head.lower().startswith(markers[-1][1].lower())):
+                    continue
+            if stage == 'qa' and qa_verdict(pr, head) == 'PASS':
+                continue
+            receipts, reserved = saved.get((pr['number'], stage), ({}, []))
+            current = _CAP.read_receipts(stage, [comments])
+            if _CAP.round_counts(stage, {**receipts, **current}, reserved)[0] >= 2:
+                pr['review_cap'] = stage
+    except (sqlite3.Error, OSError, ValueError, TypeError) as exc:
+        print(f'WARN review-cap lookup failed: {exc}', file=sys.stderr)
+
+
+def latest_check_runs(runs, head):
     latest = {}
     for run in runs:
         if run.get('head_sha') != head or run.get('name') not in ('test', 'e2e'):
@@ -181,8 +292,12 @@ def latest_checks(runs, head):
         name = run['name']
         if run.get('id', 0) > latest.get(name, {}).get('id', -1):
             latest[name] = run
+    return latest
+
+
+def latest_checks(runs, head):
     return {name: ((run.get('conclusion') or '').upper() if run.get('status') == 'completed'
-                   else 'PENDING') for name, run in latest.items()}
+                   else 'PENDING') for name, run in latest_check_runs(runs, head).items()}
 
 
 def claim_evidence(row):
@@ -277,7 +392,7 @@ def merge_gate(pr, runs, obligations, e2e_required=None):
     hold = hold_reason(pr, obligations)
     if not hold and latest_12b_verdict(pr, head) == 'BLOCK':
         hold = 'latest-head PM 12b BLOCK'
-    mergeable = pr.get('mergeable') or 'UNKNOWN'
+    mergeable = mergeability(pr)
     if pr['isDraft']:
         gate, action = 'draft-rework', 'finish rework'
     elif hold:
@@ -292,7 +407,7 @@ def merge_gate(pr, runs, obligations, e2e_required=None):
             gate, action = 'dual-green/merge ask', 'request exact-head merge'
         else:
             gate = 'green/not mergeable'
-            action = 'resolve conflicts' if mergeable == 'CONFLICTING' else f'reconcile mergeable {mergeable}'
+            action = 'resolve conflicts' if mergeable == 'CONFLICTING' else 'check mergeability'
     else:
         gate, action = 'CI running', 'await terminal' if 'PENDING' in (ci, e2e) else 'reconcile missing gates'
     if mergeable == 'CONFLICTING' and not action.startswith('resolve conflicts'):
@@ -312,15 +427,37 @@ def pending_ci(head):
         return False
 
 
+def comment_time(comment):
+    return comment.get('created_at') or comment.get('createdAt') or ''
+
+
+def qa_markers(comment):
+    lines = (comment.get('body') or '').rstrip().splitlines()
+    if not lines:
+        return ()
+    return tuple(line for line in dict.fromkeys((lines[0], lines[-1]))
+                 if _CAP.QA.fullmatch(line) or _CAP.QA_PASS.fullmatch(line))
+
+
+def qa_verdict(pr, head):
+    for comment in sorted(pr.get('comments') or [], key=comment_time, reverse=True):
+        for marker in reversed(qa_markers(comment)):
+            sha = re.search(r'(?:at |head=)([a-fA-F0-9]{7,40})\b', marker)
+            if sha and head.lower().startswith(sha[1].lower()):
+                return 'PASS' if re.search(r'\bPASS\b|^DONE:', marker) else 'REVISE'
+    return None
+
+
+def pm_markers(comments):
+    shaped = [dict(c, created_at=comment_time(c), id=c.get('id', i)) for i, c in enumerate(comments)]
+    return [(verdict, sha) for verdict, sha, canonical, _ in
+            _REVIEW_GATE.canonical_markers(shaped, None) if canonical]
+
+
 def report_annotations(pr):
     proxy = pr.get('live_proxy')
-    owner = f'owner={proxy[0]} · {proxy[1]}' if proxy else None
-    # gh pr view returns createdAt, while the shared parser expects REST keys.
-    # This is display-only: a completed marker never claims an active lane.
-    comments = [dict(body=c.get('body'), created_at=c.get('createdAt') or '', id=i)
-                for i, c in enumerate(pr.get('comments') or [])]
-    markers = [(verdict, sha) for verdict, sha, canonical, _ in
-               _REVIEW_GATE.canonical_markers(comments, None) if canonical]
+    owner = ('owner=' + ' · '.join(filter(None, proxy))) if proxy else None
+    markers = pm_markers(pr.get('comments') or [])
     if not markers:
         return owner, ''
     verdict, sha = markers[-1]
@@ -328,16 +465,45 @@ def report_annotations(pr):
     return owner, f' · PM 12b: {verdict} at {sha[:12]}{head_note}'
 
 
+def review_snapshot(pr):
+    markers = []
+    for comment in pr.get('comments') or []:
+        pm = pm_markers([comment])
+        qa = qa_markers(comment)
+        if pm or qa:
+            markers.append([comment.get('id') or comment_time(comment), [list(m) for m in pm], list(qa)])
+    return markers
+
+
+def has_merge_ask(pr, obligations):
+    return pr.get('merge_ask_sent', False) or any(
+        str(row.get('pr')) == str(pr['number']) and row.get('kind') == 'pr_merge_ask'
+        and claim_evidence(row).get('head') == pr['headRefOid'] for row in obligations)
+
+
+def draft_idle(pr, since_head, now):
+    tip = stamp(pr.get('tip_at'))
+    if not tip or pr.get('comments') is None:
+        return False  # cannot prove idle when a source failed
+    activity = [tip, stamp(pr.get('createdAt')), stamp(since_head)]
+    activity.extend(stamp(comment_time(c)) for c in pr.get('comments') or [])
+    return now - max(d for d in activity if d) > dt.timedelta(hours=24)
+
+
 def classify(pr, runs, slots, obligations, prior, now):
     number, head = pr['number'], pr['headRefOid']
     labels = [item['name'] for item in pr['labels']]
     admitted = f'ci-head:{head}' in labels
     admission = 'matches' if admitted else ('stale' if any(x.startswith('ci-head:') for x in labels) else 'missing')
-    gate, action, g = merge_gate(pr, runs, obligations)
-    ci, e2e = g['ci'], g['e2e']
-    if g.get('e2e_reason'):
-        e2e = f'{e2e} ({g["e2e_reason"]})'  # why the exact-head receipt did or did not exempt E2E
+    previous = prior.get(str(number), {})
     blocked = hold_reason(pr, obligations)
+    if runs is None:
+        # An unavailable provider cannot reset the known gate age or invent a red.
+        gate = previous.get('gate') if previous.get('head') == head else None
+        action, g = 'check GitHub API', {'ci': None, 'e2e': None}
+    else:
+        gate, action, g = merge_gate(pr, runs, obligations)
+    ci, e2e = g['ci'], g['e2e']
     proxy_owner, review = report_annotations(pr)
     owner = proxy_owner
     if owner is None:
@@ -347,7 +513,7 @@ def classify(pr, runs, slots, obligations, prior, now):
             if slot.get('occupied') is True and slot.get('pr') == number and slot.get('head_sha') == head:
                 owner = f'S{slot["slot"]}'
                 break
-    active_owner = bool(proxy_owner)
+    active_owner = owner is not None
     if owner is None:
         for row in obligations:
             until = stamp(row.get('suppress_until'))
@@ -363,79 +529,134 @@ def classify(pr, runs, slots, obligations, prior, now):
         action = 'await terminal'
         if owner is None:
             owner = f'CI (admitted {head[:12]})'
-    merge_ask = pr.get('merge_ask_sent', False)
-    for row in obligations:
-        if row.get('pr') == number and row.get('kind') == 'pr_merge_ask':
-            evidence = claim_evidence(row)
-            merge_ask = merge_ask or evidence.get('head') == head
+    merge_ask = has_merge_ask(pr, obligations)
     if gate == 'dual-green/merge ask' and merge_ask:
-        owner, action = proxy_owner or 'CTO (merge ask sent)', 'await merge decision'
-    previous = prior.get(str(number), {})
+        owner, action = owner or 'CTO (merge ask sent)', 'await merge decision'
     since = stamp(previous.get('since')) if previous.get('gate') == gate else None
     since = since or now
-    movement = 'STUCK' if owner is None or (now - since).total_seconds() > 4 * 3600 else 'OWNED'
-    if movement != 'STUCK':
-        if ci_wait:
-            latest = {}
-            for run in runs:
-                if run.get('head_sha') == head and run.get('name') in ('test', 'e2e'):
-                    name = run['name']
-                    if run.get('id', 0) > latest.get(name, {}).get('id', -1):
-                        latest[name] = run
-            movement = ('QUEUED' if any(r.get('status') in ('queued', 'waiting', 'requested', 'pending')
-                                        for r in latest.values()) else 'WAITING')
-        elif gate == 'dual-green/merge ask' and merge_ask:
-            movement = 'WAITING'
-        elif previous.get('head') and previous['head'] != head:
-            movement = 'MOVING'  # observed new pushed head, not merely a claim
+    moved_head = previous.get('head') and previous['head'] != head
+    since_head = now.isoformat() if moved_head else previous.get('since_head')
+    idle = pr['isDraft'] and not proxy_owner and draft_idle(pr, since_head, now)
+    stuck = (not active_owner and not blocked and not pr['isDraft'] and gate is not None
+             and now - since > dt.timedelta(hours=4))
+    red = (ci in RED or e2e in RED) and owner is None
+    green = (ci == 'SUCCESS' and e2e in ('SUCCESS', 'NOT_REQUIRED') and not merge_ask
+             and not pr['isDraft'] and gate != 'held')
+    cap = pr.get('review_cap')
+    conflict = mergeability(pr) == 'CONFLICTING' and not active_owner and not blocked
+    actionable = stuck or idle or red or green or bool(cap) or conflict
 
-    if active_owner:
+    if proxy_owner:
         movement = 'OWNED'
-    if workflow_wait and not proxy_owner:
-        movement = 'WAITING'
-    if blocked:
+    elif blocked:
         movement = 'PARKED'
+    elif active_owner:
+        movement = 'OWNED'
+    elif stuck or idle or red:
+        movement = 'STUCK'
+    elif ci_wait:
+        latest = latest_check_runs(runs or [], head)
+        movement = ('QUEUED' if any(r.get('status') in ('queued', 'waiting', 'requested', 'pending')
+                                    for r in latest.values()) else 'WAITING')
+    elif owner:
+        movement = 'WAITING'
+    else:
+        movement = 'MOVING' if moved_head else 'OPEN'
+
+    details = [f'ci-head {admission}']
+    if runs is None:
+        details.append('checks unavailable (GitHub API error)')
+    else:
+        e2e_reason = f' ({g["e2e_reason"]})' if g.get('e2e_reason') else ''
+        details.extend((f'CI {ci}', f'E2E {e2e}{e2e_reason}'))
+    if mergeability(pr):
+        details.append(f'mergeable {mergeability(pr)}')
+    if cap:
+        action = f'{cap} review cap reached; {action}'
+    if idle:
+        action = f'draft idle >24h; {action}'
     safe_owner = re.sub(r'[\r\n]+', ' ', owner or 'unowned')
-    line = (f'#{number} {"draft" if pr["isDraft"] else "ready"} · {gate} '
-            f'[ci-head {admission}; CI {ci}; E2E {e2e}; mergeable {pr.get("mergeable", "UNKNOWN")}] '
-            f'· {safe_owner}{review} · {action} · {movement}')
-    return line, {'gate': gate, 'since': since.isoformat(), 'head': head}
+    line = (f'#{number} {"draft" if pr["isDraft"] else "ready"} · {gate or "checks unavailable"} '
+            f'[{"; ".join(details)}] · {safe_owner}{review} · {action} · {movement}')
+    return line, {'gate': gate, 'since': since.isoformat(), 'head': head, 'since_head': since_head}, actionable
 
 
-def render(prs, checks, slots, obligations, prior, now):
-    lines, state, failed = [], {}, 0
+def observation(pr, runs, obligations, old):
+    head = pr['headRefOid']
+    current = {'head': head, 'draft': pr['isDraft'], 'labels': sorted(x['name'] for x in pr['labels']),
+               'hold': hold_reason(pr, obligations), 'merge_ask': has_merge_ask(pr, obligations)}
+    if pr.get('comments') is not None:
+        current['review'] = review_snapshot(pr)
+    if 'reviewDecision' in pr:
+        current['review_decision'] = pr['reviewDecision']
+    checks = dict(old.get('terminal_checks', {})) if old.get('head') == head else {}
+    # Ignore nonterminal polling churn. A rerun changes the snapshot once its
+    # terminal result is observed, even if the conclusion is unchanged.
+    for name, check in latest_check_runs(runs or [], head).items():
+        if check.get('status') == 'completed':
+            checks[name] = [check.get('id'), check.get('conclusion')]
+    if runs is not None or checks:
+        current['terminal_checks'] = checks
+    return current
+
+
+def render(prs, checks, slots, obligations, prior, now, *, previous=None, merged=()):
+    lines, state, failed, hidden = [], {}, 0, 0
+    previous = prior if previous is None else previous
     for pr in sorted(prs, key=lambda item: item['number']):
+        key = str(pr['number'])
         runs = checks.get(pr['number'], [])
-        if runs is None:
-            failed += 1
-            labels = [item['name'] for item in pr['labels']]
-            proxy_owner, review = report_annotations(pr)
-            lines.append(f'#{pr["number"]} {"draft" if pr["isDraft"] else "ready"} · '
-                         f'checks: unavailable (GitHub API error) · head {pr["headRefOid"][:12]} '
-                         f'· mergeable {pr.get("mergeable", "UNKNOWN")}'
-                         + (' · ' + ','.join(sorted(x for x in labels if x.startswith('pm-blocked:')))
-                            if any(x.startswith('pm-blocked:') for x in labels) else '')
-                         + (f' · {proxy_owner}' if proxy_owner else '') + review)
-            if str(pr['number']) in prior:
-                state[str(pr['number'])] = prior[str(pr['number'])]  # keep gate age
-            continue
-        line, entry = classify(pr, runs, slots, obligations, prior, now)
-        lines.append(line)
-        state[str(pr['number'])] = entry
+        failed += runs is None
+        line, entry, actionable = classify(pr, runs, slots, obligations, prior, now)
+        last = previous.get(key, {})
+        old = last.get('observation', {})
+        observed = observation(pr, runs, obligations, old)
+        # Older installations stored only gate/head. Seed the new fields without
+        # listing every existing PR, unless its known head or gate actually moved.
+        changed = (not last or last.get('head') not in (None, entry['head']) or
+                   (not old and entry['gate'] is not None and last.get('gate') != entry['gate']) or
+                   any((k not in old or old[k] != v) for k, v in observed.items() if old))
+        state[key] = {**entry, 'observation': {**old, **observed}}
+        if changed or actionable:
+            lines.append(line)
+        else:
+            hidden += 1
+    for number, merged_at in merged:
+        lines.append(f'#{number} merged · {merged_at}')
     if prs and failed * 2 > len(prs):
         lines.insert(0, f'GitHub API degraded: check-runs unavailable for {failed}/{len(prs)} PRs')
+    if hidden:
+        lines.append(f'{hidden} unchanged and owned')
     return lines or ['No open PRs.'], state
 
 
+def disappeared_prs(previous, prs):
+    """Verify closures of previously seen PRs; absence from the list is not a merge."""
+    merged, unresolved = [], {}
+    absent = previous.keys() - {str(pr['number']) for pr in prs}
+    for number in sorted(absent, key=int):
+        try:
+            closed = gh('pr', 'view', number, '--repo', REPO, '--json', 'state,mergedAt')
+            if closed['state'] == 'MERGED' and closed.get('mergedAt'):
+                merged.append((number, closed['mergedAt']))
+            elif closed['state'] != 'CLOSED':
+                unresolved[number] = previous[number]
+        except GH_ERRORS as exc:
+            print(f'WARN disappeared PR #{number}: {exc}', file=sys.stderr)
+            unresolved[number] = previous[number]
+    return merged, unresolved
+
+
 def chunks(lines, limit=35000):
-    # Slack hard limit is 40k; split on complete PR lines, never omit a row.
+    # Slack hard limit is 40k; split on complete lines and print the footer only once.
+    title = '*Hourly per-PR status (continued)*\n\n'
     out, text, count = [], '*Hourly per-PR status*\n\n', 0
-    for line in lines:
-        if len(line) + 30 > limit:
-            raise ValueError('single PR line exceeds Slack limit')
+    for line in [*lines, FOOTER]:
+        if len(title) + len(line) + 2 > limit:
+            raise ValueError('single report line exceeds Slack limit')
         if len(text) + len(line) + 2 > limit or count >= 40:
             out.append(text)
-            text, count = '*Hourly per-PR status (continued)*\n\n', 0
+            text, count = title, 0
         text += line + '\n\n'
         count += 1
     return out + [text]
@@ -457,11 +678,27 @@ def post(channel, thread, text):
     return match.group(1)
 
 
+def preview(saved, now):
+    prs, checks, slots, obligations = collect()
+    gates = saved.get('gates', {})
+    previous = saved.get('previous', gates)
+    merged, unresolved = disappeared_prs(previous, prs)
+    lines, ages = render(prs, checks, slots, obligations, gates, now, previous=previous, merged=merged)
+    return lines, ages, {**unresolved, **ages}
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--thread')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--thread')
+    mode.add_argument('--dry-run', action='store_true', help='print the exact Slack body; never post or save ages')
     parser.add_argument('--channel', default='C0ALZJHGE49')
     args = parser.parse_args()
+    if not args.thread:
+        saved = json.loads(STATE.read_text()) if STATE.exists() else {}
+        lines, _, _ = preview(saved, dt.datetime.now(dt.timezone.utc))
+        print((''.join(chunks(lines)).rstrip()) if args.dry_run else '\n'.join(lines))
+        return
     STATE.parent.mkdir(parents=True, exist_ok=True)
     with STATE.with_suffix('.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -471,7 +708,7 @@ def main():
         if args.thread and delivered.get(key, {}).get('done'):
             print('ALREADY_POSTED ' + key)
             return
-        receipt = delivered.get(key) if args.thread else None
+        receipt = delivered.get(key)
         if receipt and (receipt.get('attempt') is not None or
                 (len(receipt['parts']) < len(receipt['messages'])
                  and receipt.get('delivery_version') != 1)):
@@ -479,11 +716,17 @@ def main():
             # Keep confirmed parts and stop before even recollecting providers.
             raise RuntimeError('UNCERTAIN Slack part; reconcile the existing thread before retrying: '
                                + key + f'; confirmed_parts={len(receipt["parts"])}')
-        prs, checks, slots, obligations = collect()
         now = dt.datetime.now(dt.timezone.utc)
-        lines, ages = render(prs, checks, slots, obligations, saved.get('gates', {}), now)
-        saved['gates'] = ages
-        # Save ages even if delivery fails; retries cannot reset the STUCK clock.
+        if receipt is None:
+            # Preserve the prior hourly independently of gate ages (which are
+            # saved even if delivery fails). Old receipts resume as written.
+            saved.setdefault('previous', saved.get('gates', {}))
+            lines, ages, snapshot = preview(saved, now)
+            saved['gates'] = ages
+            receipt = {'parts': [], 'messages': chunks(lines), 'delivery_version': 1,
+                       'snapshot': snapshot, 'snapshot_at': now.isoformat()}
+            delivered[key] = receipt
+
         def save():
             temporary = STATE.with_suffix('.new')
             with temporary.open('w') as handle:
@@ -496,15 +739,6 @@ def main():
                 os.fsync(directory)
             finally:
                 os.close(directory)
-        save()
-        if not args.thread:
-            print('\n'.join(lines))
-            return
-        receipt = delivered.setdefault(key, {'parts': [], 'messages': chunks(lines), 'delivery_version': 1})
-        save()
-        if receipt.get('attempt') is not None:
-            raise RuntimeError('UNCERTAIN Slack part; reconcile the existing thread before retrying: '
-                               + json.dumps(receipt['attempt']))
         for index in range(len(receipt['parts']), len(receipt['messages'])):
             # Save intent durably BEFORE sending. A lost response or crash must
             # never turn an accepted send into a duplicate on the next run.
@@ -514,6 +748,10 @@ def main():
             receipt.pop('attempt')
             save()
         receipt['done'] = True
+        snapshot = receipt.pop('snapshot', None)
+        snapshot_at = receipt.pop('snapshot_at', '')
+        if snapshot is not None and snapshot_at > saved.get('previous_at', ''):
+            saved.update(previous=snapshot, previous_at=snapshot_at)
         save()
 
 

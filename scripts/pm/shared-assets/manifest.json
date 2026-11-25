@@ -906,7 +906,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "de710ffb138b2c08465f04d88cbb7402486eb0b6ba02f2121eb0fba7a1613b51",
+      "sha256": "793ec964a1d80e1a65a381f6a5ff5ea1292844abd6a755e94625f65f8b60f506",
       "source_path": "claude/scripts/pm/heartbeat/pr-status-report.py"
     },
     {
@@ -1023,7 +1023,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "6ec8e0d0d92e465a8ccaca7abce61131a27f95cebeee7b2b80522fd6134ae77d",
+      "sha256": "81ee01fbbad58ace38153df865adf07f1b6da71f0f7451e04e99cef6ac055398",
       "source_path": "claude/scripts/proxy-review-cap.py"
     },
     {

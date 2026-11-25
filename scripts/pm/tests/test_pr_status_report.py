@@ -62,7 +62,7 @@ def test_unowned_expired_and_wrong_head():
     checks[6].append(dict(id=0, name='test', head_sha='head', status='completed', conclusion='failure'))
     lines, _ = report.render([prs[5]], checks, [], [dict(pr=6, owner='expired', suppress_until='2026-10-26T00:00:00Z')], {}, NOW)
     assert 'CI running' in lines[0] and 'E2E MISSING' in lines[0]
-    assert 'unowned' in lines[0] and 'STUCK' in lines[0]
+    assert 'unowned' in lines[0] and lines[0].endswith('· OPEN')
 
 
 def launch_log(name, pr, time='09:00:00'):
@@ -81,7 +81,7 @@ def test_collect_renders_each_process_bound_proxy_and_latest_12b(tmp_path, monke
         processes.append(f'{number + 100} /usr/local/bin/claude -p --name {lane} --model auto')
         filename = f'{role}-{lane}-{number}-20261027T090001Z.log' if role == 'hd-proof-qa' else f'{lane}.log'
         (tmp_path / filename).write_text(launch_log(lane, number))
-        pr.update(headRefOid=head, labels=[], comments=[
+        pr.update(headRefOid=head, isDraft=False, labels=[], comments=[
             {'body': f'## PM 12b: REVISE at {head}', 'createdAt': '2026-10-27T09:10:00Z'},
             {'body': f'PM 12b: PASS at {head}', 'createdAt': '2026-10-27T08:10:00Z'},
         ])
@@ -93,16 +93,18 @@ def test_collect_renders_each_process_bound_proxy_and_latest_12b(tmp_path, monke
     monkeypatch.setattr(report, 'DB', db)
     monkeypatch.setattr(report, 'HOME', tmp_path)
     monkeypatch.setattr(report, 'PROXY_LOG_DIR', tmp_path)
+    monkeypatch.setattr(report, 'PROXY_RUN_DIR', tmp_path / 'runs')
     monkeypatch.setattr(report.urllib.request, 'urlopen', lambda *a, **kw: io.StringIO('{"slots": []}'))
     monkeypatch.setattr(report, 'gh', lambda *args: [[{'number': n} for n in by_pr]]
                         if args[0] == 'api' else by_pr[int(args[2])][0])
+    monkeypatch.setattr(report, 'fetch_comments', lambda number: by_pr[number][0]['comments'])
     monkeypatch.setattr(report, 'fetch_checks', lambda *_: [])
     with patch.object(report.subprocess, 'run', return_value=subprocess.CompletedProcess(
             [], 0, '\n'.join(processes), '')) as run:
         inputs = report.collect()
         lines, _ = report.render(*inputs, {str(pr['number']): {'gate': '12b', 'since': '2026-10-26T13:00:00Z'}
                                           for pr in selected}, NOW)
-    assert run.call_args.args[0] == ['pgrep', '-fl', 'claude -p --name proxy-']
+    assert run.call_args.args[0] == ['pgrep', '-fl', 'claude -p --name ']
     assert run.call_count == 1
     assert len(lines) == len(by_pr)
     for line in lines:
@@ -129,7 +131,7 @@ def test_proxy_logs_and_completed_markers_cannot_claim_without_live_pr_binding(t
     ])
     lines, _ = report.render([pr], checks, [], [], {}, NOW)
     assert '· unowned · PM 12b: PASS at bbbbbbb (different head)' in lines[0]
-    assert lines[0].endswith('· STUCK')
+    assert lines[0].endswith('· OPEN')
 
 
 def test_split_preserves_every_line():
@@ -189,7 +191,7 @@ def test_stale_checkout_cannot_own_pr(tmp_path, monkeypatch, capsys, slot):
     monkeypatch.setattr(sys, 'argv', ['report'])
     report.main()
     line = capsys.readouterr().out
-    assert 'unowned' in line and 'STUCK' in line and 'S2' not in line
+    assert 'unowned' in line and 'S2' not in line
     assert 'draft-rework' in line  # draft takes precedence over CI
 
 
@@ -226,7 +228,7 @@ def test_current_head_merge_ask_transfers_owner_to_cto():
         rows = [dict(pr=6, kind='pr_merge_ask', evidence_json=json.dumps({'head': evidence}))]
         lines, _ = report.render([prs[5]], checks, [], rows, {}, NOW)
         assert expected in lines[0]
-        assert ('WAITING' if evidence == 'head' else 'STUCK') in lines[0]
+        assert lines[0].endswith('· WAITING' if evidence == 'head' else '· OPEN')
     prs[5]['merge_ask_sent'] = True
     lines, _ = report.render([prs[5]], checks, [], [], {}, NOW)
     assert 'CTO (merge ask sent)' in lines[0]
@@ -239,7 +241,7 @@ def test_post_has_one_pr_per_block_and_explicit_multiline_fallback():
         assert report.post('C0ALZJHGE49', '123.0', text) == '123.4'
         argv = run.call_args.args[0]
         blocks = json.loads(argv[argv.index('-b') + 1])
-        assert [b['text']['text'] for b in blocks][1:] == ['#1 ready · MOVING', '#2 draft · MOVING']
+        assert [b['text']['text'] for b in blocks][1:] == ['#1 ready · MOVING', '#2 draft · MOVING', report.FOOTER]
         assert '\n\n#1' in run.call_args.kwargs['input']
 
 
@@ -301,8 +303,8 @@ def test_twenty_two_rows_preserve_block_layout():
         report.post('C0ALZJHGE49', '123.0', text)
     argv = send.call_args.args[0]
     blocks = json.loads(argv[argv.index('-b') + 1])
-    assert len(blocks) == 23
-    assert [b['text']['text'] for b in blocks][1:] == lines
+    assert len(blocks) == len(lines) + 2
+    assert [b['text']['text'] for b in blocks][1:] == [*lines, report.FOOTER]
 
 
 def entry_fixture(tmp_path):
@@ -433,6 +435,148 @@ def test_legacy_accepted_response_loss_is_not_replayed(tmp_path):
     assert len(log.read_text().splitlines()) == 2
     assert restarted.returncode == 1 and 'UNCERTAIN' in restarted.stderr
     assert json.loads(ledger.read_text())['delivered']['C_TEST:123.0']['parts'] == ['321.000001']
+
+
+@pytest.mark.parametrize('count', [3, 19, 53])
+def test_delta_partitions_generated_prs_and_retains_every_baseline_row(count):
+    original = [dict(number=n, headRefOid='a' * 40, isDraft=False, labels=[], mergeable='MERGEABLE',
+                     comments=[], live_proxy=(f'proxy-build-{n}', 'build/rework')) for n in range(1, count + 1)]
+    _, prior = report.render(original, {}, [], [], {}, NOW)
+    prior = json.loads(json.dumps(prior))  # compare the same data actually read back next hour
+    incoming, checks, obligations, expected = [], {}, [], set()
+    for pr in original:
+        n = pr['number']
+        updated = dict(pr)
+        if n % 7 == 0:
+            updated['headRefOid'] = 'b' * 40
+        elif n % 7 == 1:
+            updated['labels'] = [{'name': 'pm-blocked:dependency'}]
+        elif n % 7 == 2:
+            checks[n] = [dict(head_sha=pr['headRefOid'], id=n, name='e2e', status='completed', conclusion='success')]
+        elif n % 7 == 3:
+            updated['comments'] = [dict(id=n, body=f'PM 12b: REVISE at {pr["headRefOid"]}')]
+        elif n % 7 == 4:
+            updated['merge_ask_sent'] = True
+        elif n % 7 == 5:
+            obligations.append(dict(pr=n, kind='merge_hold', id=n))
+        if n % 7 != 6:
+            expected.add(n)
+        incoming.append(updated)
+    lines, baseline = report.render(incoming, checks, [], obligations, prior, NOW + dt.timedelta(hours=1))
+    assert {int(line.split()[0][1:]) for line in lines if line.startswith('#')} == expected
+    assert all(line.endswith('· OWNED') for line in lines if line.startswith('#'))
+    assert set(baseline) == {str(pr['number']) for pr in original}
+    if count > len(expected):
+        assert lines[-1] == f'{count - len(expected)} unchanged and owned'
+    same, _ = report.render(incoming, checks, [], obligations, baseline, NOW + dt.timedelta(hours=2))
+    assert same == [f'{count} unchanged and owned']
+
+
+@pytest.mark.parametrize('case,shown', [
+    ('dual-green', True), ('red', True), ('red-owned', False), ('cap', True),
+    ('stuck', True), ('stuck-owned', False), ('draft-idle', True),
+    ('draft-idle-owned', False), ('draft-recent-comment', False), ('waiting', False),
+])
+def test_unchanged_action_thresholds(case, shown):
+    head = 'a' * 40
+    pr = dict(number=121, headRefOid=head, isDraft=case.startswith('draft'), labels=[], comments=[])
+    runs = []
+    if case == 'dual-green' or case.startswith('red'):
+        pr['labels'] = [{'name': f'ci-head:{head}'}]
+        runs = [dict(head_sha=head, id=i, name=name, status='completed', conclusion=conclusion)
+                for i, (name, conclusion) in enumerate((('test', 'success'),
+                    ('e2e', 'success' if case == 'dual-green' else 'failure')), 1)]
+    if case.endswith('-owned'):
+        pr['live_proxy'] = ('proxy-rw-121', 'rework')
+    if case == 'cap':
+        pr['review_cap'] = '12b'
+    if pr['isDraft']:
+        pr['tip_at'] = (NOW - dt.timedelta(hours=25)).isoformat()
+    if case == 'draft-recent-comment':
+        pr['comments'] = [{'created_at': NOW.isoformat(), 'body': 'Working on this'}]
+    _, prior = report.render([pr], {121: runs}, [], [], {}, NOW)
+    later = NOW + dt.timedelta(hours=5 if case.startswith('stuck') else 1)
+    lines, _ = report.render([pr], {121: runs}, [], [], prior, later)
+    assert lines[0].startswith('#121 ') is shown
+    assert (lines == ['1 unchanged and owned']) is (not shown)
+
+
+def test_named_lanes_require_a_live_process_and_explicit_pr(tmp_path):
+    log_dir = tmp_path / 'logs'
+    log_dir.mkdir()
+    names = ['proxy-rw-short', 'px-builder.custom', 'proxy-dead', 'proxy-1234']
+    for pid, name in enumerate(names, 10):
+        lane = tmp_path / name
+        lane.mkdir()
+        brief = lane / 'brief.md'
+        brief.write_text('PR: #7234\n' if pid == 11 else 'ISSUE: 7234\n')
+        manifest = dict(name=name, pid=pid, type='hd-builder', state='running',
+                        started_at=NOW.isoformat(), brief=str(brief))
+        if pid in (10, 12):
+            manifest['pr'] = '7233' if pid == 10 else '7235'
+        (lane / 'manifest.json').write_text(json.dumps(manifest))
+    process_rows = '\n'.join(f'{pid} /bin/claude -p --name {names[pid-10]} --model test' for pid in (10, 11, 13))
+    process_rows += f'\n12 /bin/sh -c claude -p --name {names[2]}\n'
+    with patch.object(report.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, process_rows)):
+        owners = report.live_proxy_lanes(log_dir, tmp_path)
+    assert owners == {7233: (names[0], 'build/rework'), 7234: (names[1], 'build/rework')}
+
+
+@pytest.mark.parametrize('initial,retry,expected_calls,field', [
+    ('MERGEABLE', None, 1, 'MERGEABLE'), ('UNKNOWN', 'CONFLICTING', 2, 'CONFLICTING'),
+    ('UNKNOWN', 'UNKNOWN', 2, None), ('UNKNOWN', 'different-head', 2, None),
+])
+def test_mergeability_requery_once_and_never_print_unknown(initial, retry, expected_calls, field):
+    head = 'a' * 40
+    pr = dict(number=721, headRefOid=head, isDraft=False, labels=[], mergeable=initial)
+    second = dict(headRefOid='b' * 40 if retry == 'different-head' else head,
+                  mergeable='MERGEABLE' if retry == 'different-head' else retry)
+    with patch.object(report, 'gh', side_effect=[pr, second]) as query:
+        fetched = report.fetch_pr({'number': pr['number']})
+    assert query.call_count == expected_calls and fetched.get('mergeable') == field
+    lines, _ = report.render([fetched], {}, [], [], {}, NOW)
+    assert 'UNKNOWN' not in lines[0]
+    assert ('mergeable ' in lines[0]) is bool(field)
+
+
+def test_disappeared_pr_requires_verified_merge_and_retains_failed_lookup():
+    prior = {str(n): {'head': str(n)} for n in range(1, 5)}
+    with patch.object(report, 'gh', side_effect=[{'state': 'MERGED', 'mergedAt': NOW.isoformat()},
+                                                {'state': 'CLOSED'}, ValueError('unavailable')]):
+        merged, unresolved = report.disappeared_prs(prior, [{'number': 4}])
+    lines, _ = report.render([], {}, [], [], {}, NOW, merged=merged)
+    assert lines == [f'#1 merged · {NOW.isoformat()}'] and unresolved == {'3': prior['3']}
+
+
+def test_cap_uses_distinct_receipts_and_ignores_completed_qa(monkeypatch, tmp_path):
+    monkeypatch.setattr(report, 'HOME', tmp_path)
+    head = 'a' * 40
+    qa_receipt = f'hd-proof-qa: REVISE at {head}'
+    token = 'a' * 32
+    draft = dict(number=1, headRefOid=head, isDraft=True, labels=[], comments=[
+        {'id': n, 'body': f'{qa_receipt}\nREVIEW_ROUND_RECEIPT: {token}'} for n in (1, 2)])
+    report.annotate_review_caps([draft])
+    assert 'review_cap' not in draft
+    draft['comments'].append({'id': 3, 'body': qa_receipt})
+    report.annotate_review_caps([draft])
+    assert draft.pop('review_cap') == 'qa'
+    draft['comments'].append({'id': 4, 'created_at': NOW.isoformat(), 'body': f'hd-proof-qa: PASS at {head}'})
+    report.annotate_review_caps([draft])
+    assert 'review_cap' not in draft
+
+
+def test_dry_run_keeps_previous_and_ends_with_pm_instruction(tmp_path, monkeypatch, capsys):
+    state = tmp_path / 'state.json'
+    state.write_text('{"gates": {}, "delivered": {}}')
+    before = state.read_bytes()
+    monkeypatch.setattr(report, 'STATE', state)
+    monkeypatch.setattr(report, 'collect', lambda: ([], {}, [], []))
+    monkeypatch.setattr(sys, 'argv', ['report', '--dry-run'])
+    with patch.object(report, 'post') as post:
+        report.main()
+    post.assert_not_called()
+    assert state.read_bytes() == before and not state.with_suffix('.lock').exists()
+    assert capsys.readouterr().out.splitlines()[-1] == report.FOOTER
 
 
 def test_native_draft_false_precedes_legacy_true():
