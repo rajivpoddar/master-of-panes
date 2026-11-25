@@ -2296,7 +2296,7 @@ def cp_linkage(row, helper, cache):
         key = 'issue:' + number
         if key not in cache:
             try:
-                proc = cp_run(['gh', 'issue', 'view', number, '--repo', 'heydonna-app/heydonna-app', '--json', 'number,state,url'])
+                proc = cp_run(['gh', 'issue', 'view', number, '--repo', 'Scribie/heydonna-app', '--json', 'number,state,url'])
                 value = json.loads(proc.stdout) if proc.returncode == 0 else {}
                 cache[key] = {**value, 'kind': 'issue', 'target': number,
                               'state': value.get('state', 'UNKNOWN')}
@@ -2307,10 +2307,10 @@ def cp_linkage(row, helper, cache):
         if target not in cache:
             try:
                 if target.isdigit():
-                    proc = cp_run(['gh', 'pr', 'view', target, '--repo', 'heydonna-app/heydonna-app', '--json', 'number,state,url'])
+                    proc = cp_run(['gh', 'pr', 'view', target, '--repo', 'Scribie/heydonna-app', '--json', 'number,state,url'])
                     cache[target] = json.loads(proc.stdout) if proc.returncode == 0 else {'state': 'UNKNOWN', 'target': target}
                 else:
-                    proc = cp_run(['gh', 'pr', 'list', '--repo', 'heydonna-app/heydonna-app', '--head', target,
+                    proc = cp_run(['gh', 'pr', 'list', '--repo', 'Scribie/heydonna-app', '--head', target,
                                    '--state', 'all', '--limit', '100', '--json', 'number,state,url'])
                     found = json.loads(proc.stdout) if proc.returncode == 0 else None
                     opened = next((link for link in (found or []) if link.get('state') == 'OPEN'), None)

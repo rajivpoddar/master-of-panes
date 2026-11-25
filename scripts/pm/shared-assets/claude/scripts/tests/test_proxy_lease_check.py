@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 TOOL = Path(__file__).parents[1] / 'proxy-lease-check.py'
-REPO = 'heydonna-app/heydonna-app'
+REPO = 'Scribie/heydonna-app'
 NAME = 'proxy-hd-builder-14461t'
 NOW = '2026-11-23T12:00:00Z'
 GH = '''#!/usr/bin/env python3
@@ -170,7 +170,7 @@ def worktree_lane(lab, *, dirty=False, unpushed=1):
     event = {'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'name': 'Bash', 'input': {'command': f'lane-clone.sh clone {wt} origin/fix/14461-x'}}]}}
     out.with_suffix('.jsonl').write_text(json.dumps(event) + '\n')
     lab.lane(pr=None, out=out, started='2020-01-01T00:00:00Z')  # started long ago, so the real commit time is "after the lane started"
-    lab.gh[f'repos/{REPO}/pulls?head=heydonna-app:fix/14461-x&state=open'] = []
+    lab.gh[f'repos/{REPO}/pulls?head=Scribie:fix/14461-x&state=open'] = []
     lab.gh[f'repos/{REPO}/issues/14461/comments'] = []
     return wt
 

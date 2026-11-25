@@ -227,7 +227,7 @@ def snapshot():
         connection.close()
     with urllib.request.urlopen('http://127.0.0.1:3100/slots', timeout=15) as response:
         slots = json.load(response)['slots']
-    prs = json.loads(subprocess.run(['gh', 'pr', 'list', '--repo', 'heydonna-app/heydonna-app', '--state', 'open',
+    prs = json.loads(subprocess.run(['gh', 'pr', 'list', '--repo', 'Scribie/heydonna-app', '--state', 'open',
         '--limit', '1000', '--json', 'number,title,headRefName,headRefOid,isDraft,url'],
         capture_output=True, text=True, check=True, timeout=60).stdout)
     if len(prs) >= 1000:

@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 
-REPO = "heydonna-app/heydonna-app"
+REPO = "Scribie/heydonna-app"
 REPO_ROOT = "/Users/rajiv/Downloads/projects/heydonna-app"
 
 

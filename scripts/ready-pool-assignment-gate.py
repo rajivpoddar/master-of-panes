@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_REPO = "heydonna-app/heydonna-app"
+DEFAULT_REPO = "Scribie/heydonna-app"
 GH_BIN = "gh"
 CI_FAILURE_SCAN_CACHE = Path("/tmp/heydonna-free-slot-ci-scan.json")
 CI_FAILURE_SCAN_CACHE_SECONDS = 60

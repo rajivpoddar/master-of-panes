@@ -325,7 +325,7 @@ packet instead of duplicating it):
 
 ```bash
 python3 /Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/rework-packet-ledger.py \
-  publish --repo heydonna-app/heydonna-app --pr <PR> --issue <ISSUE> \
+  publish --repo Scribie/heydonna-app --pr <PR> --issue <ISSUE> \
   --head <full-head> --kind rework --packet /tmp/exact-rework-packet.md
 ```
 

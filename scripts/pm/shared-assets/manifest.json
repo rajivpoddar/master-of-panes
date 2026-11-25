@@ -150,7 +150,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-feedback-draft-queue-stop",
-      "sha256": "9bdc1593a048aee63ddf8a3975daeab9eede9c937c349a4e9b0b8288d6bfdb9f",
+      "sha256": "30f06254ef45354d0f233984896d4066eb8ae28d0779d5e1afcfe0a95fe0d57e",
       "source_path": "claude/hooks/feedback-draft-queue-stop.py"
     },
     {
@@ -231,7 +231,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-create-audit",
-      "sha256": "f2e72cac5e4746c7849e81a9594eaa0ec7e0c896c36f7cc9e8e50bf61e287645",
+      "sha256": "57f5c1bbe160dc52ce777d27945a423f7f47ef37b982d9f3739122d9604e3938",
       "source_path": "claude/hooks/pre-issue-create-audit.sh"
     },
     {
@@ -375,7 +375,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-buddhi",
-      "sha256": "f012f7947b0b45d47709a200bca0eb08957016abd3ee3b26dad38efbdadf4319",
+      "sha256": "ded53332f8c04ea9d6d611a3025dfc226f3c55e0a156cc93b8ce272c8bddab60",
       "source_path": "claude/rules/20-buddhi-pm.md"
     },
     {
@@ -834,7 +834,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-daily-pm-restart",
-      "sha256": "103e64542b05490abdda9f630568f7542b3ad84ac3f264338045d033d7d7bcdb",
+      "sha256": "aaed2c4f156b96d2f84ebd55351ed94e3f6e279173e1072cd1324b7ff7d95066",
       "source_path": "claude/scripts/pm/daily-pm-restart.sh"
     },
     {
@@ -861,7 +861,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "3cfdc4d60640c99c0e2f5c3e4a63631ef3e0150c04dca0ffb5f43c2ac09f4d7b",
+      "sha256": "96147a7427cf48f4c907efcd732b1a7b926db761d4341f73690a80eeccf70c3b",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -924,7 +924,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "31d3ded51d123bb65ea412b7dc7b0604fa110a2f7673bab177859be2829c3269",
+      "sha256": "027a39445532a60210940834e30d07981bca71a7b05e874646b10393ca4f191c",
       "source_path": "claude/scripts/pm/heartbeat/pr-status-report.py"
     },
     {
@@ -942,7 +942,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-delivery-retro",
-      "sha256": "fb4a91c73fadb911b908253ecf6b42a5066e97ec0d0751adef38466e0ee39112",
+      "sha256": "0d353631caabfe0b077cdd006c16922dd7011ac67baf2a28e6df4c3f2292ca94",
       "source_path": "claude/scripts/pr-delivery-retro.py"
     },
     {
@@ -1023,7 +1023,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "5a8bcd49cad6be73e345a63a39f3b1b4e08a624b24a26187d2f3cd1ec1ea4634",
+      "sha256": "0df29fdd7d75883561d4be235c159bc025783ddfe4ddb311e064d8c88a69d1b5",
       "source_path": "claude/scripts/proxy-lease-check.py"
     },
     {
@@ -1080,7 +1080,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-visual-proof-gate",
-      "sha256": "5a498e91233055f01cbda34b80c9c3d3d8d950b3e62d53222d9f1432672b8734",
+      "sha256": "0d4629a55ff9f980d376820c31058c759ab7c93ab660c0b53e4c25f6b0a88657",
       "source_authority": {
         "blob_sha": "fd3604644ad9bb48c4cf06f6eb99e4abcf508693",
         "commit": "26c592065a1584bfdd6bc7ba0272149c5ed88612",
@@ -1205,7 +1205,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-stale-process-cleanup",
-      "sha256": "bc37f205f29eddac7c12b769766be2f112d06418df99d83d6c3ef0c72c457376",
+      "sha256": "5d0ec991a78ab32924adb53cb3f6806a13abb1c680ff9e5ee58cf78dc4125051",
       "source_path": "claude/scripts/stale-process-cleanup.py"
     },
     {
@@ -1340,7 +1340,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "387e8cc3a368ee8d1b9b145870b05851e7b3215c7c6e0bc8337efb261c642dcc",
+      "sha256": "50a5af57cb8ae1540a246cccc14f4835c163362a454e330608b41e4591065a51",
       "source_path": "claude/scripts/tests/test_proxy_lease_check.py"
     },
     {
@@ -1421,7 +1421,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-ci-success-reconciliation",
-      "sha256": "c80324bf0d984f8f68f481c1bd88f66540f5ee1d24ef5670bed14b8bff927d09",
+      "sha256": "331bdcf0475a0fd4abb7eb4a9ce9fab2541f15e5c503585704f56a4e0ec4bdde",
       "source_path": "claude/skills/ci-success-reconciliation/SKILL.md"
     },
     {
@@ -1430,7 +1430,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-cleanup",
-      "sha256": "224ebb06fee5786531afd6a465bb1cd2d1ede48a3c0de2b4241b5d62e3e1ce9b",
+      "sha256": "43db3ce79e11e299ed8ff996fadfd9527c53939866b6575796e4b38566478fed",
       "source_path": "claude/skills/cleanup-pr/SKILL.md"
     },
     {
@@ -1601,7 +1601,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "46b2f722e20510e09b683ceff8be1ab0249e71c44fc5a49dc5904536d33f5cf4",
+      "sha256": "9df69a1312ebcdabee3f6bc586019ba5b62731a370db010ffaf2cfaa74d7428c",
       "source_path": "claude/skills/hourly-report-processing/SKILL.md"
     },
     {
@@ -1718,7 +1718,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-cleanup",
-      "sha256": "a12579e0e381947be8dccbe3c648e93858df29ad25556fbb45e4cb37f3dbe4f2",
+      "sha256": "fb0bd3f7e27149824017954944f4120dc441ba063ed4e79a37a97f9ce4a90bea",
       "source_path": "claude/skills/pm-cleanup-pr/SKILL.md"
     },
     {
@@ -1736,7 +1736,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pr-state-sweep",
-      "sha256": "48079ae07a9dc2241d639cf00f7f5ffb4f87e94dff41bcf923df9d7989f4725d",
+      "sha256": "fe04f6b763d4fbd57c31b2612a5caf11fc7db81b8d334e1f7553fe740fb243b4",
       "source_path": "claude/skills/pr-state-sweep/SKILL.md"
     },
     {
@@ -1745,7 +1745,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pr-state-sweep",
-      "sha256": "43677c02a781b44b050964cc7c4f2b4962a90ef5052a06e18c24d3a44347eec0",
+      "sha256": "f5fefd1865c77f5d54cb7b716611585a911d8ff6226d9e6507bad8b6dd97201e",
       "source_path": "claude/skills/pr-state-sweep/scripts/sweep.sh"
     },
     {
@@ -2031,7 +2031,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-automation-prompt-template",
-      "sha256": "f247f41191d6e83fa39cf0edcceb4253859663a878a3c93a71de3d5598d19ca8",
+      "sha256": "9e6beda0672d3426c1781fae374467b03505a1493aefc90d8757c2bf3c618159",
       "source_path": "codex/automations/heydonna-3h-ready-pool-reconciliation/prompt.template"
     },
     {
@@ -2094,7 +2094,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-ci-admission",
-      "sha256": "e5670b9bde5e9f3bbe21f334da91b99c00164c03e8ada8b88184ac76def1a7b4",
+      "sha256": "0316b7bd7bf785fedafb8e389708ec38c19a0cf8764576c96d5f5f0affed5652",
       "source_path": "codex/scripts/classifier_requirements.py"
     },
     {
@@ -2175,7 +2175,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
-      "sha256": "6ad8d3e14dff831978387618c68e4d76e9b10f48d9ac2cce5f51f1a9be7a8633",
+      "sha256": "3c6b00e1381c38c062968237a175aa0e60e8215c60299804f248144a2573a21c",
       "source_path": "codex/skills/heydonna-cto-label-gated-ci/SKILL.md"
     },
     {
@@ -2265,7 +2265,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill-executable",
-      "sha256": "a54beeb08cbb79ef12e93b6af219632b439aaf2c63b4389f7fed3e14eb8128d6",
+      "sha256": "bfe16dda5685deb6d1bc42e44197bd5512217cf5e91082e3443d02c73fbadfbf",
       "source_path": "codex/skills/heydonna-open-pr-status/scripts/merge.py"
     },
     {

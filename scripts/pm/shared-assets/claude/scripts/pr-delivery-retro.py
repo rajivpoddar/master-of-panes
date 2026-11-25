@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 
-REPO = "heydonna-app/heydonna-app"
+REPO = "Scribie/heydonna-app"
 VERSION = 12
 MOP_BASE_URL = "http://127.0.0.1:3100"
 COMPANION_MARKER_DIR = Path("/tmp/codex-review-companion")

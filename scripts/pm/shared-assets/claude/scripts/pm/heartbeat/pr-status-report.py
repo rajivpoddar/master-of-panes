@@ -26,7 +26,7 @@ HOME = Path.home()
 STATE = HOME / '.claude/state/pr-status-report.json'
 DB = Path(os.environ.get('PM_OPS_DB', str(
     HOME / '.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db')))
-REPO = 'heydonna-app/heydonna-app'
+REPO = 'Scribie/heydonna-app'
 RED = {'FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'}
 PROXY_RUN_DIR = Path(os.environ.get('PROXY_AGENT_RUN_STATE_DIR', str(HOME / '.local/state/proxy-agent-runs')))
 PROXY_PROCESS = re.compile(

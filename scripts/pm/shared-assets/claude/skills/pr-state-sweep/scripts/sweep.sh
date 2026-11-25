@@ -10,7 +10,7 @@ export PATH="${PATH:-}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:
 
 TRIGGER="manual"
 DRY_RUN="${DRY_RUN:-0}"
-GH_REPO="${GH_REPO:-heydonna-app/heydonna-app}"
+GH_REPO="${GH_REPO:-Scribie/heydonna-app}"
 MOP_HOST="${MOP_HOST:-http://localhost:3100}"
 PM_OPS="${PM_OPS:-/Users/rajiv/.claude/scripts/pm-ops.py}"
 PM_OPS_DB_WAS_EXPLICIT="${PM_OPS_DB+x}"
@@ -430,7 +430,7 @@ try:
     merged_prs = json.loads(os.environ.get("MERGED_JSON") or "[]")
 except Exception:
     merged_prs = []
-gh_repo = os.environ.get("GH_REPO") or "heydonna-app/heydonna-app"
+gh_repo = os.environ.get("GH_REPO") or "Scribie/heydonna-app"
 try:
     required_ci_jobs = json.loads(
         Path(os.environ["REQUIRED_CI_JOBS_FILE"]).read_text(encoding="utf-8")

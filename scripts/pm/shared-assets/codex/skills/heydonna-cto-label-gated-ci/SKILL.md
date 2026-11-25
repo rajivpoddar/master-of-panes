@@ -32,7 +32,7 @@ scope-aware is a separate follow-up, not a reason to delay this policy.
    1793295548.599969 / 1793295657.837009; buddhi S106). Run (UI-gated cases only):
 
    ```bash
-   python3 /Users/rajiv/.claude/scripts/qa-visual-proof-gate.py --pr PR --repo heydonna-app/heydonna-app --expect-head FULL_HEAD --json
+   python3 /Users/rajiv/.claude/scripts/qa-visual-proof-gate.py --pr PR --repo Scribie/heydonna-app --expect-head FULL_HEAD --json
    ```
 
    Require exit status 0 and `ok: true`; do not use

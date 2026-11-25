@@ -331,7 +331,7 @@ THREAD_TS=""
 # line is not rewritten.
 if [[ "$SOURCE_RESULT" == GITHUB\ * ]]; then
   GITHUB_COMMENT_ID="${SOURCE_RESULT#GITHUB }"
-  if gh api "repos/heydonna-app/heydonna-app/issues/comments/${GITHUB_COMMENT_ID}" --jq .id >/dev/null 2>&1; then
+  if gh api "repos/Scribie/heydonna-app/issues/comments/${GITHUB_COMMENT_ID}" --jq .id >/dev/null 2>&1; then
     SOURCE_RESULT="NONE"
   else
     printf '%s\n' '{"decision":"block","message":"BLOCKED: Source identity is a GitHub comment URL but that comment could not be read. Keep the single Source: line; do not rename it. No permit was consumed and no obligation was written."}'

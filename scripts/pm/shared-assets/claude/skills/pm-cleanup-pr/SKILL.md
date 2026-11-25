@@ -19,7 +19,7 @@ the caller must never fabricate one. For a merged PR with a linked issue,
 attest the canonical merge terminal explicitly:
 
 ```json
-{"repository": "heydonna-app/heydonna-app", "pr": 7740, "issue": 7739,
+{"repository": "Scribie/heydonna-app", "pr": 7740, "issue": 7739,
  "head": "<40-hex>", "merge_commit": "<40-hex>",
  "thread_reply": false, "post_merge_terminal": true}
 ```

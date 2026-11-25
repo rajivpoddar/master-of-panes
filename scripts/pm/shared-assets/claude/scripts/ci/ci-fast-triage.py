@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterable
 
 
-DEFAULT_REPO = "heydonna-app/heydonna-app"
+DEFAULT_REPO = "Scribie/heydonna-app"
 WORKFLOWS = ("ci.yml", "e2e.yml")
 VERDICT_MARKER = re.compile(r"<!--\s*ci-verdict:\s*(\{.*?\})\s*-->", re.S | re.I)
 REQUIRED_CI_JOBS_PATH = Path(__file__).with_name("required-ci-jobs.json")

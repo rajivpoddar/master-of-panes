@@ -297,7 +297,7 @@ def capture_success_verdict(
     pr: int,
     run_id: int,
     capture_profile: str,
-    repo: str = "heydonna-app/heydonna-app",
+    repo: str = "Scribie/heydonna-app",
 ) -> dict[str, Any]:
     """Adopt one completed capture run into the existing PR verdict record.
 
@@ -630,7 +630,7 @@ def main() -> int:
         action="store_true",
         help="validate and print the capture verdict without touching PR comments",
     )
-    parser.add_argument("--repo", default="heydonna-app/heydonna-app")
+    parser.add_argument("--repo", default="Scribie/heydonna-app")
     parser.add_argument(
         "--quarantine-store",
         type=Path,

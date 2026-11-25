@@ -307,7 +307,7 @@ The GraphQL query below pulls ALL Codex-authored review threads on the PR (filte
 # 1. Fetch all unresolved Codex-authored review threads on this PR (ALL commits, not just HEAD)
 UNRESOLVED_THREADS=$(gh api graphql -f query='
 query($pr: Int!) {
-  repository(owner: "heydonna-app", name: "heydonna-app") {
+  repository(owner: "Scribie", name: "heydonna-app") {
     pullRequest(number: $pr) {
       reviewThreads(first: 100) {
         nodes {
@@ -348,7 +348,7 @@ mutation($threadId: ID!) {
   # 3. Verify post-state via second GraphQL query (no stale read)
   STILL_UNRESOLVED=$(gh api graphql -f query='
 query($pr: Int!) {
-  repository(owner: "heydonna-app", name: "heydonna-app") {
+  repository(owner: "Scribie", name: "heydonna-app") {
     pullRequest(number: $pr) {
       reviewThreads(first: 100) {
         nodes {
@@ -412,7 +412,7 @@ question.
 **Procedure (run alongside Step 5c, same idempotent pattern):**
 
 ```bash
-BOT_ISSUE_COMMENTS=$(gh api /repos/heydonna-app/heydonna-app/issues/$PR_NUMBER/comments --paginate \
+BOT_ISSUE_COMMENTS=$(gh api /repos/Scribie/heydonna-app/issues/$PR_NUMBER/comments --paginate \
   --jq '[.[] | select(.user.login | test("codex"; "i"))] | length')
 
 if [ "$BOT_ISSUE_COMMENTS" -gt 0 ]; then
@@ -439,7 +439,7 @@ Codex can submit a finding in `pulls/<PR>/reviews[].body` with state
 `pulls/<PR>/comments` does not include review bodies:
 
 ```bash
-gh api --paginate /repos/heydonna-app/heydonna-app/pulls/$PR_NUMBER/reviews \
+gh api --paginate /repos/Scribie/heydonna-app/pulls/$PR_NUMBER/reviews \
   > "/tmp/pm-codex-review-bodies-PR-$PR_NUMBER.json"
 ```
 
@@ -535,7 +535,7 @@ CF_CONCLUSION=""
 CF_URL=""
 
 for i in {1..60}; do
-  CF_JSON=$(gh api "/repos/heydonna-app/heydonna-app/commits/$MERGE_SHA/check-runs?check_name=$CF_CHECK_NAME_ENCODED" 2>/dev/null || printf '{"check_runs":[]}')
+  CF_JSON=$(gh api "/repos/Scribie/heydonna-app/commits/$MERGE_SHA/check-runs?check_name=$CF_CHECK_NAME_ENCODED" 2>/dev/null || printf '{"check_runs":[]}')
   CF_FIELDS=$(printf '%s' "$CF_JSON" | python3 -c '
 import json, re, sys
 raw = sys.stdin.read()
@@ -742,15 +742,15 @@ Rajiv directive 2026-04-20: clean up expired artifacts in every `/cleanup-pr` so
 
 ```bash
 # Count + size of expired artifacts
-EXPIRED_COUNT=$(gh api /repos/heydonna-app/heydonna-app/actions/artifacts --paginate --jq '[.artifacts[] | select(.expired == true)] | length')
-EXPIRED_SIZE_GB=$(gh api /repos/heydonna-app/heydonna-app/actions/artifacts --paginate --jq '[.artifacts[] | select(.expired == true) | .size_in_bytes] | add / 1e9 | . * 100 | floor / 100')
+EXPIRED_COUNT=$(gh api /repos/Scribie/heydonna-app/actions/artifacts --paginate --jq '[.artifacts[] | select(.expired == true)] | length')
+EXPIRED_SIZE_GB=$(gh api /repos/Scribie/heydonna-app/actions/artifacts --paginate --jq '[.artifacts[] | select(.expired == true) | .size_in_bytes] | add / 1e9 | . * 100 | floor / 100')
 
 echo "Expired artifacts: $EXPIRED_COUNT ($EXPIRED_SIZE_GB GB) — deleting..."
 
 # Bulk-delete expired
-gh api /repos/heydonna-app/heydonna-app/actions/artifacts --paginate --jq '.artifacts[] | select(.expired == true) | .id' \
+gh api /repos/Scribie/heydonna-app/actions/artifacts --paginate --jq '.artifacts[] | select(.expired == true) | .id' \
   | while read id; do
-      gh api -X DELETE "/repos/heydonna-app/heydonna-app/actions/artifacts/$id" 2>&1 | head -1
+      gh api -X DELETE "/repos/Scribie/heydonna-app/actions/artifacts/$id" 2>&1 | head -1
     done
 
 echo "Done. Quota recalculates every 6-12h."

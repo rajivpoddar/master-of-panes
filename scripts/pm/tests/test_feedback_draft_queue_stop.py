@@ -35,7 +35,7 @@ def isolated_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     checkout.mkdir()
     subprocess.run(["git", "init", "-q", str(checkout)], check=True)
     subprocess.run(["git", "-C", str(checkout), "remote", "add", "origin",
-                    "https://github.com/heydonna-app/heydonna-app.git"], check=True)
+                    "https://github.com/Scribie/heydonna-app.git"], check=True)
     monkeypatch.setitem(globals(), "HEYDONNA_CWD", str(checkout))
     return checkout
 
@@ -461,6 +461,10 @@ def test_legitimate_git_worktree_with_matching_key_passes(tmp_path, isolated_che
 
 
 @pytest.mark.parametrize("remote", [
+    "https://github.com/Scribie/heydonna-app",
+    "git@github.com:Scribie/heydonna-app.git",
+    "ssh://git@github.com/Scribie/heydonna-app.git",
+    # Pre-transfer remotes stay accepted.
     "https://github.com/heydonna-app/heydonna-app",
     "git@github.com:heydonna-app/heydonna-app.git",
     "ssh://git@github.com/heydonna-app/heydonna-app.git",

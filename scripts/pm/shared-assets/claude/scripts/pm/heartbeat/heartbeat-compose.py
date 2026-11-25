@@ -4226,7 +4226,7 @@ def compose(
 # Unblockable now (Rajiv 2026-10-25, C0ALZJHGE49 ts 1792910836.320109):
 # "we need to unblock the dependencies, not fix the labels."
 # ---------------------------------------------------------------------------
-UNBLOCK_REPO = "heydonna-app/heydonna-app"
+UNBLOCK_REPO = "Scribie/heydonna-app"
 UNBLOCK_CAP = 10
 _BLOCKER_LINE = re.compile(r"(?im)^[^\n]*?(?:\bblockers?\s*:|\bblocked on\b|\bunblock_condition\b)[^\n]*$")
 # Rajiv 2026-10-25 (C0ALZJHGE49 ts 1792914885.859829): tighten. Only a strict `blockers:` line counts.

@@ -48,7 +48,7 @@ The event may come from Slack ingress or the independent green-CI watchdog.
 2. Read live PR state and bind every decision to the current head:
 
    ```bash
-   gh pr view <PR> --repo heydonna-app/heydonna-app \
+   gh pr view <PR> --repo Scribie/heydonna-app \
      --json state,isDraft,headRefName,headRefOid,labels,mergeStateStatus,mergeable
    /Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/pre-merge-current-head-ci-guard.sh --mode promotion <PR>
    ```

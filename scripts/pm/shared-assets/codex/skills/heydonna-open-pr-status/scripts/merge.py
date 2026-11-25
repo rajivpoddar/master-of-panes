@@ -14,8 +14,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
 from classifier_requirements import classify as workflow_requirements
 
-REPO = "heydonna-app/heydonna-app"
-SAME_REPO_NAMES = {REPO.lower(), "scribie/heydonna-app"}
+REPO = "Scribie/heydonna-app"
+# The pre-transfer name stays accepted: GitHub can still report it for the same repository.
+SAME_REPO_NAMES = {REPO.lower(), "heydonna-app/heydonna-app"}
 WORKFLOWS = {"ci.yml": ("typescript", "python", "test"), "e2e.yml": ("e2e",)}
 SITE_EXEMPTION_WORKFLOW = "ci-dummy.yml"
 SITE_CLASSIFIER_JOB_NAME = "detect-docs-only"
@@ -98,7 +99,7 @@ def pr_at(number, head):
         return pr
     if pr["state"] != "open" or pr["draft"]:
         raise Refusal("PR_NOT_OPEN_NON_DRAFT")
-    # GitHub resolves the heydonna-app/heydonna-app alias to the canonical Scribie/heydonna-app.
+    # The canonical repository is Scribie/heydonna-app; the pre-transfer heydonna-app/heydonna-app alias also resolves to it.
     head_repo = pr["head"].get("repo") or {}
     base_repo = pr["base"].get("repo") or {}
     same_repo = (head_repo.get("full_name") or "").lower() in SAME_REPO_NAMES and (
