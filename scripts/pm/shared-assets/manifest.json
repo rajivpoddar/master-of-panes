@@ -541,6 +541,15 @@
       "source_path": "claude/scripts/cto-relay-snapshot.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/deepseek-direct-gate.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "9c675c24042a3ac03b9c94c9a40aea6956ebb2c90584c1c90cfbdc0b322065ec",
+      "source_path": "claude/scripts/deepseek-direct-gate.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/growth/lifecycle-drip.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -969,7 +978,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "3eb748ed73ce62a572192f4f6bc76d8fa3a1a9a469908e8668ff00b4d07731a7",
+      "sha256": "aebc1b29622603f75e0ceef2089e4b6e55a3fdcd794602d8d2ba84f0e3aef66c",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -1236,6 +1245,15 @@
       "source_path": "claude/scripts/tests/test_backlog_runnability.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_deepseek_direct_gate.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-claude-proxy-launcher",
+      "sha256": "3502aa1d1a681976248cb146120789e1077910a26aabe42f109c4f31a23486eb",
+      "source_path": "claude/scripts/tests/test_deepseek_direct_gate.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/tests/test_hourly_collectors.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -1277,7 +1295,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "b80e6ee5e8aa9d0a9afe9af698e39f0b00a1f41bb2a6ba786cbb53c964b50f68",
+      "sha256": "fe12afe60469c30af269b30b6d8b5a1b252171a7cdd1f286cbf98665d450f112",
       "source_path": "claude/scripts/tests/test_proxy_claude_cap.py"
     },
     {
@@ -2319,7 +2337,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 254,
+    "selected_count": 256,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",

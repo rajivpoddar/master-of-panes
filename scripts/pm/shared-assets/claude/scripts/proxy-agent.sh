@@ -1639,9 +1639,13 @@ proxy_agent_is_sarvam_id() {
 }
 # Direct DeepSeek pool (Rajiv 25 Nov directive below): CLIProxyAPI openai-compat provider "deepseek-direct" (prefix `deepseek-direct`, upstream api.deepseek.com, the existing
 # DeepSeek API key). The id is `deepseek-direct/<upstream model>`; the upstream serves exactly deepseek-flash (DeepSeek-V4.1-Flash) and deepseek-v4-pro (GET /models, 25 Nov).
-# Explicit `--model` only: never in a tier list, never in the burn dial, own cap DEEPSEEK_DIRECT_PROXY_CAP (default 8). Balance-metered, so like Sarvam it has no role
-# exemption. Rajiv C0ALZJHGE49 thread 1795597777.761599, ts 1795597998.571509: "use direct deepseek for this so that we don't hit caps. is it wired up on proxy agents?";
-# $25 bench cap ts 1795598139.238639. The old emergency ids (deepseek, deepseek-flash, deepseek-flash-4.1) keep their rajiv:<ts> gate below; this prefix is a different identity.
+# Explicit `--model` only: never in a tier list, never in the burn dial. Balance-metered, so like Sarvam it has no role exemption. Rajiv C0ALZJHGE49 thread
+# 1795597777.761599, ts 1795597998.571509: "use direct deepseek for this so that we don't hit caps. is it wired up on proxy agents?"; $25 bench cap ts 1795598139.238639.
+# CTO REVISE of 248ae25b (ts 1795600640.261439): paid deepseek-direct/* launches AND continuations are bench-only, behind ONE admission boundary,
+# ~/.claude/scripts/deepseek-direct-gate.py: the scope token PROXY_AGENT_DEEPSEEK_DIRECT_SCOPE=bench:<run-id> must match ~/.claude/state/deepseek-direct-bench.json, whose stop
+# flag and budget_usd (vs spent_usd + the in-flight spend of the running lanes) refuse the start, and DEEPSEEK_DIRECT_PROXY_CAP (default 8) caps the live lanes. Every start,
+# dry run and continuation re-reads all of it under one flock at that moment; nothing is captured at launch time and the launcher no longer counts this pool itself.
+# The old emergency ids (deepseek, deepseek-flash, deepseek-flash-4.1) keep their rajiv:<ts> gate below; this prefix is a different identity.
 proxy_agent_is_deepseek_direct_id() {
   local id
   id="$(proxy_agent_router_identity "$1")"
@@ -2195,8 +2199,8 @@ proxy_agent_pool_blocked() {
     claude-*) pool=claude; cap="${CLAUDE_PROXY_CAP:-${PROXY_AGENT_CLAUDE_CAP:-5}}";;
     # dev@scribie ULTRA credential, own route + own cap (25 Nov): never counted in, or governed by, the team Claude pool.
     ultra/claude-*) pool=ultra; cap="${ULTRA_PROXY_CAP:-4}";;
-    # Direct DeepSeek (api.deepseek.com): own pool, own cap (25 Nov), never counted in the team Claude, Ultra or OpenCode pools.
-    deepseek-direct/*) pool=deepseek_direct; cap="${DEEPSEEK_DIRECT_PROXY_CAP:-8}";;
+    # Direct DeepSeek (api.deepseek.com) has no pool here: its only admission is deepseek-direct-gate.py. Any stray caller is told "blocked", never "free".
+    deepseek-direct/*) return 0;;
     gpt-*) pool=codex; cap="${CODEX_PROXY_CAP:-8}";;
     grok-4.7|grok) pool=grok; cap="${GROK_PROXY_CAP:-8}";;
     # hy4-flash-free has its own cap, outside the OpenCode Go cap (Rajiv C0ALZJHGE49 thread 1795416243.378619, ts 1795418976.792619: "yes, exempt it. add a spearate cap for hy4"; free tier keeps running while the Go limit refuses glm/deepseek).
@@ -2209,13 +2213,13 @@ proxy_agent_pool_blocked() {
     *) return 1;;
   esac
   # The Sarvam pool, like OpenCode, has no role exemption: paid credits with no meter, so the cap applies to cap-exempt roles and a P0 override too.
-  if [[ "$pool" != opencode && "$pool" != hy4 && "$pool" != sarvam && "$pool" != ultra && "$pool" != deepseek_direct ]] && proxy_agent_cap_exempt "$TYPE"; then return 1; fi  # ultra: hard cap, no role exemption (25 Nov: cap 4 while the burn rate is measured)
+  if [[ "$pool" != opencode && "$pool" != hy4 && "$pool" != sarvam && "$pool" != ultra ]] && proxy_agent_cap_exempt "$TYPE"; then return 1; fi  # ultra: hard cap, no role exemption (25 Nov: cap 4 while the burn rate is measured)
   case "$cap" in ''|*[!0-9]*) return 1;; esac
   # OpenCode / Sarvam cap 0 means the pool is off: blocked without counting, so an unreadable process list cannot let a launch through.
-  if [[ ( "$pool" == opencode || "$pool" == hy4 || "$pool" == sarvam || "$pool" == ultra || "$pool" == deepseek_direct ) && "$cap" =~ ^0+$ ]]; then return 0; fi
+  if [[ ( "$pool" == opencode || "$pool" == hy4 || "$pool" == sarvam || "$pool" == ultra ) && "$cap" =~ ^0+$ ]]; then return 0; fi
   if ! live="$(proxy_agent_pool_live "$pool")"; then
     printf 'proxy-agent: pool_cap UNAVAILABLE pool=%s\n' "$pool" >&2
-    if [[ "$pool" == claude || "$pool" == ultra || "$pool" == deepseek_direct ]]; then printf 'proxy-agent: pool_cap fail-closed pool=%s (live count unreadable)\n' "$pool" >&2; return 0; fi
+    if [[ "$pool" == claude || "$pool" == ultra ]]; then printf 'proxy-agent: pool_cap fail-closed pool=%s (live count unreadable)\n' "$pool" >&2; return 0; fi
     if [[ "$pool" == opencode || "$pool" == hy4 || "$pool" == sarvam || "$pool" == spark || "$pool" == inkling ]]; then return 0; fi
     return 1
   fi
@@ -2316,12 +2320,8 @@ proxy_agent_primary_pool_guard() {
         return 75
       fi
       return 0;;
-    deepseek-direct/*)
-      if PA_P0_ARMED=1 proxy_agent_pool_blocked "$_guard_id"; then
-        printf 'proxy-agent: REFUSED primary %s (deepseek_direct pool_cap)\n' "$_guard_id" >&2
-        return 75
-      fi
-      return 0;;
+    # Direct DeepSeek is admitted by deepseek-direct-gate.py only (the admission block after JSONL= below: scope, stop, budget, cap). A P0 never preempts a bench lane for room.
+    deepseek-direct/*) return 0;;
     grok-4.7|grok)
       if PA_P0_ARMED=1 proxy_agent_pool_blocked "$_guard_id"; then
         printf 'proxy-agent: REFUSED primary %s (grok pool_cap)\n' "$_guard_id" >&2
@@ -2645,6 +2645,25 @@ fi
 LOG="${OUT%.md}.log"
 DELIVERY="${OUT}.delivery"
 JSONL="${OUT%.md}.jsonl"
+# Direct DeepSeek bench gate (CTO REVISE of 248ae25b, ts 1795600640.261439): the ONE admission for a deepseek-direct/* start and for a --dry-run of one (a dry run takes
+# a slot for PROXY_AGENT_DSD_DRYRUN_HOLD_S seconds, default 0, so concurrent previews see each other). run.sh re-admits every continuation through the same script. It
+# checks the bench scope token, the stop flag, the budget and the cap, all read now under one lock. rc 75 = cap (capacity: queueing a retry is meaningful); rc 2 =
+# scope, stop, budget, state or a gate failure (fail closed: no gate, no launch). Runs before the dry-run return so a preview reports what the real launch would get.
+DSD_GATE="$HOME/.claude/scripts/deepseek-direct-gate.py"
+PA_DSD_ADMITTED=0
+PA_DSD_NAME="${PROXY_AGENT_NAME:-proxy-$TYPE-$$}"
+read -r _dsd_id _ _ < <(resolve_model "$MODEL")
+if proxy_agent_is_deepseek_direct_id "$_dsd_id"; then
+  _dsd_args=(admit --name "$PA_DSD_NAME" --model "$_dsd_id" --pid "$$" --jsonl "$JSONL" --log "$LOG")
+  if [[ "${PROXY_AGENT_DRY_RUN:-}" == 1 ]]; then _dsd_args+=(--dry-run --hold "${PROXY_AGENT_DSD_DRYRUN_HOLD_S:-0}"); fi
+  _dsd_rc=0
+  python3 -I "$DSD_GATE" "${_dsd_args[@]}" >&2 || _dsd_rc=$?
+  if [[ "$_dsd_rc" != 0 ]]; then
+    [[ "$_dsd_rc" == 75 ]] || _dsd_rc=2
+    exit "$_dsd_rc"
+  fi
+  [[ "${PROXY_AGENT_DRY_RUN:-}" == 1 ]] || PA_DSD_ADMITTED=1
+fi
 # Dry-run stops before checkout, git, credential export, tmux, or launch.
 # Stdout is the path line only; model selection stays on stderr.
 if [[ "${PROXY_AGENT_DRY_RUN:-}" == "1" ]]; then
@@ -2968,14 +2987,7 @@ if proxy_agent_is_capped "$TYPE"; then
       exit 75
     fi
   fi
-  if [[ "$MODEL_ID" == deepseek-direct/* ]]; then
-    # Same enforcement for direct DeepSeek against its own cap (default 8). cap 0 = route off; an unreadable count (999) refuses.
-    _live_dsd="$(proxy_agent_live_count deepseek_direct)"
-    if [[ "${_live_dsd:-999}" -ge "${DEEPSEEK_DIRECT_PROXY_CAP:-8}" ]]; then
-      printf 'PROXY_AGENT_REFUSED reason=deepseek_direct_cap model=%s (%s live >= %s)\n' "$MODEL_ID" "$_live_dsd" "${DEEPSEEK_DIRECT_PROXY_CAP:-8}" >&2
-      exit 75
-    fi
-  fi
+  # Direct DeepSeek is not counted here: its admission (scope, stop, budget, cap) is deepseek-direct-gate.py, called once before the dry-run return above.
 fi
 # P0 preemption now happens at pool admission (proxy_agent_pool_blocked -> proxy_agent_p0_preempt, Rajiv C0ALZJHGE49 thread 1795437841.011459,
 # ts 1795439359.022079), before the model is picked: a P0 takes a freed slot in its own pool or is queued CAPACITY_WAIT. The old post-selection
@@ -3302,10 +3314,13 @@ RESULT_CONTRACT
   printf '    SARVAM_PROXY_CAP="$(proxy_agent_resolve_sarvam_cap "${SARVAM_PROXY_CAP:-}")"\n'
   printf '    if proxy_agent_pool_blocked "$MODEL_ID"; then printf "[%%s] PROXY_AGENT_CONTINUE_REFUSED model=%%s cap=%%s reason=sarvam_pool_cap capacity-stop\\n" "$(date -u +%%FT%%TZ)" "$MODEL_ID" "$SARVAM_PROXY_CAP" >> %q; printf "PROXY_AGENT_CAPACITY_STOP rc=75 model=%%s cap=%%s reason=sarvam_pool_cap\\n" "$MODEL_ID" "$SARVAM_PROXY_CAP" >&2; rc=75; exit 75; fi\n' "$LOG"
   printf '  fi\n'
-  # Same re-check for direct DeepSeek (25 Nov): a continuation is a new admission against DEEPSEEK_DIRECT_PROXY_CAP (launcher env or caps file, else 8).
+  # Direct DeepSeek: a continuation is a new admission through the SAME gate as the start (deepseek-direct-gate.py admit --continue). The bench scope token (a PROXY_*
+  # var, so it is in this runner's env), the stop flag, the budget and the cap are all read at this moment; nothing is captured at launch time and this runner carries no cap.
+  # Refused => a resumable capacity-stop (the lane keeps its work; a later resume goes through the start admission again).
   printf '  if proxy_agent_is_deepseek_direct_id "$MODEL_ID"; then\n'
-  printf '    DEEPSEEK_DIRECT_PROXY_CAP=%q\n' "${DEEPSEEK_DIRECT_PROXY_CAP:-8}"
-  printf '    if proxy_agent_pool_blocked "$MODEL_ID"; then printf "[%%s] PROXY_AGENT_CONTINUE_REFUSED model=%%s cap=%%s reason=deepseek_direct_pool_cap capacity-stop\\n" "$(date -u +%%FT%%TZ)" "$MODEL_ID" "$DEEPSEEK_DIRECT_PROXY_CAP" >> %q; printf "PROXY_AGENT_CAPACITY_STOP rc=75 model=%%s cap=%%s reason=deepseek_direct_pool_cap\\n" "$MODEL_ID" "$DEEPSEEK_DIRECT_PROXY_CAP" >&2; rc=75; exit 75; fi\n' "$LOG"
+  printf '    pa_dsd_out="$(python3 -I %q admit --continue --name %q --model "$MODEL_ID" --pid %q --jsonl %q --log %q 2>&1)"; pa_dsd_rc=$?\n' "$DSD_GATE" "$PA_DSD_NAME" "$$" "$JSONL" "$LOG"
+  printf '    printf "%%s\\n" "$pa_dsd_out" >> %q\n' "$LOG"
+  printf '    if [[ "$pa_dsd_rc" != 0 ]]; then printf "[%%s] PROXY_AGENT_CONTINUE_REFUSED model=%%s rc=%%s reason=deepseek_direct_gate capacity-stop\\n" "$(date -u +%%FT%%TZ)" "$MODEL_ID" "$pa_dsd_rc" >> %q; printf "PROXY_AGENT_CAPACITY_STOP rc=75 model=%%s reason=deepseek_direct_gate\\n" "$MODEL_ID" >&2; rc=75; exit 75; fi\n' "$LOG"
   printf '  fi\n'
   printf '  if [[ "$pa_claude_429" == 1 ]]; then pa_log_start=$(wc -c < "$PA_LOG"); fi\n'
   printf '  %q ' "$CLAUDE_BIN" "${ARGS[@]}"
@@ -3429,6 +3444,11 @@ try:
 except OSError:
     pass
 PY
+fi
+# Direct DeepSeek lane end: price the lane's PROXY_AGENT_USAGE line (else its stream), add it to spent_usd in the bench state file and free the lane's reservation. Best
+# effort and never changes the rc: a lane that dies before this point is settled from its stream by the gate's next reconcile.
+if [[ "$PA_DSD_ADMITTED" == 1 ]]; then
+  python3 -I "$DSD_GATE" settle --name "$PA_DSD_NAME" --model "$MODEL_ID" --log "$LOG" --jsonl "$JSONL" >&2 || true
 fi
 echo "PROXY_AGENT_DONE rc=$RC type=$TYPE model=$MODEL_ID window=$WINDOW out=$OUT log=$LOG"
 exit "$RC"

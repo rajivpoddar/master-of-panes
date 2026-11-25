@@ -12,8 +12,10 @@ Run: /opt/homebrew/bin/pytest -q -p no:cacheprovider tests/test_proxy_claude_cap
 """
 import ast
 import importlib.util
+import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import types
@@ -258,33 +260,101 @@ def test_cap_count_cli_prints_a_fail_closed_999_for_ultra_when_ps_is_unreadable(
     assert done.stdout.strip() == '999', done.stdout + done.stderr
 
 
-# ---- Direct DeepSeek (25 Nov): own pool, own hard cap (default 8), explicit --model only, outside the tiers and the burn dial -------------
+# ---- Direct DeepSeek (25 Nov): explicit --model only, outside the tiers and the burn dial; bench-only behind ONE admission boundary ----------
 # Rajiv C0ALZJHGE49 thread 1795597777.761599, ts 1795597998.571509: "use direct deepseek for this so that we don't hit caps"; $25 bench cap ts 1795598139.238639.
+# CTO REVISE of 248ae25b (ts 1795600640.261439): scope token + state file + budget stop + one atomic check, deepseek-direct-gate.py (its own unit tests are in
+# test_deepseek_direct_gate.py). The launcher only calls it: before the dry-run return for a start, and from run.sh before every continuation.
+
+DSD = 'deepseek-direct/deepseek-flash'
+
+
+def dsd_lab(lab, spent=0.0, stop=False, budget=25.0, cap_line=None):
+    """The gate beside the launcher in the lab's HOME, with a bench state file. Returns the env that carries the bench scope token."""
+    _tmp, home, _ = lab
+    shutil.copy(SCRIPTS / 'deepseek-direct-gate.py', home / '.claude/scripts/deepseek-direct-gate.py')
+    (home / '.claude/state/deepseek-direct-bench.json').write_text(json.dumps({'run_id': 'ds-test', 'budget_usd': budget, 'spent_usd': spent, 'stop': stop}))
+    if cap_line:
+        with open(home / '.claude/state/proxy-caps.env', 'a') as fh:
+            fh.write(cap_line + '\n')
+    return {'PROXY_AGENT_DEEPSEEK_DIRECT_SCOPE': 'bench:ds-test'}
+
+
+def test_a_deepseek_direct_launch_without_the_bench_scope_token_is_refused_2(lab):
+    _tmp, home, _ = lab
+    prepare(lab, 'hd-builder')
+    dsd_lab(lab)
+    done = run(lab, 'hd-builder', 'proxy-test-dsd-noscope', DSD, live=0)
+    assert done.returncode == 2 and 'PROXY_AGENT_REFUSED reason=deepseek_direct_scope' in done.stderr, done.stderr
+    assert not (home / 'prompt-seen.txt').exists()
+
+
+def test_a_token_for_another_run_is_refused_too(lab):
+    _tmp, home, _ = lab
+    prepare(lab, 'hd-builder')
+    dsd_lab(lab)
+    done = run(lab, 'hd-builder', 'proxy-test-dsd-otherrun', DSD, live=0, PROXY_AGENT_DEEPSEEK_DIRECT_SCOPE='bench:another-run')
+    assert done.returncode == 2 and 'reason=deepseek_direct_scope' in done.stderr and 'another-run' in done.stderr, done.stderr
+    assert not (home / 'prompt-seen.txt').exists()
+
+
+def test_a_dry_run_goes_through_the_same_gate(lab):
+    prepare(lab, 'hd-builder')
+    env = dsd_lab(lab)
+    refused = run(lab, 'hd-builder', 'proxy-test-dsd-dry-refused', DSD, live=0, PROXY_AGENT_DRY_RUN='1')
+    assert refused.returncode == 2 and 'reason=deepseek_direct_scope' in refused.stderr, refused.stderr
+    admitted = run(lab, 'hd-builder', 'proxy-test-dsd-dry-ok', DSD, live=0, PROXY_AGENT_DRY_RUN='1', **env)
+    assert admitted.returncode == 0 and 'PROXY_AGENT_DSD_GATE admitted' in admitted.stderr and 'kind=dry-run' in admitted.stderr, admitted.stderr
+
 
 def test_an_explicit_deepseek_direct_model_at_its_cap_is_refused_75_with_its_own_reason(lab):
     _tmp, home, _ = lab
     prepare(lab, 'hd-builder')
-    done = run(lab, 'hd-builder', 'proxy-test-dsd-cap', 'deepseek-direct/deepseek-flash', live=0, PROXY_TEST_LIVE_DEEPSEEK_DIRECT='8', DEEPSEEK_DIRECT_PROXY_CAP='8')
-    assert done.returncode == 75 and 'PROXY_AGENT_REFUSED reason=deepseek_direct_cap model=deepseek-direct/deepseek-flash (8 live >= 8)' in done.stderr, done.stderr
+    env = dsd_lab(lab)
+    done = run(lab, 'hd-builder', 'proxy-test-dsd-cap', DSD, live=0, PROXY_AGENT_STUB_POOL_LIVE='8', **env)
+    assert done.returncode == 75 and 'PROXY_AGENT_REFUSED reason=deepseek_direct_cap' in done.stderr and '(8 live >= 8)' in done.stderr, done.stderr
     assert 'reason=claude_cap' not in done.stderr and 'reason=ultra_cap' not in done.stderr  # not the team or Ultra pool that refused
     assert not (home / 'prompt-seen.txt').exists()
 
 
-def test_an_explicit_deepseek_direct_model_under_its_cap_launches_when_the_team_pool_is_full_and_reports_usage(lab):
+def test_an_explicit_deepseek_direct_model_under_its_cap_launches_when_the_team_pool_is_full_and_settles_its_usage(lab):
     _tmp, home, _ = lab
     prepare(lab, 'hd-builder')
-    done = run(lab, 'hd-builder', 'proxy-test-dsd-room', 'deepseek-direct/deepseek-flash', live=9, cap=2, PROXY_TEST_LIVE_DEEPSEEK_DIRECT='7', DEEPSEEK_DIRECT_PROXY_CAP='8')
+    env = dsd_lab(lab)
+    done = run(lab, 'hd-builder', 'proxy-test-dsd-room', DSD, live=9, cap=2, PROXY_AGENT_STUB_POOL_LIVE='7', **env)
     assert done.returncode == 0 and 'PROXY_AGENT_REFUSED' not in done.stderr and 'deepseek_requires_rajiv_override' not in done.stderr, done.stderr
     assert (home / 'prompt-seen.txt').exists()
     assert 'PROXY_AGENT_USAGE model=deepseek-direct/deepseek-flash' in done.stderr  # tokens when the stream carries them, "unavailable" otherwise
+    assert 'PROXY_AGENT_DSD_GATE settled name=proxy-test-dsd-room' in done.stderr
+    ledger = json.loads((home / '.claude/state/deepseek-direct-lanes.json').read_text())
+    assert ledger['lanes'] == {} and [s['name'] for s in ledger['settled']] == ['proxy-test-dsd-room']  # the reservation is freed at the lane's end
 
 
-def test_deepseek_direct_cap_zero_refuses_an_explicit_deepseek_direct_model(lab):
+def test_deepseek_direct_cap_zero_in_the_caps_file_refuses_an_explicit_deepseek_direct_model(lab):
     _tmp, home, _ = lab
     prepare(lab, 'hd-builder')
-    done = run(lab, 'hd-builder', 'proxy-test-dsd-off', 'deepseek-direct/deepseek-v4-pro', live=0, PROXY_TEST_LIVE_DEEPSEEK_DIRECT='0', DEEPSEEK_DIRECT_PROXY_CAP='0')
-    assert done.returncode == 75 and 'REFUSED primary deepseek-direct/deepseek-v4-pro (deepseek_direct pool_cap)' in done.stderr, done.stderr
+    env = dsd_lab(lab, cap_line='DEEPSEEK_DIRECT_PROXY_CAP=0')
+    done = run(lab, 'hd-builder', 'proxy-test-dsd-off', 'deepseek-direct/deepseek-v4-pro', live=0, **env)
+    assert done.returncode == 75 and 'reason=deepseek_direct_cap' in done.stderr and '(0 live >= 0)' in done.stderr, done.stderr
     assert not (home / 'prompt-seen.txt').exists()
+
+
+def test_the_stop_flag_and_a_spent_budget_each_refuse_a_start_2(lab):
+    _tmp, home, _ = lab
+    prepare(lab, 'hd-builder')
+    env = dsd_lab(lab, stop=True)
+    stopped = run(lab, 'hd-builder', 'proxy-test-dsd-stop', DSD, live=0, **env)
+    assert stopped.returncode == 2 and 'reason=deepseek_direct_stop' in stopped.stderr, stopped.stderr
+    env = dsd_lab(lab, spent=24.9)  # 24.90 + the 0.25 floor of the lane being admitted reaches the 25.00 budget
+    spent = run(lab, 'hd-builder', 'proxy-test-dsd-budget', DSD, live=0, **env)
+    assert spent.returncode == 2 and 'reason=deepseek_direct_budget' in spent.stderr, spent.stderr
+    assert not (home / 'prompt-seen.txt').exists()
+
+
+def test_the_launcher_has_one_admission_and_captures_no_cap_for_the_runner():
+    src = (SCRIPTS / 'proxy-agent.sh').read_text()
+    assert 'DEEPSEEK_DIRECT_PROXY_CAP=%q' not in src and 'proxy_agent_live_count deepseek_direct' not in src  # no cap baked into run.sh, no second counter
+    assert 'admit --continue' in src and src.count('python3 -I "$DSD_GATE"') == 2  # start (and dry run) + lane-end settle; run.sh calls the same script for continuations
+    assert re.search(r'deepseek-direct/\*\) return 0;;', src)  # the pool guard and pool_blocked never admit it themselves
 
 
 def test_every_deepseek_direct_id_is_wired_and_none_is_in_a_tier_list():
