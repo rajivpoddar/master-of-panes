@@ -4,7 +4,8 @@
 # GREEN, or GREEN -> RED (--mutate-patch applied for the RED leg only) -> GREEN on the SAME box. Always destroys the box.
 # --env-file F (optional): base env for the mandatory --disposable-convex. Default = slot 5's dev env
 # ($HOME/Downloads/projects/heydonna-app-3005/.env.local) whatever --slot is; --slot never selects the env file.
-# --dry-run --check-sample-ids REPO: run sample env staging on private copies using --head in a local app Git checkout.
+# --pair-sample-id: pair the sample IDs only for the #14738 tour spec on --disposable-convex.
+# --dry-run --check-sample-ids REPO: exercise the same gate, staging on private copies from --head only when eligible.
 #   remote-browser-box.sh spec --slot N --branch B --head SHA --spec tests/e2e/specs/... --out DIR --allow-seed-replace
 #       [--mutate-patch FILE] [--test-line N] [--project core-rest] [--env-file F] [--config JSON] [--provider auto] [--ttl 150m] [--timeout SECS]
 #   [--prod-build] [--trace] [--dry-run]: --prod-build forwards to preflight; --trace records Playwright trace (on) + video for every test;
@@ -140,7 +141,12 @@ qa_onmiss_headroom_gate() {
 runtime="${QA_SPEC_RUNTIME:-$HOME/.claude/scripts/remote-qa-spec-runtime.sh}"
 fetch_helper="$HOME/.claude/scripts/remote-qa-spec-fetch.py"
 base_env_default="$HOME/Downloads/projects/heydonna-app-3005/.env.local"
-slot='' branch='' head='' out='' env_file='' config='' provider=auto ttl=150m allow_seed='' spec='' patch='' test_line='' project='' with_deps=no legs_override='' timeout_secs='' prod_build=no trace=no dry_run=no sample_check_repo=''
+slot='' branch='' head='' out='' env_file='' config='' provider=auto ttl=150m allow_seed='' spec='' patch='' test_line='' project='' with_deps=no legs_override='' timeout_secs='' prod_build=no trace=no dry_run=no sample_check_repo='' pair_sample_id=''
+# Gate the offline and box staging paths together. Never rewrite a shared deployment's config.
+qa_should_pair_sample_ids() {
+  [ "$disposable_convex" = 1 ] && [ "$pair_sample_id" = 1 ] &&
+    [ "$spec" = tests/e2e/specs/qa-tests/14667-sample-editor-tour.spec.ts ]
+}
 # Spec preflight imports HEAD:tests/e2e/fixtures/preview-seed.zip (no seed override). Use the legal medium fixture,
 # and verify the project and a cloneable transcript are in that ZIP, not just named in the companion manifest.
 # Generate the same staging command for the exact-head box and the offline dry-run; never source the manifest on the host.
@@ -216,6 +222,7 @@ while [ $# -gt 0 ]; do
     --prod-build) prod_build=yes; shift;; # forwarded to local-repro-preflight.sh --prod-build (next build + next start, matches CI)
     --trace) trace=yes; shift;; # box-local playwright.config trace:'on'; trace.zip + video land in <out>/leg*/test-results
     --dry-run) dry_run=yes; shift;;
+    --pair-sample-id) pair_sample_id=1; shift;;
     --check-sample-ids) sample_check_repo="${2:?--check-sample-ids needs a local app Git checkout}"; shift 2;;
     --pre-write-check) pre_write_check="${2:?--pre-write-check needs a command}"; shift 2;;
     --on-miss) llm_onmiss=--on-miss; onmiss_stock=1; shift;; # explicit capture-on-miss (also the DEFAULT; see header); never inferred
@@ -232,7 +239,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [[ "$slot" =~ ^[1-8]$ && "$head" =~ ^[0-9a-f]{40}$ ]] && [ -n "$branch" ] && [ -n "$out" ] && [ -n "$spec" ] || {
-  echo 'spec --slot N --branch B --head SHA40 --spec tests/e2e/specs/...spec.ts --out DIR --allow-seed-replace [--mutate-patch F] [--test-line N] [--project P] [--with-deps] [--legs GREEN,RED,GREEN] [--env-file F] [--config JSON] [--ttl 150m] [--timeout SECS] [--prod-build] [--trace] [--dry-run [--check-sample-ids REPO]] [--disposable-convex [--pre-write-check CMD] [--on-miss] [--stripe-test-env]] [--requires-modal --extra-secret SUPPORTING_DOCUMENT_RECEIPT_SECRET=generate]' >&2; exit 2; }
+  echo 'spec --slot N --branch B --head SHA40 --spec tests/e2e/specs/...spec.ts --out DIR --allow-seed-replace [--mutate-patch F] [--test-line N] [--project P] [--with-deps] [--legs GREEN,RED,GREEN] [--env-file F] [--config JSON] [--ttl 150m] [--timeout SECS] [--prod-build] [--trace] [--dry-run [--check-sample-ids REPO]] [--disposable-convex [--pair-sample-id] [--pre-write-check CMD] [--on-miss] [--stripe-test-env]] [--requires-modal --extra-secret SUPPORTING_DOCUMENT_RECEIPT_SECRET=generate]' >&2; exit 2; }
 [[ "$spec" =~ ^tests/e2e/(specs|qa-tests)/[A-Za-z0-9_./-]+\.spec\.ts$ && "$spec" != *..* ]] || { echo '--spec must be a repo-relative tests/e2e/specs/**.spec.ts or tests/e2e/qa-tests/**.spec.ts path' >&2; exit 2; }
 case "$spec" in tests/e2e/qa-tests/*|tests/e2e/specs/qa-tests/*) project=qa-tests;; esac
 if [ -n "$pool_lane" ]; then
@@ -369,8 +376,12 @@ fi
 [ "$ttl_seconds" -ge 60 ] && [ "$ttl_seconds" -le 10800 ] || { echo '--ttl must be 60s..3h (QA Modal lease limit)' >&2; exit 2; }
 [ "$timeout_secs" -le $(( ttl_seconds - 600 )) ] || { echo '--timeout must leave 600s of --ttl for setup/teardown (lease covers the lane only within --ttl)' >&2; exit 2; }
 if [ -n "$sample_check_repo" ]; then
-  [ "$dry_run" = yes ] && [ "$disposable_convex" = 1 ] || { echo '--check-sample-ids requires --dry-run and --disposable-convex' >&2; exit 2; }
-  bash -c "$(qa_sample_stage_cmd dry "$sample_check_repo" "${env_file:-$base_env_default}" "$config")"
+  [ "$dry_run" = yes ] || { echo '--check-sample-ids requires --dry-run' >&2; exit 2; }
+  if qa_should_pair_sample_ids; then
+    bash -c "$(qa_sample_stage_cmd dry "$sample_check_repo" "${env_file:-$base_env_default}" "$config")"
+  else
+    echo 'sample_ids pairing=skipped'
+  fi
 fi
 if [ "$dry_run" = yes ]; then echo "DRY_RUN slot=$slot head=$head spec=$spec legs=$legs test_line=${test_line:-} project=${project:-} with_deps=$with_deps prod_build=$prod_build trace=$trace timeout_secs=$timeout_secs pool=${pool_lane:-0} priority=${pool_priority:-} disposable_convex=${disposable_convex:-0} pre_write_check=$([ -n "$pre_write_check" ] && echo yes || echo no) stripe_test_env=$([ -n "$stripe_test_env" ] && echo yes || echo no) llm_mode=$(llm_label)${llm_onmiss:+ onmiss_cap_usd=3 onmiss_fixture_bucket=heydonna-fixtures onmiss_scope=run+attempt onmiss_headroom=pre-lane app_data=ci-parity app_data_bucket=heydonna-uploads}${strict_manifest:+ strict_digest=$strict_digest strict_fixtures=3 strict_bucket=heydonna-qa forwarding=off product_pin=$product_pin app_data=$app_data app_data_bucket=$app_data_bucket m15_staged=$([ -n "$m15_draft" ] && echo yes || echo no)}${m15_overlay_sha:+ m15_overlay_sha256=$m15_overlay_sha m15_convex_flag=config m15_next_flags=spec_env m15_observer_gate=before_browser}"; exit 0; fi
 # Report unexpected failures without exposing command arguments or environment values.
@@ -840,8 +851,10 @@ if [ -n "$exact_manifest$strict_manifest" ]; then
     || { echo 'QA_SPEC_ENV_FAILED: could not record the controller-selected spec env' | tee -a "$out/lane.txt" >&2; exit 1; }
   echo "QA_SPEC_ENV names=$(printf '%s' "$spec_env" | tr ' ' '\n' | cut -d= -f1 | paste -sd, -) app_data=$app_data bucket=$app_data_bucket (controller-selected)" | tee -a "$out/lane.txt"
 fi
-# Stage the exact-head sample pair before installing/hashing the env. The runtime applies the server half only to the owned deployment.
-qa_rsh "$(qa_sample_stage_cmd box "$remote" "$remote/.env.local.next" /root/qa/config.json)" | tee -a "$out/lane.txt"
+# Stage the opt-in tour's exact-head pair before installing/hashing the env. Otherwise keep the uploaded config as supplied.
+if qa_should_pair_sample_ids; then
+  qa_rsh "$(qa_sample_stage_cmd box "$remote" "$remote/.env.local.next" /root/qa/config.json)" | tee -a "$out/lane.txt"
+fi
 qa_rsh "set -e; chmod 600 '$remote/.env.local.next' /root/qa/synth-private.pem; sed -i 's#^SYNTH_JWT_PRIVATE_KEY_PATH=.*#SYNTH_JWT_PRIVATE_KEY_PATH=/root/qa/synth-private.pem#' '$remote/.env.local.next'; sed -i '/^MODAL_API_KEY=/d; /^MODAL_KEY=/d; /^MODAL_SECRET=/d' '$remote/.env.local.next'; bash -n '$remote/.env.local.next'; mv '$remote/.env.local.next' '$remote/.env.local'; printf '%s\\t%s\\t%s\\n' \"\$(sha256sum <'$remote/.env.local' | cut -c1-64)\" \"\$(readlink -f '$remote/.env.local')\" \"\$(cat /var/lib/rtb/gen 2>/dev/null || echo -)\" >>/root/qa/.rtb-env-copies.tsv; chmod 600 /root/qa/.rtb-env-copies.tsv"
 # Ownership receipt (same function/contract as capture mode) BEFORE any Convex write: Modal prepare, runtime config apply,
 # preflight seed import and the spec's own setup all come later. The Modal lease was registered above, so v2 binds it.

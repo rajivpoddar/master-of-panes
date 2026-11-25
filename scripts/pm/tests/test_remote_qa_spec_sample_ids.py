@@ -42,15 +42,24 @@ def test_sample_check_uses_the_pinned_zip_and_keeps_inputs_private(tmp_path):
     before = (env.read_bytes(), config.read_bytes())
     out = tmp_path / 'no-run'
 
-    for head, match, rc in [(pinned, 'y', 0), (missing, 'n', 2)]:
+    tour = 'tests/e2e/specs/qa-tests/14667-sample-editor-tour.spec.ts'
+    other = 'tests/e2e/specs/qa-tests/unrelated.spec.ts'
+    disposable = ['--disposable-convex']
+    opt_in = ['--pair-sample-id']
+    for head, spec, flags, expected, rc in [
+        (pinned, tour, disposable + opt_in, 'match=y', 0),
+        (missing, tour, disposable + opt_in, 'match=n', 2),
+        (pinned, other, disposable + opt_in, 'pairing=skipped', 0),
+        (pinned, tour, disposable, 'pairing=skipped', 0),
+        (pinned, tour, opt_in, 'pairing=skipped', 0),
+    ]:
         run = subprocess.run([
             'bash', str(LAUNCHER), '--slot', '5', '--branch', 'test', '--head', head,
-            '--spec', 'tests/e2e/specs/qa-tests/tour.spec.ts', '--out', str(out),
-            '--allow-seed-replace', '--disposable-convex', '--env-file', str(env), '--config', str(config),
-            '--dry-run', '--check-sample-ids', str(app),
-        ], env=dict(os.environ, HOME=str(home)), capture_output=True, text=True)
+            '--spec', spec, '--out', str(out), '--allow-seed-replace', *flags,
+            '--env-file', str(env), '--config', str(config), '--dry-run', '--check-sample-ids', str(app),
+        ], env=dict(os.environ, HOME=str(home), CI='1'), capture_output=True, text=True)
         assert run.returncode == rc
-        assert [line for line in run.stdout.splitlines() if line.startswith('sample_ids ')] == [f'sample_ids match={match}']
+        assert [line for line in run.stdout.splitlines() if line.startswith('sample_ids ')] == [f'sample_ids {expected}']
         assert sample not in run.stdout + run.stderr and stale not in run.stdout + run.stderr
         assert (env.read_bytes(), config.read_bytes()) == before
         assert not out.exists()
