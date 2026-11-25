@@ -25,6 +25,7 @@ import re
 import subprocess
 import socket
 import sys
+import threading
 import time
 import unicodedata
 import urllib.error
@@ -106,7 +107,18 @@ def remaining_budget() -> float:
     return remaining
 # Cap how many previously-tracked roots one run re-checks (newest first). Roots beyond
 # the cap keep their prior state and are picked up on a later run, so nothing is dropped.
-MAX_CARRY_FORWARD = int(os.environ.get("SUPPORT_MAX_CARRY_FORWARD") or 40)
+# 40 was far below the tracked set (~90 per channel and growing), so every run was
+# structurally partial and the rotation re-read an old answered thread only every few runs.
+# 200 covers the whole set in one run (~0.1s per root with CARRY_WORKERS in flight).
+MAX_CARRY_FORWARD = int(os.environ.get("SUPPORT_MAX_CARRY_FORWARD") or 200)
+CARRY_WORKERS = 5
+# Per-channel wall budget. Worst case 2 x CHANNEL_BUDGET_S + 45s in-app read = 115s, inside
+# the composer's 120s support timeout. fetch_channel (history + in-window replies) gets
+# CHANNEL_FETCH_S; the tracked-root refresh gets the rest. CARRY_GRACE_S is the part of the
+# budget after the soft deadline in which already-started calls may finish (no new root starts).
+CHANNEL_BUDGET_S = 35.0
+CHANNEL_FETCH_S = 20.0
+CARRY_GRACE_S = 6.0
 
 
 
@@ -388,7 +400,7 @@ def save_carry_cursor(channel, value: int, path: Path | None = None) -> None:
 
 
 def carry_forward(threads: list[dict], prev_tracked, fetch_thread, *, deadline: float | None = None,
-                  cursor: int = 0) -> tuple[list[dict], int]:
+                  cursor: int = 0, stats: dict | None = None) -> tuple[list[dict], int]:
     """Re-fetch every previously tracked root (answered or not) that fell out of the
     lookback, so a new customer reply on an answered thread flips it back to needs_reply
     (classify_thread decides from the full reply list).
@@ -408,35 +420,87 @@ def carry_forward(threads: list[dict], prev_tracked, fetch_thread, *, deadline: 
     Newest-first still determines ORDER within a window, and a full wrap is re-sorted, so a
     recently active thread is still seen sooner than a dormant one.
 
+    DEFECT FIXED (heartbeat support UNAVAILABLE x3, 25 Nov): the caller gave this loop a 5s
+    deadline for up to 40 refreshes (~0.5s each) and the pool raised PartialChannel on the
+    first failed root, so the channel aborted and every heartbeat read UNAVAILABLE. Now:
+      - `deadline` is SOFT: it only stops NEW roots from starting. A call already in flight
+        finishes (the caller bounds it with the hard DEADLINE read by remaining_budget()).
+      - A root that fails is isolated: it is recorded in `stats["failed"]`, keeps its prior
+        tracked state, and the other roots still refresh. A root Slack reports as
+        `thread_not_found` is recorded in `stats["gone"]` (not a failure) so the caller drops it.
+      - The cursor advances past every root that was attempted, failed or not, so a root that
+        always fails cannot wedge the rotation; roots never started keep their place.
+    `stats` (optional dict, filled in place) carries total/window/attempted/refreshed/failed/gone
+    for the caller's honest partial report (see `carry_problems`).
+
     Returns (threads_to_report, next_cursor).
     """
     seen = {t["ts"] for t in threads}
     out = list(threads)
+    stats = stats if stats is not None else {}
+    stats.update(total=0, window=0, attempted=0, refreshed=0, failed=[], gone=[])
     pending = [ts for ts in (prev_tracked or {}) if ts not in seen]
     if not pending:
         return out, 0
     # Slack ts values are decimal strings, so a float sort orders them chronologically.
     pending.sort(key=lambda s: float(s) if _is_ts(s) else 0.0, reverse=True)
     total = len(pending)
-    start = cursor % total if total else 0
+    start = cursor % total
     window = [pending[(start + i) % total] for i in range(min(MAX_CARRY_FORWARD, total))]
-    next_cursor = (start + len(window)) % total if total else 0
-    # Fetch in small batches to avoid serial network latency while retaining ordered
-    # cursor progress and the existing deadline/partial-result semantics.
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        for offset in range(0, len(window), 5):
-            batch = window[offset:offset + 5]
+    stats.update(total=total, window=len(window))
+
+    lock = threading.Lock()
+    taken = [0]
+    results: dict[int, dict | None] = {}
+    errors: dict[int, Exception] = {}
+
+    def take() -> int | None:
+        # Hand out window positions in order, so the attempted roots are always a prefix.
+        with lock:
+            if taken[0] >= len(window):
+                return None
             if deadline is not None and time.monotonic() >= deadline:
-                return out, pending.index(batch[0]) % total
-            futures = [pool.submit(fetch_thread, ts) for ts in batch]
-            for future in futures:
-                try:
-                    item = future.result()
-                except Exception as exc:
-                    raise PartialChannel(str(exc), out) from exc
-                if item:
-                    out.append(item)
-    return out, next_cursor
+                return None
+            taken[0] += 1
+            return taken[0] - 1
+
+    def work() -> None:
+        while (i := take()) is not None:
+            try:
+                results[i] = fetch_thread(window[i])
+            except Exception as exc:  # noqa: BLE001 - isolated per root, reported via stats
+                errors[i] = exc
+
+    with ThreadPoolExecutor(max_workers=max(1, min(CARRY_WORKERS, len(window)))) as pool:
+        for future in [pool.submit(work) for _ in range(max(1, min(CARRY_WORKERS, len(window))))]:
+            future.result()
+
+    attempted = taken[0]
+    for i in range(attempted):
+        if i in errors:
+            exc = errors[i]
+            if isinstance(exc, RuntimeError) and "thread_not_found" in str(exc):
+                stats["gone"].append(window[i])
+            else:
+                stats["failed"].append((window[i], str(exc)[:120]))
+        elif results.get(i):
+            out.append(results[i])
+    stats.update(attempted=attempted, refreshed=attempted - len(errors))
+    return out, (start + attempted) % total
+
+
+def carry_problems(stats: dict) -> list[str]:
+    """Honest partial reasons for one channel's tracked-root refresh (empty = fully refreshed).
+    A root skipped by the cap or the soft deadline, or one that failed, makes the channel partial;
+    roots that merely have no change, or are gone from Slack, do not."""
+    problems = []
+    total, attempted = stats.get("total", 0), stats.get("attempted", 0)
+    failed = stats.get("failed") or []
+    if failed:
+        problems.append(f"{len(failed)} of {attempted} tracked threads failed to refresh ({failed[0][1][:80]})")
+    if total - attempted > 0:
+        problems.append(f"{total - attempted} of {total} tracked threads not refreshed this run (time or cap)")
+    return problems
 
 
 def _is_ts(value) -> bool:
@@ -579,7 +643,8 @@ def main() -> int:
     global DEADLINE
     DEADLINE = deadline = time.monotonic() + SUPPORT_BUDGET_S
     window_start = now_ts - args.hours * 3600
-    result: dict = {"threshold_min": needs_reply_threshold_minutes(now), "slack": [], "in_app": [], "failures": []}
+    result: dict = {"threshold_min": needs_reply_threshold_minutes(now), "slack": [], "in_app": [], "failures": [],
+                    "diagnostics": {}}
     token = load_env("SLACK_BOT_TOKEN")
     if not token:
         result["failures"].append("SLACK_BOT_TOKEN missing")
@@ -588,26 +653,43 @@ def main() -> int:
         prev_state = load_open_state()
         new_state = dict(prev_state)
         for channel in CHANNELS:
-            # Each channel and tracked refresh owns a small budget; neither may
-            # spend the following channel's or in-app read's allowance.
-            DEADLINE = time.monotonic() + 25.0
+            # Each channel owns CHANNEL_BUDGET_S (fetch first, tracked-root refresh with what
+            # remains); neither may spend the following channel's or the in-app read's allowance.
+            channel_start = time.monotonic()
+            channel_end = channel_start + CHANNEL_BUDGET_S
+            DEADLINE = channel_start + CHANNEL_FETCH_S
             try:
                 threads = fetch_channel(token, channel, now_ts - args.lookback_hours * 3600, now_ts)
-                pending_count = len(set(prev_state.get(channel, {})) - {t['ts'] for t in threads})
-                DEADLINE = deadline = time.monotonic() + 5.0
+                # Soft deadline: no new root starts after it. Hard DEADLINE (read by slack_get via
+                # remaining_budget) ends calls already in flight CARRY_GRACE_S later.
+                DEADLINE = channel_end
+                soft_deadline = channel_end - CARRY_GRACE_S
+                carry_stats: dict = {}
                 threads, next_cursor = carry_forward(
                     threads, prev_state.get(channel, []),
                     lambda ts, ch=channel: fetch_thread(token, ch, ts, now_ts),
-                    deadline=deadline,
+                    deadline=soft_deadline,
                     cursor=load_carry_cursor(channel),
+                    stats=carry_stats,
                 )
                 if not args.dry_run:
                     save_carry_cursor(channel, next_cursor)
                 threads = apply_skips(threads, channel, skips)
-                if time.monotonic() >= deadline or pending_count > MAX_CARRY_FORWARD:
-                    result["failures"].append(f"{CHANNELS[channel]}: partial; tracked threads not fully refreshed")
+                problems = carry_problems(carry_stats)
+                if problems:
+                    result["failures"].append(f"{CHANNELS[channel]}: partial; " + "; ".join(problems))
                 new_state[channel] = tracked_roots(threads, now_ts, prev_state.get(channel) or {})
+                for gone_ts in carry_stats.get("gone", []):
+                    new_state[channel].pop(gone_ts, None)  # deleted in Slack: stop tracking it
                 result["slack"].extend(select_items(threads, window_start))
+                result["diagnostics"][CHANNELS[channel]] = {
+                    "tracked": carry_stats.get("total", 0),
+                    "attempted": carry_stats.get("attempted", 0),
+                    "refreshed": carry_stats.get("refreshed", 0),
+                    "failed": len(carry_stats.get("failed", [])),
+                    "gone": len(carry_stats.get("gone", [])),
+                    "elapsed_s": round(time.monotonic() - channel_start, 1),
+                }
             except PartialChannel as exc:
                 exc_threads = apply_skips(exc.threads, channel, skips)
                 new_state[channel] = tracked_roots(exc_threads, now_ts, prev_state.get(channel) or {})
