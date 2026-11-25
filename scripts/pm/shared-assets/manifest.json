@@ -546,7 +546,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "9c675c24042a3ac03b9c94c9a40aea6956ebb2c90584c1c90cfbdc0b322065ec",
+      "sha256": "939d7e709524069d3f9653a1ef0a6ef7008ef41649f401257b29c837baf19fbc",
       "source_path": "claude/scripts/deepseek-direct-gate.py"
     },
     {
@@ -978,7 +978,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "aebc1b29622603f75e0ceef2089e4b6e55a3fdcd794602d8d2ba84f0e3aef66c",
+      "sha256": "f965b63dcbf31f74a426e085db633c5b0fdc864ae7dc45cfcdabc85cf7981388",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -1250,7 +1250,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "3502aa1d1a681976248cb146120789e1077910a26aabe42f109c4f31a23486eb",
+      "sha256": "885d4b9798079c22e7e6e7a6a7d8d4d0e2e0d2d016364c49ea2cfaa882f4cb4c",
       "source_path": "claude/scripts/tests/test_deepseek_direct_gate.py"
     },
     {
@@ -1295,7 +1295,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "fe12afe60469c30af269b30b6d8b5a1b252171a7cdd1f286cbf98665d450f112",
+      "sha256": "4689fc21093aa9e634666264047bc1734226b64cf1de15f9fd485e33291dcf7e",
       "source_path": "claude/scripts/tests/test_proxy_claude_cap.py"
     },
     {

@@ -2650,11 +2650,13 @@ JSONL="${OUT%.md}.jsonl"
 # checks the bench scope token, the stop flag, the budget and the cap, all read now under one lock. rc 75 = cap (capacity: queueing a retry is meaningful); rc 2 =
 # scope, stop, budget, state or a gate failure (fail closed: no gate, no launch). Runs before the dry-run return so a preview reports what the real launch would get.
 DSD_GATE="$HOME/.claude/scripts/deepseek-direct-gate.py"
+DSD_GRANT="${OUT%.md}.dsd-grant"  # the gate writes the segment's --max-budget-usd here; a stale one is removed at every admission
 PA_DSD_ADMITTED=0
+PA_DSD_BUDGET=""
 PA_DSD_NAME="${PROXY_AGENT_NAME:-proxy-$TYPE-$$}"
 read -r _dsd_id _ _ < <(resolve_model "$MODEL")
 if proxy_agent_is_deepseek_direct_id "$_dsd_id"; then
-  _dsd_args=(admit --name "$PA_DSD_NAME" --model "$_dsd_id" --pid "$$" --jsonl "$JSONL" --log "$LOG")
+  _dsd_args=(admit --name "$PA_DSD_NAME" --model "$_dsd_id" --pid "$$" --jsonl "$JSONL" --log "$LOG" --grant-file "$DSD_GRANT")
   if [[ "${PROXY_AGENT_DRY_RUN:-}" == 1 ]]; then _dsd_args+=(--dry-run --hold "${PROXY_AGENT_DSD_DRYRUN_HOLD_S:-0}"); fi
   _dsd_rc=0
   python3 -I "$DSD_GATE" "${_dsd_args[@]}" >&2 || _dsd_rc=$?
@@ -2662,7 +2664,15 @@ if proxy_agent_is_deepseek_direct_id "$_dsd_id"; then
     [[ "$_dsd_rc" == 75 ]] || _dsd_rc=2
     exit "$_dsd_rc"
   fi
-  [[ "${PROXY_AGENT_DRY_RUN:-}" == 1 ]] || PA_DSD_ADMITTED=1
+  if [[ "${PROXY_AGENT_DRY_RUN:-}" != 1 ]]; then
+    PA_DSD_ADMITTED=1
+    # The admission reserved a worst-case segment, and the cap is ENFORCED by claude itself (--max-budget-usd, set on the command below). No readable grant: no launch.
+    PA_DSD_BUDGET="$(cat "$DSD_GRANT" 2>/dev/null || true)"
+    if [[ ! "$PA_DSD_BUDGET" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+      printf 'PROXY_AGENT_REFUSED reason=deepseek_direct_no_grant model=%s (the gate admitted but left no readable --max-budget-usd: fail closed)\n' "$_dsd_id" >&2
+      exit 2
+    fi
+  fi
 fi
 # Dry-run stops before checkout, git, credential export, tmux, or launch.
 # Stdout is the path line only; model selection stays on stderr.
@@ -3255,7 +3265,12 @@ RESULT_CONTRACT
   printf 'pa_account=""; if [[ "$pa_claude_429" == 1 && -r "$HOME/.claude/state/proxy-claude-account-pin" ]]; then IFS= read -r pa_account < "$HOME/.claude/state/proxy-claude-account-pin"; fi\n'
   printf 'while :; do\n'
   printf 'if [[ "$pa_claude_429" == 1 ]]; then pa_log_start=$(wc -c < "$PA_LOG"); pa_terminal_jsonl="$PA_JSONL"; fi\n'
+  # Direct DeepSeek: tell the gate claude is about to start (a lane that never got here spent nothing and is released, not held), then cap the segment.
+  if [[ "$PA_DSD_ADMITTED" == 1 ]]; then  # decided here, not in run.sh: MODEL_ID and the helper functions are only defined in run.sh AFTER its first claude command
+    printf 'python3 -I %q started --name %q >/dev/null 2>>%q || { printf "PROXY_AGENT_CAPACITY_STOP rc=75 reason=deepseek_direct_gate_started\\n" >&2; rc=75; exit 75; }\n' "$DSD_GATE" "$PA_DSD_NAME" "$LOG"
+  fi
   printf '%q ' "$CLAUDE_BIN" "${ARGS[@]}"
+  if [[ -n "${PA_DSD_BUDGET:-}" ]]; then printf -- '--max-budget-usd %q ' "$PA_DSD_BUDGET"; fi
   printf '< %q 2>> %q | python3 -I -u %q %q %q\n' "$JOB_DIR/prompt0.md" "$LOG" "$HOME/.claude/scripts/proxy-agent-stream.py" "$OUT" "$JSONL"
   printf 'statuses=("${PIPESTATUS[@]}"); pa_cli_rc=${statuses[0]}; rc=$pa_cli_rc; if [[ "$rc" == 0 ]]; then rc=${statuses[1]}; fi\n'
   # Production-touching / safety-stop agent types NEVER auto-continue (side-agent flag
@@ -3318,13 +3333,14 @@ RESULT_CONTRACT
   # var, so it is in this runner's env), the stop flag, the budget and the cap are all read at this moment; nothing is captured at launch time and this runner carries no cap.
   # Refused => a resumable capacity-stop (the lane keeps its work; a later resume goes through the start admission again).
   printf '  if proxy_agent_is_deepseek_direct_id "$MODEL_ID"; then\n'
-  printf '    pa_dsd_out="$(python3 -I %q admit --continue --name %q --model "$MODEL_ID" --pid %q --jsonl %q --log %q 2>&1)"; pa_dsd_rc=$?\n' "$DSD_GATE" "$PA_DSD_NAME" "$$" "$JSONL" "$LOG"
+  printf '    pa_dsd_out="$(python3 -I %q admit --continue --name %q --model "$MODEL_ID" --pid %q --jsonl %q --log %q --grant-file %q 2>&1)"; pa_dsd_rc=$?\n' "$DSD_GATE" "$PA_DSD_NAME" "$$" "$JSONL" "$LOG" "$DSD_GRANT"
+  printf '    pa_dsd_budget="$(cat %q 2>/dev/null)"\n' "$DSD_GRANT"
   printf '    printf "%%s\\n" "$pa_dsd_out" >> %q\n' "$LOG"
-  printf '    if [[ "$pa_dsd_rc" != 0 ]]; then printf "[%%s] PROXY_AGENT_CONTINUE_REFUSED model=%%s rc=%%s reason=deepseek_direct_gate capacity-stop\\n" "$(date -u +%%FT%%TZ)" "$MODEL_ID" "$pa_dsd_rc" >> %q; printf "PROXY_AGENT_CAPACITY_STOP rc=75 model=%%s reason=deepseek_direct_gate\\n" "$MODEL_ID" >&2; rc=75; exit 75; fi\n' "$LOG"
+  printf '    if [[ "$pa_dsd_rc" != 0 || ! "$pa_dsd_budget" =~ ^[0-9]+([.][0-9]+)?$ ]]; then printf "[%%s] PROXY_AGENT_CONTINUE_REFUSED model=%%s rc=%%s reason=deepseek_direct_gate capacity-stop\\n" "$(date -u +%%FT%%TZ)" "$MODEL_ID" "$pa_dsd_rc" >> %q; printf "PROXY_AGENT_CAPACITY_STOP rc=75 model=%%s reason=deepseek_direct_gate\\n" "$MODEL_ID" >&2; rc=75; exit 75; fi\n' "$LOG"
   printf '  fi\n'
   printf '  if [[ "$pa_claude_429" == 1 ]]; then pa_log_start=$(wc -c < "$PA_LOG"); fi\n'
   printf '  %q ' "$CLAUDE_BIN" "${ARGS[@]}"
-  printf ' --resume "$pa_sid" < %q 2>> %q | python3 -I -u %q %q %q\n' "$JOB_DIR/continue.md" "$LOG" "$HOME/.claude/scripts/proxy-agent-stream.py" "$OUT.c" "$JSONL.c"
+  printf ' ${pa_dsd_budget:+--max-budget-usd "$pa_dsd_budget"} --resume "$pa_sid" < %q 2>> %q | python3 -I -u %q %q %q\n' "$JOB_DIR/continue.md" "$LOG" "$HOME/.claude/scripts/proxy-agent-stream.py" "$OUT.c" "$JSONL.c"
   printf '  statuses=("${PIPESTATUS[@]}"); pa_cli_rc=${statuses[0]}; rc=$pa_cli_rc; if [[ "$rc" == 0 ]]; then rc=${statuses[1]}; fi\n'
   printf '  cat %q >> %q 2>/dev/null; cp %q %q 2>/dev/null\n' "$JSONL.c" "$JSONL" "$OUT.c" "$OUT"
   printf '  if [[ "$pa_claude_429" == 1 ]]; then pa_terminal_jsonl="$PA_JOB/terminal.jsonl"; mv -f %q "$pa_terminal_jsonl"; fi\n' "$JSONL.c"

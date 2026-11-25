@@ -1,15 +1,17 @@
-"""deepseek-direct-gate.py: the ONE admission boundary for paid deepseek-direct lanes (CTO REVISE of 248ae25b, C0ALZJHGE49 thread 1795597777.761599, ts 1795600640.261439).
+"""deepseek-direct-gate.py: the ONE admission boundary for paid deepseek-direct lanes.
+CTO REVISE of 248ae25b (C0ALZJHGE49 thread 1795597777.761599, ts 1795600640.261439) and of a5c85804 (ts 1795603176.516159).
 
-  scope     : no token, a malformed token or another run's token is refused (rc 2); only bench:<run_id> of the state file is admitted.
-  stop      : a start and a continuation are both refused while the state file says stop; the flag is read at that moment.
-  budget    : spent_usd + the in-flight spend of the running lanes (each at least the floor) reaching budget_usd refuses.
-  cap       : the cap is re-read from proxy-caps.env on every admission (a continuation sees a cap lowered after the lane started); parallel starts
-              cannot exceed it (flock + reservations); a reservation counts before the claude process exists.
-  settle    : the PROXY_AGENT_USAGE line is priced at the published peak rates (input miss, cache read, output) and added to spent_usd once.
-  reconcile : a lane that ends without settling is settled from its stream by the next admission.
+  scope      : no token, a malformed token or another run's token is refused (rc 2); only bench:<run_id> of the state file is admitted.
+  stop       : a start and a continuation are both refused while the state file says stop; the flag is read at that moment.
+  reservation: every segment reserves grant + one worst-case request at admission, so 24.70 spent with no live lane admits NOTHING, and 24.00 spent admits a
+               lane with a smaller grant; the grant becomes the claude --max-budget-usd (cumulative for a resumed session).
+  held       : a started lane that ends with no readable result keeps its reservation HELD (never settled at 0, never at an estimate) until reconcile;
+               a lane that never reached its claude spawn is released.
+  cap        : the cap is re-read from proxy-caps.env on every admission; parallel starts cannot exceed it (flock + reservations).
 Each case drives the REAL script in a temp state dir (PROXY_AGENT_DSD_STATE_DIR), with the launcher's own process-table stub (PROXY_AGENT_STUB_POOL_LIVE).
 Run: /opt/homebrew/bin/pytest -q -p no:cacheprovider tests/test_deepseek_direct_gate.py
 """
+import importlib.util
 import json
 import os
 import subprocess
@@ -23,6 +25,15 @@ GATE = Path(__file__).parents[1] / 'deepseek-direct-gate.py'
 FLASH = 'deepseek-direct/deepseek-flash'
 USAGE = 'PROXY_AGENT_USAGE model=%s results=1 input_tokens=100000 output_tokens=30000 cache_read_tokens=6000000 cache_creation_tokens=0\n' % FLASH
 USAGE_USD = 100000 * 0.30 / 1e6 + 6000000 * 0.006 / 1e6 + 30000 * 1.20 / 1e6  # the published peak rates: miss, cache hit, output (docstring of the gate)
+RESULT = json.dumps({'duration_api_ms': 1, 'usage': {'input_tokens': 100000, 'output_tokens': 30000, 'cache_read_input_tokens': 6000000, 'cache_creation_input_tokens': 0},
+                     'total_cost_usd': 4.38, 'type': 'result'}) + '\n'  # a real lane's shape: Claude Code priced it 4.38 for 0.102 of DeepSeek usage
+ASSISTANT = json.dumps({'type': 'assistant', 'message': {'id': 'm1', 'usage': {'input_tokens': 90000, 'output_tokens': 0}, 'content': [{'type': 'text', 'text': 'working'}]}}) + '\n'
+
+_spec = importlib.util.spec_from_file_location('dsd_gate_under_test', GATE)
+G = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(G)
+WORST = G.worst_request_usd(FLASH)
+RESERVE = G.segment_max(FLASH) + WORST  # one full segment at budget 25: 1.00 + one worst-case request
 
 
 @pytest.fixture
@@ -30,7 +41,7 @@ def lab(tmp_path):
     state = tmp_path / 'state'
     state.mkdir()
     env = {**os.environ, 'PROXY_AGENT_DSD_STATE_DIR': str(state), 'PROXY_AGENT_STUB_POOL_LIVE': '0', 'PROXY_AGENT_DEEPSEEK_DIRECT_SCOPE': 'bench:run-1'}
-    for k in ('DEEPSEEK_DIRECT_PROXY_CAP', 'PROXY_AGENT_DSD_INFLIGHT_FLOOR_USD'):
+    for k in ('DEEPSEEK_DIRECT_PROXY_CAP', 'PROXY_AGENT_DSD_SEGMENT_MAX_USD', 'PROXY_AGENT_DSD_MIN_SEGMENT_USD'):
         env.pop(k, None)
     return tmp_path, state, env
 
@@ -51,8 +62,13 @@ def state_of(lab):
     return json.loads((lab[1] / 'deepseek-direct-bench.json').read_text())
 
 
+def ledger_of(lab):
+    return json.loads((lab[1] / 'deepseek-direct-lanes.json').read_text())
+
+
 def admit(lab, name, *extra, env=None):
-    return gate(lab, 'admit', '--name', name, '--model', FLASH, *extra, env=env)
+    grant = [] if ('--dry-run' in extra or '--grant-file' in extra) else ['--grant-file', str(lab[0] / ('grant-' + name))]  # the launcher always passes one
+    return gate(lab, 'admit', '--name', name, '--model', FLASH, *extra, *grant, env=env)
 
 
 def fake_launcher(tmp):
@@ -60,6 +76,19 @@ def fake_launcher(tmp):
     script = tmp / 'proxy-agent.sh'
     script.write_text('#!/bin/bash\nsleep 60\n')
     return subprocess.Popen(['bash', str(script)])
+
+
+def lane_files(tmp, name, stream='', log=''):
+    jsonl, logf = tmp / (name + '.jsonl'), tmp / (name + '.log')
+    jsonl.write_text(stream)
+    logf.write_text(log)
+    return ['--jsonl', str(jsonl), '--log', str(logf)]
+
+
+def kill(proc):
+    proc.kill()
+    proc.wait()
+    time.sleep(0.2)
 
 
 def test_no_token_a_malformed_token_and_another_runs_token_are_refused(lab):
@@ -80,13 +109,14 @@ def test_a_start_and_a_continuation_both_read_the_stop_flag_now(lab):
     init(lab)
     launcher = fake_launcher(lab[0])
     try:
-        assert admit(lab, 'L1', '--pid', str(launcher.pid)).returncode == 0
+        files = lane_files(lab[0], 'L1', RESULT)  # one finished segment: a continuation is possible
+        assert admit(lab, 'L1', '--pid', str(launcher.pid), *files).returncode == 0
         gate(lab, 'set-stop', 'true', check=0)
-        cont = admit(lab, 'L1', '--continue', '--pid', str(launcher.pid))
+        cont = admit(lab, 'L1', '--continue', '--pid', str(launcher.pid), *files)
         assert cont.returncode == 2 and 'reason=deepseek_direct_stop' in cont.stdout and 'kind=continue' in cont.stdout
         assert admit(lab, 'L2', '--dry-run').returncode == 2
         gate(lab, 'set-stop', 'false', check=0)
-        assert admit(lab, 'L1', '--continue', '--pid', str(launcher.pid)).returncode == 0
+        assert admit(lab, 'L1', '--continue', '--pid', str(launcher.pid), *files).returncode == 0
     finally:
         launcher.kill()
 
@@ -95,10 +125,11 @@ def test_a_continuation_sees_a_cap_lowered_after_the_lane_started(lab):
     init(lab)
     procs = [fake_launcher(lab[0]) for _ in range(3)]
     try:
+        files = [lane_files(lab[0], 'L%d' % i, RESULT) for i in range(3)]
         for i, p in enumerate(procs):
-            assert admit(lab, 'L%d' % i, '--pid', str(p.pid)).returncode == 0
+            assert admit(lab, 'L%d' % i, '--pid', str(p.pid), *files[i]).returncode == 0
         (lab[1] / 'proxy-caps.env').write_text('DEEPSEEK_DIRECT_PROXY_CAP=2\n')  # edited while the lanes run: 2 others already fill it
-        cont = admit(lab, 'L0', '--continue', '--pid', str(procs[0].pid))
+        cont = admit(lab, 'L0', '--continue', '--pid', str(procs[0].pid), *files[0])
         assert cont.returncode == 75 and 'reason=deepseek_direct_cap' in cont.stdout and '(2 live >= 2)' in cont.stdout
     finally:
         for p in procs:
@@ -112,57 +143,208 @@ def test_parallel_starts_cannot_exceed_the_cap(lab):
                               env={**lab[2], **env}, stdout=subprocess.PIPE, text=True) for i in range(10)]
     outs = [(p.communicate()[0], p.returncode) for p in procs]
     assert sorted(rc for _o, rc in outs) == [0] * 8 + [75] * 2, outs
-    assert json.loads((lab[1] / 'deepseek-direct-lanes.json').read_text())['lanes'] == {}  # every hold was released
+    assert ledger_of(lab)['lanes'] == {}  # every hold was released
 
 
-def test_the_budget_counts_spent_plus_the_in_flight_floor_of_every_running_lane(lab):
-    init(lab, budget=1.0, spent=0.4)
+def test_a_start_near_the_ceiling_is_refused_and_a_start_just_below_it_gets_a_smaller_enforced_grant(lab):
+    """CTO a5c85804: 24.70 settled and no live lane used to admit a lane at 24.95 that could spend more than 0.30 before the gate ran again."""
+    init(lab, budget=25.0, spent=24.70)
+    refused = admit(lab, 'L1')
+    assert refused.returncode == 2 and 'reason=deepseek_direct_budget' in refused.stdout and 'headroom 0.3000' in refused.stdout, refused.stdout
+    assert ledger_of(lab)['lanes'] == {}  # nothing was reserved
+    init_state = lab[1] / 'deepseek-direct-bench.json'
+    init_state.write_text(json.dumps({'run_id': 'run-1', 'budget_usd': 25.0, 'spent_usd': 24.00, 'stop': False}))
+    launcher = fake_launcher(lab[0])
+    try:
+        grant_file = lab[0] / 'grant'
+        ok = admit(lab, 'L1', '--pid', str(launcher.pid), '--grant-file', str(grant_file))
+        assert ok.returncode == 0, ok.stdout
+        grant = G.floor4(1.0 - WORST)  # headroom 1.00 minus the worst-case request the reservation also holds
+        assert 'grant_usd=%.4f' % grant in ok.stdout and 'reserve_usd=%.4f' % (grant + WORST) in ok.stdout
+        assert float(grant_file.read_text()) == G.floor4(grant * G.cc_per_usd(FLASH))  # the cap the launcher passes to claude, in Claude Code dollars
+        second = admit(lab, 'L2', '--dry-run')  # L1's whole reserve is held: nothing is left for a second lane
+        assert second.returncode == 2 and 'reason=deepseek_direct_budget' in second.stdout
+    finally:
+        launcher.kill()
+
+
+def test_the_reservations_of_live_lanes_count_against_the_budget(lab):
+    init(lab, budget=3.0)
     procs = [fake_launcher(lab[0]) for _ in range(3)]
     try:
-        assert admit(lab, 'L0', '--pid', str(procs[0].pid)).returncode == 0  # 0.40 + 0.25 floor < 1.00
-        assert admit(lab, 'L1', '--pid', str(procs[1].pid)).returncode == 0  # 0.40 + 2 * 0.25 < 1.00
-        refused = admit(lab, 'L2', '--pid', str(procs[2].pid))  # 0.40 + 3 * 0.25 >= 1.00
+        assert admit(lab, 'A', '--pid', str(procs[0].pid)).returncode == 0  # holds 1.00 + worst
+        assert admit(lab, 'B', '--pid', str(procs[1].pid)).returncode == 0
+        refused = admit(lab, 'C', '--pid', str(procs[2].pid))  # 3.00 - 2 x 1.353 = 0.294 < worst + the minimum segment
         assert refused.returncode == 2 and 'reason=deepseek_direct_budget' in refused.stdout, refused.stdout
     finally:
         for p in procs:
             p.kill()
 
 
-def test_settle_prices_the_usage_line_and_frees_the_reservation(lab):
+def test_a_continuation_cap_is_the_sessions_cumulative_claude_code_cost_plus_the_grant(lab):
     init(lab)
     launcher = fake_launcher(lab[0])
     try:
-        logf = lab[0] / 'lane.log'
-        logf.write_text(USAGE)
-        assert admit(lab, 'L1', '--pid', str(launcher.pid), '--log', str(logf)).returncode == 0
-        gate(lab, 'settle', '--name', 'L1', '--model', FLASH, '--log', str(logf), check=0)
-        assert abs(state_of(lab)['spent_usd'] - USAGE_USD) < 1e-5  # the launcher calls settle once per lane, at its end
-        assert json.loads((lab[1] / 'deepseek-direct-lanes.json').read_text())['lanes'] == {}
+        files = lane_files(lab[0], 'L1', RESULT)  # the finished segment: Claude Code total_cost_usd 4.38 (cumulative for the session)
+        assert admit(lab, 'L1', '--pid', str(launcher.pid), *files).returncode == 0
+        grant_file = lab[0] / 'grant'
+        cont = admit(lab, 'L1', '--continue', '--pid', str(launcher.pid), *files, '--grant-file', str(grant_file))
+        assert cont.returncode == 0 and 'cum_cc_usd=4.3800' in cont.stdout and 'segment=2' in cont.stdout, cont.stdout
+        grant = G.floor4(min(G.segment_max(FLASH), 25.0 - USAGE_USD - WORST))
+        assert float(grant_file.read_text()) == G.floor4(4.38 + grant * G.cc_per_usd(FLASH))
     finally:
         launcher.kill()
 
 
-def test_a_result_event_that_does_not_start_with_its_type_is_priced_and_a_dead_lane_is_reconciled(lab):
+def test_a_continuation_of_a_lane_whose_previous_segment_has_no_result_is_refused(lab):
     init(lab)
     launcher = fake_launcher(lab[0])
-    jsonl = lab[0] / 'lane.jsonl'
-    result = {'duration_api_ms': 1, 'usage': {'input_tokens': 100000, 'output_tokens': 30000, 'cache_read_input_tokens': 6000000, 'cache_creation_input_tokens': 0}, 'type': 'result'}
-    jsonl.write_text(json.dumps(result) + '\n')
-    assert admit(lab, 'L1', '--pid', str(launcher.pid), '--jsonl', str(jsonl)).returncode == 0
+    try:
+        files = lane_files(lab[0], 'L1', ASSISTANT)  # the segment was killed: requests were made, no result event
+        assert admit(lab, 'L1', '--pid', str(launcher.pid), *files).returncode == 0
+        cont = admit(lab, 'L1', '--continue', '--pid', str(launcher.pid), *files)
+        assert cont.returncode == 2 and 'reason=deepseek_direct_segment_unreconciled' in cont.stdout, cont.stdout
+    finally:
+        launcher.kill()
+
+
+def test_a_killed_lane_with_no_readable_usage_keeps_its_reservation_held_never_settled_at_zero(lab):
+    """CTO a5c85804: a killed lane with no readable usage used to settle at 0 and release its reservation."""
+    init(lab, budget=25.0)
+    launcher = fake_launcher(lab[0])
+    files = lane_files(lab[0], 'L1', ASSISTANT, 'PROXY_AGENT_USAGE model=%s unavailable (no result event with usage in the stream)\n' % FLASH)
+    assert admit(lab, 'L1', '--pid', str(launcher.pid), *files).returncode == 0
+    gate(lab, 'started', '--name', 'L1', check=0)
+    kill(launcher)
+    status = json.loads(gate(lab, 'status', check=0).stdout)  # the next look at the ledger closes the dead lane
+    assert state_of(lab)['spent_usd'] == 0.0, 'a lane with unknown usage must not be settled at 0'
+    held = status['held']['L1']
+    assert abs(held['usd'] - RESERVE) < 1e-4 and held['unknown_segments'] == 1 and status['live_lanes'] == 0
+    assert abs(status['exposure_usd'] - RESERVE) < 1e-4  # still counted against the budget
+    # ...so it still blocks admission when it is most of what is left.
+    (lab[1] / 'deepseek-direct-bench.json').write_text(json.dumps({'run_id': 'run-1', 'budget_usd': 1.6, 'spent_usd': 0.0, 'stop': False}))
+    blocked = admit(lab, 'L2', '--dry-run')
+    assert blocked.returncode == 2 and 'reason=deepseek_direct_budget' in blocked.stdout and 'held %.4f' % RESERVE in blocked.stdout, blocked.stdout
+    # reconcile with evidence releases it
+    done = gate(lab, 'reconcile', '--name', 'L1', '--usd', '0.21', '--evidence', 'balance_delta', check=0)
+    assert json.loads(done.stdout)['reconciled'][0]['charged_usd'] == 0.21 and state_of(lab)['spent_usd'] == 0.21
+    assert ledger_of(lab)['held'] == {}
+    assert admit(lab, 'L2', '--dry-run').returncode == 0
+
+
+def test_reconcile_can_charge_the_reservation_in_full_for_one_lane_or_all(lab):
+    init(lab)
+    procs = [fake_launcher(lab[0]) for _ in range(2)]
+    for i, p in enumerate(procs):
+        assert admit(lab, 'L%d' % i, '--pid', str(p.pid), *lane_files(lab[0], 'L%d' % i, ASSISTANT)).returncode == 0
+        gate(lab, 'started', '--name', 'L%d' % i, check=0)
+        kill(p)
+    gate(lab, 'status', check=0)
+    assert set(ledger_of(lab)['held']) == {'L0', 'L1'}
+    assert gate(lab, 'reconcile', '--all').returncode == 2  # --all alone is refused: it needs an explicit charge basis
+    one = json.loads(gate(lab, 'reconcile', '--name', 'L0', '--charge-reservation', check=0).stdout)
+    assert abs(one['reconciled'][0]['charged_usd'] - RESERVE) < 1e-4
+    rest = json.loads(gate(lab, 'reconcile', '--all', '--charge-reservation', check=0).stdout)
+    assert [r['name'] for r in rest['reconciled']] == ['L1'] and abs(state_of(lab)['spent_usd'] - 2 * RESERVE) < 1e-4 and rest['held_usd'] == 0
+
+
+def test_a_result_event_without_usage_is_unreadable_not_zero(lab):
+    init(lab)
+    launcher = fake_launcher(lab[0])
+    files = lane_files(lab[0], 'L1', json.dumps({'type': 'result', 'result': 'done'}) + '\n', 'PROXY_AGENT_USAGE model=%s unavailable\n' % FLASH)
+    assert admit(lab, 'L1', '--pid', str(launcher.pid), *files).returncode == 0
+    gate(lab, 'started', '--name', 'L1', check=0)
+    gate(lab, 'settle', '--name', 'L1', '--model', FLASH, '--log', files[3], check=0)
+    assert state_of(lab)['spent_usd'] == 0.0 and list(ledger_of(lab)['held']) == ['L1']
     launcher.kill()
-    launcher.wait()
-    time.sleep(0.2)
-    assert admit(lab, 'L2', '--dry-run').returncode == 0  # the next admission settles L1 from its stream
-    assert abs(state_of(lab)['spent_usd'] - USAGE_USD) < 1e-5
-    assert 'L1' not in json.loads((lab[1] / 'deepseek-direct-lanes.json').read_text())['lanes']
 
 
-def test_init_state_seeds_ended_lanes_exact_first_and_adopts_the_running_one_once(lab):
+def test_a_lane_that_never_reached_its_claude_spawn_is_released_not_held(lab):
+    init(lab)
+    launcher = fake_launcher(lab[0])
+    assert admit(lab, 'L1', '--pid', str(launcher.pid), *lane_files(lab[0], 'L1')).returncode == 0  # admitted, but no started mark: the runner died first
+    kill(launcher)
+    status = json.loads(gate(lab, 'status', check=0).stdout)
+    assert status['held'] == {} and status['live_lanes'] == 0 and state_of(lab)['spent_usd'] == 0.0
+
+
+def test_a_runner_that_cannot_receive_the_segment_cap_is_refused(lab):
+    init(lab)
+    launcher = fake_launcher(lab[0])
+    try:
+        done = gate(lab, 'admit', '--name', 'L1', '--model', FLASH, '--pid', str(launcher.pid))  # no --grant-file: a runner baked before the cap existed
+        assert done.returncode == 2 and 'reason=deepseek_direct_no_grant_channel' in done.stdout and ledger_of(lab)['lanes'] == {}
+        assert gate(lab, 'admit', '--name', 'L1', '--model', FLASH, '--dry-run').returncode == 0  # a preview needs no channel
+    finally:
+        launcher.kill()
+
+
+def test_a_lane_admitted_by_the_previous_gate_version_that_dies_with_no_result_is_held_not_released(lab):
+    init(lab)
+    launcher = fake_launcher(lab[0])
+    legacy = {'name': 'old', 'model': FLASH, 'owner': 'launcher', 'pid': launcher.pid, 'jsonl': None, 'log': None, 'baseline_usd': 0.0, 'missing_since': None,
+              'acc': {'off': 0, 'last_mid': None, 'a_in': 0, 'a_out': 0, 'a_cr': 0, 'a_cc': 0, 'r_in': 0, 'r_out': 0, 'r_cr': 0, 'r_cc': 0}, 'acc_c': {'off': 0}}
+    (lab[1] / 'deepseek-direct-lanes.json').write_text(json.dumps({'version': 1, 'lanes': {'old': legacy}, 'settled': []}))  # the a5c85804 ledger shape
+    kill(launcher)
+    status = json.loads(gate(lab, 'status', check=0).stdout)
+    assert list(status['held']) == ['old'] and state_of(lab)['spent_usd'] == 0.0 and status['held']['old']['usd'] > 0
+
+
+def test_started_without_a_reservation_fails_closed(lab):
+    init(lab)
+    done = gate(lab, 'started', '--name', 'nobody')
+    assert done.returncode == 2 and 'reason=deepseek_direct_no_reservation' in done.stdout
+
+
+def test_settle_prices_the_usage_line_and_frees_the_reservation(lab):
+    init(lab)
+    launcher = fake_launcher(lab[0])
+    try:
+        files = lane_files(lab[0], 'L1', '', USAGE)
+        assert admit(lab, 'L1', '--pid', str(launcher.pid), *files).returncode == 0
+        gate(lab, 'started', '--name', 'L1', check=0)
+        gate(lab, 'settle', '--name', 'L1', '--model', FLASH, '--log', files[3], check=0)
+        assert abs(state_of(lab)['spent_usd'] - USAGE_USD) < 1e-5  # the launcher calls settle once per lane, at its end
+        assert ledger_of(lab)['lanes'] == {} and ledger_of(lab)['held'] == {}
+    finally:
+        launcher.kill()
+
+
+def test_a_lane_killed_after_its_result_event_is_settled_exactly_from_the_stream(lab):
+    init(lab)
+    launcher = fake_launcher(lab[0])
+    files = lane_files(lab[0], 'L1', RESULT)  # the result event does not start with its type: the keys come alphabetically
+    assert admit(lab, 'L1', '--pid', str(launcher.pid), *files).returncode == 0
+    gate(lab, 'started', '--name', 'L1', check=0)
+    kill(launcher)
+    status = json.loads(gate(lab, 'status', check=0).stdout)
+    assert abs(state_of(lab)['spent_usd'] - USAGE_USD) < 1e-5 and status['held'] == {} and status['live_lanes'] == 0
+
+
+def test_a_lane_priced_below_the_assumed_claude_code_floor_stops_admission_until_cleared(lab):
+    init(lab)
+    cheap = RESULT.replace('4.38', '0.12')  # Claude Code total 0.12 for 0.102 of DeepSeek usage: a ratio of ~1.2, far below k
+    launcher = fake_launcher(lab[0])
+    files = lane_files(lab[0], 'L1', cheap, USAGE)
+    assert admit(lab, 'L1', '--pid', str(launcher.pid), *files).returncode == 0
+    gate(lab, 'started', '--name', 'L1', check=0)
+    gate(lab, 'settle', '--name', 'L1', '--model', FLASH, '--log', files[3], check=0)
+    assert 'cost_basis_violation' in ledger_of(lab)
+    blocked = admit(lab, 'L2', '--dry-run')
+    assert blocked.returncode == 2 and 'reason=deepseek_direct_cost_basis' in blocked.stdout
+    gate(lab, 'reconcile', '--clear-cost-basis', check=0)
+    assert admit(lab, 'L2', '--dry-run').returncode == 0
+    launcher.kill()
+
+
+def test_init_state_seeds_exact_ended_lanes_holds_unreadable_ones_and_adopts_the_running_one_once(lab):
     tmp = lab[0]
-    exact_log = tmp / 'claude-ended-exact.log'
-    exact_log.write_text('[2026-11-25T09:56:35Z] LAUNCH name=ended-exact ISSUE:UNKNOWN model_alias=x model_id=' + FLASH + '\n' + USAGE)
-    (tmp / 'claude-ended-exact.jsonl').write_text('')
-    (tmp / 'claude-running-one.log').write_text('[2026-11-25T09:56:35Z] LAUNCH name=running-one ISSUE:UNKNOWN model_alias=x model_id=' + FLASH + '\n')
+    launch_line = '[2026-11-25T09:56:35Z] LAUNCH name=%s ISSUE:UNKNOWN model_alias=x model_id=' + FLASH + '\n'
+    (tmp / 'claude-ended-exact.log').write_text(launch_line % 'ended-exact' + USAGE)
+    (tmp / 'claude-ended-exact.jsonl').write_text(RESULT)
+    (tmp / 'claude-ended-dead.log').write_text(launch_line % 'ended-dead' + 'PROXY_AGENT_USAGE model=%s unavailable\n' % FLASH)
+    (tmp / 'claude-ended-dead.jsonl').write_text(ASSISTANT)
+    (tmp / 'claude-running-one.log').write_text(launch_line % 'running-one')
     (tmp / 'claude-running-one.jsonl').write_text('')
     fake = tmp / 'bin' / 'claude'
     fake.parent.mkdir()
@@ -172,10 +354,11 @@ def test_init_state_seeds_ended_lanes_exact_first_and_adopts_the_running_one_onc
     try:
         time.sleep(0.3)
         done = gate(lab, 'init-state', '--run-id', 'run-1', '--budget-usd', '25', '--adopt-running', '--ended-jsonl', str(tmp / 'claude-running-one.jsonl'),
-                    '--ended-jsonl', str(tmp / 'claude-ended-exact.jsonl'), env={'PROXY_AGENT_STUB_POOL_LIVE': ''}, check=0)
+                    '--ended-jsonl', str(tmp / 'claude-ended-dead.jsonl'), '--ended-jsonl', str(tmp / 'claude-ended-exact.jsonl'), env={'PROXY_AGENT_STUB_POOL_LIVE': ''}, check=0)
         report = json.loads(done.stdout)
-        assert report['skipped_still_running'] == ['running-one'] and [s['name'] for s in report['adopted_running']] == ['running-one']
-        assert [s['name'] for s in report['ended_seeded']] == ['ended-exact'] and report['ended_seeded'][0]['source'] == 'init_usage_line'
-        assert abs(state_of(lab)['spent_usd'] - USAGE_USD) < 1e-5  # the ended lane's exact usage only; the running lane has a baseline of ~0 and counts from here
+        # (the real process table is read here, so unrelated live deepseek-direct lanes may be listed too: assert on ours)
+        assert 'running-one' in report['skipped_still_running'] and 'running-one' in [s['name'] for s in report['adopted_running']]
+        assert abs(state_of(lab)['spent_usd'] - USAGE_USD) < 1e-5  # only the exact lane is spent; the unreadable one is HELD, the running one is not counted yet
+        assert list(report['held']) == ['ended-dead']
     finally:
         proc.kill()

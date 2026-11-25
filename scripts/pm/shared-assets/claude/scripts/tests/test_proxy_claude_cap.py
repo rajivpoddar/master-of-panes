@@ -316,17 +316,69 @@ def test_an_explicit_deepseek_direct_model_at_its_cap_is_refused_75_with_its_own
     assert not (home / 'prompt-seen.txt').exists()
 
 
-def test_an_explicit_deepseek_direct_model_under_its_cap_launches_when_the_team_pool_is_full_and_settles_its_usage(lab):
-    _tmp, home, _ = lab
+def _recording_claude(tmp, usage=True):
+    """The lab's fake claude, plus: its argv is written to HOME/claude-argv.json and its result event carries usage and Claude Code's total_cost_usd."""
+    src = launch_states.FAKE_CLAUDE
+    src = src.replace("name = sys.argv[sys.argv.index('--name') + 1]", "name = sys.argv[sys.argv.index('--name') + 1]\nopen(os.path.join(os.environ['HOME'], 'claude-argv.json'), 'w').write(json.dumps(sys.argv[1:]))")
+    if usage:
+        src = src.replace("{'type': 'result', 'result': text}", "{'type': 'result', 'result': text, 'total_cost_usd': 0.5, 'usage': {'input_tokens': 1000, 'output_tokens': 200, 'cache_read_input_tokens': 50000, 'cache_creation_input_tokens': 0}}")
+        assert 'total_cost_usd' in src
+    assert 'claude-argv.json' in src
+    (tmp / 'bin/claude').write_text(src)
+
+
+def _cap_arg(home):
+    argv = json.loads((home / 'claude-argv.json').read_text())
+    return float(argv[argv.index('--max-budget-usd') + 1])
+
+
+gate_mod = _load('gate_for_cap_tests', SCRIPTS / 'deepseek-direct-gate.py')
+
+
+def test_a_deepseek_direct_lane_starts_with_the_enforced_segment_cap_and_settles_its_exact_usage(lab):
+    tmp, home, _ = lab
     prepare(lab, 'hd-builder')
     env = dsd_lab(lab)
+    _recording_claude(tmp)
     done = run(lab, 'hd-builder', 'proxy-test-dsd-room', DSD, live=9, cap=2, PROXY_AGENT_STUB_POOL_LIVE='7', **env)
     assert done.returncode == 0 and 'PROXY_AGENT_REFUSED' not in done.stderr and 'deepseek_requires_rajiv_override' not in done.stderr, done.stderr
-    assert (home / 'prompt-seen.txt').exists()
-    assert 'PROXY_AGENT_USAGE model=deepseek-direct/deepseek-flash' in done.stderr  # tokens when the stream carries them, "unavailable" otherwise
+    # CTO a5c85804: the grant is ENFORCED by claude itself. Budget 25, nothing spent: the grant is the segment max, in Claude Code dollars.
+    assert _cap_arg(home) == gate_mod.floor4(gate_mod.segment_max(DSD) * gate_mod.cc_per_usd(DSD))
+    assert 'PROXY_AGENT_USAGE model=deepseek-direct/deepseek-flash results=1' in done.stderr
     assert 'PROXY_AGENT_DSD_GATE settled name=proxy-test-dsd-room' in done.stderr
     ledger = json.loads((home / '.claude/state/deepseek-direct-lanes.json').read_text())
-    assert ledger['lanes'] == {} and [s['name'] for s in ledger['settled']] == ['proxy-test-dsd-room']  # the reservation is freed at the lane's end
+    assert ledger['lanes'] == {} and ledger['held'] == {} and [s['name'] for s in ledger['settled']] == ['proxy-test-dsd-room']
+    spent = json.loads((home / '.claude/state/deepseek-direct-bench.json').read_text())['spent_usd']
+    assert abs(spent - (1000 * 0.30 + 50000 * 0.006 + 200 * 1.20) / 1e6) < 1e-6  # the exact priced usage, not an estimate
+
+
+def test_a_deepseek_direct_lane_whose_usage_is_unreadable_keeps_its_reservation_held_not_settled_at_zero(lab):
+    _tmp, home, _ = lab
+    prepare(lab, 'hd-builder')
+    env = dsd_lab(lab)  # the lab's default fake claude ends with a result event that carries no usage
+    done = run(lab, 'hd-builder', 'proxy-test-dsd-nousage', DSD, live=0, **env)
+    assert done.returncode == 0, done.stderr
+    assert 'PROXY_AGENT_USAGE model=deepseek-direct/deepseek-flash unavailable' in done.stderr and 'PROXY_AGENT_DSD_GATE held name=proxy-test-dsd-nousage' in done.stderr
+    ledger = json.loads((home / '.claude/state/deepseek-direct-lanes.json').read_text())
+    held = ledger['held']['proxy-test-dsd-nousage']
+    assert ledger['lanes'] == {} and abs(held['usd'] - (gate_mod.segment_max(DSD) + gate_mod.worst_request_usd(DSD))) < 1e-4
+    assert json.loads((home / '.claude/state/deepseek-direct-bench.json').read_text())['spent_usd'] == 0.0
+
+
+def test_near_the_ceiling_a_launch_gets_a_smaller_enforced_cap_and_at_the_ceiling_none(lab):
+    tmp, home, _ = lab
+    prepare(lab, 'hd-builder')
+    _recording_claude(tmp)
+    env = dsd_lab(lab, spent=24.0)  # headroom 1.00 leaves a grant of 1.00 minus one worst-case request
+    done = run(lab, 'hd-builder', 'proxy-test-dsd-near', DSD, live=0, **env)
+    assert done.returncode == 0, done.stderr
+    grant = gate_mod.floor4(1.0 - gate_mod.worst_request_usd(DSD))
+    assert _cap_arg(home) == gate_mod.floor4(grant * gate_mod.cc_per_usd(DSD)) and grant < gate_mod.segment_max(DSD)
+    env = dsd_lab(lab, spent=24.70)  # CTO a5c85804: 0.30 left is less than ONE worst-case request, so no lane is admitted at all
+    (home / 'claude-argv.json').unlink()
+    refused = run(lab, 'hd-builder', 'proxy-test-dsd-ceiling', DSD, live=0, **env)
+    assert refused.returncode == 2 and 'reason=deepseek_direct_budget' in refused.stderr, refused.stderr
+    assert not (home / 'claude-argv.json').exists()
 
 
 def test_deepseek_direct_cap_zero_in_the_caps_file_refuses_an_explicit_deepseek_direct_model(lab):
@@ -344,17 +396,20 @@ def test_the_stop_flag_and_a_spent_budget_each_refuse_a_start_2(lab):
     env = dsd_lab(lab, stop=True)
     stopped = run(lab, 'hd-builder', 'proxy-test-dsd-stop', DSD, live=0, **env)
     assert stopped.returncode == 2 and 'reason=deepseek_direct_stop' in stopped.stderr, stopped.stderr
-    env = dsd_lab(lab, spent=24.9)  # 24.90 + the 0.25 floor of the lane being admitted reaches the 25.00 budget
+    env = dsd_lab(lab, spent=24.9)  # 0.10 left: less than one worst-case request
     spent = run(lab, 'hd-builder', 'proxy-test-dsd-budget', DSD, live=0, **env)
     assert spent.returncode == 2 and 'reason=deepseek_direct_budget' in spent.stderr, spent.stderr
     assert not (home / 'prompt-seen.txt').exists()
 
 
-def test_the_launcher_has_one_admission_and_captures_no_cap_for_the_runner():
+def test_the_launcher_has_one_admission_captures_no_cap_and_enforces_the_grant_on_every_claude_command():
     src = (SCRIPTS / 'proxy-agent.sh').read_text()
     assert 'DEEPSEEK_DIRECT_PROXY_CAP=%q' not in src and 'proxy_agent_live_count deepseek_direct' not in src  # no cap baked into run.sh, no second counter
     assert 'admit --continue' in src and src.count('python3 -I "$DSD_GATE"') == 2  # start (and dry run) + lane-end settle; run.sh calls the same script for continuations
     assert re.search(r'deepseek-direct/\*\) return 0;;', src)  # the pool guard and pool_blocked never admit it themselves
+    # CTO a5c85804: the reserved maximum is enforced: the start command and the resume command both carry --max-budget-usd, and no grant means no launch.
+    assert "printf -- '--max-budget-usd %q ' \"$PA_DSD_BUDGET\"" in src and '$' + '{pa_dsd_budget:+--max-budget-usd "$pa_dsd_budget"} --resume' in src
+    assert src.count('--grant-file') == 2 and 'reason=deepseek_direct_no_grant' in src and ' started --name ' in src
 
 
 def test_every_deepseek_direct_id_is_wired_and_none_is_in_a_tier_list():
