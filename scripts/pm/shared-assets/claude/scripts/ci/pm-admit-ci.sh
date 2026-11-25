@@ -378,6 +378,134 @@ plan_main_merge() {
   fi
 }
 
+# Stale test-merge guard (2026-11-21; CTO REVISE #2, C0ALZJHGE49 thread 1795543629.469469, ts 1795544911.112579).
+# GitHub can leave refs/pull/N/merge built on an old main for over an hour, so CI tests stale code (#14302/#14420/#14430/#14435/#14436 kept
+# failing on a lint already fixed on main). The PR's test merge must be verified built on the main that PASSED THE OVERLAP CHECK above.
+# - Fail closed: any unreadable main, PR or merge-ref read is UNKNOWN and REFUSEs here. Nothing reaches the activation label on an UNKNOWN.
+# - ONE read pass, no polling and no sleeps (probes found no evidence that waiting rebuilds a ref). Every GitHub read is bounded by the REMAINING
+#   deadline (PM_ADMIT_STALE_DEADLINE seconds, default 30, covering the whole pass) with timeout; a result that returns at or after the deadline
+#   counts as UNKNOWN (whole-second clock, so it errs early, never late).
+# - Bound to OVERLAP_MAIN_SHA, the main that plan_main_merge reviewed for overlap. If main has moved since, REFUSE: the overlap review no longer
+#   covers it and a fresh admission run is needed. Never re-read "current main" and trust that instead.
+# - No PR state change (a close queues e2e.yml teardown, which stops the PR's six Modal apps and can kill an in-flight E2E run), no main merge,
+#   no push (rule 62/S166). The guard runs before every admission write (label create, label cleanup, priority mirror, activation label).
+# Lagging-ref rule (2026-11-25; Rajiv rule 62/S166, CTO C0ALZJHGE49 thread 1795567441.556059, ts 1795584167.126789): GitHub's test merge can sit on an older
+# main M for minutes to hours while main keeps moving (6 admissions refused on 2026-11-25). A test merge whose parents are NOT exactly {head, overlap-checked
+# main} is still ADMITTED when ALL hold, else it REFUSEs with the overlap list: (a) the PR is not CONFLICTING; (b) the PR's changed files (merge-base..head, taken
+# against BOTH the overlap-checked main and M, unioned) do not overlap the files main changed since M (M..overlap-checked main); (c) one parent is exactly the
+# reviewed head and the other, M, is a verified ancestor of the overlap-checked main. The ancestry and file reads are local git reads under the same deadline
+# (no new GitHub read). The rule that admitted the PR is printed as MERGE_REF_RULE and, for the lagging rule, appended to pm-admit-skip.log.
+stale_refuse() {
+  echo "REFUSE stale_merge_ref #$PR: $1. Admission needs the PR's test merge built on the overlap-checked main $OVERLAP_MAIN_SHA, or on an older ancestor of it whose later changes touch none of this PR's files, and made NO change to the PR (no PR state change, no main merge, no push). Re-run admission; if the overlap list above is non-empty, merge main into the PR branch (non-force); if it keeps refusing, report it to the CTO"
+  exit 3
+}
+# stale_read <cmd...>: ONE read bounded by the remaining deadline. Prints stdout; returns 1 (UNKNOWN) when there is no timeout binary, the
+# deadline has passed, the call fails or is killed by the timeout, or the result returns at or after the deadline.
+stale_read() {
+  local remaining out
+  [ -n "$STALE_TIMEOUT_BIN" ] || return 1
+  remaining=$(( STALE_DEADLINE_AT - $(date +%s) ))
+  [ "$remaining" -ge 1 ] || return 1
+  out=$("$STALE_TIMEOUT_BIN" --kill-after=2 "$remaining" "$@" 2>/dev/null) || return 1
+  [ "$(date +%s)" -lt "$STALE_DEADLINE_AT" ] || return 1
+  printf '%s' "$out"
+}
+is_sha() { printf '%s' "$1" | grep -Eq "$SHA_RE"; }
+lag_refuse() {
+  stale_refuse "test merge $MERGE_SHA has parents [$STALE_PARENTS] but must be exactly the reviewed head and the overlap-checked main [$STALE_WANTED], so GitHub has not rebuilt it on that main; lagging-ref rule not met: $1"
+}
+# lagging_ref_verify: called only when the merge commit's parents are not exactly {head, overlap-checked main}. Returns 0 (sets MERGE_REF_RULE_LINE and
+# MERGE_REF_LAGGING=1) only when conditions (a)-(c) above hold; every other outcome, including any unreadable or late git read, exits through stale_refuse.
+lagging_ref_verify() {
+  local p lagp="" nh=0 main_base lag_base d_main d_lag d_since pr_files main_files overlap n_pr=0 n_main=0 n_overlap=0 list
+  [ "$MERGEABLE" != CONFLICTING ] || lag_refuse "the PR conflicts with main"
+  set -- $STALE_PARENTS
+  [ "$#" -eq 2 ] || lag_refuse "the test merge has $# parent(s), not exactly two"
+  for p in "$@"; do
+    is_sha "$p" || lag_refuse "a test-merge parent is not a full sha"
+    if [ "$p" = "$HEAD" ]; then nh=$((nh + 1)); else lagp="$p"; fi
+  done
+  [ "$nh" -eq 1 ] && [ -n "$lagp" ] || lag_refuse "the test merge was not built on the reviewed head $HEAD"
+  stale_read git -C "$MAIN_REPO" merge-base --is-ancestor "$lagp" "$OVERLAP_MAIN_SHA" >/dev/null ||
+    lag_refuse "its main parent $lagp is not verified as an ancestor of the overlap-checked main $OVERLAP_MAIN_SHA (not an ancestor, or the git read failed, timed out or returned past the deadline)"
+  main_base=$(stale_read git -C "$MAIN_REPO" merge-base "$OVERLAP_MAIN_SHA" "$HEAD") || lag_refuse "the merge-base of the overlap-checked main and the head is $STALE_UNKNOWN"
+  lag_base=$(stale_read git -C "$MAIN_REPO" merge-base "$lagp" "$HEAD") || lag_refuse "the merge-base of its main parent and the head is $STALE_UNKNOWN"
+  is_sha "$main_base" || lag_refuse "the merge-base of the overlap-checked main and the head is not a full sha"
+  is_sha "$lag_base" || lag_refuse "the merge-base of its main parent and the head is not a full sha"
+  # C-quoted names are one path per line even with embedded newlines. Both merge-bases are used so a PR branched before M is not under-counted.
+  d_main=$(stale_read git -C "$MAIN_REPO" -c core.quotePath=true diff --no-renames --name-only "$main_base" "$HEAD" --) || lag_refuse "the PR's changed files (merge-base $main_base..head) are $STALE_UNKNOWN"
+  d_lag=$(stale_read git -C "$MAIN_REPO" -c core.quotePath=true diff --no-renames --name-only "$lag_base" "$HEAD" --) || lag_refuse "the PR's changed files (merge-base $lag_base..head) are $STALE_UNKNOWN"
+  d_since=$(stale_read git -C "$MAIN_REPO" -c core.quotePath=true diff --no-renames --name-only "$lagp" "$OVERLAP_MAIN_SHA" --) || lag_refuse "the files main changed since $lagp are $STALE_UNKNOWN"
+  pr_files=$(printf '%s\n%s\n' "$d_main" "$d_lag" | sed '/^$/d' | LC_ALL=C sort -u) || lag_refuse "the PR's changed files could not be listed"
+  main_files=$(printf '%s\n' "$d_since" | sed '/^$/d' | LC_ALL=C sort -u) || lag_refuse "the files main changed since $lagp could not be listed"
+  overlap=$(LC_ALL=C comm -12 <(printf '%s\n' "$pr_files") <(printf '%s\n' "$main_files")) || lag_refuse "the two file lists could not be compared"
+  if [ -n "$pr_files" ]; then n_pr=$(printf '%s\n' "$pr_files" | wc -l | tr -d ' '); fi
+  if [ -n "$main_files" ]; then n_main=$(printf '%s\n' "$main_files" | wc -l | tr -d ' '); fi
+  if [ -n "$overlap" ]; then
+    n_overlap=$(printf '%s\n' "$overlap" | wc -l | tr -d ' ')
+    list=$(printf '%s\n' "$overlap" | sed -n '1,20p' | tr '\n' ' ' | sed 's/ $//')
+    [ "$n_overlap" -le 20 ] || list="$list ... (+$((n_overlap - 20)) more)"
+    lag_refuse "overlap: the PR changes $n_overlap file(s) that main also changed since that parent $lagp, so CI did not run against main's version of them: $list"
+  fi
+  MERGE_REF_LAGGING=1
+  MERGE_REF_RULE_LINE="MERGE_REF_RULE rule=lagging_ref_no_overlap pr=$PR head=$HEAD merge=$MERGE_SHA main_parent=$lagp main=$OVERLAP_MAIN_SHA pr_files=$n_pr main_files_since_parent=$n_main overlap=0"
+}
+merge_ref_guard() {
+  OVERLAP_MAIN_SHA="$MAIN_SHA"
+  MERGE_REF_LAGGING=0
+  STALE_DEADLINE_SECS="${PM_ADMIT_STALE_DEADLINE:-30}"
+  case "$STALE_DEADLINE_SECS" in ''|*[!0-9]*) STALE_DEADLINE_SECS=30 ;; esac
+  [ "$STALE_DEADLINE_SECS" -ge 1 ] || STALE_DEADLINE_SECS=1
+  STALE_DEADLINE_AT=$(( $(date +%s) + STALE_DEADLINE_SECS ))
+  STALE_TIMEOUT_BIN=$(command -v timeout || command -v gtimeout || true)
+  STALE_UNKNOWN="UNKNOWN (read failed, timed out or returned past the ${STALE_DEADLINE_SECS}s deadline)"
+  STALE_PR_JQ='[.state, .head.sha, (.merge_commit_sha // "")] | join(" ")'
+  printf '%s' "$OVERLAP_MAIN_SHA" | grep -Eq "$SHA_RE" || stale_refuse "the main sha from the overlap check is unreadable"
+  STALE_LINE1=$(stale_read gh api "repos/$REPO/pulls/$PR" --jq "$STALE_PR_JQ") || stale_refuse "PR state, head and merge ref $STALE_UNKNOWN"
+  read -r STALE_STATE STALE_HEAD MERGE_SHA <<<"$STALE_LINE1"
+  [ "$STALE_STATE" = open ] || stale_refuse "PR is not open (state ${STALE_STATE:-unknown})"
+  [ "$STALE_HEAD" = "$HEAD" ] || stale_refuse "PR head moved since review (reviewed $HEAD, GitHub now has ${STALE_HEAD:-unknown}); needs a fresh admission run"
+  printf '%s' "$MERGE_SHA" | grep -Eq "$SHA_RE" || stale_refuse "GitHub has no test merge commit for the PR yet (merge_commit_sha empty or invalid)"
+  STALE_MAIN_NOW=$(stale_read gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha) || stale_refuse "main $STALE_UNKNOWN"
+  printf '%s' "$STALE_MAIN_NOW" | grep -Eq "$SHA_RE" || stale_refuse "main read returned an invalid sha"
+  [ "$STALE_MAIN_NOW" = "$OVERLAP_MAIN_SHA" ] || stale_refuse "main moved since the overlap review (overlap checked $OVERLAP_MAIN_SHA, main is now $STALE_MAIN_NOW); a fresh admission run is needed"
+  STALE_PARENTS=$(stale_read gh api "repos/$REPO/commits/$MERGE_SHA" --jq '[.parents[].sha] | sort | join(" ")') || stale_refuse "parents of test merge $MERGE_SHA $STALE_UNKNOWN"
+  STALE_WANTED=$(printf '%s\n%s\n' "$HEAD" "$OVERLAP_MAIN_SHA" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
+  if [ "$STALE_PARENTS" = "$STALE_WANTED" ]; then
+    MERGE_REF_RULE_LINE="MERGE_REF_RULE rule=exact_main_parent pr=$PR head=$HEAD merge=$MERGE_SHA main=$OVERLAP_MAIN_SHA"
+  else
+    lagging_ref_verify
+  fi
+  STALE_LINE2=$(stale_read gh api "repos/$REPO/pulls/$PR" --jq "$STALE_PR_JQ") || stale_refuse "confirming PR read $STALE_UNKNOWN"
+  [ "$STALE_LINE2" = "$STALE_LINE1" ] || stale_refuse "PR state, head or merge ref changed during the check"
+  STALE_MAIN_AGAIN=$(stale_read gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha) || stale_refuse "confirming main read $STALE_UNKNOWN"
+  [ "$STALE_MAIN_AGAIN" = "$OVERLAP_MAIN_SHA" ] || stale_refuse "main moved during the check (overlap checked $OVERLAP_MAIN_SHA, main is now $STALE_MAIN_AGAIN); a fresh admission run is needed"
+  echo "$MERGE_REF_RULE_LINE"
+  if [ "$MERGE_REF_LAGGING" = 1 ] && [ "$DRY" != 1 ]; then
+    # Best-effort audit trail beside the other admission overrides; the printed line above is the primary record.
+    printf '%s %s\n' "$(date -u +%FT%TZ)" "${MERGE_REF_RULE_LINE#MERGE_REF_RULE }" >> "$HOME/.claude/logs/pm-admit-skip.log" 2>/dev/null || true
+  fi
+  echo "MERGE_REF_VERIFIED pr=$PR head=$HEAD main=$OVERLAP_MAIN_SHA merge=$MERGE_SHA"
+}
+# --dry-run only: read-only, informational preview of what the real run's merge-ref guard would decide right now. It never changes the dry run's exit
+# code and never writes (the guard's only write is the lagging-rule audit line, skipped when DRY=1).
+dry_merge_ref_verdict() {
+  local out rc=0
+  out=$(
+    read_pr_head
+    plan=$(main_merge_probe "$HEAD" "$MERGEABLE") || { echo "UNKNOWN: main merge probe failed"; exit 3; }
+    read -r MERGE_REASON MERGE_FILES MAIN_SHA <<<"$plan"
+    if [ "$MERGE_REASON" != no_conflict_no_overlap ]; then
+      echo "main integration required reason=$MERGE_REASON files=$MERGE_FILES; the real run refuses before the merge-ref check"
+      exit 2
+    fi
+    merge_ref_guard
+  ) || rc=$?
+  if [ "$rc" = 0 ]; then echo "DRY RUN merge_ref: ELIGIBLE (the real run would pass the merge-ref guard now)"
+  else echo "DRY RUN merge_ref: would REFUSE (rc=$rc)"; fi
+  printf '%s\n' "$out" | sed 's/^/  /'
+}
+
 # Integrate main before review, not during admission. Exit before any admission effects.
 if [ "$MERGE_ONLY" = 1 ]; then
   read_pr_head
@@ -419,6 +547,7 @@ if [ "$DRY" = 1 ]; then
   fi
   echo "DRY RUN PR #$PR head=$H"
   overlap_start "$H"; overlap_finish
+  dry_merge_ref_verdict || true
   rc=0; scope_gate "$H" || rc=$?
   [ $rc -ne 0 ] && { echo "DRY RUN done (scope gate rc=$rc); nothing admitted"; exit $rc; }
   rc=0; related_tests_gate "$H" || rc=$?
@@ -478,57 +607,9 @@ plan_main_merge
 echo 'MAIN_MERGE: skipped reason=no_conflict_no_overlap'
 echo "PR #$PR head=$HEAD mergeable=$MERGEABLE"
 [ "$MERGEABLE" = "CONFLICTING" ] && { echo "REFUSE: conflict with main; route to slot"; exit 2; }
-# Stale test-merge guard (2026-11-21; CTO REVISE #2, C0ALZJHGE49 thread 1795543629.469469, ts 1795544911.112579).
-# GitHub can leave refs/pull/N/merge built on an old main for over an hour, so CI tests stale code (#14302/#14420/#14430/#14435/#14436 kept
-# failing on a lint already fixed on main). The PR's test merge must be verified built on the main that PASSED THE OVERLAP CHECK above.
-# - Fail closed: any unreadable main, PR or merge-ref read is UNKNOWN and REFUSEs here. Nothing reaches the activation label on an UNKNOWN.
-# - ONE read pass, no polling and no sleeps (probes found no evidence that waiting rebuilds a ref). Every GitHub read is bounded by the REMAINING
-#   deadline (PM_ADMIT_STALE_DEADLINE seconds, default 30, covering the whole pass) with timeout; a result that returns at or after the deadline
-#   counts as UNKNOWN (whole-second clock, so it errs early, never late).
-# - Bound to OVERLAP_MAIN_SHA, the main that plan_main_merge reviewed for overlap. If main has moved since, REFUSE: the overlap review no longer
-#   covers it and a fresh admission run is needed. Never re-read "current main" and trust that instead.
-# - No PR state change (a close queues e2e.yml teardown, which stops the PR's six Modal apps and can kill an in-flight E2E run), no main merge,
-#   no push (rule 62/S166). The guard runs before every admission write (label create, label cleanup, priority mirror, activation label).
-OVERLAP_MAIN_SHA="$MAIN_SHA"
-STALE_DEADLINE_SECS="${PM_ADMIT_STALE_DEADLINE:-30}"
-case "$STALE_DEADLINE_SECS" in ''|*[!0-9]*) STALE_DEADLINE_SECS=30 ;; esac
-[ "$STALE_DEADLINE_SECS" -ge 1 ] || STALE_DEADLINE_SECS=1
-STALE_DEADLINE_AT=$(( $(date +%s) + STALE_DEADLINE_SECS ))
-STALE_TIMEOUT_BIN=$(command -v timeout || command -v gtimeout || true)
-stale_refuse() {
-  echo "REFUSE stale_merge_ref #$PR: $1. Admission needs the PR's test merge verified on the overlap-checked main $OVERLAP_MAIN_SHA and made NO change to the PR (no PR state change, no main merge, no push). Re-run admission; if it keeps refusing, report it to the CTO"
-  exit 3
-}
-# stale_read <cmd...>: ONE GitHub read bounded by the remaining deadline. Prints stdout; returns 1 (UNKNOWN) when there is no timeout binary, the
-# deadline has passed, the call fails or is killed by the timeout, or the result returns at or after the deadline.
-stale_read() {
-  local remaining out
-  [ -n "$STALE_TIMEOUT_BIN" ] || return 1
-  remaining=$(( STALE_DEADLINE_AT - $(date +%s) ))
-  [ "$remaining" -ge 1 ] || return 1
-  out=$("$STALE_TIMEOUT_BIN" --kill-after=2 "$remaining" "$@" 2>/dev/null) || return 1
-  [ "$(date +%s)" -lt "$STALE_DEADLINE_AT" ] || return 1
-  printf '%s' "$out"
-}
-STALE_UNKNOWN="UNKNOWN (read failed, timed out or returned past the ${STALE_DEADLINE_SECS}s deadline)"
-STALE_PR_JQ='[.state, .head.sha, (.merge_commit_sha // "")] | join(" ")'
-printf '%s' "$OVERLAP_MAIN_SHA" | grep -Eq "$SHA_RE" || stale_refuse "the main sha from the overlap check is unreadable"
-STALE_LINE1=$(stale_read gh api "repos/$REPO/pulls/$PR" --jq "$STALE_PR_JQ") || stale_refuse "PR state, head and merge ref $STALE_UNKNOWN"
-read -r STALE_STATE STALE_HEAD MERGE_SHA <<<"$STALE_LINE1"
-[ "$STALE_STATE" = open ] || stale_refuse "PR is not open (state ${STALE_STATE:-unknown})"
-[ "$STALE_HEAD" = "$HEAD" ] || stale_refuse "PR head moved since review (reviewed $HEAD, GitHub now has ${STALE_HEAD:-unknown}); needs a fresh admission run"
-printf '%s' "$MERGE_SHA" | grep -Eq "$SHA_RE" || stale_refuse "GitHub has no test merge commit for the PR yet (merge_commit_sha empty or invalid)"
-STALE_MAIN_NOW=$(stale_read gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha) || stale_refuse "main $STALE_UNKNOWN"
-printf '%s' "$STALE_MAIN_NOW" | grep -Eq "$SHA_RE" || stale_refuse "main read returned an invalid sha"
-[ "$STALE_MAIN_NOW" = "$OVERLAP_MAIN_SHA" ] || stale_refuse "main moved since the overlap review (overlap checked $OVERLAP_MAIN_SHA, main is now $STALE_MAIN_NOW); a fresh admission run is needed"
-STALE_PARENTS=$(stale_read gh api "repos/$REPO/commits/$MERGE_SHA" --jq '[.parents[].sha] | sort | join(" ")') || stale_refuse "parents of test merge $MERGE_SHA $STALE_UNKNOWN"
-STALE_WANTED=$(printf '%s\n%s\n' "$HEAD" "$OVERLAP_MAIN_SHA" | LC_ALL=C sort | tr '\n' ' ' | sed 's/ $//')
-[ "$STALE_PARENTS" = "$STALE_WANTED" ] || stale_refuse "test merge $MERGE_SHA has parents [$STALE_PARENTS] but must be exactly the reviewed head and the overlap-checked main [$STALE_WANTED], so GitHub has not rebuilt it on that main"
-STALE_LINE2=$(stale_read gh api "repos/$REPO/pulls/$PR" --jq "$STALE_PR_JQ") || stale_refuse "confirming PR read $STALE_UNKNOWN"
-[ "$STALE_LINE2" = "$STALE_LINE1" ] || stale_refuse "PR state, head or merge ref changed during the check"
-STALE_MAIN_AGAIN=$(stale_read gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha) || stale_refuse "confirming main read $STALE_UNKNOWN"
-[ "$STALE_MAIN_AGAIN" = "$OVERLAP_MAIN_SHA" ] || stale_refuse "main moved during the check (overlap checked $OVERLAP_MAIN_SHA, main is now $STALE_MAIN_AGAIN); a fresh admission run is needed"
-echo "MERGE_REF_VERIFIED pr=$PR head=$HEAD main=$OVERLAP_MAIN_SHA merge=$MERGE_SHA"
+# Stale test-merge guard + lagging-ref rule: see merge_ref_guard above. It runs before every admission write (label create, label cleanup,
+# priority mirror, activation label) and exits 3 (stale_merge_ref) on anything it cannot verify.
+merge_ref_guard
 # Even malformed-label cleanup is a write; don't do it on a refused head.
 clean_bad_ci_head_labels
 overlap_start "$HEAD"

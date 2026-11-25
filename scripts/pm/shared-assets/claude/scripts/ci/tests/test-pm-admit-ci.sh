@@ -9,6 +9,8 @@ export STUB_MAIN_SHA=cccccccccccccccccccccccccccccccccccccccc
 export STUB_MERGED_SHA=dddddddddddddddddddddddddddddddddddddddd
 export STUB_FRESH_SHA=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 export STUB_MOVED_SHA=9999999999999999999999999999999999999999   # main after it moved on GitHub
+export STUB_LAG_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa      # the older main a lagging test merge was built on (an ancestor of STUB_MAIN_SHA)
+export STUB_LAGBASE_SHA=7777777777777777777777777777777777777777  # merge-base of that older main and the PR head
 PASS=0; FAIL=0
 T=$(mktemp -d "${TMPDIR:-/tmp}/pm-admit-test.XXXXXX")
 
@@ -22,11 +24,23 @@ case "$*" in
   *'fetch -q --no-tags origin refs/pull/'*) [ -f "$STUB_DIR/updated" ] ;;
   *'rev-parse --verify origin/main^{commit}') printf '%s\n' "$STUB_MAIN_SHA" ;;   # the main that passes the overlap check; the stale-ref guard binds to it
   *'merge-base --is-ancestor '*)
+    # Lagging-ref guard: "is the test merge's main parent an ancestor of the overlap-checked main?" (the call ends with STUB_MAIN_SHA). Default = NOT an ancestor.
+    if [[ "$*" = *" $STUB_MAIN_SHA" ]]; then [ "${LAG_ANCESTOR:-no}" = yes ]; exit $?; fi
     if [ -z "${S166_CASE:-}" ]; then printf '%s\n' "$STUB_SHA"; exit 0; fi
     [ -f "$STUB_DIR/updated" ] && [[ "$*" = *" $STUB_MAIN_SHA $STUB_MERGED_SHA" || "$*" = *" $STUB_SHA $STUB_MERGED_SHA" ]] ;;
   *'merge-base '*)
+    # Lagging-ref guard: merge-base of the lagging main parent and the head is a distinct commit, so its diff is a separate, observable read.
+    if [ -n "${LAG_CASE:-}" ] && [[ "$*" = *" $STUB_LAG_SHA $STUB_SHA" ]]; then printf '%s\n' "$STUB_LAGBASE_SHA"; exit 0; fi
     if [ -n "${S166_CASE:-}" ]; then printf '%s\n' "$STUB_BASE_SHA"; else printf '%s\n' "$STUB_SHA"; fi ;;
   *'diff --no-renames --name-only '*)
+    if [ -n "${LAG_CASE:-}" ]; then   # lagging-ref guard file lists (printf %b turns the \n in LAG_* into newlines); the S166 probe's own reads stay empty
+      case "$*" in
+        *" $STUB_LAG_SHA $STUB_MAIN_SHA --") [ -z "${LAG_DIFF_FAIL:-}" ] || exit 1; printf '%b' "${LAG_MAIN_FILES:-}" ;;   # files main changed since the lagging parent
+        *" $STUB_LAGBASE_SHA $STUB_SHA --") printf '%b' "${LAG_PR_FILES_LAGBASE:-}" ;;                                       # PR files against the lagging merge-base
+        *" $STUB_SHA $STUB_SHA --") printf '%b' "${LAG_PR_FILES:-}" ;;                                                       # PR files against the main merge-base
+      esac
+      exit 0
+    fi
     [ -n "${S166_CASE:-}" ] || exit 0
     if [[ "$*" = *" $STUB_SHA --" ]] || [ "$S166_CASE" = overlap ]; then printf 'lib/pr.ts\n'; else printf 'lib/main.ts\n'; fi ;;
   *'merge-tree --write-tree '*) [ -n "${S166_CASE:-}" ] ;;
@@ -63,7 +77,8 @@ case "$args" in
     printf '[{"jobs":[{"name":"typescript","conclusion":"failure","started_at":"2026-11-20T10:00:00Z","completed_at":"2026-11-20T10:20:00Z"}]}]\n' ;;
   # Stale test-merge guard: ONE deadline-bounded read pass, bound to the main that passed the overlap check (STUB_MAIN_SHA). Default = fresh merge ref.
   # STALE_MODE: stale | unreadable | unreadable_main | unreadable_parents | unreadable_confirm_pr | unreadable_confirm_main | no_merge_sha |
-  #             parents_mismatch | closed | head_moved | main_moved | main_moved_confirm | pr_changed_confirm | hung | hung_parents | late
+  #             parents_mismatch | closed | head_moved | main_moved | main_moved_confirm | pr_changed_confirm | hung | hung_parents | late |
+  #             lagging | lagging_head_mismatch | lagging_three_parents   (test merge built on the older main STUB_LAG_SHA; git side: LAG_CASE, LAG_ANCESTOR, LAG_*_FILES)
   "api repos/"*"/git/ref/heads/main"*)
     n=$(cnt main)                                                    # read 1 = first main read, read 2 = confirming main read
     case "${STALE_MODE:-}" in
@@ -93,7 +108,11 @@ case "$args" in
     [ "${STALE_MODE:-}" = unreadable_parents ] && { echo "HTTP 502" >&2; exit 1; }
     [ "${STALE_MODE:-}" = hung_parents ] && exec sleep 30
     sha=${args#*commits/}; sha=${sha%% *}
-    if [ "$sha" = "$STUB_FRESH_SHA" ] && [ "${STALE_MODE:-}" != parents_mismatch ]; then printf '%s %s\n' "$STUB_SHA" "$STUB_MAIN_SHA"   # built on the overlap-checked main
+    # Lagging-ref modes: GitHub built the test merge on STUB_LAG_SHA, an older main. lagging = {head, lag}; the others break one condition.
+    if [ "$sha" = "$STUB_FRESH_SHA" ] && [ "${STALE_MODE:-}" = lagging ]; then printf '%s %s\n' "$STUB_SHA" "$STUB_LAG_SHA"
+    elif [ "$sha" = "$STUB_FRESH_SHA" ] && [ "${STALE_MODE:-}" = lagging_head_mismatch ]; then printf '%s %s\n' "$STUB_LAG_SHA" ffffffffffffffffffffffffffffffffffffffff   # neither parent is the reviewed head
+    elif [ "$sha" = "$STUB_FRESH_SHA" ] && [ "${STALE_MODE:-}" = lagging_three_parents ]; then printf '%s %s %s\n' "$STUB_SHA" "$STUB_LAG_SHA" "$STUB_BASE_SHA"
+    elif [ "$sha" = "$STUB_FRESH_SHA" ] && [ "${STALE_MODE:-}" != parents_mismatch ]; then printf '%s %s\n' "$STUB_SHA" "$STUB_MAIN_SHA"   # built on the overlap-checked main
     else printf '%s %s\n' "$STUB_SHA" "$STUB_BASE_SHA"; fi ;;                                                                            # still on an old main
   "api repos/"*"/compare/"*)
     changed='[]'; [ "${GATE_MODE:-same}" != changed ] || changed='[{"filename":"lib/a.ts"}]'
@@ -428,6 +447,77 @@ for mode in parents_mismatch closed head_moved pr_changed_confirm; do
   [ "$mode" != parents_mismatch ] || check 'stale_parents_mismatch: a new merge sha alone is not trusted, its parents were read' 'grep -q "^gh api repos/.*/commits/$STUB_FRESH_SHA" "$STUB_LOG"'
 done
 unset STALE_MODE
+
+# ---- Lagging test-merge ref (Rajiv rule 62/S166; CTO C0ALZJHGE49 thread 1795567441.556059, ts 1795584167.126789) ----
+# GitHub's test merge can sit on an older main M (STUB_LAG_SHA) while main moves on, which refused every admission on 2026-11-25. It is ADMITTED when the
+# PR is not CONFLICTING, one parent is exactly the reviewed head, M is a verified ancestor of the overlap-checked main (STUB_MAIN_SHA), and the PR's changed
+# files (merge-base..head against BOTH main and M, unioned) do not overlap the files main changed since M. Anything else refuses, with the overlap list.
+# Git side of each case is set inline: LAG_ANCESTOR (is M an ancestor of main), LAG_PR_FILES / LAG_PR_FILES_LAGBASE (PR diff vs main-base / vs M-base),
+# LAG_MAIN_FILES (main's diff M..main), LAG_DIFF_FAIL (that diff is unreadable). STALE_MODE (via LAG_MODE) sets how the merge commit's parents look.
+run_lag() { local name="$1"; shift; STALE_MODE="${LAG_MODE:-lagging}" LAG_CASE=1 run_case "$name" "$@"; }
+
+echo "case: lagging merge ref - built on an older ancestor main, the PR touches none of the files main changed since: ADMITTED, rule logged, one pass"
+LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\nlib/pr2.ts\n' LAG_MAIN_FILES='lib/main.ts\nlib/main2.ts\nlib/main3.ts\n' \
+  run_lag lag_admit --no-12b-gate --reason 'lagging ref test'
+check 'lag_admit: exit 0, ADMITTED at the reviewed head, ci-head label added after the check' '[ "$RC" = 0 ] && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT" && grep -q -- "--add-label ci-head:$SHA" "$STUB_LOG"'
+check 'lag_admit: MERGE_REF_RULE names the lagging rule, the older main parent, the overlap-checked main and the file counts (union of both PR diffs = 2)' 'grep -qx "MERGE_REF_RULE rule=lagging_ref_no_overlap pr=11173 head=$SHA merge=$STUB_FRESH_SHA main_parent=$STUB_LAG_SHA main=$STUB_MAIN_SHA pr_files=2 main_files_since_parent=3 overlap=0" <<<"$OUT"'
+check 'lag_admit: the MERGE_REF_VERIFIED line is unchanged (head, overlap-checked main, merge sha)' 'grep -qx "MERGE_REF_VERIFIED pr=11173 head=$SHA main=$STUB_MAIN_SHA merge=$STUB_FRESH_SHA" <<<"$OUT"'
+check 'lag_admit: the lagging rule is appended to the pm-admit-skip.log audit trail' 'grep -q "rule=lagging_ref_no_overlap pr=11173 head=$SHA merge=$STUB_FRESH_SHA main_parent=$STUB_LAG_SHA" "$T/home/.claude/logs/pm-admit-skip.log"'
+check 'lag_admit: ancestry, both merge-bases, both PR diffs and main'"'"'s diff since the lagging parent were all read' 'grep -q "merge-base --is-ancestor $STUB_LAG_SHA $STUB_MAIN_SHA" "$STUB_LOG" && grep -q "merge-base $STUB_MAIN_SHA $SHA" "$STUB_LOG" && grep -q "merge-base $STUB_LAG_SHA $SHA" "$STUB_LOG" && grep -q "diff --no-renames --name-only $SHA $SHA --" "$STUB_LOG" && grep -q "diff --no-renames --name-only $STUB_LAGBASE_SHA $SHA --" "$STUB_LOG" && grep -q "diff --no-renames --name-only $STUB_LAG_SHA $STUB_MAIN_SHA --" "$STUB_LOG"'
+check 'lag_admit: still one pass (2 PR reads, 2 main reads, 1 parents read) and no new GitHub read' '[ "$(cat "$STUB_DIR/cnt.verify")" = 2 ] && [ "$(cat "$STUB_DIR/cnt.main")" = 2 ] && [ "$(grep -c "^gh api repos/.*/commits/$STUB_FRESH_SHA" "$STUB_LOG")" = 1 ] && ! grep -q "^gh api repos/.*/compare/" "$STUB_LOG"'
+check 'lag_admit: every guard read precedes the first admission write' '[ "$(grep -n "git/ref/heads/main" "$STUB_LOG" | tail -1 | cut -d: -f1)" -lt "$(grep -nE -- "--add-label|label create" "$STUB_LOG" | head -1 | cut -d: -f1)" ]'
+check 'lag_admit: no PR state change, no main merge, no branch write' '! grep -qE "^gh pr (close|reopen)|update-branch|^git (merge|push|reset|rebase)|--force" "$STUB_LOG" && ! grep -q "main_merge: performed" <<<"$OUT"'
+
+echo "case: exact main parent - the original rule is unchanged and reported as exact_main_parent"
+run_case lag_exact --no-12b-gate --reason 'lagging ref test'
+check 'lag_exact: admitted, MERGE_REF_RULE rule=exact_main_parent, MERGE_REF_VERIFIED unchanged, no lagging audit line' '[ "$RC" = 0 ] && grep -qx "MERGE_REF_RULE rule=exact_main_parent pr=11173 head=$SHA merge=$STUB_FRESH_SHA main=$STUB_MAIN_SHA" <<<"$OUT" && grep -qx "MERGE_REF_VERIFIED pr=11173 head=$SHA main=$STUB_MAIN_SHA merge=$STUB_FRESH_SHA" <<<"$OUT" && [ "$(grep -c "rule=lagging_ref_no_overlap" "$T/home/.claude/logs/pm-admit-skip.log")" = 1 ] && ! grep -q "merge-base --is-ancestor $STUB_LAG_SHA" "$STUB_LOG"'
+
+echo "case: lagging merge ref - the PR changes a file main changed since the older parent (overlap vs the main merge-base): REFUSED with the overlap list"
+LAG_ANCESTOR=yes LAG_PR_FILES='lib/shared.ts\nlib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' LAG_MAIN_FILES='lib/main.ts\nlib/shared.ts\n' \
+  run_lag lag_overlap --no-12b-gate --reason 'lagging ref test'
+assert_stale_refused lag_overlap
+check 'lag_overlap: REFUSE says the lagging-ref rule is not met, names the older parent, the count and exactly the overlapping path' 'grep -q "lagging-ref rule not met: overlap: the PR changes 1 file(s) that main also changed since that parent $STUB_LAG_SHA, so CI did not run against main.s version of them: lib/shared.ts\. Admission needs" <<<"$OUT" && grep -q "has parents \[$SHA $STUB_LAG_SHA\] but must be exactly the reviewed head and the overlap-checked main \[$SHA $STUB_MAIN_SHA\]" <<<"$OUT"'
+check 'lag_overlap: no MERGE_REF_RULE line, nothing in the lagging audit trail' '! grep -q "^MERGE_REF_RULE" <<<"$OUT" && [ "$(grep -c "rule=lagging_ref_no_overlap" "$T/home/.claude/logs/pm-admit-skip.log")" = 1 ]'
+
+echo "case: lagging merge ref - the overlap is only visible against the older merge-base (PR branched before the older parent): REFUSED"
+LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\nlib/shared.ts\n' LAG_MAIN_FILES='lib/shared.ts\n' \
+  run_lag lag_overlap_lagbase --no-12b-gate --reason 'lagging ref test'
+assert_stale_refused lag_overlap_lagbase
+check 'lag_overlap_lagbase: REFUSE lists the overlapping path found through the older merge-base' 'grep -q "overlap: the PR changes 1 file(s) that main also changed since that parent $STUB_LAG_SHA.*: lib/shared.ts\. Admission needs" <<<"$OUT"'
+
+echo "case: lagging merge ref - a long overlap list is capped at 20 paths with the remainder counted"
+MANY=$(for i in $(seq -w 1 25); do printf 'lib/f%s.ts\\n' "$i"; done)
+LAG_ANCESTOR=yes LAG_PR_FILES="$MANY" LAG_PR_FILES_LAGBASE="$MANY" LAG_MAIN_FILES="$MANY" run_lag lag_overlap_many --no-12b-gate --reason 'lagging ref test'
+assert_stale_refused lag_overlap_many
+check 'lag_overlap_many: 25 overlapping files reported as the first 20 plus (+5 more)' 'grep -q "the PR changes 25 file(s)" <<<"$OUT" && grep -q "lib/f01.ts " <<<"$OUT" && grep -q "lib/f20.ts \.\.\. (+5 more)" <<<"$OUT" && ! grep -q "lib/f21.ts" <<<"$OUT"'
+
+echo "case: lagging merge ref - neither parent is the reviewed head, or the merge has the wrong parent count: REFUSED"
+LAG_MODE=lagging_head_mismatch LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_MAIN_FILES='lib/main.ts\n' run_lag lag_head_mismatch --no-12b-gate --reason 'lagging ref test'
+assert_stale_refused lag_head_mismatch
+check 'lag_head_mismatch: REFUSE says the test merge was not built on the reviewed head, and the diffs were never read' 'grep -q "the test merge was not built on the reviewed head $SHA" <<<"$OUT" && ! grep -q "merge-base --is-ancestor $STUB_LAG_SHA" "$STUB_LOG"'
+LAG_MODE=lagging_three_parents LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_MAIN_FILES='lib/main.ts\n' run_lag lag_three_parents --no-12b-gate --reason 'lagging ref test'
+assert_stale_refused lag_three_parents
+check 'lag_three_parents: REFUSE says the test merge has 3 parents, not exactly two' 'grep -q "the test merge has 3 parent(s), not exactly two" <<<"$OUT"'
+
+echo "case: lagging merge ref - the older parent is not an ancestor of the overlap-checked main: REFUSED before any file comparison"
+LAG_ANCESTOR=no LAG_PR_FILES='lib/pr.ts\n' LAG_MAIN_FILES='lib/main.ts\n' run_lag lag_not_ancestor --no-12b-gate --reason 'lagging ref test'
+assert_stale_refused lag_not_ancestor
+check 'lag_not_ancestor: REFUSE says the main parent is not verified as an ancestor of the overlap-checked main; no merge-base or diff against it was read' 'grep -q "its main parent $STUB_LAG_SHA is not verified as an ancestor of the overlap-checked main $STUB_MAIN_SHA" <<<"$OUT" && ! grep -q "merge-base $STUB_LAG_SHA $SHA" "$STUB_LOG" && ! grep -q "diff --no-renames --name-only $STUB_LAG_SHA " "$STUB_LOG"'
+
+echo "case: lagging merge ref - an unreadable main diff is UNKNOWN and refuses (fail closed), never a guess of no overlap"
+LAG_ANCESTOR=yes LAG_DIFF_FAIL=1 LAG_PR_FILES='lib/pr.ts\n' LAG_MAIN_FILES='lib/main.ts\n' run_lag lag_diff_unreadable --no-12b-gate --reason 'lagging ref test'
+assert_stale_refused lag_diff_unreadable
+check 'lag_diff_unreadable: REFUSE says the files main changed since the older parent are UNKNOWN' 'grep -q "the files main changed since $STUB_LAG_SHA are UNKNOWN (read failed, timed out or returned past the 4s deadline)" <<<"$OUT"'
+
+echo "case: lagging merge ref - --dry-run previews the verdict without writing or changing its exit code"
+AUDITED_LAG=$(grep -c "rule=lagging_ref_no_overlap" "$T/home/.claude/logs/pm-admit-skip.log")
+LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' LAG_MAIN_FILES='lib/main.ts\n' run_lag lag_dry --dry-run --no-12b-gate --reason 'lagging ref test'
+check 'lag_dry: DRY RUN merge_ref ELIGIBLE with the lagging rule line, nothing admitted, exit 0' '[ "$RC" = 0 ] && grep -q "^DRY RUN merge_ref: ELIGIBLE" <<<"$OUT" && grep -q "^  MERGE_REF_RULE rule=lagging_ref_no_overlap " <<<"$OUT" && grep -q "nothing admitted" <<<"$OUT" && ! grep -q "^ADMITTED" <<<"$OUT"'
+check 'lag_dry: no audit line, no label or PR write' '[ "$(grep -c "rule=lagging_ref_no_overlap" "$T/home/.claude/logs/pm-admit-skip.log")" = "$AUDITED_LAG" ] && ! grep -qE -- "--add-label|--remove-label|label create|pr edit|update-branch" "$STUB_LOG"'
+LAG_ANCESTOR=yes LAG_PR_FILES='lib/shared.ts\n' LAG_PR_FILES_LAGBASE='lib/shared.ts\n' LAG_MAIN_FILES='lib/shared.ts\n' run_lag lag_dry_overlap --dry-run --no-12b-gate --reason 'lagging ref test'
+check 'lag_dry_overlap: DRY RUN merge_ref would REFUSE (rc=3) with the overlap list, dry-run exit code unchanged' '[ "$RC" = 0 ] && grep -q "^DRY RUN merge_ref: would REFUSE (rc=3)" <<<"$OUT" && grep -q "^  REFUSE stale_merge_ref #11173: .*overlap: the PR changes 1 file(s).*: lib/shared.ts\. Admission needs" <<<"$OUT"'
+run_case lag_dry_exact --dry-run --no-12b-gate --reason 'lagging ref test'
+check 'lag_dry_exact: a fresh exact-main-parent ref previews ELIGIBLE with the exact_main_parent rule' '[ "$RC" = 0 ] && grep -q "^DRY RUN merge_ref: ELIGIBLE" <<<"$OUT" && grep -q "^  MERGE_REF_RULE rule=exact_main_parent " <<<"$OUT"'
 
 echo "case: static - the script never contains a PR close or reopen"
 check 'pm-admit-ci.sh has no gh pr close/reopen call and no refresh_stale_merge_ref' '! grep -qE "gh pr (close|reopen)|refresh_stale_merge_ref|STALE_MERGE_REF_REFRESHED" "$SCRIPT"'
