@@ -26,7 +26,7 @@ FLASH = 'deepseek-direct/deepseek-flash'
 USAGE = 'PROXY_AGENT_USAGE model=%s results=1 input_tokens=100000 output_tokens=30000 cache_read_tokens=6000000 cache_creation_tokens=0 check=strict\n' % FLASH
 USAGE_USD = 100000 * 0.30 / 1e6 + 6000000 * 0.006 / 1e6 + 30000 * 1.20 / 1e6  # the published peak rates: miss, cache hit, output (docstring of the gate)
 RESULT = json.dumps({'duration_api_ms': 1, 'usage': {'input_tokens': 100000, 'output_tokens': 30000, 'cache_read_input_tokens': 6000000, 'cache_creation_input_tokens': 0},
-                     'total_cost_usd': 4.38, 'type': 'result'}) + '\n'  # a real lane's shape: Claude Code priced it 4.38 for 0.102 of DeepSeek usage
+                     'total_cost_usd': 4.38, 'subtype': 'success', 'type': 'result'}) + '\n'  # a real lane's shape: Claude Code priced it 4.38 for 0.102 of DeepSeek usage
 ASSISTANT = json.dumps({'type': 'assistant', 'message': {'id': 'm1', 'usage': {'input_tokens': 90000, 'output_tokens': 0}, 'content': [{'type': 'text', 'text': 'working'}]}}) + '\n'
 
 _spec = importlib.util.spec_from_file_location('dsd_gate_under_test', GATE)
@@ -275,20 +275,99 @@ def test_strict_usage_accepts_verified_positive_usage_and_defaults_absent_cache_
     assert G.strict_usage({'input_tokens': 0, 'output_tokens': 0, 'cache_read_input_tokens': 50000})['cache_read_input_tokens'] == 50000
 
 
-def test_the_usage_line_parser_trusts_only_strict_lines_with_a_positive_prompt(tmp_path):
-    logf = tmp_path / 'l.log'
-    for text, ok in ((USAGE, True), ('PROXY_AGENT_USAGE model=%s %s\n' % (FLASH, OLD_SUMMARY), False),  # an all-zero summary
-                     (USAGE.replace(' check=strict', ''), False),  # a line from a launcher that counted any usage object
-                     (USAGE.replace('results=1', 'results=0'), False), ('PROXY_AGENT_USAGE model=%s unavailable\n' % FLASH, False)):
-        logf.write_text(text)
-        assert (G.usage_from_log(str(logf)) is not None) == ok, text
+def _record(subtype='success', usage=None, cost=4.38, terminated=True):
+    d = {'usage': usage if usage is not None else {'input_tokens': 100000, 'output_tokens': 30000, 'cache_read_input_tokens': 6000000, 'cache_creation_input_tokens': 0},
+         'total_cost_usd': cost, 'type': 'result'}
+    if subtype is not None:
+        d['subtype'] = subtype
+    return json.dumps(d) + ('\n' if terminated else '')
+
+
+@pytest.mark.parametrize('raw,ok', [
+    (_record(), True), (_record('error_max_budget_usd'), True), (_record('error_max_turns'), True),
+    (_record(terminated=False), False),  # a record missing its final newline
+    (_record(subtype=None), False), (_record(subtype=''), False), (_record(subtype=5), False),  # the subtype must be named
+    (_record(usage={}), False), (json.dumps({'type': 'assistant'}) + '\n', False), ('not json\n', False),
+    (_record().encode(), True), (_record(terminated=False).encode(), False),
+], ids=['complete', 'cap-stop', 'max-turns', 'unterminated', 'no subtype', 'empty subtype', 'non-string subtype', 'empty usage', 'not a result', 'not json', 'bytes', 'unterminated bytes'])
+def test_verified_result_accepts_only_a_complete_named_strictly_priced_record(raw, ok):
+    assert (G.verified_result(raw) is not None) == ok
+
+
+def test_verified_result_reads_the_subtype_and_the_usage():
+    got = G.verified_result(_record('error_max_budget_usd', usage={'input_tokens': 1000, 'output_tokens': 200}))
+    assert got['subtype'] == 'error_max_budget_usd' and got['usage']['input_tokens'] == 1000 and got['cost'] == 4.38
+
+
+def test_the_launcher_summary_alone_never_frees_a_reservation_even_with_a_valid_strict_line(lab):
+    """CTO REVISE of d1c5f257 (ts 1795606131.012159): a summary with no complete result record behind it (summary-only) settled the reported 0.000840 and freed the held
+    worst-case request. The summary is reporting only now: the whole reserve stays held."""
+    for n, stream in enumerate(('', ASSISTANT)):  # no stream at all, and a stream that only shows requests
+        sub = lab[0] / ('s%d' % n)
+        sub.mkdir()
+        state2 = lab[1] / sub.name
+        state2.mkdir()
+        lab2 = (sub, state2, {**lab[2], 'PROXY_AGENT_DSD_STATE_DIR': str(state2)})
+        init(lab2)
+        launcher = fake_launcher(sub)
+        try:
+            files = lane_files(sub, 'L1', stream, USAGE)  # the launcher's own strict, tagged summary line
+            assert admit(lab2, 'L1', '--pid', str(launcher.pid), *files).returncode == 0
+            gate(lab2, 'started', '--name', 'L1', check=0)
+            cont = admit(lab2, 'L1', '--continue', '--pid', str(launcher.pid), *files)
+            assert cont.returncode == 2 and 'segment_unreconciled' in cont.stdout
+            gate(lab2, 'settle', '--name', 'L1', '--model', FLASH, '--log', files[3], check=0)
+            assert state_of(lab2)['spent_usd'] == 0.0 and abs(ledger_of(lab2)['held']['L1']['usd'] - RESERVE) < 1e-4
+        finally:
+            launcher.kill()
+
+
+@pytest.mark.parametrize('subtype', ['success', 'error_max_budget_usd'])
+def test_a_result_record_missing_its_final_newline_frees_nothing_until_it_is_complete(lab, subtype):
+    """An unterminated record (the budget-stop one included) is not a complete result: the whole reserve stays held, and a continuation is refused. Once the line is
+    terminated the same record is counted (and the cap stop still holds one worst-case request)."""
+    for terminated in (False, True):
+        sub = lab[0] / ('t%d' % terminated)
+        sub.mkdir()
+        state2 = lab[1] / sub.name
+        state2.mkdir()
+        lab2 = (sub, state2, {**lab[2], 'PROXY_AGENT_DSD_STATE_DIR': str(state2)})
+        init(lab2)
+        launcher = fake_launcher(sub)
+        try:
+            files = lane_files(sub, 'L1', _record(subtype, terminated=terminated), USAGE)
+            assert admit(lab2, 'L1', '--pid', str(launcher.pid), *files).returncode == 0
+            gate(lab2, 'started', '--name', 'L1', check=0)
+            cont = None if terminated else admit(lab2, 'L1', '--continue', '--pid', str(launcher.pid), *files)  # (a continuation would open a second, result-less segment)
+            gate(lab2, 'settle', '--name', 'L1', '--model', FLASH, '--log', files[3], check=0)
+            held = ledger_of(lab2)['held'].get('L1', {}).get('usd', 0.0)
+            if not terminated:
+                assert cont.returncode == 2 and state_of(lab2)['spent_usd'] == 0.0 and abs(held - RESERVE) < 1e-4
+            else:
+                assert abs(state_of(lab2)['spent_usd'] - USAGE_USD) < 1e-5
+                assert abs(held - (WORST if subtype == 'error_max_budget_usd' else 0.0)) < 1e-4
+        finally:
+            launcher.kill()
+
+
+def test_a_complete_result_without_a_named_subtype_is_unverified(lab):
+    init(lab)
+    launcher = fake_launcher(lab[0])
+    try:
+        files = lane_files(lab[0], 'L1', _record(subtype=None), USAGE)
+        assert admit(lab, 'L1', '--pid', str(launcher.pid), *files).returncode == 0
+        gate(lab, 'started', '--name', 'L1', check=0)
+        gate(lab, 'settle', '--name', 'L1', '--model', FLASH, '--log', files[3], check=0)
+        assert state_of(lab)['spent_usd'] == 0.0 and abs(ledger_of(lab)['held']['L1']['usd'] - RESERVE) < 1e-4
+    finally:
+        launcher.kill()
 
 
 @pytest.mark.parametrize('summary', [None, OLD_SUMMARY, OLD_SUMMARY + ' check=strict'], ids=['stream only', 'old launcher summary', 'zero summary even if tagged'])
 @pytest.mark.parametrize('usage', list(UNVERIFIED.values()), ids=list(UNVERIFIED))
 def test_unverified_usage_retains_the_reservation_at_settlement_and_refuses_a_continuation(lab, usage, summary):
     """The same strict check on both paths. Settlement: spent_usd stays 0 and the whole reserve stays held. Continuation: refused (segment_unreconciled), never admitted."""
-    result = json.dumps({'usage': usage, 'total_cost_usd': 4.38, 'type': 'result'}) + '\n'
+    result = json.dumps({'usage': usage, 'total_cost_usd': 4.38, 'subtype': 'success', 'type': 'result'}) + '\n'
     log = 'PROXY_AGENT_USAGE model=%s %s\n' % (FLASH, summary) if summary else 'PROXY_AGENT_USAGE model=%s unavailable\n' % FLASH
     for path in ('continue', 'settle'):
         sub = lab[0] / path
@@ -328,7 +407,7 @@ def test_a_segment_that_ended_on_the_budget_stop_holds_the_unreported_crossing_r
     """Measured with the real claude: error_max_budget_usd reports usage for the requests BEFORE the crossing one only (error_max_turns reports all)."""
     init(lab)
     launcher = fake_launcher(lab[0])
-    capped = RESULT.replace('"type": "result"', '"subtype": "error_max_budget_usd", "type": "result"')
+    capped = RESULT.replace('"subtype": "success"', '"subtype": "error_max_budget_usd"')
     files = lane_files(lab[0], 'L1', capped, USAGE)
     assert admit(lab, 'L1', '--pid', str(launcher.pid), *files).returncode == 0
     gate(lab, 'started', '--name', 'L1', check=0)
@@ -377,11 +456,11 @@ def test_started_without_a_reservation_fails_closed(lab):
     assert done.returncode == 2 and 'reason=deepseek_direct_no_reservation' in done.stdout
 
 
-def test_settle_prices_the_usage_line_and_frees_the_reservation(lab):
+def test_settle_prices_the_complete_result_record_and_frees_the_reservation(lab):
     init(lab)
     launcher = fake_launcher(lab[0])
     try:
-        files = lane_files(lab[0], 'L1', '', USAGE)
+        files = lane_files(lab[0], 'L1', RESULT, USAGE)
         assert admit(lab, 'L1', '--pid', str(launcher.pid), *files).returncode == 0
         gate(lab, 'started', '--name', 'L1', check=0)
         gate(lab, 'settle', '--name', 'L1', '--model', FLASH, '--log', files[3], check=0)

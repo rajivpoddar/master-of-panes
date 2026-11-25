@@ -319,15 +319,19 @@ def test_an_explicit_deepseek_direct_model_at_its_cap_is_refused_75_with_its_own
 VALID_USAGE = {'input_tokens': 1000, 'output_tokens': 200, 'cache_read_input_tokens': 50000, 'cache_creation_input_tokens': 0}
 
 
-def _recording_claude(tmp, usage=VALID_USAGE, subtype=None):
+def _recording_claude(tmp, usage=VALID_USAGE, subtype='success', terminated=True):
     """The lab's fake claude, plus: its argv is written to HOME/claude-argv.json and its result event carries the given usage object (None: no usage key at all), Claude
-    Code's total_cost_usd and, optionally, a subtype such as error_max_budget_usd."""
+    Code's total_cost_usd and a subtype (default success, as Claude Code always names one; None omits it; error_max_budget_usd is the cap stop). terminated=False writes the
+    result record as the last line WITHOUT its final newline."""
     src = launch_states.FAKE_CLAUDE
     src = src.replace("name = sys.argv[sys.argv.index('--name') + 1]", "name = sys.argv[sys.argv.index('--name') + 1]\nopen(os.path.join(os.environ['HOME'], 'claude-argv.json'), 'w').write(json.dumps(sys.argv[1:]))")
     if usage is not None:
         extra = (", 'subtype': %r" % subtype) if subtype else ''
         src = src.replace("{'type': 'result', 'result': text}", "{'type': 'result', 'result': text, 'total_cost_usd': 0.5, 'usage': json.loads(%r)%s}" % (json.dumps(usage), extra))
         assert 'total_cost_usd' in src
+    if not terminated:
+        assert 'print(json.dumps(event), flush=True)' in src
+        src = src.replace('print(json.dumps(event), flush=True)', "print(json.dumps(event), end=('' if event.get('type') == 'result' else '\\n'), flush=True)")
     assert 'claude-argv.json' in src
     (tmp / 'bin/claude').write_text(src)
 
@@ -385,6 +389,23 @@ def test_a_deepseek_direct_lane_with_empty_or_malformed_usage_keeps_its_reservat
     assert 'PROXY_AGENT_DSD_GATE held name=proxy-test-dsd-badusage' in done.stderr
     ledger = json.loads((home / '.claude/state/deepseek-direct-lanes.json').read_text())
     assert ledger['lanes'] == {} and abs(ledger['held']['proxy-test-dsd-badusage']['usd'] - (gate_mod.segment_max(DSD) + gate_mod.worst_request_usd(DSD))) < 1e-4
+    assert json.loads((home / '.claude/state/deepseek-direct-bench.json').read_text())['spent_usd'] == 0.0
+
+
+# CTO REVISE of d1c5f257 (ts 1795606131.012159): only the gate's own COMPLETE result record frees a reservation; the launcher summary is reporting only.
+@pytest.mark.parametrize('subtype,terminated', [('error_max_budget_usd', False), ('success', False), (None, True)],
+                         ids=['unterminated cap-stop result', 'unterminated success result', 'complete result without a subtype'])
+def test_a_deepseek_direct_lane_whose_result_record_is_incomplete_keeps_its_whole_reservation_held(lab, subtype, terminated):
+    """Pre-fix, the launcher summary counted a result missing its final newline (results=1), and the gate settled it from the summary and freed the held request."""
+    tmp, home, _ = lab
+    prepare(lab, 'hd-builder')
+    env = dsd_lab(lab)
+    _recording_claude(tmp, subtype=subtype, terminated=terminated)
+    done = run(lab, 'hd-builder', 'proxy-test-dsd-incomplete', DSD, live=0, **env)
+    assert done.returncode == 0, done.stderr
+    assert 'PROXY_AGENT_USAGE model=deepseek-direct/deepseek-flash unavailable' in done.stderr and 'results=1' not in done.stderr
+    ledger = json.loads((home / '.claude/state/deepseek-direct-lanes.json').read_text())
+    assert ledger['lanes'] == {} and abs(ledger['held']['proxy-test-dsd-incomplete']['usd'] - (gate_mod.segment_max(DSD) + gate_mod.worst_request_usd(DSD))) < 1e-4
     assert json.loads((home / '.claude/state/deepseek-direct-bench.json').read_text())['spent_usd'] == 0.0
 
 
@@ -448,7 +469,7 @@ def test_the_launcher_has_one_admission_captures_no_cap_and_enforces_the_grant_o
     assert "printf -- '--max-budget-usd %q ' \"$PA_DSD_BUDGET\"" in src and '$' + '{pa_dsd_budget:+--max-budget-usd "$pa_dsd_budget"} --resume' in src
     assert src.count('--grant-file') == 2 and 'reason=deepseek_direct_no_grant' in src and ' started --name ' in src
     # ONE strict usage check: the launcher's PROXY_AGENT_USAGE summary imports the gate's strict_usage and counts nothing else (no isinstance(u, dict) count of its own).
-    assert 'strict_usage = mod.strict_usage' in src and 'isinstance(u, dict)' not in src and 'check=strict' in src
+    assert 'verified_result = mod.verified_result' in src and 'isinstance(u, dict)' not in src and 'check=strict' in src
 
 
 def test_every_deepseek_direct_id_is_wired_and_none_is_in_a_tier_list():

@@ -3422,24 +3422,27 @@ read -r RC < "$JOB_DIR/rc"
 if [[ "$RC" -ne 0 ]] && ! proxy_agent_uses_claude_account "$MODEL_ID"; then
   proxy_agent_note_log_exhaustion "$MODEL_ID" "$LOG" "$OUT" || true
 fi
-# Direct DeepSeek (25 Nov): report the lane's token usage from the stream-json result events whose usage passes the gate's strict_usage() (summed; a continuation adds one
-# each). Printed to stderr and appended to the lane log, before the DONE line; "unavailable" when no result carries verified usage. Never changes the rc.
+# Direct DeepSeek (25 Nov): report the lane's token usage from the stream-json result records that pass the gate's verified_result() (summed; a continuation adds one each;
+# budget_stop=N counts the records that ended on the budget stop, whose usage omits the crossing request). Printed to stderr and appended to the lane log, before the DONE line;
+# "unavailable" when no complete result carries verified usage. REPORTING ONLY (the gate never frees a reservation from it). Never changes the rc.
 if proxy_agent_is_deepseek_direct_id "$MODEL_ID"; then
   python3 -I - "$JSONL" "$MODEL_ID" "$LOG" "$DSD_GATE" <<'PY' >&2 || true
 import importlib.util, json, sys
 path, model, log, gate = sys.argv[1:5]
-# ONE strict usage check, shared with the gate (CTO REVISE of 56d3ff19, ts 1795605169.603049): this is the gate's own strict_usage(). An empty, malformed or unverified
-# usage object is not counted, so it can never become results=1 input_tokens=0. If the gate cannot be loaded there is no check, and so no verified usage (fail closed).
+# ONE strict check, shared with the gate (CTO REVISE of 56d3ff19, ts 1795605169.603049; of d1c5f257, ts 1795606131.012159): the gate's own verified_result(). An empty, malformed,
+# unverified, subtype-less or unterminated record is not counted, so this summary never reports what the gate would not accept. It is REPORTING ONLY: the gate does not read it.
+# If the gate cannot be loaded there is no check, and so no verified usage (fail closed).
 try:
     spec = importlib.util.spec_from_file_location("dsd_gate", gate)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    strict_usage = mod.strict_usage
+    verified_result = mod.verified_result
 except Exception:
-    strict_usage = lambda u: None
+    verified_result = lambda raw: None
 keys = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
 tot = dict.fromkeys(keys, 0)
 n = 0
+capped = 0
 try:
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
@@ -3449,16 +3452,19 @@ try:
                 d = json.loads(line)
             except ValueError:
                 continue
-            u = strict_usage(d.get("usage")) if d.get("type") == "result" else None
-            if u is not None:
+            # The gate's own complete-record check (a fully terminated line, a named subtype, strict usage). REPORTING ONLY: the gate never frees a reservation from this summary.
+            r = verified_result(line) if d.get("type") == "result" else None
+            if r is not None:
                 n += 1
                 for k in keys:
-                    tot[k] += u[k]
+                    tot[k] += r["usage"][k]
+                if r["subtype"] == "error_max_budget_usd":
+                    capped += 1
 except OSError:
     pass
 if n:
-    msg = "PROXY_AGENT_USAGE model=%s results=%d input_tokens=%d output_tokens=%d cache_read_tokens=%d cache_creation_tokens=%d check=strict" % (
-        model, n, tot[keys[0]], tot[keys[1]], tot[keys[2]], tot[keys[3]])
+    msg = "PROXY_AGENT_USAGE model=%s results=%d input_tokens=%d output_tokens=%d cache_read_tokens=%d cache_creation_tokens=%d check=strict budget_stop=%d" % (
+        model, n, tot[keys[0]], tot[keys[1]], tot[keys[2]], tot[keys[3]], capped)
 else:
     msg = "PROXY_AGENT_USAGE model=%s unavailable (no result event with verified usage in the stream)" % model
 print(msg)

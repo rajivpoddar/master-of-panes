@@ -36,10 +36,12 @@ Every paid SEGMENT (a start, or one continuation) reserves an enforceable maximu
              On success it prints PROXY_AGENT_DSD_GRANT ... max_budget_usd=<N> and writes N to --grant-file; the launcher fails closed if it cannot read it.
   started    The runner calls it right before it spawns claude. A lane that never got there (a later refusal, a tmux failure) spent nothing and is RELEASED when
              it ends; only a started lane can be held.
-  settle     Lane end. Exact when every segment has a result event with VERIFIED usage (strict_usage: integer input and output tokens, non-negative integer cache
-             counts, a positive prompt; an empty object, a string, a bool, a float, a negative or a missing field is NOT verified) or the PROXY_AGENT_USAGE line
-             (check=strict, built by the launcher with the same strict_usage) covers every segment: spent_usd += the priced usage and the reservation is freed. Otherwise (killed lane, usage unavailable) the known part is added and the unknown segments' RESERVATIONS STAY HELD against the
-             budget, never settled at 0 and never at an estimate, until reconcile. A segment that ended on the budget stop (subtype error_max_budget_usd) is exact
+  settle     Lane end. Exact when every segment has a COMPLETE result record in the gate's own stream (verified_result: a fully terminated line, valid JSON, type result, a
+             named subtype, and VERIFIED usage per strict_usage: integer input and output tokens, non-negative integer cache counts, a positive prompt; an empty object, a
+             string, a bool, a float, a negative or a missing field is NOT verified): spent_usd += the priced usage and the reservation is freed. The launcher's
+             PROXY_AGENT_USAGE line is REPORTING ONLY and never frees anything: it cannot carry the subtype, and a summary with no complete record behind it (summary-only, or a
+             result missing its final newline) settles nothing. Otherwise (killed lane, usage unavailable) the known part is added and the unknown segments' RESERVATIONS STAY
+             HELD against the budget, never settled at 0 and never at an estimate, until reconcile. A segment that ended on the budget stop (subtype error_max_budget_usd) is exact
              for the requests it reports, but its usage OMITS the request that crossed the cap (measured; its total_cost_usd includes it, and error_max_turns reports
              every request): one worst request per such segment is held until reconcile.
   reconcile  Releases a held lane with evidence: --usd <spent> (e.g. from the provider balance), or --charge-reservation (charge the reserve in full); --all
@@ -62,7 +64,7 @@ DeepSeek published rates, https://api-docs.deepseek.com/quick_start/pricing (rea
 Every token is priced at the peak rate (peak is 01:00-04:00 and 06:00-10:00 UTC Mon-Fri excluding Chinese holidays, which this script cannot know). cache_creation
 has no DeepSeek price and is priced as a miss. The context window is 1048576 and the max output 32000 (the launcher's own limits for these ids).
 
-Exact pricing of a lane: from the result events' usage (per process, so the sum over segments is the lane's real total) or the PROXY_AGENT_USAGE line. Measured
+Exact pricing of a lane: from its complete result records' usage (per process, so the sum over segments is the lane's real total). Measured
 against the account (25 Nov): 6 lanes priced 0.81 here vs a balance drop of ~0.51 (2-decimal API; they straddled the 10:00 UTC peak edge). A RUNNING lane that
 is not ours to cap (adopted at init, or started by a pre-gate launcher) has only its stream: prompt tokens at the observed cache-hit fraction plus output at ~1
 token per 3 characters, x STREAM_MARGIN (1.25: the raw estimate measured 0.86-0.97 of exact), plus a whole unenforced segment allowance.
@@ -96,7 +98,7 @@ MAX_OUTPUT_TOKENS = 32000  # CLAUDE_CODE_MAX_OUTPUT_TOKENS the launcher sets for
 # Claude Code's flat fallback price for an unknown model id, USD per 1M: the LOWEST table measured (claude 2.1.332, local stub provider, no network).
 CC_FALLBACK_LOW = {'in': 4.0, 'out': 20.0, 'cache_read': 0.20, 'cache_creation': 5.0}
 CC_SAFETY = 0.75
-EXACT = ('usage_line', 'init_usage_line', 'stream_results', 'init_stream_results')  # settled-history sources whose cache split is real (the others are stream estimates)
+EXACT = ('stream_results', 'init_stream_results')  # settled-history sources whose cache split is real (the others are stream estimates)
 MIN_CACHE_SAMPLE = 1000000  # ended prompt tokens needed before the observed cache-hit fraction is trusted
 MAX_CACHE_HIT = 0.99
 STREAM_MARGIN = 1.25  # applied to the stream-only estimate of a lane we do not cap (measured up to 14% low); never to an exact figure
@@ -361,9 +363,36 @@ USAGE_REQUIRED = ('input_tokens', 'output_tokens')
 USAGE_OPTIONAL = ('cache_read_input_tokens', 'cache_creation_input_tokens')
 
 
+def verified_result(raw):
+    """THE complete-result check (CTO REVISE of d1c5f257, ts 1795606131.012159): the only thing that frees a segment's reservation. One stream line that is fully terminated
+    (ends with a newline: a record missing its final newline may be the front of a longer or corrupt one), is valid JSON, is a result record, names its subtype (a non-empty string:
+    the budget-stop subtype is the evidence that one more request went unreported) and carries strict_usage. Returns {'usage', 'subtype', 'cost'} or None. The launcher's
+    PROXY_AGENT_USAGE summary imports this function but is REPORTING ONLY: the gate never frees a reservation from it."""
+    if isinstance(raw, bytes):
+        if not raw.endswith(b'\n'):
+            return None
+        raw = raw.decode('utf-8', 'replace')
+    elif not isinstance(raw, str) or not raw.endswith('\n'):
+        return None
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(d, dict) or d.get('type') != 'result':
+        return None
+    subtype = d.get('subtype')
+    if not isinstance(subtype, str) or not subtype:
+        return None
+    u = strict_usage(d.get('usage'))
+    if u is None:
+        return None
+    cost = d.get('total_cost_usd')
+    return {'usage': u, 'subtype': subtype, 'cost': float(cost) if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost > 0 else 0.0}
+
+
 def strict_usage(u):
-    """THE usage check: one function, used by the stream scan (settlement AND continuation), by the PROXY_AGENT_USAGE line parser, and imported by the launcher to
-    build that line. CTO REVISE of 56d3ff19 (ts 1795605169.603049): empty, malformed or otherwise unverified usage must RETAIN the reservation, never release it at 0.
+    """THE usage check: one function, used by verified_result() (so by the stream scan: settlement AND continuation), and imported by the launcher, through
+    verified_result(), to build its reporting summary. CTO REVISE of 56d3ff19 (ts 1795605169.603049): empty, malformed or otherwise unverified usage must RETAIN the reservation, never release it at 0.
     A usage is verified only if it is an object whose input_tokens and output_tokens are present and are non-negative integers (a bool, a string, a float, null or a
     negative is malformed), whose cache_read_input_tokens / cache_creation_input_tokens are, when present, non-negative integers too, and whose prompt
     (input + cache read + cache creation) is positive: every billed request has a prompt, so a zero one proves nothing. Returns the four integer counts, else None."""
@@ -444,19 +473,19 @@ def scan_file(path, acc):
                     acc['a_cc'] += _int(u.get('cache_creation_input_tokens'))
                     acc['a_out'] += max(_int(u.get('output_tokens')), est)
                 elif d.get('type') == 'result':
-                    u = strict_usage(d.get('usage'))
-                    if u is None:  # empty, malformed or unverified usage proves nothing: the segment's spend is unreadable, not zero
+                    res = verified_result(line)  # empty, malformed, unverified or subtype-less: the segment's spend is unreadable, not zero
+                    if res is None:
                         continue
+                    u = res['usage']
                     acc['r_in'] += u['input_tokens']
                     acc['r_out'] += u['output_tokens']
                     acc['r_cr'] += u['cache_read_input_tokens']
                     acc['r_cc'] += u['cache_creation_input_tokens']
                     acc['r_n'] = acc.get('r_n', 0) + 1
-                    if d.get('subtype') == 'error_max_budget_usd':  # measured: this result's usage omits the request that crossed the cap, its total_cost_usd includes it
+                    if res['subtype'] == 'error_max_budget_usd':  # measured: this result's usage omits the request that crossed the cap, its total_cost_usd includes it
                         acc['r_capped'] = acc.get('r_capped', 0) + 1
-                    cost = d.get('total_cost_usd')
-                    if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost > 0:
-                        acc['r_ccost'] = max(acc.get('r_ccost', 0.0), float(cost))
+                    if res['cost'] > 0:
+                        acc['r_ccost'] = max(acc.get('r_ccost', 0.0), res['cost'])
     except OSError:
         return
     acc['off'] = pos
@@ -524,29 +553,8 @@ def stream_estimate(lane, frac):
     return max(stream, lane_results(lane)[0])
 
 
-# check=strict marks a line built by the launcher with strict_usage(); a line without it (an older launcher counted any usage object, even {}) is not trusted.
-USAGE_RE = re.compile(r'PROXY_AGENT_USAGE model=(\S+) results=(\d+) input_tokens=(\d+) output_tokens=(\d+) cache_read_tokens=(\d+) cache_creation_tokens=(\d+) check=strict\b')
-
-
-def usage_from_log(path):
-    """The last PROXY_AGENT_USAGE line of a lane log, from its tail only (a lane log can be enormous). 'unavailable' lines do not match."""
-    if not path:
-        return None
-    try:
-        with open(path, 'rb') as fh:
-            fh.seek(0, os.SEEK_END)
-            fh.seek(max(fh.tell() - 262144, 0))
-            tail = fh.read().decode('utf-8', 'replace')
-    except OSError:
-        return None
-    found = USAGE_RE.findall(tail)
-    if not found:
-        return None
-    _model, n, i, o, cr, cc = found[-1]
-    u = strict_usage({'input_tokens': int(i), 'output_tokens': int(o), 'cache_read_input_tokens': int(cr), 'cache_creation_input_tokens': int(cc)})
-    if u is None or int(n) < 1:  # an all-zero summary is not verified usage
-        return None
-    return {'in': u['input_tokens'], 'out': u['output_tokens'], 'cr': u['cache_read_input_tokens'], 'cc': u['cache_creation_input_tokens'], 'n': int(n)}
+# The launcher's PROXY_AGENT_USAGE line is REPORTING ONLY: nothing in this file parses it. It cannot carry the result's subtype, and it counts records the gate
+# rejects (summary-only, unterminated), so it can never decide what is spent or free a reservation. Only verified_result() records in the lane's stream do.
 
 
 # ---- ledger operations (call under the lock) -------------------------------------------------------------------------------------------
@@ -567,22 +575,21 @@ def held_total(ledger):
 
 
 def close_lane(ledger, state, name, lane, source):
-    """End of a lane. The exact part (result events, or the PROXY_AGENT_USAGE line when it covers more segments) is added to spent_usd and the
+    """End of a lane. The exact part (the stream's complete verified result records) is added to spent_usd and the
     reservation is freed; every segment WITHOUT a readable result keeps its reservation HELD until reconcile: a killed lane is never settled at 0 or at an
     estimate. Returns (exact USD added, USD held)."""
     if lane.get('owner') == 'dry':
         ledger['lanes'].pop(name, None)
         return 0.0, 0.0
     exact_s, n_s, cc_cost, tok_s = lane_results(lane)
-    usage = usage_from_log(lane.get('log'))
     # A lane admitted by an earlier gate version has no 'reserves' key and always ran: only a lane THIS version reserved for can be proven never started.
-    if lane.get('owner') == 'launcher' and 'reserves' in lane and not lane.get('started') and n_s == 0 and not usage:  # the runner never reached its claude spawn: nothing was spent, nothing to hold
+    if lane.get('owner') == 'launcher' and 'reserves' in lane and not lane.get('started') and n_s == 0:  # the runner never reached its claude spawn: nothing was spent, nothing to hold
         ledger['lanes'].pop(name, None)
         log('RELEASED name=%s model=%s reason=never_started reserve_usd=%.6f' % (name, lane['model'], sum(lane.get('reserves') or [])))
         return 0.0, 0.0
+    # Only the gate's own COMPLETE result records free a reservation. The launcher's PROXY_AGENT_USAGE line is reporting only: it cannot see the subtype, and it can
+    # count a record the gate rejects (summary-only, unterminated), so it never decides what is spent or released.
     best_cost, best_n, best_tok, src = exact_s, n_s, tok_s, 'stream_results'
-    if usage and (usage['n'] > n_s or (usage['n'] == n_s and cost_usd(lane['model'], usage) > exact_s)):
-        best_cost, best_n, best_tok, src = cost_usd(lane['model'], usage), usage['n'], {k: usage[k] for k in ('in', 'out', 'cr', 'cc')}, 'usage_line'
     if source == 'init':
         src = 'init_' + src
     reserves = list(lane.get('reserves') or [])
@@ -825,7 +832,7 @@ def cmd_settle(a):
             log('SETTLE_SKIPPED name=%s reason=state_missing' % a.name)
             return 0
         before = json.loads(json.dumps(state))
-        if lane is None:  # a lane that never reserved (pre-gate launcher): price what its usage line / stream prove, hold the rest
+        if lane is None:  # a lane that never reserved (pre-gate launcher): price what its stream proves, hold the rest
             lane = new_lane(a.name, identity(a.model), 'launcher', None, a.jsonl or None, a.log or None)
             lane['started'] = True
         else:
