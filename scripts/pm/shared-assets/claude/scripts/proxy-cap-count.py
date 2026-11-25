@@ -13,7 +13,7 @@ PROCESS = re.compile(r'(?:^|\s)\S*/claude\s+-p\s+--name\s+([A-Za-z0-9._-]+)\s+--
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z')
 
 
-def count_processes(processes, root, claude_only=False, ultra_only=False):
+def count_processes(processes, root, claude_only=False, ultra_only=False, deepseek_direct_only=False):
     count = 0
     for line in processes.splitlines():
         match = PROCESS.search(line)
@@ -25,6 +25,10 @@ def count_processes(processes, root, claude_only=False, ultra_only=False):
         # 25 Nov: the dev@scribie ULTRA credential is its own pool (ultra/<model> via the CLIProxyAPI prefix route); it never
         # counts against the team Claude pool, and the team Claude count never counts it.
         if ultra_only and not model.startswith('ultra/'):
+            continue
+        # 25 Nov: direct DeepSeek (deepseek-direct/<model> via the CLIProxyAPI openai-compat prefix route) is its own pool and cap
+        # (DEEPSEEK_DIRECT_PROXY_CAP, default 8); neither the Claude nor the Ultra count includes it.
+        if deepseek_direct_only and not model.startswith('deepseek-direct/'):
             continue
         if not NAME.fullmatch(name) or name in ('.', '..'):
             raise ValueError('invalid proxy name')
@@ -44,7 +48,7 @@ def main():
     try:
         root = Path(os.environ.get('PROXY_AGENT_RUN_STATE_DIR', str(Path.home() / '.local/state/proxy-agent-runs')))
         output = subprocess.check_output(['/bin/ps', '-axo', 'command='], text=True, errors='replace')  # a non-UTF-8 argv made ps output undecodable → UnicodeDecodeError → caps unreadable (23 Nov)
-        print(count_processes(output, root, sys.argv[1] == 'claude', sys.argv[1] == 'ultra'))
+        print(count_processes(output, root, sys.argv[1] == 'claude', sys.argv[1] == 'ultra', sys.argv[1] == 'deepseek_direct'))
     except (OSError, ValueError, IndexError, subprocess.SubprocessError) as exc:
         print('proxy-agent: cap metadata unavailable: ' + type(exc).__name__, file=sys.stderr)
         print(999)

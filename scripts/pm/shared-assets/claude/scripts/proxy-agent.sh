@@ -731,7 +731,7 @@ model = os.environ.get("PROXY_AGENT_CLAUDE_PROBE_MODEL", "")
 # Both local Spark aliases must be probe-able: without it an id that is not in this list returns "fail" and is
 # recorded as probe_failed, so the lane is cooled and falls through to a PAID model even though the Spark is healthy and the
 # gate above already proved the checkpoint is served. /v1/messages through CLIProxyAPI answers it 200 (verified 22 Nov).
-if model not in ("claude-opus-5-5-high", "claude-sonnet-5-5-high", "gemini-4-argon-high", "gemini-3.8-flash-high", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-high", "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "grok-4.7", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-sol(xhigh)", "gpt-6-astra", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-fable-5-2", "ultra/claude-opus-5-5", "ultra/claude-sonnet-5-5", "ultra/claude-haiku-5-5", "hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor", "inkling-2-mini", "ornith-1.5-35b-a3b", "qwen3.8-flash-next", "sarvam-glm-5.3", "sarvam-deepseek-v4.1-flash", "sarvam-105b", "sarvam-gemma4", "sarvam-kimi-k3"):
+if model not in ("claude-opus-5-5-high", "claude-sonnet-5-5-high", "gemini-4-argon-high", "gemini-3.8-flash-high", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-high", "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "grok-4.7", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-sol(xhigh)", "gpt-6-astra", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-fable-5-2", "ultra/claude-opus-5-5", "ultra/claude-sonnet-5-5", "ultra/claude-haiku-5-5", "deepseek-direct/deepseek-flash", "deepseek-direct/deepseek-v4-pro", "hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor", "inkling-2-mini", "ornith-1.5-35b-a3b", "qwen3.8-flash-next", "sarvam-glm-5.3", "sarvam-deepseek-v4.1-flash", "sarvam-105b", "sarvam-gemma4", "sarvam-kimi-k3"):
     finish("fail", 0)
 
 state_dir = os.environ.get("PROXY_AGENT_STATE_DIR") or os.path.expanduser("~/.cache/proxy-agent")
@@ -1596,7 +1596,7 @@ _PROXY_TOTAL_CAP_ENV="${PROXY_AGENT_TOTAL_CAP:-}"
 if [[ -r "$HOME/.claude/state/proxy-caps.env" ]]; then
   while IFS== read -r _k _v; do
     case "$_k" in
-      PROXY_AGENT_TOTAL_CAP|PROXY_AGENT_CLAUDE_CAP|PM_SUBAGENT_CAP|CODEX_PROXY_CAP|CLAUDE_PROXY_CAP|GROK_PROXY_CAP|OPENCODE_PROXY_CAP|HY4_PROXY_CAP|SARVAM_PROXY_CAP|SPARK_PROXY_CAP|ULTRA_PROXY_CAP) [[ -z "${!_k:-}" && "$_v" =~ ^[0-9]+$ ]] && printf -v "$_k" %s "$_v";;
+      PROXY_AGENT_TOTAL_CAP|PROXY_AGENT_CLAUDE_CAP|PM_SUBAGENT_CAP|CODEX_PROXY_CAP|CLAUDE_PROXY_CAP|GROK_PROXY_CAP|OPENCODE_PROXY_CAP|HY4_PROXY_CAP|SARVAM_PROXY_CAP|SPARK_PROXY_CAP|ULTRA_PROXY_CAP|DEEPSEEK_DIRECT_PROXY_CAP) [[ -z "${!_k:-}" && "$_v" =~ ^[0-9]+$ ]] && printf -v "$_k" %s "$_v";;
       PROXY_BURN_GATE) [[ -z "${!_k:-}" && ( "$_v" == enforce || "$_v" == shadow ) ]] && printf -v "$_k" %s "$_v";;
     esac
   done < "$HOME/.claude/state/proxy-caps.env"
@@ -1636,6 +1636,16 @@ proxy_agent_is_sarvam_id() {
   local id
   id="$(proxy_agent_router_identity "$1")"
   case "$id" in sarvam-glm-5.3|sarvam-deepseek-v4.1-flash|sarvam-105b|sarvam-gemma4|sarvam-kimi-k3) return 0;; *) return 1;; esac
+}
+# Direct DeepSeek pool (Rajiv 25 Nov directive below): CLIProxyAPI openai-compat provider "deepseek-direct" (prefix `deepseek-direct`, upstream api.deepseek.com, the existing
+# DeepSeek API key). The id is `deepseek-direct/<upstream model>`; the upstream serves exactly deepseek-flash (DeepSeek-V4.1-Flash) and deepseek-v4-pro (GET /models, 25 Nov).
+# Explicit `--model` only: never in a tier list, never in the burn dial, own cap DEEPSEEK_DIRECT_PROXY_CAP (default 8). Balance-metered, so like Sarvam it has no role
+# exemption. Rajiv C0ALZJHGE49 thread 1795597777.761599, ts 1795597998.571509: "use direct deepseek for this so that we don't hit caps. is it wired up on proxy agents?";
+# $25 bench cap ts 1795598139.238639. The old emergency ids (deepseek, deepseek-flash, deepseek-flash-4.1) keep their rajiv:<ts> gate below; this prefix is a different identity.
+proxy_agent_is_deepseek_direct_id() {
+  local id
+  id="$(proxy_agent_router_identity "$1")"
+  case "$id" in deepseek-direct/*) return 0;; *) return 1;; esac
 }
 # Kimi K3 is a Provisioned Throughput model at Sarvam: until Sarvam enables it for the organisation every request is HTTP 400 ("not enabled for your
 # organisation"), which proxy_agent_sub_usable reports as rc 2 (probe_failed). Left alone that would (a) burn a probe on every launch and (b) close the
@@ -2103,6 +2113,8 @@ proxy_agent_burn_refused() {
     # dev@scribie ULTRA route (CLIProxyAPI prefix `ultra`): ULTRA_PROXY_CAP (fixed 4) + a 429 cooldown decide until the hourly burn rate has data
     # (Rajiv D0AMF0XE6TS thread 1795576437.379619, ts 1795590119.110289: "set the cap to 4 initially and measure the burn rate in hourlies").
     ultra/claude-*) return 1;;
+    # Direct DeepSeek has no %/h meter either (it is outside the burn dial): DEEPSEEK_DIRECT_PROXY_CAP and a 402/429 cooldown decide.
+    deepseek-direct/*) return 1;;
   esac
   # OpenCode Go has no %/h budget meter: OPENCODE_PROXY_CAP and a 402/429 cooldown decide.
   if proxy_agent_is_opencode_id "$1"; then return 1; fi
@@ -2158,7 +2170,7 @@ for line in out.splitlines():
     # Same cut as proxy_agent_router_identity: lowercase, drop the first '(' or '[' suffix, trim.
     # A decorated OpenCode primary must count toward OPENCODE_PROXY_CAP (CTO REVISE ts 1795010788.320629).
     model = re.split(r"[(\[]", raw.lower(), 1)[0].strip()
-    kind = "ultra" if model.startswith("ultra/") else "claude" if model.startswith("claude-") else "codex" if model.startswith("gpt-") else "grok" if model.startswith("grok") else "spark" if model in ("ornith-1.5-35b-a3b", "qwen3.8-flash-next") else "inkling" if model == "inkling-2-mini" else "hy4" if model == "hy4-flash-free" else "opencode" if model in ("deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor") else "sarvam" if model in ("sarvam-glm-5.3", "sarvam-deepseek-v4.1-flash", "sarvam-105b", "sarvam-gemma4", "sarvam-kimi-k3") else ""
+    kind = "ultra" if model.startswith("ultra/") else "deepseek_direct" if model.startswith("deepseek-direct/") else "claude" if model.startswith("claude-") else "codex" if model.startswith("gpt-") else "grok" if model.startswith("grok") else "spark" if model in ("ornith-1.5-35b-a3b", "qwen3.8-flash-next") else "inkling" if model == "inkling-2-mini" else "hy4" if model == "hy4-flash-free" else "opencode" if model in ("deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor") else "sarvam" if model in ("sarvam-glm-5.3", "sarvam-deepseek-v4.1-flash", "sarvam-105b", "sarvam-gemma4", "sarvam-kimi-k3") else ""
     if kind == pool:
         n += 1
 print(n)
@@ -2183,6 +2195,8 @@ proxy_agent_pool_blocked() {
     claude-*) pool=claude; cap="${CLAUDE_PROXY_CAP:-${PROXY_AGENT_CLAUDE_CAP:-5}}";;
     # dev@scribie ULTRA credential, own route + own cap (25 Nov): never counted in, or governed by, the team Claude pool.
     ultra/claude-*) pool=ultra; cap="${ULTRA_PROXY_CAP:-4}";;
+    # Direct DeepSeek (api.deepseek.com): own pool, own cap (25 Nov), never counted in the team Claude, Ultra or OpenCode pools.
+    deepseek-direct/*) pool=deepseek_direct; cap="${DEEPSEEK_DIRECT_PROXY_CAP:-8}";;
     gpt-*) pool=codex; cap="${CODEX_PROXY_CAP:-8}";;
     grok-4.7|grok) pool=grok; cap="${GROK_PROXY_CAP:-8}";;
     # hy4-flash-free has its own cap, outside the OpenCode Go cap (Rajiv C0ALZJHGE49 thread 1795416243.378619, ts 1795418976.792619: "yes, exempt it. add a spearate cap for hy4"; free tier keeps running while the Go limit refuses glm/deepseek).
@@ -2195,13 +2209,13 @@ proxy_agent_pool_blocked() {
     *) return 1;;
   esac
   # The Sarvam pool, like OpenCode, has no role exemption: paid credits with no meter, so the cap applies to cap-exempt roles and a P0 override too.
-  if [[ "$pool" != opencode && "$pool" != hy4 && "$pool" != sarvam && "$pool" != ultra ]] && proxy_agent_cap_exempt "$TYPE"; then return 1; fi  # ultra: hard cap, no role exemption (25 Nov: cap 4 while the burn rate is measured)
+  if [[ "$pool" != opencode && "$pool" != hy4 && "$pool" != sarvam && "$pool" != ultra && "$pool" != deepseek_direct ]] && proxy_agent_cap_exempt "$TYPE"; then return 1; fi  # ultra: hard cap, no role exemption (25 Nov: cap 4 while the burn rate is measured)
   case "$cap" in ''|*[!0-9]*) return 1;; esac
   # OpenCode / Sarvam cap 0 means the pool is off: blocked without counting, so an unreadable process list cannot let a launch through.
-  if [[ ( "$pool" == opencode || "$pool" == hy4 || "$pool" == sarvam || "$pool" == ultra ) && "$cap" =~ ^0+$ ]]; then return 0; fi
+  if [[ ( "$pool" == opencode || "$pool" == hy4 || "$pool" == sarvam || "$pool" == ultra || "$pool" == deepseek_direct ) && "$cap" =~ ^0+$ ]]; then return 0; fi
   if ! live="$(proxy_agent_pool_live "$pool")"; then
     printf 'proxy-agent: pool_cap UNAVAILABLE pool=%s\n' "$pool" >&2
-    if [[ "$pool" == claude || "$pool" == ultra ]]; then printf 'proxy-agent: pool_cap fail-closed pool=%s (live count unreadable)\n' "$pool" >&2; return 0; fi
+    if [[ "$pool" == claude || "$pool" == ultra || "$pool" == deepseek_direct ]]; then printf 'proxy-agent: pool_cap fail-closed pool=%s (live count unreadable)\n' "$pool" >&2; return 0; fi
     if [[ "$pool" == opencode || "$pool" == hy4 || "$pool" == sarvam || "$pool" == spark || "$pool" == inkling ]]; then return 0; fi
     return 1
   fi
@@ -2302,6 +2316,12 @@ proxy_agent_primary_pool_guard() {
         return 75
       fi
       return 0;;
+    deepseek-direct/*)
+      if PA_P0_ARMED=1 proxy_agent_pool_blocked "$_guard_id"; then
+        printf 'proxy-agent: REFUSED primary %s (deepseek_direct pool_cap)\n' "$_guard_id" >&2
+        return 75
+      fi
+      return 0;;
     grok-4.7|grok)
       if PA_P0_ARMED=1 proxy_agent_pool_blocked "$_guard_id"; then
         printf 'proxy-agent: REFUSED primary %s (grok pool_cap)\n' "$_guard_id" >&2
@@ -2351,6 +2371,8 @@ proxy_agent_primary_burn_check() {
   if proxy_agent_is_sarvam_id "$_burn_model"; then return 0; fi
   # dev@scribie ULTRA route (25 Nov): ULTRA_PROXY_CAP + cooldown decide, as in proxy_agent_burn_refused; proxy-burn-shadow.py has no `ultra/` pool and answered pool=unknown, so an explicit --model ultra/... was refused rc 75 in enforce mode.
   case "$_burn_model" in ultra/claude-*) return 0;; esac
+  # Direct DeepSeek (25 Nov): outside the burn dial; proxy-burn-shadow.py has no pool for it (it would answer pool=unknown and refuse rc 75 in enforce mode).
+  case "$_burn_model" in deepseek-direct/*) return 0;; esac
   python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$_burn_model" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >&2 || _burn_rc=$?
   if [[ "$_burn_rc" -ne 0 ]]; then
     printf 'proxy-burn: mode=%s decision=would_refuse rc=%s\n' "$PROXY_BURN_GATE" "$_burn_rc" >&2
@@ -2515,6 +2537,8 @@ resolve_model() {
     # Keep the local Spark proxy window on both aliases.
     ornith-1.5-35b-a3b|qwen3.8-flash-next) echo "$1 240000 16384";;
     ultra/claude-opus-5-5|ultra/claude-sonnet-5-5|ultra/claude-haiku-5-5) echo "$1 200000 64000";;  # dev@scribie ULTRA route: same window/output as the team id
+    # Direct DeepSeek: GET api.deepseek.com/models (25 Nov) reports context_window 1048576 for both ids (max_output_tokens 393216; 32000 matches the other 1M ids here).
+    deepseek-direct/deepseek-flash|deepseek-direct/deepseek-v4-pro) echo "$1 1048576 32000";;
     gpt-6.2-sol)  echo "gpt-6.2-sol 1050000 128000";;  # Rajiv D0AMF0XE6TS ts 1794940288.370549; exact id only, not in any tier ladder
     gpt-6-luna|gpt-6.1-terra|gpt-6.1-sol|gpt-6-astra|grok-4.7|gemini-4-argon-high|gemini-3.8-flash-high|gemini-4-hydrogen-xhigh|claude-opus-5-5-high|claude-sonnet-5-5-high|claude-haiku-5-5|claude-sonnet-5-5|claude-opus-5-5|claude-fable-5-2)
                   resolve_model "$(proxy_agent_alias_for_id "$1")";;
@@ -2694,6 +2718,7 @@ proxy_agent_log_emergency_muse opus "${OPUS_MODEL:-}"
 case "$MODEL" in
   ag-opus|ag-sonnet|luna|terra|sol|astra|grok|hydrogen|ernie|gemini-pro|gemini-flash|gpt-6-luna|gpt-6.1-terra|gpt-6.1-sol|gpt-6.2-sol|gpt-6.2-sol\(*\)|gpt-6-astra|grok-4.7|gemini-4-argon-high|gemini-3.8-flash-high|gemini-4-hydrogen-xhigh|claude-opus-5-5-high|claude-sonnet-5-5-high|haiku|sonnet|opus|fable|claude-haiku-5-5|claude-sonnet-5-5|claude-opus-5-5|claude-fable-5-2) ;;
   ultra/claude-opus-5-5|ultra/claude-sonnet-5-5|ultra/claude-haiku-5-5) ;;  # dev@scribie ULTRA credential via the CLIProxyAPI `ultra` prefix route
+  deepseek-direct/deepseek-flash|deepseek-direct/deepseek-v4-pro) ;;  # direct DeepSeek via the CLIProxyAPI openai-compat provider "deepseek-direct" (prefix route); window from resolve_model
   inkling-2-mini) ;;  # local Inkling 2 Mini (DGX Spark vLLM via CLIProxyAPI openai-compat "inkling-spark"), 262144-token window
   ornith-1.5-35b-a3b|qwen3.8-flash-next) ;; # same local Spark vLLM service via CLIProxyAPI
   hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor) ;;  # OpenCode Go via CLIProxyAPI; conservative 200000/32000 window until a source is added
@@ -2940,6 +2965,14 @@ if proxy_agent_is_capped "$TYPE"; then
     _live_ultra="$(proxy_agent_live_count ultra)"
     if [[ "${_live_ultra:-999}" -ge "${ULTRA_PROXY_CAP:-4}" ]]; then
       printf 'PROXY_AGENT_REFUSED reason=ultra_cap model=%s (%s live >= %s)\n' "$MODEL_ID" "$_live_ultra" "${ULTRA_PROXY_CAP:-4}" >&2
+      exit 75
+    fi
+  fi
+  if [[ "$MODEL_ID" == deepseek-direct/* ]]; then
+    # Same enforcement for direct DeepSeek against its own cap (default 8). cap 0 = route off; an unreadable count (999) refuses.
+    _live_dsd="$(proxy_agent_live_count deepseek_direct)"
+    if [[ "${_live_dsd:-999}" -ge "${DEEPSEEK_DIRECT_PROXY_CAP:-8}" ]]; then
+      printf 'PROXY_AGENT_REFUSED reason=deepseek_direct_cap model=%s (%s live >= %s)\n' "$MODEL_ID" "$_live_dsd" "${DEEPSEEK_DIRECT_PROXY_CAP:-8}" >&2
       exit 75
     fi
   fi
@@ -3237,6 +3270,7 @@ RESULT_CONTRACT
   declare -f proxy_agent_pool_blocked
   declare -f proxy_agent_resolve_opencode_cap
   declare -f proxy_agent_is_sarvam_id
+  declare -f proxy_agent_is_deepseek_direct_id
   declare -f proxy_agent_resolve_sarvam_cap
   printf 'printf "Continue the task in your brief from exactly where you stopped. Do not end your turn until it is DONE, or BLOCKED with the exact external blocker (or HANDOFF). Do not send interim progress peer messages to PM; send ONE message only for a blocker that needs a PM decision, plus the final Stop.\\n" > %q\n' "$JOB_DIR/continue.md"
   # Also continue after an error_max_turns stop (rc!=0): 4 sol runs died that way on 2026-11-13 with work mid-flight (PM).
@@ -3267,6 +3301,11 @@ RESULT_CONTRACT
   fi
   printf '    SARVAM_PROXY_CAP="$(proxy_agent_resolve_sarvam_cap "${SARVAM_PROXY_CAP:-}")"\n'
   printf '    if proxy_agent_pool_blocked "$MODEL_ID"; then printf "[%%s] PROXY_AGENT_CONTINUE_REFUSED model=%%s cap=%%s reason=sarvam_pool_cap capacity-stop\\n" "$(date -u +%%FT%%TZ)" "$MODEL_ID" "$SARVAM_PROXY_CAP" >> %q; printf "PROXY_AGENT_CAPACITY_STOP rc=75 model=%%s cap=%%s reason=sarvam_pool_cap\\n" "$MODEL_ID" "$SARVAM_PROXY_CAP" >&2; rc=75; exit 75; fi\n' "$LOG"
+  printf '  fi\n'
+  # Same re-check for direct DeepSeek (25 Nov): a continuation is a new admission against DEEPSEEK_DIRECT_PROXY_CAP (launcher env or caps file, else 8).
+  printf '  if proxy_agent_is_deepseek_direct_id "$MODEL_ID"; then\n'
+  printf '    DEEPSEEK_DIRECT_PROXY_CAP=%q\n' "${DEEPSEEK_DIRECT_PROXY_CAP:-8}"
+  printf '    if proxy_agent_pool_blocked "$MODEL_ID"; then printf "[%%s] PROXY_AGENT_CONTINUE_REFUSED model=%%s cap=%%s reason=deepseek_direct_pool_cap capacity-stop\\n" "$(date -u +%%FT%%TZ)" "$MODEL_ID" "$DEEPSEEK_DIRECT_PROXY_CAP" >> %q; printf "PROXY_AGENT_CAPACITY_STOP rc=75 model=%%s cap=%%s reason=deepseek_direct_pool_cap\\n" "$MODEL_ID" "$DEEPSEEK_DIRECT_PROXY_CAP" >&2; rc=75; exit 75; fi\n' "$LOG"
   printf '  fi\n'
   printf '  if [[ "$pa_claude_429" == 1 ]]; then pa_log_start=$(wc -c < "$PA_LOG"); fi\n'
   printf '  %q ' "$CLAUDE_BIN" "${ARGS[@]}"
@@ -3351,6 +3390,45 @@ read -r RC < "$JOB_DIR/rc"
 # own log boundary. Keep the legacy cooldown behavior for every other pool.
 if [[ "$RC" -ne 0 ]] && ! proxy_agent_uses_claude_account "$MODEL_ID"; then
   proxy_agent_note_log_exhaustion "$MODEL_ID" "$LOG" "$OUT" || true
+fi
+# Direct DeepSeek (25 Nov): report the lane's token usage from the stream-json result events (summed; a continuation adds one each). Printed to stderr and appended to the
+# lane log, before the DONE line; "unavailable" when the stream carries no usage. Never changes the rc.
+if proxy_agent_is_deepseek_direct_id "$MODEL_ID"; then
+  python3 -I - "$JSONL" "$MODEL_ID" "$LOG" <<'PY' >&2 || true
+import json, sys
+path, model, log = sys.argv[1:4]
+keys = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+tot = dict.fromkeys(keys, 0)
+n = 0
+try:
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if '"type":"result"' not in line and '"type": "result"' not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            u = d.get("usage") if d.get("type") == "result" else None
+            if isinstance(u, dict):
+                n += 1
+                for k in keys:
+                    if isinstance(u.get(k), int):
+                        tot[k] += u[k]
+except OSError:
+    pass
+if n:
+    msg = "PROXY_AGENT_USAGE model=%s results=%d input_tokens=%d output_tokens=%d cache_read_tokens=%d cache_creation_tokens=%d" % (
+        model, n, tot[keys[0]], tot[keys[1]], tot[keys[2]], tot[keys[3]])
+else:
+    msg = "PROXY_AGENT_USAGE model=%s unavailable (no result event with usage in the stream)" % model
+print(msg)
+try:
+    with open(log, "a") as fh:
+        fh.write(msg + "\n")
+except OSError:
+    pass
+PY
 fi
 echo "PROXY_AGENT_DONE rc=$RC type=$TYPE model=$MODEL_ID window=$WINDOW out=$OUT log=$LOG"
 exit "$RC"

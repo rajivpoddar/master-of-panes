@@ -256,3 +256,64 @@ def test_cap_count_cli_prints_a_fail_closed_999_for_ultra_when_ps_is_unreadable(
     patched.write_text((SCRIPTS / 'proxy-cap-count.py').read_text().replace("'/bin/ps'", repr(str(fake))))
     done = subprocess.run(['python3', '-I', str(patched), 'ultra'], capture_output=True, text=True, timeout=30)
     assert done.stdout.strip() == '999', done.stdout + done.stderr
+
+
+# ---- Direct DeepSeek (25 Nov): own pool, own hard cap (default 8), explicit --model only, outside the tiers and the burn dial -------------
+# Rajiv C0ALZJHGE49 thread 1795597777.761599, ts 1795597998.571509: "use direct deepseek for this so that we don't hit caps"; $25 bench cap ts 1795598139.238639.
+
+def test_an_explicit_deepseek_direct_model_at_its_cap_is_refused_75_with_its_own_reason(lab):
+    _tmp, home, _ = lab
+    prepare(lab, 'hd-builder')
+    done = run(lab, 'hd-builder', 'proxy-test-dsd-cap', 'deepseek-direct/deepseek-flash', live=0, PROXY_TEST_LIVE_DEEPSEEK_DIRECT='8', DEEPSEEK_DIRECT_PROXY_CAP='8')
+    assert done.returncode == 75 and 'PROXY_AGENT_REFUSED reason=deepseek_direct_cap model=deepseek-direct/deepseek-flash (8 live >= 8)' in done.stderr, done.stderr
+    assert 'reason=claude_cap' not in done.stderr and 'reason=ultra_cap' not in done.stderr  # not the team or Ultra pool that refused
+    assert not (home / 'prompt-seen.txt').exists()
+
+
+def test_an_explicit_deepseek_direct_model_under_its_cap_launches_when_the_team_pool_is_full_and_reports_usage(lab):
+    _tmp, home, _ = lab
+    prepare(lab, 'hd-builder')
+    done = run(lab, 'hd-builder', 'proxy-test-dsd-room', 'deepseek-direct/deepseek-flash', live=9, cap=2, PROXY_TEST_LIVE_DEEPSEEK_DIRECT='7', DEEPSEEK_DIRECT_PROXY_CAP='8')
+    assert done.returncode == 0 and 'PROXY_AGENT_REFUSED' not in done.stderr and 'deepseek_requires_rajiv_override' not in done.stderr, done.stderr
+    assert (home / 'prompt-seen.txt').exists()
+    assert 'PROXY_AGENT_USAGE model=deepseek-direct/deepseek-flash' in done.stderr  # tokens when the stream carries them, "unavailable" otherwise
+
+
+def test_deepseek_direct_cap_zero_refuses_an_explicit_deepseek_direct_model(lab):
+    _tmp, home, _ = lab
+    prepare(lab, 'hd-builder')
+    done = run(lab, 'hd-builder', 'proxy-test-dsd-off', 'deepseek-direct/deepseek-v4-pro', live=0, PROXY_TEST_LIVE_DEEPSEEK_DIRECT='0', DEEPSEEK_DIRECT_PROXY_CAP='0')
+    assert done.returncode == 75 and 'REFUSED primary deepseek-direct/deepseek-v4-pro (deepseek_direct pool_cap)' in done.stderr, done.stderr
+    assert not (home / 'prompt-seen.txt').exists()
+
+
+def test_every_deepseek_direct_id_is_wired_and_none_is_in_a_tier_list():
+    """Ids are discovered from resolve_model, not hand-listed: a new id there must also be probe-allowlisted and accepted by the MODEL case."""
+    src = (SCRIPTS / 'proxy-agent.sh').read_text()
+    ids = re.search(r'^\s*((?:deepseek-direct/[a-z0-9.-]+\|?)+)\) echo "\$1 ', src, re.M).group(1).split('|')
+    assert ids
+    tier_fn = src[src.index('proxy_agent_tier_models() {'):]
+    tier_fn = tier_fn[:tier_fn.index('\n}')]
+    for i in ids:
+        assert '"%s"' % i in src, i  # the probe allowlist
+        assert re.search(r'^\s+(?:\S*\|)?' + re.escape(i) + r'(?:\|\S*)?\) ;;', src, re.M), i  # the case "$MODEL" allowlist
+        assert i not in tier_fn, i  # explicit --model only
+    assert 'deepseek-direct' not in tier_fn
+
+
+def _dsd_count(tmp_path, **kw):
+    return _count(tmp_path, '\n'.join([
+        '/x/claude -p --name px-a --model claude-sonnet-5-5 brief',
+        '/x/claude -p --name px-b --model deepseek-direct/deepseek-flash brief',
+        '/x/claude -p --name px-c --model deepseek-direct/deepseek-v4-pro brief',
+    ]), **kw)
+
+
+def test_cap_count_deepseek_direct_mode_counts_only_deepseek_direct_models(tmp_path):
+    assert _dsd_count(tmp_path, deepseek_direct_only=True) == 2
+
+
+def test_neither_the_team_claude_count_nor_the_ultra_count_includes_deepseek_direct(tmp_path):
+    assert _dsd_count(tmp_path, claude_only=True) == 1
+    assert _dsd_count(tmp_path, ultra_only=True) == 0
+    assert _dsd_count(tmp_path) == 3  # the total (telemetry) still sees every lane
