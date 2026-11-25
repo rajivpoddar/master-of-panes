@@ -4,6 +4,7 @@
 # GREEN, or GREEN -> RED (--mutate-patch applied for the RED leg only) -> GREEN on the SAME box. Always destroys the box.
 # --env-file F (optional): base env for the mandatory --disposable-convex. Default = slot 5's dev env
 # ($HOME/Downloads/projects/heydonna-app-3005/.env.local) whatever --slot is; --slot never selects the env file.
+# --dry-run --check-sample-ids REPO: run sample env staging on private copies using --head in a local app Git checkout.
 #   remote-browser-box.sh spec --slot N --branch B --head SHA --spec tests/e2e/specs/... --out DIR --allow-seed-replace
 #       [--mutate-patch FILE] [--test-line N] [--project core-rest] [--env-file F] [--config JSON] [--provider auto] [--ttl 150m] [--timeout SECS]
 #   [--prod-build] [--trace] [--dry-run]: --prod-build forwards to preflight; --trace records Playwright trace (on) + video for every test;
@@ -138,7 +139,68 @@ qa_onmiss_headroom_gate() {
 # HEADROOM_GATE_END
 runtime="${QA_SPEC_RUNTIME:-$HOME/.claude/scripts/remote-qa-spec-runtime.sh}"
 fetch_helper="$HOME/.claude/scripts/remote-qa-spec-fetch.py"
-slot='' branch='' head='' out='' env_file='' config='' provider=auto ttl=150m allow_seed='' spec='' patch='' test_line='' project='' with_deps=no legs_override='' timeout_secs='' prod_build=no trace=no dry_run=no
+base_env_default="$HOME/Downloads/projects/heydonna-app-3005/.env.local"
+slot='' branch='' head='' out='' env_file='' config='' provider=auto ttl=150m allow_seed='' spec='' patch='' test_line='' project='' with_deps=no legs_override='' timeout_secs='' prod_build=no trace=no dry_run=no sample_check_repo=''
+# Spec preflight imports HEAD:tests/e2e/fixtures/preview-seed.zip (no seed override). Use the legal medium fixture,
+# and verify the project and a cloneable transcript are in that ZIP, not just named in the companion manifest.
+# Generate the same staging command for the exact-head box and the offline dry-run; never source the manifest on the host.
+qa_sample_stage_cmd() {  # MODE REPO ENV CONFIG
+  printf "umask 077; python3 -I - %q %q %q %q %q <<'QA_SAMPLE_STAGE'\n" "$head" "$@"
+  cat <<'PY'
+import io, json, re, shutil, subprocess, sys, tempfile, zipfile
+from pathlib import Path
+
+head, mode, repo, env, config = sys.argv[1:]
+seed = 'tests/e2e/fixtures/preview-seed'
+
+def git(*args):
+    return subprocess.check_output(['git', '-C', repo, *args], stderr=subprocess.DEVNULL)
+
+def stage(env, config):
+    manifest = git('show', f'{head}:{seed}-projects.sh')
+    ids = re.findall(rb'(?m)^SEED_PROJECT_MEDIUM=([a-z0-9]{32})\r?$', manifest)
+    if len(ids) != 1:
+        return False
+    sample = ids[0].decode('ascii')
+    with zipfile.ZipFile(io.BytesIO(git('show', f'{head}:{seed}.zip'))) as snapshot:
+        with snapshot.open('projects/documents.jsonl') as rows:
+            present = any(row.get('_id') == sample for row in map(json.loads, rows))
+        with snapshot.open('transcripts/documents.jsonl') as rows:
+            ready = [row for row in map(json.loads, rows) if row.get('projectId') == sample and row.get('status') == 'ready']
+    if not present or not ready or not all(row.get('contentR2Key') for row in ready):
+        return False
+
+    desired = json.loads(config.read_text())
+    if not isinstance(desired, dict):
+        return False
+    desired['SAMPLE_PROJECT_ID'] = sample  # applied/read back by the existing disposable Convex config path
+    client = b'NEXT_PUBLIC_SAMPLE_PROJECT_ID=' + ids[0]
+    stale = rb'(?m)^[ \t]*(?:export[ \t]+)?(?:NEXT_PUBLIC_)?SAMPLE_PROJECT_ID[ \t]*\+?=[^\n]*(?:\n|$)'
+    text = re.sub(stale, b'', env.read_bytes())
+    env.chmod(0o600)
+    config.chmod(0o600)
+    env.write_bytes(text + (b'\n' if text and not text.endswith(b'\n') else b'') + client + b'\n')
+    config.write_text(json.dumps(desired) + '\n')
+    return (re.findall(stale, env.read_bytes()) == [client + b'\n']
+            and json.loads(config.read_text())['SAMPLE_PROJECT_ID'] == sample)
+
+try:
+    if mode == 'dry':
+        with tempfile.TemporaryDirectory(prefix='qa-sample-check-') as tmp:
+            staged_env = Path(tmp) / '.env.local.next'
+            staged_config = Path(tmp) / 'config.json'
+            shutil.copyfile(env, staged_env)
+            staged_config.write_bytes(Path(config).read_bytes() if config else b'{}')
+            match = stage(staged_env, staged_config)
+    else:
+        match = git('rev-parse', 'HEAD').decode().strip() == head and stage(Path(env), Path(config))
+except (OSError, ValueError, KeyError, AttributeError, TypeError, RuntimeError, zipfile.BadZipFile, subprocess.CalledProcessError):
+    match = False
+print('sample_ids match=' + ('y' if match else 'n'))
+sys.exit(0 if match else 2)
+QA_SAMPLE_STAGE
+PY
+}
 # Pool / disposable Convex reuse the capture lane's implementations (remote-qa-capture.sh): RTB_QA_POOL fenced lease,
 # remote-qa-convex.py create/destroy, push-file/run/fetch through the lease generation, quarantine on unresolved teardown.
 pool_lane='' pool_priority='' disposable_convex='' managed_dir='' pool_box='' auto_pool=
@@ -154,6 +216,7 @@ while [ $# -gt 0 ]; do
     --prod-build) prod_build=yes; shift;; # forwarded to local-repro-preflight.sh --prod-build (next build + next start, matches CI)
     --trace) trace=yes; shift;; # box-local playwright.config trace:'on'; trace.zip + video land in <out>/leg*/test-results
     --dry-run) dry_run=yes; shift;;
+    --check-sample-ids) sample_check_repo="${2:?--check-sample-ids needs a local app Git checkout}"; shift 2;;
     --pre-write-check) pre_write_check="${2:?--pre-write-check needs a command}"; shift 2;;
     --on-miss) llm_onmiss=--on-miss; onmiss_stock=1; shift;; # explicit capture-on-miss (also the DEFAULT; see header); never inferred
     --on-miss-exact) exact_manifest="${2:?--on-miss-exact needs an approval manifest}"; llm_onmiss=--on-miss; shift 2;; # M15 scoped exact-hash capture (see header)
@@ -169,7 +232,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [[ "$slot" =~ ^[1-8]$ && "$head" =~ ^[0-9a-f]{40}$ ]] && [ -n "$branch" ] && [ -n "$out" ] && [ -n "$spec" ] || {
-  echo 'spec --slot N --branch B --head SHA40 --spec tests/e2e/specs/...spec.ts --out DIR --allow-seed-replace [--mutate-patch F] [--test-line N] [--project P] [--with-deps] [--legs GREEN,RED,GREEN] [--env-file F] [--config JSON] [--ttl 150m] [--timeout SECS] [--prod-build] [--trace] [--dry-run] [--disposable-convex [--pre-write-check CMD] [--on-miss] [--stripe-test-env]] [--requires-modal --extra-secret SUPPORTING_DOCUMENT_RECEIPT_SECRET=generate]' >&2; exit 2; }
+  echo 'spec --slot N --branch B --head SHA40 --spec tests/e2e/specs/...spec.ts --out DIR --allow-seed-replace [--mutate-patch F] [--test-line N] [--project P] [--with-deps] [--legs GREEN,RED,GREEN] [--env-file F] [--config JSON] [--ttl 150m] [--timeout SECS] [--prod-build] [--trace] [--dry-run [--check-sample-ids REPO]] [--disposable-convex [--pre-write-check CMD] [--on-miss] [--stripe-test-env]] [--requires-modal --extra-secret SUPPORTING_DOCUMENT_RECEIPT_SECRET=generate]' >&2; exit 2; }
 [[ "$spec" =~ ^tests/e2e/(specs|qa-tests)/[A-Za-z0-9_./-]+\.spec\.ts$ && "$spec" != *..* ]] || { echo '--spec must be a repo-relative tests/e2e/specs/**.spec.ts or tests/e2e/qa-tests/**.spec.ts path' >&2; exit 2; }
 case "$spec" in tests/e2e/qa-tests/*|tests/e2e/specs/qa-tests/*) project=qa-tests;; esac
 if [ -n "$pool_lane" ]; then
@@ -305,6 +368,10 @@ fi
 # The relay lease is registered with the box TTL and must outlive the whole lane run (modal logs are read until the end).
 [ "$ttl_seconds" -ge 60 ] && [ "$ttl_seconds" -le 10800 ] || { echo '--ttl must be 60s..3h (QA Modal lease limit)' >&2; exit 2; }
 [ "$timeout_secs" -le $(( ttl_seconds - 600 )) ] || { echo '--timeout must leave 600s of --ttl for setup/teardown (lease covers the lane only within --ttl)' >&2; exit 2; }
+if [ -n "$sample_check_repo" ]; then
+  [ "$dry_run" = yes ] && [ "$disposable_convex" = 1 ] || { echo '--check-sample-ids requires --dry-run and --disposable-convex' >&2; exit 2; }
+  bash -c "$(qa_sample_stage_cmd dry "$sample_check_repo" "${env_file:-$base_env_default}" "$config")"
+fi
 if [ "$dry_run" = yes ]; then echo "DRY_RUN slot=$slot head=$head spec=$spec legs=$legs test_line=${test_line:-} project=${project:-} with_deps=$with_deps prod_build=$prod_build trace=$trace timeout_secs=$timeout_secs pool=${pool_lane:-0} priority=${pool_priority:-} disposable_convex=${disposable_convex:-0} pre_write_check=$([ -n "$pre_write_check" ] && echo yes || echo no) stripe_test_env=$([ -n "$stripe_test_env" ] && echo yes || echo no) llm_mode=$(llm_label)${llm_onmiss:+ onmiss_cap_usd=3 onmiss_fixture_bucket=heydonna-fixtures onmiss_scope=run+attempt onmiss_headroom=pre-lane app_data=ci-parity app_data_bucket=heydonna-uploads}${strict_manifest:+ strict_digest=$strict_digest strict_fixtures=3 strict_bucket=heydonna-qa forwarding=off product_pin=$product_pin app_data=$app_data app_data_bucket=$app_data_bucket m15_staged=$([ -n "$m15_draft" ] && echo yes || echo no)}${m15_overlay_sha:+ m15_overlay_sha256=$m15_overlay_sha m15_convex_flag=config m15_next_flags=spec_env m15_observer_gate=before_browser}"; exit 0; fi
 # Report unexpected failures without exposing command arguments or environment values.
 trap 'rc=$?; printf "QA_SPEC_ERROR: command failed at line %s (rc=%s)\n" "$LINENO" "$rc" >&2' ERR
@@ -443,7 +510,7 @@ fi
 # Deliberately NOT derived from --slot: --slot stays the run's assigned slot (box checkout name), the env file is only the
 # --disposable-convex base template. An explicit --env-file overrides. An unreadable default keeps the existing refusal (no fallback
 # to another slot's file); remote-qa-convex.py create still refuses a production base env before any request.
-env_file="${env_file:-$HOME/Downloads/projects/heydonna-app-3005/.env.local}"
+env_file="${env_file:-$base_env_default}"
 [ -r "$env_file" ] || { echo 'Env file unreadable' >&2; exit 2; }
 val() { grep -E "^$1=" "$env_file" | head -1 | cut -d= -f2- | tr -d "\"'" | awk '{print $1}'; }
 # Rule 65 (Rajiv D0AMF0XE6TS ts 1795316993.447349): heydonna-qa is retired as a QA app-data store. The DEFAULT route and every
@@ -773,6 +840,8 @@ if [ -n "$exact_manifest$strict_manifest" ]; then
     || { echo 'QA_SPEC_ENV_FAILED: could not record the controller-selected spec env' | tee -a "$out/lane.txt" >&2; exit 1; }
   echo "QA_SPEC_ENV names=$(printf '%s' "$spec_env" | tr ' ' '\n' | cut -d= -f1 | paste -sd, -) app_data=$app_data bucket=$app_data_bucket (controller-selected)" | tee -a "$out/lane.txt"
 fi
+# Stage the exact-head sample pair before installing/hashing the env. The runtime applies the server half only to the owned deployment.
+qa_rsh "$(qa_sample_stage_cmd box "$remote" "$remote/.env.local.next" /root/qa/config.json)" | tee -a "$out/lane.txt"
 qa_rsh "set -e; chmod 600 '$remote/.env.local.next' /root/qa/synth-private.pem; sed -i 's#^SYNTH_JWT_PRIVATE_KEY_PATH=.*#SYNTH_JWT_PRIVATE_KEY_PATH=/root/qa/synth-private.pem#' '$remote/.env.local.next'; sed -i '/^MODAL_API_KEY=/d; /^MODAL_KEY=/d; /^MODAL_SECRET=/d' '$remote/.env.local.next'; bash -n '$remote/.env.local.next'; mv '$remote/.env.local.next' '$remote/.env.local'; printf '%s\\t%s\\t%s\\n' \"\$(sha256sum <'$remote/.env.local' | cut -c1-64)\" \"\$(readlink -f '$remote/.env.local')\" \"\$(cat /var/lib/rtb/gen 2>/dev/null || echo -)\" >>/root/qa/.rtb-env-copies.tsv; chmod 600 /root/qa/.rtb-env-copies.tsv"
 # Ownership receipt (same function/contract as capture mode) BEFORE any Convex write: Modal prepare, runtime config apply,
 # preflight seed import and the spec's own setup all come later. The Modal lease was registered above, so v2 binds it.
