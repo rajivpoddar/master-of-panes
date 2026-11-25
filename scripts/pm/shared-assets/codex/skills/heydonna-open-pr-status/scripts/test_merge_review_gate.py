@@ -1480,6 +1480,34 @@ def t74_copied_gate_binds_only_the_attempt_whose_window_contains_it():
     merge.verify_ci_required_jobs(run, jobs, required)
 
 
+def t75_ci_label_verdict_with_skipped_literal_reads_uses_only_the_executed_attempt():
+    def rerun(conclusion="success", minutes=40):
+        run, jobs = ci_verifier_entry(8002, 2, conclusion, minutes)
+        jobs.append(_job("literal-test-reads", "skipped", (), run["id"], run["run_attempt"]))
+        return run, jobs
+
+    def proof(*entries):
+        install_run_set({"ci.yml": entries})
+        return merge.workflow_proof(make_pr(), "ci.yml", merge.WORKFLOWS["ci.yml"])
+
+    paid = ci_substantive_entry(8001, 1, "success", 20)
+    for verifier in (rerun(), rerun(minutes=20)):
+        assert proof(verifier, paid) == {"run": paid[0]["id"], "attempt": 1, "head": HEAD}
+
+    expect_refusal(lambda: proof(rerun()), "WORKFLOW_MISSING workflow=ci.yml")
+    wrong_head = ci_substantive_entry(8001, 1, "success", 20)
+    wrong_head[0]["head_sha"] = OTHER
+    expect_refusal(lambda: proof(rerun(), wrong_head), "WORKFLOW_MISSING workflow=ci.yml")
+    red = ci_substantive_entry(8001, 1, "failure", 20)
+    expect_refusal(lambda: proof(rerun(), red), "WORKFLOW_NOT_GREEN workflow=ci.yml")
+    expect_refusal(lambda: proof(rerun("failure"), paid), "VERIFIER_SHAPE_AMBIGUOUS")
+
+    ran_literal_reads = rerun()
+    literal = ran_literal_reads[1][-1]
+    literal.update(conclusion="success", steps=[_step("Generate literal test-read set", "success")])
+    expect_refusal(lambda: proof(ran_literal_reads, paid), "VERIFIER_SHAPE_AMBIGUOUS")
+
+
 def _tests():
     return sorted((k, v) for k, v in list(globals().items())
                   if len(k) > 1 and k[0] == "t" and k[1].isdigit() and callable(v))

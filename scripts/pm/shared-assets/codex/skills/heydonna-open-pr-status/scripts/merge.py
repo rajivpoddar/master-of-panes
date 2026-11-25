@@ -127,6 +127,7 @@ def verifier_job_names(workflow):
     return ({"classify-change-scope", "test", "ci-infra", "unit-tests-isolated", "unit-select", "python-contracts", "unit-prechecks", "typescript", "python-docx", "unit-gate", "theme-palette", "python-modal", "python", "unit-tests (${{ matrix.shard }})", "unit-cost-receipt", "ci-receipt-publish", "functional-selection-manifest"} if workflow == "ci.yml" else {"classify-change-scope", "teardown-pr-modal-apps", "e2e", "rerun-on-infra-failure", "e2e-log-capture"})
 
 
+CI_LITERAL_READS_JOB = "literal-test-reads"
 LEGACY_CI_VERIFIER_JOBS = {"test", "classify-change-scope", "python-contracts", "unit-tests", "unit-tests-isolated", "typescript", "python-docx", "python", "theme-palette", "ci-receipt-publish", "functional-selection-manifest", "ci-infra", "python-modal"}
 LEGACY_CI_WORKFLOW_BLOB = "eb973c3382478b845d1d0541f12f95ee4efc7d33"
 
@@ -161,7 +162,12 @@ def verifier_only_outcome(pr, workflow, run, jobs):
            or j.get("head_sha") != pr["head"]["sha"] or j.get("status") != "completed"
            or j.get("conclusion") not in ((outcome,) if j.get("name") == aggregate else ("success", "skipped")) for j in jobs): return None
     by_name = {j["name"]: j for j in jobs}
-    if (set(by_name) != verifier_job_names(workflow)
+    expected = verifier_job_names(workflow)
+    # The label-verdict rerun also lists literal-test-reads. Like the rest
+    # of the paid roster it must be skipped with no steps (checked below).
+    green_ci_rerun = (workflow == "ci.yml" and outcome == "success"
+                      and set(by_name) == expected | {CI_LITERAL_READS_JOB})
+    if (set(by_name) != expected and not green_ci_rerun
             and not (workflow == "ci.yml" and legacy_ci_roster_authenticated(pr, run, jobs))): return None
     scope=by_name.get(CLASSIFIER_JOB_NAME,{})
     scope_step="Classify paid CI scope" if workflow == "ci.yml" else "Classify paid E2E scope"
@@ -395,7 +401,9 @@ def workflow_proof(pr, workflow, names):
             continue
         verifier = verifier_only_outcome(pr, workflow, run, jobs)
         if verifier:
-            if verifier == "success" and workflow == "ci.yml":
+            if (verifier == "success" and workflow == "ci.yml"
+                    and not any(j["name"] == CI_LITERAL_READS_JOB for j in jobs)):
+                # The new label-verdict shape is a sibling, not an exemption producer.
                 scope = next(j for j in jobs if j.get("name") == CLASSIFIER_JOB_NAME)
                 exempt = classifier_exemption(pr, workflow, run, scope)
                 if exempt is not None:
