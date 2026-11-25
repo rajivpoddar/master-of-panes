@@ -210,6 +210,68 @@ def test_bindings_require_enabled_known_accounts(tmp_path):
         burn.bindings('claude-haiku-5-5', config)
 
 
+def _write_creds(tmp_path, creds):
+    for i, cred in enumerate(creds):
+        (tmp_path / f'{i}.json').write_text(json.dumps(cred))
+
+
+def test_force_model_prefix_skips_prefixed_credentials_and_binds_the_rest(tmp_path):
+    """25 Nov ultra route: force-model-prefix:true must not blank every pool (it made terra/luna burn_refused)."""
+    config = {'auth-dir': str(tmp_path), 'force-model-prefix': True}
+    _write_creds(tmp_path, [
+        {'type': 'claude', 'email': 'plain@x', 'disabled': False},
+        {'type': 'claude', 'email': 'ultra@x', 'prefix': 'ultra', 'disabled': False},
+        {'type': 'codex', 'account_id': 'acct-1', 'disabled': False},
+    ])
+    assert burn.bindings('claude-opus-5-5', config) == ('claude', ['plain@x'])
+    assert burn.bindings('gpt-6.1-terra', config) == ('codex', ['acct-1'])
+    assert burn.bindings('gpt-6-luna', config) == ('codex', ['acct-1'])
+
+
+def test_force_model_prefix_with_only_prefixed_credentials_fails_closed(tmp_path):
+    config = {'auth-dir': str(tmp_path), 'force-model-prefix': True}
+    _write_creds(tmp_path, [{'type': 'claude', 'email': 'ultra@x', 'prefix': 'ultra', 'disabled': False}])
+    with pytest.raises(ValueError, match='no_accounts'):
+        burn.bindings('claude-opus-5-5', config)
+
+
+@pytest.mark.parametrize('flag', [False, None])
+def test_prefixed_credential_without_force_model_prefix_stays_unknown_binding(tmp_path, flag):
+    config = {'auth-dir': str(tmp_path), 'force-model-prefix': flag}
+    _write_creds(tmp_path, [
+        {'type': 'claude', 'email': 'plain@x', 'disabled': False},
+        {'type': 'claude', 'email': 'ultra@x', 'prefix': 'ultra', 'disabled': False},
+    ])
+    with pytest.raises(ValueError, match='unknown_binding'):
+        burn.bindings('claude-opus-5-5', config)
+
+
+@pytest.mark.parametrize('flag', [True, False])
+@pytest.mark.parametrize('model', ['not-a-model', 'ultra/claude-opus-5-5', 'deepseek-direct/deepseek-v4.1-flash'])
+def test_model_without_a_pool_is_unknown_route_with_or_without_force_model_prefix(tmp_path, flag, model):
+    with pytest.raises(ValueError, match='unknown_route'):
+        burn.bindings(model, {'auth-dir': str(tmp_path), 'force-model-prefix': flag})
+
+
+def test_codex_model_is_not_burn_refused_under_force_model_prefix(tmp_path):
+    """The gate (proxy-agent.sh -> shadow) used to print would_refuse/rc 75 for terra and luna on unknown_route."""
+    config = {'auth-dir': str(tmp_path), 'force-model-prefix': True}
+    _write_creds(tmp_path, [
+        {'type': 'codex', 'account_id': 'a', 'disabled': False},
+        {'type': 'claude', 'email': 'ultra@x', 'prefix': 'ultra', 'disabled': False},
+    ])
+    rows = {'codex:a:weekly': {'ts': 10000, 'pct': 10, 'reset': 50000}}
+    with mock.patch.object(burn, 'read_config', return_value=config), \
+         mock.patch.object(burn, 'read_latest', return_value=rows), \
+         mock.patch.object(burn, 'load_horizons', return_value={}), \
+         mock.patch.object(burn, 'burn_for', return_value=0):
+        for model in ('gpt-6.1-terra', 'gpt-6-luna'):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                assert burn.shadow(model, 'hd-builder', '', 'unused', 'unused', 10000) == 'allow'
+            assert 'unknown_route' not in out.getvalue()
+
+
 def test_shadow_pool_decision_and_exempt_override():
     config = {'auth-dir': '/not-used'}
     rows = {'codex:a:weekly': {'ts': 10000, 'pct': 10, 'reset': 50000},

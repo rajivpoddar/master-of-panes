@@ -332,8 +332,11 @@ def model_pool(model):
 
 def bindings(model, config):
     pool = model_pool(model)
-    if not pool or config.get('force-model-prefix'):
+    if not pool:
         raise ValueError('unknown_route')
+    # force-model-prefix: true (ultra route, 25 Nov): a bare model id is served ONLY by credentials without a prefix, so a
+    # prefixed credential (dev@scribie `ultra`) is not part of this pool. Without the flag a prefixed credential stays ambiguous.
+    forced_prefix = bool(config.get('force-model-prefix'))
     # A configured alternate provider alias can make model->account ambiguous.
     for provider, entries in (config.get('oauth-model-alias') or {}).items():
         for entry in entries or []:
@@ -356,7 +359,11 @@ def bindings(model, config):
         typ = {'xai': 'grok'}.get(d.get('type'), d.get('type'))
         if typ != pool or d.get('disabled') is True:
             continue
-        if d.get('disabled') not in (True, False, None) or d.get('prefix'):
+        if d.get('disabled') not in (True, False, None):
+            raise ValueError('unknown_binding')
+        if d.get('prefix'):
+            if forced_prefix:
+                continue
             raise ValueError('unknown_binding')
         ident = d.get('account_id') if pool == 'codex' else d.get('email')
         if not isinstance(ident, str) or not ident.strip():
