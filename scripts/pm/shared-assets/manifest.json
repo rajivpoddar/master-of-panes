@@ -33,7 +33,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-planning-agents",
-      "sha256": "938fe54853186f4086be0958dce774e3fb28a8ecfdae504f7b4566e29ba26a7e",
+      "sha256": "58dff45a2b758499e02ed6049e41ce4a863e58c5ce931fcfb407c6ed584f3149",
       "source_path": "claude/agents/plan-agent.md"
     },
     {
@@ -375,7 +375,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-buddhi",
-      "sha256": "ce201bf6a42c6854b9200c529dda694995d87c285ab6ad32895d9ba82b225f10",
+      "sha256": "f012f7947b0b45d47709a200bca0eb08957016abd3ee3b26dad38efbdadf4319",
       "source_path": "claude/rules/20-buddhi-pm.md"
     },
     {
@@ -384,7 +384,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-review-cap-policy",
-      "sha256": "3b3a704d1093e4ccd0812a87582ab97dd3a84b1d9ae3e06f1e137cd6bc594996",
+      "sha256": "0834180c5d56ad48f1fc9d98687c3c9defd96b53016eab5a3224dbf0b9396944",
       "source_path": "claude/rules/99-pm-fable-review-cap.md"
     },
     {
@@ -1574,7 +1574,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "3ff78345d54d36c66304c6eab51ea183e22c3c10395af153eff504287de5da9d",
+      "sha256": "46b2f722e20510e09b683ceff8be1ab0249e71c44fc5a49dc5904536d33f5cf4",
       "source_path": "claude/skills/hourly-report-processing/SKILL.md"
     },
     {
@@ -1986,7 +1986,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-heydonna-product-rules",
-      "sha256": "6f1dd1efd58f8b97c4f9839456de43b731d7f708ca9ae2308dcb1e6c27234af6",
+      "sha256": "fc0a735a31f0cde3d24ef2c0dbed563eebd7dc1f2a65e8566a2660879f7c2c59",
       "source_path": "claude/user-rules/33-heydonna-ui-product-rules.md"
     },
     {
