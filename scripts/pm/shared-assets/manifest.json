@@ -451,12 +451,21 @@
       "source_path": "claude/scripts/ci/pm-admit-cap.py"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/ci/pm-admit-ci-inputs.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-ci-admission",
+      "sha256": "023aaa5bbb557556e18dafbde8970a00cd3c408640d6220a5168d455472669cb",
+      "source_path": "claude/scripts/ci/pm-admit-ci-inputs.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/.claude/scripts/ci/pm-admit-ci.sh",
       "dependencies": [],
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-ci-admission",
-      "sha256": "7c60fa4939ddbc0f789a2881aeafe940750b8dd5515125e891ea4714f83c3161",
+      "sha256": "98dfa66285caef593f4600ca4b298b5a074c5e16ad690ba605b0a97e88c48fff",
       "source_path": "claude/scripts/ci/pm-admit-ci.sh"
     },
     {
@@ -474,7 +483,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-ci-admission",
-      "sha256": "bd5454530c253be6f39de8d2ee11f0847abbf8ba1534dc5b805610356322157f",
+      "sha256": "56bf53546da2ae7498e8483b86886a269a81eacb3586f525cb8ee5237d5965cb",
       "source_path": "claude/scripts/ci/tests/test-pm-admit-ci.sh"
     },
     {
@@ -2310,7 +2319,7 @@
         "path": "~/.codex/skills/codex-stdio-send-message/.git"
       }
     ],
-    "selected_count": 253,
+    "selected_count": 254,
     "source_roots": [
       "~/.claude/dev-slot-rules/22-slot-pushya.md",
       "~/.claude/dev-slot-rules/22-slot-revati.md",

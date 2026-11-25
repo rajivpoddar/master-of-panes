@@ -393,8 +393,12 @@ plan_main_merge() {
 # main M for minutes to hours while main keeps moving (6 admissions refused on 2026-11-25). A test merge whose parents are NOT exactly {head, overlap-checked
 # main} is still ADMITTED when ALL hold, else it REFUSEs with the overlap list: (a) the PR is not CONFLICTING; (b) the PR's changed files (merge-base..head, taken
 # against BOTH the overlap-checked main and M, unioned) do not overlap the files main changed since M (M..overlap-checked main); (c) one parent is exactly the
-# reviewed head and the other, M, is a verified ancestor of the overlap-checked main. The ancestry and file reads are local git reads under the same deadline
-# (no new GitHub read). The rule that admitted the PR is printed as MERGE_REF_RULE and, for the lagging rule, appended to pm-admit-skip.log.
+# reviewed head and the other, M, is a verified ancestor of the overlap-checked main; (d) main changed none of the trusted shared CI inputs that decide WHAT
+# runs (the .github tree, the scripts a pull_request workflow executes and the selector/classifier rules and E2E selection config beside them) since M,
+# because a changed selector means the PR's CI ran the OLD selection even when no PR file overlaps (CTO REVISE of MoP 9518bf9d, same thread, ts 1795586027.634509;
+# e.g. 73499dfb..6ee67558 changed scripts/ci/change_scope.py). The inputs are DISCOVERED by pm-admit-ci-inputs.py from the workflows' own references at M and
+# at main (rule 60: no hand-kept list), and an unreadable discovery is UNKNOWN and refuses. The ancestry, file and input reads are local git reads under the
+# same deadline (no new GitHub read). The rule that admitted the PR is printed as MERGE_REF_RULE and, for the lagging rule, appended to pm-admit-skip.log.
 stale_refuse() {
   echo "REFUSE stale_merge_ref #$PR: $1. Admission needs the PR's test merge built on the overlap-checked main $OVERLAP_MAIN_SHA, or on an older ancestor of it whose later changes touch none of this PR's files, and made NO change to the PR (no PR state change, no main merge, no push). Re-run admission; if the overlap list above is non-empty, merge main into the PR branch (non-force); if it keeps refusing, report it to the CTO"
   exit 3
@@ -415,9 +419,9 @@ lag_refuse() {
   stale_refuse "test merge $MERGE_SHA has parents [$STALE_PARENTS] but must be exactly the reviewed head and the overlap-checked main [$STALE_WANTED], so GitHub has not rebuilt it on that main; lagging-ref rule not met: $1"
 }
 # lagging_ref_verify: called only when the merge commit's parents are not exactly {head, overlap-checked main}. Returns 0 (sets MERGE_REF_RULE_LINE and
-# MERGE_REF_LAGGING=1) only when conditions (a)-(c) above hold; every other outcome, including any unreadable or late git read, exits through stale_refuse.
+# MERGE_REF_LAGGING=1) only when conditions (a)-(d) above hold; every other outcome, including any unreadable or late git read, exits through stale_refuse.
 lagging_ref_verify() {
-  local p lagp="" nh=0 main_base lag_base d_main d_lag d_since pr_files main_files overlap n_pr=0 n_main=0 n_overlap=0 list
+  local p lagp="" nh=0 main_base lag_base d_main d_lag d_since pr_files main_files overlap n_pr=0 n_main=0 n_overlap=0 list ci_changed n_ci
   [ "$MERGEABLE" != CONFLICTING ] || lag_refuse "the PR conflicts with main"
   set -- $STALE_PARENTS
   [ "$#" -eq 2 ] || lag_refuse "the test merge has $# parent(s), not exactly two"
@@ -447,8 +451,18 @@ lagging_ref_verify() {
     [ "$n_overlap" -le 20 ] || list="$list ... (+$((n_overlap - 20)) more)"
     lag_refuse "overlap: the PR changes $n_overlap file(s) that main also changed since that parent $lagp, so CI did not run against main's version of them: $list"
   fi
+  # (d) A changed trusted CI input is refused even with zero file overlap: the PR's CI ran the selection at M, not main's. The helper prints the changed
+  # input paths (empty when none) and exits 1 on any unreadable git state; a late or failed run is UNKNOWN through stale_read.
+  ci_changed=$(stale_read python3 -I "$SCRIPT_DIR/pm-admit-ci-inputs.py" --repo "$MAIN_REPO" --base "$lagp" --main "$OVERLAP_MAIN_SHA") || lag_refuse "the trusted shared CI inputs main changed since $lagp are $STALE_UNKNOWN"
+  ci_changed=$(printf '%s\n' "$ci_changed" | sed '/^$/d')
+  if [ -n "$ci_changed" ]; then
+    n_ci=$(printf '%s\n' "$ci_changed" | wc -l | tr -d ' ')
+    list=$(printf '%s\n' "$ci_changed" | sed -n '1,20p' | tr '\n' ' ' | sed 's/ $//')
+    [ "$n_ci" -le 20 ] || list="$list ... (+$((n_ci - 20)) more)"
+    lag_refuse "trusted CI input changed: main changed $n_ci shared CI input file(s) that decide what runs since that parent $lagp, so CI ran the older selection even though no PR file overlaps: $list"
+  fi
   MERGE_REF_LAGGING=1
-  MERGE_REF_RULE_LINE="MERGE_REF_RULE rule=lagging_ref_no_overlap pr=$PR head=$HEAD merge=$MERGE_SHA main_parent=$lagp main=$OVERLAP_MAIN_SHA pr_files=$n_pr main_files_since_parent=$n_main overlap=0"
+  MERGE_REF_RULE_LINE="MERGE_REF_RULE rule=lagging_ref_no_overlap pr=$PR head=$HEAD merge=$MERGE_SHA main_parent=$lagp main=$OVERLAP_MAIN_SHA pr_files=$n_pr main_files_since_parent=$n_main overlap=0 ci_inputs_changed=0"
 }
 merge_ref_guard() {
   OVERLAP_MAIN_SHA="$MAIN_SHA"
