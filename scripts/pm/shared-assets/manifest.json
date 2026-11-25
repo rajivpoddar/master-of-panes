@@ -987,7 +987,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "ada0d48d7f65c4bc9e0e2d9d0f7895c6eca02449a083c09b5c8cfe9108206ec0",
+      "sha256": "1877721d7533989618bc805e8274f6e68aaff0939c5bc6c4ffb4f1023d195f29",
       "source_path": "claude/scripts/proxy-burn-shadow.py"
     },
     {
