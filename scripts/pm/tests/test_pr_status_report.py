@@ -43,7 +43,7 @@ def test_mixed_fixture():
     prs, checks = fixture()
     obligations = [dict(pr=n, target_type='github_pr', target_id=str(n), owner='repair-agent', suppress_until='2026-10-27T12:00:00Z', evidence_json=json.dumps({'head': 'head'})) for n in (1, 2, 4, 5)]
     lines, ages = report.render(prs, checks, [dict(slot=2, pr=1, issue=123, occupied=True, head_sha='head')], obligations,
-                               {'6': {'gate': 'dual-green/merge ask', 'since': '2026-10-27T05:00:00Z'}}, NOW)
+                               {'6': {'head': 'head', 'gate': 'dual-green/merge ask', 'since': '2026-10-27T05:00:00Z'}}, NOW)
     assert len(lines) == 8
     for line, expected in zip(lines, ['draft-rework', '12b', 'CI running', 'CI red', 'E2E red',
                                      'dual-green/merge ask', 'PARKED', 'ci-head stale']):
@@ -78,9 +78,13 @@ def test_collect_renders_each_process_bound_proxy_and_latest_12b(tmp_path, monke
     for pr, (role, stage) in zip(selected, cases):
         number = pr['number']
         lane = f'proxy-{role}-20261027T090000Z-{number}'
-        processes.append(f'{number + 100} /usr/local/bin/claude -p --name {lane} --model auto')
-        filename = f'{role}-{lane}-{number}-20261027T090001Z.log' if role == 'hd-proof-qa' else f'{lane}.log'
-        (tmp_path / filename).write_text(launch_log(lane, number))
+        pid = number + 100
+        processes.append(f'{pid} /usr/local/bin/claude -p --name {lane} --model auto')
+        lane_dir = tmp_path / lane
+        lane_dir.mkdir()
+        (lane_dir / 'manifest.json').write_text(json.dumps(dict(
+            name=lane, pid=pid, state='running', type=role, pr=number,
+            started_at='2026-10-27T09:00:00Z', running_at=NOW.isoformat())))
         pr.update(headRefOid=head, isDraft=False, labels=[], comments=[
             {'body': f'## PM 12b: REVISE at {head}', 'createdAt': '2026-10-27T09:10:00Z'},
             {'body': f'PM 12b: PASS at {head}', 'createdAt': '2026-10-27T08:10:00Z'},
@@ -92,8 +96,10 @@ def test_collect_renders_each_process_bound_proxy_and_latest_12b(tmp_path, monke
                     'suppress_until, kind, evidence_json, status)')
     monkeypatch.setattr(report, 'DB', db)
     monkeypatch.setattr(report, 'HOME', tmp_path)
-    monkeypatch.setattr(report, 'PROXY_LOG_DIR', tmp_path)
-    monkeypatch.setattr(report, 'PROXY_RUN_DIR', tmp_path / 'runs')
+    monkeypatch.setattr(report, 'PROXY_RUN_DIR', tmp_path)
+    commands = dict(row.split(maxsplit=1) for row in processes)
+    monkeypatch.setattr(report, 'process_identity',
+                        lambda pid: ('9', NOW - dt.timedelta(minutes=30), commands[pid]))
     monkeypatch.setattr(report.urllib.request, 'urlopen', lambda *a, **kw: io.StringIO('{"slots": []}'))
     monkeypatch.setattr(report, 'gh', lambda *args: [[{'number': n} for n in by_pr]]
                         if args[0] == 'api' else by_pr[int(args[2])][0])
@@ -120,8 +126,10 @@ def test_proxy_logs_and_completed_markers_cannot_claim_without_live_pr_binding(t
     (tmp_path / f'{live}.log').write_text(launch_log(live, 1))
     (tmp_path / f'hd-builder-{live}-3-20261027T093000Z.log').write_text(
         launch_log(live, 'UNKNOWN', '09:30:00') + 'Later output references PR:1\n')
-    with patch.object(report.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0,
-            f'10 /bin/sh -c claude -p --name {dead}\n11 /bin/claude -p --name {live}\n', '')):
+    with (patch.object(report.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0,
+                        f'10 /bin/sh -c claude -p --name {dead}\n11 /bin/claude -p --name {live}\n', '')),
+          patch.object(report, 'process_identity', side_effect=[
+              ('9', NOW, f'/bin/claude -p --name {live}'), ('1', NOW, '/bin/bash other.sh')])):
         proxies = report.live_proxy_lanes(tmp_path)
     assert proxies == {}
     prs, checks = fixture()
@@ -172,7 +180,8 @@ def test_real_sender_callback_only_hourly_alert_parent():
 
 def test_pending_ci_lane_waits_without_claiming_movement():
     prs, checks = fixture()
-    for prior, expected in [({}, 'WAITING'), ({'3': {'gate': 'CI running', 'since': '2026-10-27T05:00:00Z'}}, 'STUCK')]:
+    for prior, expected in [({}, 'WAITING'), ({'3': {'head': 'head', 'gate': 'CI running',
+                                                    'since': '2026-10-27T05:00:00Z'}}, 'STUCK')]:
         lines, _ = report.render([prs[2]], checks, [], [], prior, NOW)
         assert 'CI (admitted head)' in lines[0]
         assert expected in lines[0]
@@ -475,7 +484,8 @@ def test_delta_partitions_generated_prs_and_retains_every_baseline_row(count):
 @pytest.mark.parametrize('case,shown', [
     ('dual-green', True), ('red', True), ('red-owned', False), ('cap', True),
     ('stuck', True), ('stuck-owned', False), ('draft-idle', True),
-    ('draft-idle-owned', False), ('draft-recent-comment', False), ('waiting', False),
+    ('draft-idle-owned', False), ('draft-recent-comment', True), ('unowned-admission', True),
+    ('waiting', False), ('parked', False),
 ])
 def test_unchanged_action_thresholds(case, shown):
     head = 'a' * 40
@@ -494,16 +504,36 @@ def test_unchanged_action_thresholds(case, shown):
         pr['tip_at'] = (NOW - dt.timedelta(hours=25)).isoformat()
     if case == 'draft-recent-comment':
         pr['comments'] = [{'created_at': NOW.isoformat(), 'body': 'Working on this'}]
-    _, prior = report.render([pr], {121: runs}, [], [], {}, NOW)
+    if case == 'waiting':
+        pr['labels'] = [{'name': f'ci-head:{head}'}]
+        runs = [dict(head_sha=head, id=1, name='test', status='in_progress')]
+    obligations = [dict(pr=pr['number'], kind='merge_hold', id=1)] if case == 'parked' else []
+    checks = {pr['number']: runs}
+    _, prior = report.render([pr], checks, [], obligations, {}, NOW)
     later = NOW + dt.timedelta(hours=5 if case.startswith('stuck') else 1)
-    lines, _ = report.render([pr], {121: runs}, [], [], prior, later)
-    assert lines[0].startswith('#121 ') is shown
-    assert (lines == ['1 unchanged and owned']) is (not shown)
+    lines, _ = report.render([pr], checks, [], obligations, prior, later)
+    assert lines[0].startswith(f'#{pr["number"]} ') is shown
+    assert (lines == ['1 unchanged and owned']) is (not shown and 'live_proxy' in pr)
+    if case == 'unowned-admission':
+        assert 'unowned' in lines[0] and 'review/admit exact head' in lines[0]
+
+
+@pytest.mark.parametrize('move', ['none', 'head', 'gate', 'both'])
+def test_gate_age_survives_only_the_same_head_and_gate(move):
+    pr = dict(number=121, headRefOid='a' * 40, isDraft=False, labels=[], comments=[])
+    _, prior = report.render([pr], {}, [], [], {}, NOW)
+    if move in ('head', 'both'):
+        pr['headRefOid'] = 'b' * 40
+    if move in ('gate', 'both'):
+        pr['labels'] = [{'name': f'ci-head:{pr["headRefOid"]}'}]
+    later = NOW + dt.timedelta(hours=5)
+    with patch.object(report, 'pending_ci', return_value=False):
+        lines, ages = report.render([pr], {}, [], [], prior, later)
+    assert ages[str(pr['number'])]['since'] == (NOW if move == 'none' else later).isoformat()
+    assert lines[0].endswith('· STUCK') is (move == 'none')
 
 
 def test_named_lanes_require_a_live_process_and_explicit_pr(tmp_path):
-    log_dir = tmp_path / 'logs'
-    log_dir.mkdir()
     names = ['proxy-rw-short', 'px-builder.custom', 'proxy-dead', 'proxy-1234']
     for pid, name in enumerate(names, 10):
         lane = tmp_path / name
@@ -511,15 +541,57 @@ def test_named_lanes_require_a_live_process_and_explicit_pr(tmp_path):
         brief = lane / 'brief.md'
         brief.write_text('PR: #7234\n' if pid == 11 else 'ISSUE: 7234\n')
         manifest = dict(name=name, pid=pid, type='hd-builder', state='running',
-                        started_at=NOW.isoformat(), brief=str(brief))
+                        started_at=NOW.isoformat(), running_at=NOW.isoformat(), brief=str(brief))
         if pid in (10, 12):
             manifest['pr'] = '7233' if pid == 10 else '7235'
         (lane / 'manifest.json').write_text(json.dumps(manifest))
-    process_rows = '\n'.join(f'{pid} /bin/claude -p --name {names[pid-10]} --model test' for pid in (10, 11, 13))
+    commands = {str(pid): f'/bin/claude -p --name {names[pid-10]} --model test' for pid in (10, 11, 13)}
+    process_rows = '\n'.join(f'{pid} {command}' for pid, command in commands.items())
     process_rows += f'\n12 /bin/sh -c claude -p --name {names[2]}\n'
-    with patch.object(report.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, process_rows)):
-        owners = report.live_proxy_lanes(log_dir, tmp_path)
+    with (patch.object(report.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, process_rows)),
+          patch.object(report, 'process_identity', side_effect=lambda pid: ('9', NOW, commands.get(pid, 'bash')))):
+        owners = report.live_proxy_lanes(tmp_path)
     assert owners == {7233: (names[0], 'build/rework'), 7234: (names[1], 'build/rework')}
+
+
+@pytest.mark.parametrize('case,owns', [
+    ('reused-name', False), ('recycled-pid', False), ('legacy-live', True),
+    ('continuation', True), ('unknown-pr', False),
+])
+def test_launch_header_fallback_requires_live_process_and_runner_binding(tmp_path, case, owns):
+    name, pid, pr = 'proxy-my-rework', '20', 123
+    log = tmp_path / f'hd-builder-{name}-11-20261027T090000Z.log'
+    log.write_text(launch_log(name, 'UNKNOWN' if case == 'unknown-pr' else pr)
+                   + 'Later output references PR:123\n')
+    if case in ('continuation', 'recycled-pid'):
+        lane_dir = tmp_path / name
+        lane_dir.mkdir()
+        (lane_dir / 'manifest.json').write_text(json.dumps(dict(
+            name=name, pid=int(pid) if case == 'recycled-pid' else 19, pr=pr,
+            state='running', started_at='2026-10-27T09:00:00Z', running_at='2026-10-27T09:00:01Z',
+            out=str(log.with_suffix('.md')))))
+    command = f'/bin/claude -p --name {name}' + (' --resume test-session' if case == 'continuation' else '')
+    file = log.stat()
+    descriptor = f'p{pid}\nf2\ntREG\nD{file.st_dev:#x}\ni{file.st_ino}\nn{log}\n'
+
+    def run(args, **_):
+        executable = args[0]
+        if executable == 'pgrep':
+            stdout = f'{pid} {command}'
+        elif executable == 'ps':
+            if args[args.index('-p') + 1] == pid:
+                stdout = f'14 Tue Oct 27 09:30:01 2026 {command}'
+            else:
+                start = '09:30:00' if case == 'recycled-pid' else '09:00:00'
+                stdout = f'1 Tue Oct 27 {start} 2026 bash /tmp/proxy-agent-job.abc123/run.sh'
+        else:
+            assert executable == 'lsof'
+            stdout = f'p{pid}\nf2\ntCHR\nn/dev/null\n' if case == 'reused-name' else descriptor
+        return subprocess.CompletedProcess(args, 0, stdout)
+
+    with patch.object(report.subprocess, 'run', side_effect=run):
+        owners = report.live_proxy_lanes(tmp_path)
+    assert owners == ({pr: (name, 'build/rework')} if owns else {})
 
 
 @pytest.mark.parametrize('initial,retry,expected_calls,field', [

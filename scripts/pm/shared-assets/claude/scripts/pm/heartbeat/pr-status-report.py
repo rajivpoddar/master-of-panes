@@ -2,7 +2,7 @@
 """Deterministic hourly per-PR report; no GitHub or ownership mutations.
 
 Posting is called by slack-send only after an Alerts Hourly parent succeeds.
-Gate ages are persisted independently of PR head/owner changes.
+Gate ages are persisted for the same PR head and gate, independently of ownership.
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -26,7 +27,6 @@ DB = Path(os.environ.get('PM_OPS_DB', str(
     HOME / '.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db')))
 REPO = 'heydonna-app/heydonna-app'
 RED = {'FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'}
-PROXY_LOG_DIR = Path('/tmp/proxy-agent')
 PROXY_RUN_DIR = Path(os.environ.get('PROXY_AGENT_RUN_STATE_DIR', str(HOME / '.local/state/proxy-agent-runs')))
 PROXY_PROCESS = re.compile(
     r'^\s*(\d+)\s+(?:\S*/)?claude\s+-p\s+--name\s+'
@@ -87,7 +87,43 @@ def fetch_checks(head, retry_delay=3):
     return None
 
 
-def lane_binding(pid, name, log_dir, run_dir):
+def process_identity(pid):
+    row = subprocess.run(['ps', '-ww', '-p', pid, '-o', 'ppid=,lstart=,command='],
+                         capture_output=True, text=True, timeout=5, check=True,
+                         env={**os.environ, 'LC_ALL': 'C', 'TZ': 'UTC'}).stdout.split(maxsplit=6)
+    return (row[0], dt.datetime.strptime(' '.join(row[1:6]), '%a %b %d %H:%M:%S %Y')
+            .replace(tzinfo=dt.timezone.utc), row[6])
+
+
+def live_launch_header(pid, name, identity):
+    # The runner redirects fd 2 to the same launch log for the initial child
+    # and every continuation. Name-matched files cannot prove that relationship.
+    parent, started, _ = identity
+    _, runner_started, runner = process_identity(parent)
+    if not re.fullmatch(r'(?:\S*/)?bash\s+.+/proxy-agent-job\.[^/\s]+/run\.sh', runner):
+        return None
+    opened = subprocess.run(['lsof', '-nP', '-a', '-p', pid, '-d', '2', '-FftDin'],
+                            capture_output=True, text=True, timeout=5, check=True).stdout
+    fields = {line[0]: line[1:] for line in opened.splitlines() if line}
+    if fields.get('p') != pid or fields.get('f') != '2' or fields.get('t') != 'REG':
+        return None
+    path = Path(fields['n'])
+    if not path.is_absolute() or path.suffix != '.log':
+        return None
+    with open(path, encoding='utf-8', errors='replace',
+              opener=lambda p, flags: os.open(p, flags | os.O_NONBLOCK)) as handle:
+        file = os.fstat(handle.fileno())
+        if (not stat.S_ISREG(file.st_mode) or
+                (file.st_dev, file.st_ino) != (int(fields['D'], 16), int(fields['i']))):
+            return None
+        launch = PROXY_LAUNCH.match(handle.readline(2048))
+    if (launch and launch[2] == name and launch[3] != 'UNKNOWN'
+            and runner_started <= stamp(launch[1]) <= started and process_identity(pid) == identity):
+        return launch, path
+    return None
+
+
+def lane_binding(pid, name, run_dir):
     base = run_dir / name
     try:
         manifest = json.loads((base / 'manifest.json').read_text())
@@ -97,8 +133,22 @@ def lane_binding(pid, name, log_dir, run_dir):
         manifest = {}
     if manifest and manifest.get('state') not in ('queued', 'running'):
         return None  # never resurrect a completed manifest from the logs
-    if str(manifest.get('pid')) == pid:
-        pr = str(manifest.get('pr', ''))
+    try:
+        identity = process_identity(pid)
+        _, started, command = identity
+        process = PROXY_PROCESS.match(f'{pid} {command}')
+        if not process or process.groups() != (pid, name):
+            return None
+        manifest_started = stamp(manifest.get('started_at'))
+        confirmed = stamp(manifest.get('running_at'))
+        if (str(manifest.get('pid')) == pid and manifest_started and confirmed
+                and manifest_started.replace(microsecond=0) <= started <= confirmed):
+            pr = str(manifest.get('pr', ''))
+        else:
+            pr = None
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return None
+    if pr is not None:
         if not re.fullmatch(r'[1-9]\d*', pr):
             for path in (base / 'active/original-brief.txt', Path(manifest.get('brief') or '/dev/null')):
                 try:
@@ -112,32 +162,26 @@ def lane_binding(pid, name, log_dir, run_dir):
         if re.fullmatch(r'[1-9]\d*', pr):
             return manifest.get('started_at', ''), int(pr), manifest.get('type', '')
 
-    # Older lanes and same-name continuation PIDs can still be tied to the
-    # launch header, never to an incidental PR mention or digits in the name.
+    try:
+        bound = live_launch_header(pid, name, identity)
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError, KeyError):
+        return None
+    if not bound:
+        return None
+    launch, path = bound
+    role, separator, _ = path.name.partition(f'-{name}-')
+    role = role if separator else ''
+    if path.name == f'{name}.log':
+        role = re.sub(r'-\d{8}T\d{6}Z-\d+$', '', name.removeprefix('proxy-'))
     out = manifest.get('out')
-    paths = ([Path(out).with_suffix('.log')] if out else
-             [log_dir / f'{name}.log', *log_dir.glob(f'*-{name}-*-????????T??????Z.log')])
-    launches = []
-    for path in paths:
-        try:
-            with path.open(encoding='utf-8', errors='replace') as handle:
-                launch = PROXY_LAUNCH.match(handle.readline(2048))
-        except OSError:
-            continue
-        if launch and launch[2] == name:
-            role = manifest.get('type') or path.name.partition(f'-{name}-')[0]
-            if path.name == f'{name}.log':
-                role = re.sub(r'-\d{8}T\d{6}Z-\d+$', '', name.removeprefix('proxy-'))
-            launches.append((launch[1], launch[3], role))
-    if launches:
-        started_at, pr, role = max(launches)
-        if pr != 'UNKNOWN':
-            return started_at, int(pr), role
-    return None
+    if (isinstance(out, str) and Path(out).name.removesuffix('.md') + '.log' == path.name
+            and manifest_started and manifest_started.replace(microsecond=0) <= stamp(launch[1])):
+        role = manifest.get('type') or role
+    return launch[1], int(launch[3]), role
 
 
-def live_proxy_lanes(log_dir, run_dir=None):
-    """One process snapshot; only a live Claude process can own an explicit PR."""
+def live_proxy_lanes(run_dir=None):
+    """Only a live, launch-bound Claude process can own an explicit PR."""
     try:
         result = subprocess.run(['pgrep', '-fl', 'claude -p --name '],
                                 capture_output=True, encoding='utf-8', errors='replace', timeout=5)
@@ -154,7 +198,7 @@ def live_proxy_lanes(log_dir, run_dir=None):
         if not process:
             continue
         pid, name = process.groups()
-        binding = lane_binding(pid, name, log_dir, run_dir or PROXY_RUN_DIR)
+        binding = lane_binding(pid, name, run_dir or PROXY_RUN_DIR)
         if binding:
             started_at, pr, role = binding
             entry = (stamp(started_at) or dt.datetime.min.replace(tzinfo=dt.timezone.utc),
@@ -244,7 +288,7 @@ def collect():
             pr['merge_ask_sent'] = any(
                 re.search(r'#' + str(pr['number']) + r'\b', body)
                 and pr['headRefOid'][:12] in body for body in messages)
-    proxies = live_proxy_lanes(PROXY_LOG_DIR)
+    proxies = live_proxy_lanes()
     for pr in prs:
         if pr['number'] in proxies:
             pr['live_proxy'] = proxies[pr['number']]
@@ -530,9 +574,11 @@ def classify(pr, runs, slots, obligations, prior, now):
         if owner is None:
             owner = f'CI (admitted {head[:12]})'
     merge_ask = has_merge_ask(pr, obligations)
-    if gate == 'dual-green/merge ask' and merge_ask:
+    awaiting_merge = gate == 'dual-green/merge ask' and merge_ask
+    if awaiting_merge:
         owner, action = owner or 'CTO (merge ask sent)', 'await merge decision'
-    since = stamp(previous.get('since')) if previous.get('gate') == gate else None
+    same_head_and_gate = previous.get('head') == head and previous.get('gate') == gate
+    since = stamp(previous.get('since')) if same_head_and_gate else None
     since = since or now
     moved_head = previous.get('head') and previous['head'] != head
     since_head = now.isoformat() if moved_head else previous.get('since_head')
@@ -544,7 +590,8 @@ def classify(pr, runs, slots, obligations, prior, now):
              and not pr['isDraft'] and gate != 'held')
     cap = pr.get('review_cap')
     conflict = mergeability(pr) == 'CONFLICTING' and not active_owner and not blocked
-    actionable = stuck or idle or red or green or bool(cap) or conflict
+    needs_owner = not (active_owner or blocked or gate == 'held' or ci_wait or awaiting_merge)
+    actionable = stuck or idle or red or green or bool(cap) or conflict or needs_owner
 
     if proxy_owner:
         movement = 'OWNED'
@@ -578,7 +625,7 @@ def classify(pr, runs, slots, obligations, prior, now):
     safe_owner = re.sub(r'[\r\n]+', ' ', owner or 'unowned')
     line = (f'#{number} {"draft" if pr["isDraft"] else "ready"} · {gate or "checks unavailable"} '
             f'[{"; ".join(details)}] · {safe_owner}{review} · {action} · {movement}')
-    return line, {'gate': gate, 'since': since.isoformat(), 'head': head, 'since_head': since_head}, actionable
+    return line, {'gate': gate, 'since': since.isoformat(), 'head': head, 'since_head': since_head}, actionable, active_owner
 
 
 def observation(pr, runs, obligations, old):
@@ -601,13 +648,13 @@ def observation(pr, runs, obligations, old):
 
 
 def render(prs, checks, slots, obligations, prior, now, *, previous=None, merged=()):
-    lines, state, failed, hidden = [], {}, 0, 0
+    lines, state, failed, hidden_owned = [], {}, 0, 0
     previous = prior if previous is None else previous
     for pr in sorted(prs, key=lambda item: item['number']):
         key = str(pr['number'])
         runs = checks.get(pr['number'], [])
         failed += runs is None
-        line, entry, actionable = classify(pr, runs, slots, obligations, prior, now)
+        line, entry, actionable, active_owner = classify(pr, runs, slots, obligations, prior, now)
         last = previous.get(key, {})
         old = last.get('observation', {})
         observed = observation(pr, runs, obligations, old)
@@ -619,15 +666,15 @@ def render(prs, checks, slots, obligations, prior, now, *, previous=None, merged
         state[key] = {**entry, 'observation': {**old, **observed}}
         if changed or actionable:
             lines.append(line)
-        else:
-            hidden += 1
+        elif active_owner:
+            hidden_owned += 1
     for number, merged_at in merged:
         lines.append(f'#{number} merged · {merged_at}')
     if prs and failed * 2 > len(prs):
         lines.insert(0, f'GitHub API degraded: check-runs unavailable for {failed}/{len(prs)} PRs')
-    if hidden:
-        lines.append(f'{hidden} unchanged and owned')
-    return lines or ['No open PRs.'], state
+    if hidden_owned:
+        lines.append(f'{hidden_owned} unchanged and owned')
+    return lines or ['No PR changes or actions.' if prs else 'No open PRs.'], state
 
 
 def disappeared_prs(previous, prs):
