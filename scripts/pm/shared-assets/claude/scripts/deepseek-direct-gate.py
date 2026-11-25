@@ -38,7 +38,9 @@ Every paid SEGMENT (a start, or one continuation) reserves an enforceable maximu
              it ends; only a started lane can be held.
   settle     Lane end. Exact when every segment has a result event (or the PROXY_AGENT_USAGE line covers every segment): spent_usd += the priced usage and the
              reservation is freed. Otherwise (killed lane, usage unavailable) the known part is added and the unknown segments' RESERVATIONS STAY HELD against the
-             budget, never settled at 0 and never at an estimate, until reconcile.
+             budget, never settled at 0 and never at an estimate, until reconcile. A segment that ended on the budget stop (subtype error_max_budget_usd) is exact
+             for the requests it reports, but its usage OMITS the request that crossed the cap (measured; its total_cost_usd includes it, and error_max_turns reports
+             every request): one worst request per such segment is held until reconcile.
   reconcile  Releases a held lane with evidence: --usd <spent> (e.g. from the provider balance), or --charge-reservation (charge the reserve in full); --all
              applies --charge-reservation to every held lane; --clear-cost-basis clears a cost_basis_violation after the table was re-measured.
   status     JSON: state, cap, lanes with upper bounds, held lanes, exposure.
@@ -342,7 +344,7 @@ def ps_lanes(rows):
 # ---- measuring a lane from its stream --------------------------------------------------------------------------------------------------
 
 def new_acc():
-    return {'off': 0, 'last_mid': None, 'a_in': 0, 'a_out': 0, 'a_cr': 0, 'a_cc': 0, 'r_in': 0, 'r_out': 0, 'r_cr': 0, 'r_cc': 0, 'r_n': 0, 'r_ccost': 0.0}
+    return {'off': 0, 'last_mid': None, 'a_in': 0, 'a_out': 0, 'a_cr': 0, 'a_cc': 0, 'r_in': 0, 'r_out': 0, 'r_cr': 0, 'r_cc': 0, 'r_n': 0, 'r_ccost': 0.0, 'r_capped': 0}
 
 
 def new_lane(name, model, owner, pid, jsonl, log_file=None):
@@ -421,6 +423,8 @@ def scan_file(path, acc):
                     acc['r_cr'] += _int(u.get('cache_read_input_tokens'))
                     acc['r_cc'] += _int(u.get('cache_creation_input_tokens'))
                     acc['r_n'] = acc.get('r_n', 0) + 1
+                    if d.get('subtype') == 'error_max_budget_usd':  # measured: this result's usage omits the request that crossed the cap, its total_cost_usd includes it
+                        acc['r_capped'] = acc.get('r_capped', 0) + 1
                     cost = d.get('total_cost_usd')
                     if isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost > 0:
                         acc['r_ccost'] = max(acc.get('r_ccost', 0.0), float(cost))
@@ -442,7 +446,7 @@ def measure(lane):
 
 def totals(lane):
     a, c = lane['acc'], lane['acc_c']
-    t = {k: a.get(k, 0) + c.get(k, 0) for k in ('a_in', 'a_out', 'a_cr', 'a_cc', 'r_in', 'r_out', 'r_cr', 'r_cc', 'r_n')}
+    t = {k: a.get(k, 0) + c.get(k, 0) for k in ('a_in', 'a_out', 'a_cr', 'a_cc', 'r_in', 'r_out', 'r_cr', 'r_cc', 'r_n', 'r_capped')}
     t['r_ccost'] = max(a.get('r_ccost', 0.0), c.get('r_ccost', 0.0))
     return t
 
@@ -522,7 +526,7 @@ def lane_ub(lane, frac):
     if lane.get('owner') == 'ps' or not reserves:
         return max(exact, stream_estimate(lane, frac)) + ps_allowance(lane['model'])
     unknown = max(len(reserves) - n, 0)
-    return exact + sum(sorted(reserves, reverse=True)[:unknown])
+    return exact + sum(sorted(reserves, reverse=True)[:unknown]) + totals(lane)['r_capped'] * worst_request_usd(lane['model'])
 
 
 def held_total(ledger):
@@ -552,13 +556,15 @@ def close_lane(ledger, state, name, lane, source):
     if lane.get('owner') == 'ps' or not reserves:
         reserves = [ps_allowance(lane['model'])] * max(best_n, 1)
     unknown = max(len(reserves) - best_n, 0)
-    held = round(sum(sorted(reserves, reverse=True)[:unknown]), 6)
+    capped = totals(lane)['r_capped']  # segments that ended on the --max-budget-usd stop: their usage omits the request that crossed it
+    held = round(sum(sorted(reserves, reverse=True)[:unknown]) + capped * worst_request_usd(lane['model']), 6)
     state['spent_usd'] = round(float(state['spent_usd']) + best_cost, 6)
     ledger['lanes'].pop(name, None)
     if held > 0:
         h = ledger['held'].get(name) or {'usd': 0.0, 'known_usd': 0.0, 'unknown_segments': 0}
         ledger['held'][name] = {'usd': round(h['usd'] + held, 6), 'known_usd': round(h['known_usd'] + best_cost, 6), 'unknown_segments': h['unknown_segments'] + unknown,
-                                'model': lane['model'], 'since': h.get('since') or iso(), 'reason': 'no_usage_for_%d_segment(s)' % unknown}
+                                'capped_segments': h.get('capped_segments', 0) + capped, 'model': lane['model'], 'since': h.get('since') or iso(),
+                                'reason': ('no_usage_for_%d_segment(s)' % unknown if unknown else '') + (' ' if unknown and capped else '') + ('%d_segment(s)_ended_on_the_budget_stop:_the_crossing_request_is_unreported' % capped if capped else '')}
     ledger['settled'] = (ledger.get('settled') or [])[-199:] + [{'name': name, 'model': lane['model'], 'usd': round(best_cost, 6), 'held_usd': held, 'results': best_n,
                                                                   'segments': len(reserves), 'tokens': best_tok, 'source': src, 'at': iso()}]
     log('%s name=%s model=%s source=%s results=%d/%d usd=%.6f held_usd=%.6f in=%d out=%d cache_read=%d cache_creation=%d spent_usd=%.6f held_total_usd=%.6f'
@@ -692,7 +698,7 @@ def cmd_admit(a):
                     if n == 0 or n < len(reserves):
                         return refuse('segment_unreconciled', '(%d of %d previous segment(s) have a result event: their spend and cumulative Claude Code cost are unknown, '
                                       'so a cap for the next segment cannot be set; the lane ends and its reservation stays held until reconcile)' % (n, max(len(reserves), 1)))
-                    committed, cum_cc = exact, (ccc if ccc > 0 else cc_low_cost(tok))
+                    committed, cum_cc = exact + totals(prior)['r_capped'] * worst_request_usd(model), (ccc if ccc > 0 else cc_low_cost(tok))
                 spent, held, others = exposure(ledger, state, alive, skip=name)
                 budget = float(state['budget_usd'])
                 worst, seg_max, floor_seg = worst_request_usd(model), segment_max(model), min_segment()

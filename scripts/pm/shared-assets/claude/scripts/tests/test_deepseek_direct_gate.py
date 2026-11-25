@@ -259,6 +259,22 @@ def test_a_result_event_without_usage_is_unreadable_not_zero(lab):
     launcher.kill()
 
 
+def test_a_segment_that_ended_on_the_budget_stop_holds_the_unreported_crossing_request(lab):
+    """Measured with the real claude: error_max_budget_usd reports usage for the requests BEFORE the crossing one only (error_max_turns reports all)."""
+    init(lab)
+    launcher = fake_launcher(lab[0])
+    capped = RESULT.replace('"type": "result"', '"subtype": "error_max_budget_usd", "type": "result"')
+    files = lane_files(lab[0], 'L1', capped, USAGE)
+    assert admit(lab, 'L1', '--pid', str(launcher.pid), *files).returncode == 0
+    gate(lab, 'started', '--name', 'L1', check=0)
+    gate(lab, 'settle', '--name', 'L1', '--model', FLASH, '--log', files[3], check=0)
+    assert abs(state_of(lab)['spent_usd'] - USAGE_USD) < 1e-5  # what the result reports is spent
+    held = ledger_of(lab)['held']['L1']
+    assert abs(held['usd'] - WORST) < 1e-4 and held['capped_segments'] == 1  # the crossing request: one worst-case request, until reconcile
+    assert 'cost_basis_violation' not in ledger_of(lab)  # the ratio check skips a segment whose usage is incomplete
+    launcher.kill()
+
+
 def test_a_lane_that_never_reached_its_claude_spawn_is_released_not_held(lab):
     init(lab)
     launcher = fake_launcher(lab[0])
