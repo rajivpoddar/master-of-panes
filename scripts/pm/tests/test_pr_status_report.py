@@ -656,3 +656,97 @@ def test_native_draft_false_precedes_legacy_true():
     prs[0].update(isDraft=False, draft=True)
     lines, _ = report.render(prs, checks, [], [], {}, NOW)
     assert '#1 ready' in lines[0] and 'draft-rework' not in lines[0]
+
+
+# CI/E2E admission rounds per row (Rajiv C0ALZJHGE49 thread 1795581894.679329, ts 1795584256.843699).
+RUN_START = dt.datetime(2026, 11, 24, 10, tzinfo=dt.timezone.utc)
+SHA_A = 'a' * 40
+
+
+def rounds_run(run_id, workflow, *, attempt=1, conclusion='success', seconds=3600, numbers=(5,)):
+    return {'id': run_id, 'event': 'pull_request', 'path': f'.github/workflows/{workflow}', 'status': 'completed',
+            'conclusion': conclusion, 'run_attempt': attempt, 'head_sha': SHA_A, 'head_branch': 'feat',
+            'created_at': RUN_START.isoformat(), 'run_started_at': RUN_START.isoformat(),
+            'updated_at': (RUN_START + dt.timedelta(seconds=seconds)).isoformat(),
+            'pull_requests': [{'number': n} for n in numbers]}
+
+
+def verdict(run_id, classification, attempt=1):
+    return {'id': run_id, 'created_at': RUN_START.isoformat(), 'body': (
+        f'<!-- ci-verdict: {json.dumps({"run_id": run_id, "classification": classification})} -->\n'
+        f'ci-failure-investigation:run={run_id} attempt={attempt} head={SHA_A}')}
+
+
+def rounds_pr(comments=None):
+    return {'number': 5, 'headRefName': 'feat', 'headRefOid': SHA_A, 'createdAt': '2026-11-24T09:00:00Z',
+            'comments': comments or []}
+
+
+def fake_items(ci_runs, e2e_runs, jobs=None):
+    def fake(path, key, fields):
+        if key == 'workflow_runs':
+            return {'ci.yml': ci_runs, 'e2e.yml': e2e_runs}[path.split('/workflows/')[1].split('/')[0]]
+        return (jobs or {})[int(path.split('/runs/')[1].split('/')[0])]
+    return fake
+
+
+def fetch_rounds(monkeypatch, pr, ci_runs, e2e_runs, jobs=None):
+    monkeypatch.setattr(report, 'gh_items', fake_items(ci_runs, e2e_runs, jobs))
+    return report.fetch_rounds(pr, RUN_START, report.time.monotonic() + 100)
+
+
+def test_rounds_sum_attempts_across_heads_and_skip_noop_label_runs(monkeypatch):
+    quick = [{'conclusion': 'success', 'started_at': RUN_START.isoformat(),
+              'completed_at': (RUN_START + dt.timedelta(seconds=5)).isoformat()}]
+    ci = [rounds_run(1, 'ci.yml'), rounds_run(2, 'ci.yml', attempt=2), rounds_run(3, 'ci.yml', seconds=30),
+          rounds_run(4, 'ci.yml', numbers=(9,)), dict(rounds_run(5, 'ci.yml'), conclusion='skipped')]
+    e2e = [rounds_run(6, 'e2e.yml')]
+    got = fetch_rounds(monkeypatch, rounds_pr(), ci, e2e, jobs={3: quick})
+    assert got == {'rounds': 1 + 2 + 1, 'due': False}  # run 3 is a gate-only no-op, 4 is another PR, 5 is skipped
+
+
+@pytest.mark.parametrize('comments,runs,due', [
+    ([verdict(11, 'flaky test'), verdict(12, 'infra: runner OOM')],
+     [rounds_run(11, 'ci.yml', conclusion='failure'), rounds_run(12, 'e2e.yml', conclusion='failure')], True),
+    ([verdict(11, 'flaky test'), verdict(12, 'PR-caused regression')],
+     [rounds_run(11, 'ci.yml', conclusion='failure'), rounds_run(12, 'e2e.yml', conclusion='failure')], False),
+    ([verdict(11, 'flaky test')],  # newest red has no verdict: not exempt
+     [rounds_run(11, 'ci.yml', conclusion='failure'), rounds_run(12, 'e2e.yml', conclusion='failure')], False),
+    ([verdict(11, 'flaky test')],  # only one red: below two
+     [rounds_run(11, 'ci.yml', conclusion='failure'), rounds_run(12, 'e2e.yml')], False),
+])
+def test_admin_merge_due_needs_three_rounds_and_last_two_reds_exempt(monkeypatch, comments, runs, due):
+    ci = [r for r in runs if 'ci.yml' in r['path']] + [rounds_run(13, 'ci.yml')]
+    e2e = [r for r in runs if 'e2e.yml' in r['path']]
+    assert fetch_rounds(monkeypatch, rounds_pr(comments), ci, e2e)['due'] is due
+
+
+def test_two_rounds_are_never_due_even_when_both_reds_are_exempt(monkeypatch):
+    comments = [verdict(11, 'flaky'), verdict(12, 'infra')]
+    got = fetch_rounds(monkeypatch, rounds_pr(comments), [rounds_run(11, 'ci.yml', conclusion='failure')],
+                       [rounds_run(12, 'e2e.yml', conclusion='failure')])
+    assert got == {'rounds': 2, 'due': False}
+
+
+def test_rounds_failure_is_unknown_never_zero(monkeypatch):
+    def boom(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, 'gh')
+    monkeypatch.setattr(report, 'gh_items', boom)
+    assert report.fetch_rounds(rounds_pr(), RUN_START, report.time.monotonic() + 100) is None
+    assert report.fetch_rounds(rounds_pr(), RUN_START, report.time.monotonic() - 1) is None  # budget spent
+    prs, checks = fixture()
+    prs[3]['rounds'] = None
+    line = report.render([prs[3]], checks, [], [], {}, NOW)[0][0]
+    assert 'rounds ?' in line and 'rounds 0' not in line
+
+
+def test_row_shows_rounds_token_and_due_marker_only_while_the_head_has_a_red():
+    prs, checks = fixture()  # prs[3] = CI red, prs[5] = dual-green
+    prs[3]['rounds'] = {'rounds': 4, 'due': False}
+    plain = report.render([prs[3]], checks, [], [], {}, NOW)[0][0]
+    assert '; rounds 4]' in plain and 'admin-merge' not in plain
+    prs[3]['rounds'] = {'rounds': 5, 'due': True}
+    assert '; rounds 5 → admin-merge ask due]' in report.render([prs[3]], checks, [], [], {}, NOW)[0][0]
+    prs[5]['rounds'] = {'rounds': 5, 'due': True}  # a dual-green head merges normally: no ask
+    green = report.render([prs[5]], checks, [], [], {}, NOW)[0][0]
+    assert '; rounds 5]' in green and 'admin-merge' not in green
