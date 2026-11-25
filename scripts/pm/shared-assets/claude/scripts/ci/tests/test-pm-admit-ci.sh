@@ -482,7 +482,7 @@ check 'lag_refused: one pass only: 1 PR read, 1 main read, 1 parents read of the
 echo "case: lagging merge ref - overlap or a changed CI input no longer gets its own refusal text: the same parked line, no file or input read"
 LAG_ANCESTOR=yes LAG_PR_FILES='lib/shared.ts\n' LAG_PR_FILES_LAGBASE='lib/shared.ts\n' LAG_MAIN_FILES='lib/shared.ts\n' run_lag lag_refused_overlap --no-12b-gate --reason 'lagging ref test'
 assert_lag_parked_refused lag_refused_overlap
-check 'lag_refused_overlap: no overlap list in the REFUSE' '! grep -q "overlap" <<<"$OUT"'
+check 'lag_refused_overlap: the parked line is the ONLY REFUSE line, so no overlap file list is reported' '[ "$(grep -c "^REFUSE" <<<"$OUT")" = 1 ] && grep -qxF "$LAG_PARKED_LINE" <<<"$OUT"'
 LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' LAG_MAIN_FILES='scripts/ci/change_scope.py\n' LAG_CI_INPUTS_CHANGED='scripts/ci/change_scope.py\n' run_lag lag_refused_selector --no-12b-gate --reason 'lagging ref test'
 assert_lag_parked_refused lag_refused_selector
 

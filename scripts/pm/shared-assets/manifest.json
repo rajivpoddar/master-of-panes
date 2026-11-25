@@ -483,7 +483,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-ci-admission",
-      "sha256": "8ac02db10d3ce3732edc325bf6c263ca92b1e0622ceb023a94c8fae7984b9b19",
+      "sha256": "4e20873b9fbeb5ff89140f92ca03c8a212a4dc88439aa34e05fc363ed21a12d6",
       "source_path": "claude/scripts/ci/tests/test-pm-admit-ci.sh"
     },
     {
