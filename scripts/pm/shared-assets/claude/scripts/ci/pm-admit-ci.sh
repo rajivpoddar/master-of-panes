@@ -15,6 +15,9 @@
 # changes PR state. No close/reopen (close queues e2e.yml teardown of the PR's Modal apps), no main merge, no push. ONE deadline-bounded read-only pass,
 # bound to the SAME main sha that passed the overlap check, runs before any admission write; anything unreadable, late or mismatching is UNKNOWN and
 # REFUSEs stale_merge_ref (exit 3). See the guard below.
+# Lagging-ref rule PARKED (PM decision after 2 CTO REVISEs; CTO ts 1795587520.404159, 2026-11-25): a test merge whose parents are not exactly
+# {head, overlap-checked main} ALWAYS refuses (exit 3, "lagging ref (rule parked)"); the recovery is one non-force merge-only refresh. Only the
+# exact_main_parent rule admits. lagging_ref_verify and pm-admit-ci-inputs.py stay in the tree, unreachable, so un-parking is a one-line change.
 set -euo pipefail
 CHECK_12B_ONLY=0; MERGE_ONLY=0
 case "${1:-}" in
@@ -389,6 +392,8 @@ plan_main_merge() {
 #   covers it and a fresh admission run is needed. Never re-read "current main" and trust that instead.
 # - No PR state change (a close queues e2e.yml teardown, which stops the PR's six Modal apps and can kill an in-flight E2E run), no main merge,
 #   no push (rule 62/S166). The guard runs before every admission write (label create, label cleanup, priority mirror, activation label).
+# PARKED (2026-11-25, PM decision after 2 CTO REVISEs; CTO ts 1795587520.404159): the rule below is NOT called. merge_ref_guard sends every lagging tuple to
+# lag_parked_refuse. The text is kept as the spec to restore, should the rule be un-parked.
 # Lagging-ref rule (2026-11-25; Rajiv rule 62/S166, CTO C0ALZJHGE49 thread 1795567441.556059, ts 1795584167.126789): GitHub's test merge can sit on an older
 # main M for minutes to hours while main keeps moving (6 admissions refused on 2026-11-25). A test merge whose parents are NOT exactly {head, overlap-checked
 # main} is still ADMITTED when ALL hold, else it REFUSEs with the overlap list: (a) the PR is not CONFLICTING; (b) the PR's changed files (merge-base..head, taken
@@ -400,7 +405,7 @@ plan_main_merge() {
 # at main (rule 60: no hand-kept list), and an unreadable discovery is UNKNOWN and refuses. The ancestry, file and input reads are local git reads under the
 # same deadline (no new GitHub read). The rule that admitted the PR is printed as MERGE_REF_RULE and, for the lagging rule, appended to pm-admit-skip.log.
 stale_refuse() {
-  echo "REFUSE stale_merge_ref #$PR: $1. Admission needs the PR's test merge built on the overlap-checked main $OVERLAP_MAIN_SHA, or on an older ancestor of it whose later changes touch none of this PR's files, and made NO change to the PR (no PR state change, no main merge, no push). Re-run admission; if the overlap list above is non-empty, merge main into the PR branch (non-force); if it keeps refusing, report it to the CTO"
+  echo "REFUSE stale_merge_ref #$PR: $1. Admission needs the PR's test merge built on the overlap-checked main $OVERLAP_MAIN_SHA, and made NO change to the PR (no PR state change, no main merge, no push). Re-run admission; if the overlap list above is non-empty, merge main into the PR branch (non-force); if it keeps refusing, report it to the CTO"
   exit 3
 }
 # stale_read <cmd...>: ONE read bounded by the remaining deadline. Prints stdout; returns 1 (UNKNOWN) when there is no timeout binary, the
@@ -418,7 +423,13 @@ is_sha() { printf '%s' "$1" | grep -Eq "$SHA_RE"; }
 lag_refuse() {
   stale_refuse "test merge $MERGE_SHA has parents [$STALE_PARENTS] but must be exactly the reviewed head and the overlap-checked main [$STALE_WANTED], so GitHub has not rebuilt it on that main; lagging-ref rule not met: $1"
 }
-# lagging_ref_verify: called only when the merge commit's parents are not exactly {head, overlap-checked main}. Returns 0 (sets MERGE_REF_RULE_LINE and
+# lag_parked_refuse: the lagging-ref rule is parked, so a test merge whose parents are not exactly {head, overlap-checked main} always refuses. No git read,
+# no PR read beyond the ones already made, no write (it runs before every admission write); the caller merges main once, without force, and re-runs.
+lag_parked_refuse() {
+  echo "REFUSE stale_merge_ref: lagging ref (rule parked); use one non-force merge-only refresh"
+  exit 3
+}
+# PARKED, NOT CALLED: lagging_ref_verify was called only when the merge commit's parents are not exactly {head, overlap-checked main}. Returns 0 (sets MERGE_REF_RULE_LINE and
 # MERGE_REF_LAGGING=1) only when conditions (a)-(d) above hold; every other outcome, including any unreadable or late git read, exits through stale_refuse.
 lagging_ref_verify() {
   local p lagp="" nh=0 main_base lag_base d_main d_lag d_since pr_files main_files overlap n_pr=0 n_main=0 n_overlap=0 list ci_changed n_ci
@@ -488,7 +499,7 @@ merge_ref_guard() {
   if [ "$STALE_PARENTS" = "$STALE_WANTED" ]; then
     MERGE_REF_RULE_LINE="MERGE_REF_RULE rule=exact_main_parent pr=$PR head=$HEAD merge=$MERGE_SHA main=$OVERLAP_MAIN_SHA"
   else
-    lagging_ref_verify
+    lag_parked_refuse
   fi
   STALE_LINE2=$(stale_read gh api "repos/$REPO/pulls/$PR" --jq "$STALE_PR_JQ") || stale_refuse "confirming PR read $STALE_UNKNOWN"
   [ "$STALE_LINE2" = "$STALE_LINE1" ] || stale_refuse "PR state, head or merge ref changed during the check"
