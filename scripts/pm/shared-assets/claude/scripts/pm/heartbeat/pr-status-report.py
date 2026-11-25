@@ -7,7 +7,6 @@ Gate ages are persisted for the same PR head and gate, independently of ownershi
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
 import datetime as dt
 import fcntl
 import importlib.util
@@ -19,6 +18,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 
@@ -58,17 +58,13 @@ try:  # exact-head copy-only receipts (#13451); a load failure keeps full CI/E2E
 except Exception:
     _COPY_ONLY = None
 
-try:  # admitted-run helpers for the per-row "rounds N" token; a load failure renders "rounds ?", never crashes the report
-    _ADMIT_SPEC = importlib.util.spec_from_file_location(
-        'pm_admit_cap_report', Path(__file__).resolve().parents[2] / 'ci/pm-admit-cap.py')
-    _ADMIT = importlib.util.module_from_spec(_ADMIT_SPEC)
-    _ADMIT_SPEC.loader.exec_module(_ADMIT)
-except Exception:
-    _ADMIT = None
 # Rajiv C0ALZJHGE49 thread 1795581894.679329, ts 1795584256.843699: "also add the ci/e2e rounds for each pr in the hourly pr status report".
-ROUNDS_BUDGET_S = 300     # one report's total time for run/job lookups; PRs past it show "rounds ?"
-ROUNDS_ADMIN_MIN = 3      # 24 Nov retro trigger (hourly-report-processing 4a): N >= 3 and the last two reds are exempt
-ROUNDS_WORKERS = 4        # PRs looked up in parallel; the 300 s budget is shared
+# CTO REVISE (C0ALZJHGE49 thread 1795586195.864359, ts 1795586272.918649): a round is one CI/E2E ADMISSION (the pm-admit-ci
+# `ci-head:<sha>` label event; one admission spawns a ci.yml and an e2e.yml run but is ONE round), the 300 s budget is
+# enforced on every GitHub read, and the row shows only the count (no merge-eligibility prompt of any kind).
+ROUNDS_BUDGET_S = 300     # one report's total time for rounds lookups; unfinished PRs show "rounds ?"
+ROUNDS_WORKERS = 4        # PRs looked up in parallel; the budget is shared
+ADMISSION_LABEL = re.compile(r'^ci-head:[0-9a-f]{40}$')  # same shape as pm-admit-cap.HEAD_LABEL
 
 
 def stamp(value):
@@ -81,8 +77,8 @@ def stamp(value):
         return None
 
 
-def gh(*args):
-    result = subprocess.run(['gh', *args], capture_output=True, text=True, timeout=120, check=True)
+def gh(*args, timeout=120):
+    result = subprocess.run(['gh', *args], capture_output=True, text=True, timeout=timeout, check=True)
     return json.loads(result.stdout)
 
 
@@ -271,89 +267,66 @@ def fetch_draft_tip(head):
         return None
 
 
-def gh_items(path, key, fields):
-    """GET a paginated list endpoint (workflow runs, jobs) and flatten every page. No `gh --cache`: with --slurp it
-    returns truncated JSON for some cached bodies (seen on #14454 job lists), which would blank that PR's token."""
-    args = ['api', '--method', 'GET', path]
-    for name, value in fields.items():
-        args += ['-f', f'{name}={value}']
-    return [item for page in gh(*args, '--paginate', '--slurp') for item in (page or {}).get(key, [])]
+def count_admissions(events):
+    """CI/E2E rounds = distinct admissions: every `labeled` issue event whose label is `ci-head:<40-hex>` (what
+    pm-admit-ci.sh writes). A re-admission of the same sha removes and re-adds the label, so it is a fresh event and a
+    fresh round; one admission that spawns both a ci.yml and an e2e.yml run is still ONE round. Reruns of an existing
+    run, pull_request-triggered runs and every other label are not admissions."""
+    return sum(1 for event in events
+               if event.get('event') == 'labeled'
+               and ADMISSION_LABEL.fullmatch(str((event.get('label') or {}).get('name') or '')))
 
 
-def bind_rounds_runs(runs, pr, kind, opened):
-    """pull_request runs of this PR since it opened, across every head (same binding as pm/merged-pr-rounds.py)."""
-    bound = {}
-    for run in runs:
-        if run.get('event') != 'pull_request' or run.get('conclusion') == 'skipped':
-            continue
-        created = stamp(run.get('created_at'))
-        if not created or created < opened - dt.timedelta(minutes=1):
-            continue
-        numbers = [int(p.get('number') or 0) for p in (run.get('pull_requests') or [])]
-        if numbers and pr['number'] not in numbers:
-            continue  # same branch name on another PR
-        if not numbers and run.get('head_branch') != pr.get('headRefName'):
-            continue
-        bound[int(run['id'])] = {**run, 'kind': kind}
-    return list(bound.values())
-
-
-def fetch_rounds(pr, now, deadline):
-    """CI/E2E admission rounds for one open PR, counted like the morning-brief retros (pm/merged-pr-rounds.py):
-    sum of run_attempt over its pull_request ci.yml and e2e.yml runs across all heads, minus skipped runs and gate-only
-    no-op label runs (ci_admitted_runs.is_noop). Also flags the 24 Nov retro trigger: N >= 3 and the last two reds
-    (newest by run id and attempt, from the ci-verdict PR comments plus any unrecorded red run) are all classified
-    infra/flaky/inherited/out-of-diff. Returns {'rounds': int, 'due': bool}, or None when it cannot be computed (the
-    row then shows "rounds ?", never 0). A red with no verdict never counts as exempt."""
-    opened = stamp(pr.get('createdAt'))
-    if _ADMIT is None or not opened or not pr.get('headRefName') or time.monotonic() > deadline:
+def fetch_rounds(pr, deadline):
+    """Admission rounds for one open PR: {'rounds': int}, or None when the lookup cannot finish inside the shared
+    budget (the row then shows "rounds ?", never 0). The remaining budget is the timeout of the GitHub read itself, so
+    a stalled `gh` is killed at the deadline instead of being waited for. A pending head that has been admitted but not
+    yet tested counts like any other; a PR with no admission yet is a true 0."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
         return None
-    car, base = _ADMIT.car, f'repos/{REPO}/actions'
     try:
-        admitted = []
-        for workflow, kind in car.WORKFLOW_FILES.items():
-            fields = {'event': 'pull_request', 'per_page': 100}
-            bound = bind_rounds_runs(gh_items(f'{base}/workflows/{workflow}/runs', 'workflow_runs',
-                                              {**fields, 'branch': pr['headRefName']}), pr, kind, opened)
-            if not bound:  # the branch filter misses a renamed/deleted branch: confirm by the head sha before accepting zero
-                bound = bind_rounds_runs(gh_items(f'{base}/workflows/{workflow}/runs', 'workflow_runs',
-                                                  {**fields, 'head_sha': pr['headRefOid']}), pr, kind, opened)
-            for run in bound:
-                done = run.get('status') == 'completed'
-                wall = (car.wall_seconds(run) if done else
-                        car.seconds_between(run.get('run_started_at'), now.isoformat()))
-                jobs = (gh_items(f'{base}/runs/{run["id"]}/jobs', 'jobs', {'per_page': 100})
-                        if car.needs_jobs_lookup(wall) else None)
-                if not car.is_noop(wall, jobs):
-                    admitted.append(run)
+        pages = gh('api', '--paginate', '--slurp', f'repos/{REPO}/issues/{pr["number"]}/events?per_page=100',
+                   timeout=remaining)
+        return {'rounds': count_admissions(event for page in pages for event in (page or []))}
     except GH_ERRORS as exc:
-        print(f'WARN rounds #{pr["number"]}: {exc}', file=sys.stderr)
+        print(f'WARN rounds #{pr["number"]}: {type(exc).__name__}: {exc}', file=sys.stderr)
         return None
-    attempt = lambda run: max(int(run.get('run_attempt') or 1), 1)
-    rounds = sum(attempt(run) for run in admitted)
-    reds = dict(_ADMIT.verdict_classifications(pr['comments'])) if pr.get('comments') is not None else {}
-    for run in admitted:
-        if str(run.get('conclusion') or '') in _ADMIT.RED_CONCLUSIONS:
-            reds.setdefault((int(run['id']), attempt(run), str(run.get('head_sha') or '')), None)
-    last_two = sorted(reds)[-2:]
-    exempt = len(last_two) == 2 and all(
-        reds[key] is not None and _ADMIT.classification_is_exempt(reds[key]) for key in last_two)
-    return {'rounds': rounds, 'due': rounds >= ROUNDS_ADMIN_MIN and exempt}
 
 
-def annotate_rounds(prs, now=None):
-    now = now or dt.datetime.now(dt.timezone.utc)
-    deadline = time.monotonic() + ROUNDS_BUDGET_S
+def annotate_rounds(prs, budget=None, lookup=None):
+    """Fill pr['rounds'] for every PR within ONE wall-clock budget. Workers are daemon threads and the composer joins
+    them only until the deadline, so a lookup that ignores its own timeout still cannot hold the report past the
+    budget: every PR without a finished result renders "rounds ?"."""
+    budget = ROUNDS_BUDGET_S if budget is None else budget
+    lookup = lookup or fetch_rounds
+    deadline = time.monotonic() + budget
+    pending, results, lock = list(prs), {}, threading.Lock()
 
-    def safe(pr):
-        try:
-            return fetch_rounds(pr, now, deadline)
-        except Exception as exc:  # a lookup bug must never take the whole report down: this row shows "rounds ?"
-            print(f'WARN rounds #{pr.get("number")}: {type(exc).__name__}: {exc}', file=sys.stderr)
-            return None
-    with ThreadPoolExecutor(max_workers=ROUNDS_WORKERS) as pool:
-        for pr, result in zip(prs, pool.map(safe, prs)):
-            pr['rounds'] = result
+    def worker():
+        while time.monotonic() < deadline:
+            with lock:
+                if not pending:
+                    return
+                pr = pending.pop(0)
+            try:
+                result = lookup(pr, deadline)
+            except Exception as exc:  # a lookup bug must never take the whole report down: this row shows "rounds ?"
+                print(f'WARN rounds #{pr.get("number")}: {type(exc).__name__}: {exc}', file=sys.stderr)
+                result = None
+            with lock:
+                results[pr['number']] = result
+
+    threads = [threading.Thread(target=worker, daemon=True, name=f'rounds-{i}')
+               for i in range(max(1, min(ROUNDS_WORKERS, len(pending))))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    with lock:  # snapshot: a straggler finishing after the deadline cannot change what this report renders
+        finished = dict(results)
+    for pr in prs:
+        pr['rounds'] = finished.get(pr['number'])
 
 
 def collect():
@@ -690,10 +663,8 @@ def classify(pr, runs, slots, obligations, prior, now):
     cap = pr.get('review_cap')
     conflict = mergeability(pr) == 'CONFLICTING' and not active_owner and not blocked
     needs_owner = not (active_owner or blocked or gate == 'held' or ci_wait or awaiting_merge)
-    rounds = pr.get('rounds')  # None = not computed: shown as "rounds ?", never 0
-    # An admin-merge ask only makes sense while the current head still has a red; a dual-green head merges normally.
-    due = bool(rounds and rounds['due']) and not (ci == 'SUCCESS' and e2e in ('SUCCESS', 'NOT_REQUIRED'))
-    actionable = stuck or idle or red or green or bool(cap) or conflict or needs_owner or due
+    rounds = pr.get('rounds')  # None = lookup unfinished: shown as "rounds ?", never 0. Display only; it gates nothing.
+    actionable = stuck or idle or red or green or bool(cap) or conflict or needs_owner
 
     if proxy_owner:
         movement = 'OWNED'
@@ -720,7 +691,7 @@ def classify(pr, runs, slots, obligations, prior, now):
         details.extend((f'CI {ci}', f'E2E {e2e}{e2e_reason}'))
     if mergeability(pr):
         details.append(f'mergeable {mergeability(pr)}')
-    details.append(f'rounds {rounds["rounds"] if rounds else "?"}{" → admin-merge ask due" if due else ""}')
+    details.append(f'rounds {rounds["rounds"] if rounds else "?"}')
     if cap:
         action = f'{cap} review cap reached; {action}'
     if idle:

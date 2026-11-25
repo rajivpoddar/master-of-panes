@@ -658,95 +658,131 @@ def test_native_draft_false_precedes_legacy_true():
     assert '#1 ready' in lines[0] and 'draft-rework' not in lines[0]
 
 
-# CI/E2E admission rounds per row (Rajiv C0ALZJHGE49 thread 1795581894.679329, ts 1795584256.843699).
-RUN_START = dt.datetime(2026, 11, 24, 10, tzinfo=dt.timezone.utc)
-SHA_A = 'a' * 40
+# CI/E2E rounds per row (Rajiv C0ALZJHGE49 thread 1795581894.679329, ts 1795584256.843699).
+# CTO REVISE (C0ALZJHGE49 thread 1795586195.864359, ts 1795586272.918649): a round is one ADMISSION (a `ci-head:<sha>`
+# labeled event), the 300 s budget is the timeout of every GitHub read, and the row never carries a merge prompt.
+SHA_A, SHA_B = 'a' * 40, 'b' * 40
 
 
-def rounds_run(run_id, workflow, *, attempt=1, conclusion='success', seconds=3600, numbers=(5,)):
-    return {'id': run_id, 'event': 'pull_request', 'path': f'.github/workflows/{workflow}', 'status': 'completed',
-            'conclusion': conclusion, 'run_attempt': attempt, 'head_sha': SHA_A, 'head_branch': 'feat',
-            'created_at': RUN_START.isoformat(), 'run_started_at': RUN_START.isoformat(),
-            'updated_at': (RUN_START + dt.timedelta(seconds=seconds)).isoformat(),
-            'pull_requests': [{'number': n} for n in numbers]}
+def labeled(name, event='labeled'):
+    return {'event': event, 'label': {'name': name}}
 
 
-def verdict(run_id, classification, attempt=1):
-    return {'id': run_id, 'created_at': RUN_START.isoformat(), 'body': (
-        f'<!-- ci-verdict: {json.dumps({"run_id": run_id, "classification": classification})} -->\n'
-        f'ci-failure-investigation:run={run_id} attempt={attempt} head={SHA_A}')}
+def admission(sha):
+    return labeled(f'ci-head:{sha}')
 
 
-def rounds_pr(comments=None):
-    return {'number': 5, 'headRefName': 'feat', 'headRefOid': SHA_A, 'createdAt': '2026-11-24T09:00:00Z',
-            'comments': comments or []}
+def serve_events(monkeypatch, events, seen=None):
+    """Replace the single paginated `gh api .../issues/N/events` read; pages mimic `--paginate --slurp`."""
+    def fake(*args, timeout=120):
+        if seen is not None:
+            seen.append((args, timeout))
+        return [events[:2], events[2:]]
+    monkeypatch.setattr(report, 'gh', fake)
 
 
-def fake_items(ci_runs, e2e_runs, jobs=None):
-    def fake(path, key, fields):
-        if key == 'workflow_runs':
-            return {'ci.yml': ci_runs, 'e2e.yml': e2e_runs}[path.split('/workflows/')[1].split('/')[0]]
-        return (jobs or {})[int(path.split('/runs/')[1].split('/')[0])]
-    return fake
+def test_rounds_count_admissions_and_ignore_everything_else(monkeypatch):
+    events = [admission(SHA_A), admission(SHA_B),
+              labeled('P1'), labeled('pm-state:qa-passed-awaiting-ci'),
+              labeled(f'ci-head:{SHA_A}', event='unlabeled'),        # removal is not an admission
+              labeled('ci-head:' + 'a' * 39), labeled('ci-head:' + 'A' * 40), labeled(f'ci-head:{SHA_A}x'),
+              {'event': 'labeled'}, {'event': 'labeled', 'label': None}, {'event': 'deployed'}]
+    serve_events(monkeypatch, events)
+    assert report.fetch_rounds({'number': 5}, report.time.monotonic() + 100) == {'rounds': 2}
 
 
-def fetch_rounds(monkeypatch, pr, ci_runs, e2e_runs, jobs=None):
-    monkeypatch.setattr(report, 'gh_items', fake_items(ci_runs, e2e_runs, jobs))
-    return report.fetch_rounds(pr, RUN_START, report.time.monotonic() + 100)
+def test_readmitting_the_same_sha_is_a_new_round_and_one_admission_is_one_round(monkeypatch):
+    # pm-admit-ci removes then re-adds the label: the fresh event is a fresh CI+E2E admission, even on the same sha.
+    # One labeled event spawns both a ci.yml and an e2e.yml run; it is still ONE round (no run lookup exists to double it).
+    serve_events(monkeypatch, [admission(SHA_A), labeled(f'ci-head:{SHA_A}', event='unlabeled'), admission(SHA_A)])
+    assert report.fetch_rounds({'number': 5}, report.time.monotonic() + 100) == {'rounds': 2}
+    serve_events(monkeypatch, [admission(SHA_A)])
+    assert report.fetch_rounds({'number': 5}, report.time.monotonic() + 100) == {'rounds': 1}
 
 
-def test_rounds_sum_attempts_across_heads_and_skip_noop_label_runs(monkeypatch):
-    quick = [{'conclusion': 'success', 'started_at': RUN_START.isoformat(),
-              'completed_at': (RUN_START + dt.timedelta(seconds=5)).isoformat()}]
-    ci = [rounds_run(1, 'ci.yml'), rounds_run(2, 'ci.yml', attempt=2), rounds_run(3, 'ci.yml', seconds=30),
-          rounds_run(4, 'ci.yml', numbers=(9,)), dict(rounds_run(5, 'ci.yml'), conclusion='skipped')]
-    e2e = [rounds_run(6, 'e2e.yml')]
-    got = fetch_rounds(monkeypatch, rounds_pr(), ci, e2e, jobs={3: quick})
-    assert got == {'rounds': 1 + 2 + 1, 'due': False}  # run 3 is a gate-only no-op, 4 is another PR, 5 is skipped
+def test_pending_head_row_shows_its_admission_count(monkeypatch):
+    prs, checks = fixture()  # prs[2] = #3: admitted head whose CI is still in_progress (not yet tested)
+    serve_events(monkeypatch, [admission(SHA_A), admission(SHA_B)])
+    report.annotate_rounds([prs[2]])
+    line = report.render([prs[2]], checks, [], [], {}, NOW)[0][0]
+    assert 'CI running' in line and 'CI PENDING' in line and '; rounds 2]' in line
 
 
-@pytest.mark.parametrize('comments,runs,due', [
-    ([verdict(11, 'flaky test'), verdict(12, 'infra: runner OOM')],
-     [rounds_run(11, 'ci.yml', conclusion='failure'), rounds_run(12, 'e2e.yml', conclusion='failure')], True),
-    ([verdict(11, 'flaky test'), verdict(12, 'PR-caused regression')],
-     [rounds_run(11, 'ci.yml', conclusion='failure'), rounds_run(12, 'e2e.yml', conclusion='failure')], False),
-    ([verdict(11, 'flaky test')],  # newest red has no verdict: not exempt
-     [rounds_run(11, 'ci.yml', conclusion='failure'), rounds_run(12, 'e2e.yml', conclusion='failure')], False),
-    ([verdict(11, 'flaky test')],  # only one red: below two
-     [rounds_run(11, 'ci.yml', conclusion='failure'), rounds_run(12, 'e2e.yml')], False),
-])
-def test_admin_merge_due_needs_three_rounds_and_last_two_reds_exempt(monkeypatch, comments, runs, due):
-    ci = [r for r in runs if 'ci.yml' in r['path']] + [rounds_run(13, 'ci.yml')]
-    e2e = [r for r in runs if 'e2e.yml' in r['path']]
-    assert fetch_rounds(monkeypatch, rounds_pr(comments), ci, e2e)['due'] is due
-
-
-def test_two_rounds_are_never_due_even_when_both_reds_are_exempt(monkeypatch):
-    comments = [verdict(11, 'flaky'), verdict(12, 'infra')]
-    got = fetch_rounds(monkeypatch, rounds_pr(comments), [rounds_run(11, 'ci.yml', conclusion='failure')],
-                       [rounds_run(12, 'e2e.yml', conclusion='failure')])
-    assert got == {'rounds': 2, 'due': False}
-
-
-def test_rounds_failure_is_unknown_never_zero(monkeypatch):
-    def boom(*args, **kwargs):
-        raise subprocess.CalledProcessError(1, 'gh')
-    monkeypatch.setattr(report, 'gh_items', boom)
-    assert report.fetch_rounds(rounds_pr(), RUN_START, report.time.monotonic() + 100) is None
-    assert report.fetch_rounds(rounds_pr(), RUN_START, report.time.monotonic() - 1) is None  # budget spent
+def test_unadmitted_pr_is_a_true_zero_but_a_failed_read_is_unknown(monkeypatch):
+    serve_events(monkeypatch, [])
+    assert report.fetch_rounds({'number': 5}, report.time.monotonic() + 100) == {'rounds': 0}
+    for error in (subprocess.CalledProcessError(1, 'gh'), subprocess.TimeoutExpired('gh', 1), ValueError('bad json')):
+        def boom(*args, error=error, **kwargs):
+            raise error
+        monkeypatch.setattr(report, 'gh', boom)
+        assert report.fetch_rounds({'number': 5}, report.time.monotonic() + 100) is None
     prs, checks = fixture()
     prs[3]['rounds'] = None
     line = report.render([prs[3]], checks, [], [], {}, NOW)[0][0]
     assert 'rounds ?' in line and 'rounds 0' not in line
 
 
-def test_row_shows_rounds_token_and_due_marker_only_while_the_head_has_a_red():
+def test_every_read_gets_the_remaining_budget_as_its_timeout(monkeypatch):
+    seen = []
+    serve_events(monkeypatch, [admission(SHA_A)], seen)
+    deadline = report.time.monotonic() + 100
+    assert report.fetch_rounds({'number': 5}, deadline) == {'rounds': 1}
+    (args, timeout), = seen
+    assert args[:3] == ('api', '--paginate', '--slurp') and args[3].startswith(
+        f'repos/{report.REPO}/issues/5/events') and 99 < timeout <= 100
+    # An exhausted budget makes no read at all and the row is unknown, not zero.
+    seen.clear()
+    assert report.fetch_rounds({'number': 5}, report.time.monotonic() - 1) is None and not seen
+
+
+def test_stalled_gh_read_is_killed_at_the_remaining_budget(monkeypatch, tmp_path):
+    fake = tmp_path / 'gh'
+    fake.write_text('#!/bin/sh\nexec sleep 60\n')
+    fake.chmod(0o755)
+    monkeypatch.setenv('PATH', f'{tmp_path}{os.pathsep}{os.environ["PATH"]}')
+    started = report.time.monotonic()
+    assert report.fetch_rounds({'number': 5}, started + 0.5) is None
+    assert report.time.monotonic() - started < 10
+
+
+def test_stalled_lookup_renders_unknown_within_budget_and_never_waits_past_it():
+    prs, checks = fixture()
+    release = report.threading.Event()
+
+    def lookup(pr, deadline):
+        if pr['number'] == 8:       # ignores its own timeout entirely: the composer must still not wait for it
+            release.wait(60)
+        return {'rounds': pr['number']}
+    started = report.time.monotonic()
+    report.annotate_rounds(prs, budget=0.5, lookup=lookup)
+    elapsed = report.time.monotonic() - started
+    release.set()
+    assert elapsed < 10
+    assert prs[7]['rounds'] is None and prs[2]['rounds'] == {'rounds': 3}
+    assert '; rounds ?]' in report.render([prs[7]], checks, [], [], {}, NOW)[0][0]
+
+
+def test_lookup_bug_or_exhausted_budget_leaves_unknown_rows_not_a_crash():
+    prs, _ = fixture()
+
+    def lookup(pr, deadline):
+        if pr['number'] == 2:
+            raise RuntimeError('boom')
+        return {'rounds': 1}
+    report.annotate_rounds(prs, lookup=lookup)
+    assert prs[1]['rounds'] is None and all(p['rounds'] == {'rounds': 1} for p in prs if p['number'] != 2)
+    report.annotate_rounds(prs, budget=0, lookup=lambda pr, deadline: {'rounds': 1})
+    assert all(p['rounds'] is None for p in prs)
+
+
+def test_row_shows_only_the_count_and_the_count_gates_nothing():
     prs, checks = fixture()  # prs[3] = CI red, prs[5] = dual-green
-    prs[3]['rounds'] = {'rounds': 4, 'due': False}
-    plain = report.render([prs[3]], checks, [], [], {}, NOW)[0][0]
-    assert '; rounds 4]' in plain and 'admin-merge' not in plain
-    prs[3]['rounds'] = {'rounds': 5, 'due': True}
-    assert '; rounds 5 → admin-merge ask due]' in report.render([prs[3]], checks, [], [], {}, NOW)[0][0]
-    prs[5]['rounds'] = {'rounds': 5, 'due': True}  # a dual-green head merges normally: no ask
-    green = report.render([prs[5]], checks, [], [], {}, NOW)[0][0]
-    assert '; rounds 5]' in green and 'admin-merge' not in green
+    rows = {}
+    for count in (0, 1, 9):
+        for index in (3, 5):
+            prs[index]['rounds'] = {'rounds': count}
+            line = report.render([prs[index]], checks, [], [], {}, NOW)[0][0]
+            assert f'; rounds {count}]' in line and 'admin' not in line.lower() and 'ask due' not in line
+            rows[(index, count)] = line.replace(f'rounds {count}', 'rounds N')
+    # Same row whatever the count: the number never changes the gate, owner, action or whether the row is shown.
+    assert len({rows[(3, c)] for c in (0, 1, 9)}) == 1 and len({rows[(5, c)] for c in (0, 1, 9)}) == 1
