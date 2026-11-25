@@ -3430,12 +3430,15 @@ def _pipe_table(header: list[str], rows: list[list[str]]) -> list[str]:
 PACE_NOTE_PREFIX ="Pace note: "  # not a fold prefix: no bullet, no "- ", no leading spaces, no leading * or _
 
 
-def _pace_table_lines(resolved: list[tuple]) -> list[str]:
+def _pace_table_lines(resolved: list[tuple], extra_rows: list | tuple = (), extra_notes: list | tuple = ()) -> list[str]:
     """Unfenced Markdown pipe table: Account | Used | Burn %/h | Target %/h | Runs out at, then a |---| separator row and
     one row per account. slack-send.sh converts a pipe table to a native Slack table block, but only outside a code
     fence (Rajiv 2026-11-17, C0ALZJHGE49 1794890771.399469: "remove the codefence from the burn report so that it shows
     up as a proper slack table"). Rows with UNKNOWN inputs get one note line each below the table, with the reason from
-    the clause (login e-mail replaced by display name)."""
+    the clause (login e-mail replaced by display name).
+
+    extra_rows (the 1h report's Ultra route row, 25 Nov) join the table after the account rows and extra_notes follow the
+    account notes, so every row stays in the one contiguous pipe table that hourly_table_split keeps in the parent post."""
     header = ["Account", "Used", "Burn %/h", "Target %/h", "Runs out at"]
     rows, notes = [], []
     for acct, clause, cells in resolved:
@@ -3460,6 +3463,8 @@ def _pace_table_lines(resolved: list[tuple]) -> list[str]:
         if cells.get("note"):   # keychain switch / weekly roll (claude:keychain:weekly alias): its own neutral IST line
             notes.append(f"{PACE_NOTE_PREFIX}{cells['note']}")
         rows.append([display, used_cell, burn_cell, target_cell, runs_cell])
+    rows.extend(extra_rows)
+    notes.extend(extra_notes)
 
     def row(cols: list[str]) -> str:
         return "| " + " | ".join(_pace_cell(c) for c in cols) + " |"
@@ -3490,34 +3495,42 @@ def _ultra_cap_text(caps_file: Path) -> str:
     return "UNKNOWN"
 
 
-def _ultra_target_clause(used: float, rate: float | None, sampled: float, reset: float | None) -> str:
-    """Target %/h, burn-vs-target verdict and runs-out time for the Ultra line. Same basis as _pace_clause: the horizon is the
+def _ultra_target(used: float, rate: float | None, sampled: float, reset: float | None) -> dict:
+    """Target %/h, burn-vs-target verdict and runs-out time for the Ultra route. Same basis as _pace_clause: the horizon is the
     weekly reset and every figure runs from the sample time. Missing input reads UNKNOWN, never a number.
 
-    ABOVE and "lasts to reset" come from the one rate-vs-target comparison, so they cannot disagree."""
+    ABOVE and "lasts to reset" come from the one rate-vs-target comparison, so they cannot disagree. The prose line
+    (_ultra_target_clause) and the table row (_ultra_pace_row) both render from this dict.
+    Keys: ceiling (None without a live weekly reset), verdict (ABOVE|BELOW|UNKNOWN), runs_out (the table cell), detail (the
+    clause text after the arrow)."""
     if reset is None or reset <= sampled:
-        return "target UNKNOWN (no live weekly reset), runs out UNKNOWN"
+        return {"ceiling": None, "verdict": "UNKNOWN", "runs_out": "UNKNOWN", "detail": None}
     ceiling = (100 - used) / ((reset - sampled) / 3600)
-    target = f"target {ceiling:.2f} %/h"
     if rate is None:
-        return f"{target} → UNKNOWN, runs out UNKNOWN"
+        return {"ceiling": ceiling, "verdict": "UNKNOWN", "runs_out": "UNKNOWN", "detail": "UNKNOWN, runs out UNKNOWN"}
     if used >= 100:
-        return f"{target} → ABOVE, limit reached"
+        return {"ceiling": ceiling, "verdict": "ABOVE", "runs_out": "limit reached", "detail": "ABOVE, limit reached"}
     if rate <= ceiling:
-        return f"{target} → BELOW, lasts to reset"
-    runs_out = min(sampled + (100 - used) / rate * 3600, reset)
-    return f"{target} → ABOVE, runs out {_ist(runs_out, '%a %d %b %H:%M')} at this burn"
+        return {"ceiling": ceiling, "verdict": "BELOW", "runs_out": "lasts to reset", "detail": "BELOW, lasts to reset"}
+    runs_out = _ist(min(sampled + (100 - used) / rate * 3600, reset), "%a %d %b %H:%M")
+    return {"ceiling": ceiling, "verdict": "ABOVE", "runs_out": runs_out, "detail": f"ABOVE, runs out {runs_out} at this burn"}
 
 
-def ultra_pace_line(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, caps_file: Path | None = None) -> str:
-    """One line for the Ultra route: 5h and weekly used %, weekly burn %/h, target %/h with ABOVE/BELOW, the runs-out time (or
-    "lasts to reset"), sample age. Never raises.
+def _ultra_target_clause(used: float, rate: float | None, sampled: float, reset: float | None) -> str:
+    """The Ultra prose line's target clause, rendered from _ultra_target."""
+    target = _ultra_target(used, rate, sampled, reset)
+    if target["ceiling"] is None:
+        return "target UNKNOWN (no live weekly reset), runs out UNKNOWN"
+    return f"target {target['ceiling']:.2f} %/h → {target['detail']}"
 
-    Burn is the rolling rate since the first sample of the CURRENT weekly window (same rule as the Pace rows: whole-percent
-    steps make last-hour deltas flip), UNKNOWN until the baseline is PACE_MIN_WINDOW_HOURS old, flagged "thin data" under
-    ULTRA_THIN_HOURS, and never zero-filled. Target/ABOVE/BELOW/runs-out derive from that burn (see _ultra_target_clause).
-    A missing or stale sample, or a missing 5h window (the Ultra usage endpoint can omit it), reads n/a/UNAVAILABLE with the
-    reason, never a number."""
+
+def _ultra_pace_read(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, caps_file: Path | None = None) -> dict:
+    """Everything the Ultra route shows, read once from the usage log. Never raises. Both renderers (ultra_pace_line, the
+    1h report's table row + note) work from this dict, so they cannot disagree.
+
+    Keys: head; unavailable (None, or the reason: no fresh weekly sample / the read failed); else five_hour, weekly_part,
+    burn (the prose burn clause), target (the prose target clause), age_hours, used, rate (None = UNKNOWN), hours (baseline
+    age), thin, sampled, reset, plus the _ultra_target keys under t."""
     head = f"Ultra route (dev-scribie, cap {_ultra_cap_text(caps_file or PROXY_CAPS_FILE)})"
     try:
         ts_now = now.timestamp()
@@ -3542,7 +3555,7 @@ def ultra_pace_line(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, caps_file: 
                     weekly_rows.append(sample)
         weekly = latest.get("weekly")
         if weekly is None or not 0 <= ts_now - weekly[0] <= USAGE_SAMPLE_MAX_AGE:
-            return f"{head}: UNAVAILABLE (no Ultra usage sample in the last {USAGE_SAMPLE_MAX_AGE // 3600}h)"
+            return {"head": head, "unavailable": f"no Ultra usage sample in the last {USAGE_SAMPLE_MAX_AGE // 3600}h"}
         sampled, used, reset = weekly
         session = latest.get("session")
         if session is None or not 0 <= ts_now - session[0] <= USAGE_SAMPLE_MAX_AGE or (session[2] is not None and session[2] <= ts_now):
@@ -3563,21 +3576,83 @@ def ultra_pace_line(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, caps_file: 
         else:
             rate = (used - base[1]) / hours
             burn = f"burn {rate:.2f} %/h over {hours:.1f}h" + (", thin data" if hours < ULTRA_THIN_HOURS else "")
-        target = _ultra_target_clause(used, rate, sampled, reset)
-        return f"{head}: {five_hour} · {weekly_part} · {burn} · {target} · sample {(ts_now - sampled) / 3600:.1f}h old"
+        return {"head": head, "unavailable": None, "five_hour": five_hour, "weekly_part": weekly_part, "burn": burn,
+                "target": _ultra_target_clause(used, rate, sampled, reset), "t": _ultra_target(used, rate, sampled, reset),
+                "age_hours": (ts_now - sampled) / 3600, "used": used, "rate": rate, "hours": hours,
+                "thin": rate is not None and hours < ULTRA_THIN_HOURS, "sampled": sampled, "reset": reset}
     except Exception as exc:
-        return f"{head}: UNAVAILABLE ({type(exc).__name__}, Ultra usage read failed)"
+        return {"head": head, "unavailable": f"{type(exc).__name__}, Ultra usage read failed"}
+
+
+def ultra_pace_line(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, caps_file: Path | None = None) -> str:
+    """One line for the Ultra route: 5h and weekly used %, weekly burn %/h, target %/h with ABOVE/BELOW, the runs-out time (or
+    "lasts to reset"), sample age. Never raises. The 1h report renders the same read as a table row plus a short note
+    (_ultra_pace_row, _ultra_pace_note); this full line stays as the single-line form.
+
+    Burn is the rolling rate since the first sample of the CURRENT weekly window (same rule as the Pace rows: whole-percent
+    steps make last-hour deltas flip), UNKNOWN until the baseline is PACE_MIN_WINDOW_HOURS old, flagged "thin data" under
+    ULTRA_THIN_HOURS, and never zero-filled. Target/ABOVE/BELOW/runs-out derive from that burn (see _ultra_target).
+    A missing or stale sample, or a missing 5h window (the Ultra usage endpoint can omit it), reads n/a/UNAVAILABLE with the
+    reason, never a number."""
+    data = _ultra_pace_read(now, snapshot, caps_file)
+    if data["unavailable"]:
+        return f"{data['head']}: UNAVAILABLE ({data['unavailable']})"
+    return (f"{data['head']}: {data['five_hour']} · {data['weekly_part']} · {data['burn']} · {data['target']}"
+            f" · sample {data['age_hours']:.1f}h old")
+
+
+ULTRA_ROW_ACCOUNT = "Claude: Ultra route (dev-scribie)"  # display name only; the login e-mail never reaches the report
+
+
+def _ultra_pace_row(data: dict) -> list[str]:
+    """The Ultra route's pace-table row: Account | Used | Burn %/h | Target %/h | Runs out at, the same cell shapes as the
+    account rows (burn = rate + ✅/⚠️, target = "≤ceiling to <weekly reset>"). No fresh sample reads UNAVAILABLE in every
+    cell, the reason is in the note below the table; an unknown burn or target reads UNKNOWN, never a number."""
+    if data["unavailable"]:
+        return [ULTRA_ROW_ACCOUNT, *["UNAVAILABLE"] * 4]
+    target, rate = data["t"], data["rate"]
+    marker = {"BELOW": " ✅", "ABOVE": " ⚠️"}.get(target["verdict"], "")
+    burn_cell = f"{rate:.2f}{marker}" if rate is not None else "UNKNOWN"
+    target_cell = (f"≤{target['ceiling']:.2f} to {_ist(data['reset'], '%a %d %b %H:%M')}" if target["ceiling"] is not None else "UNKNOWN")
+    return [ULTRA_ROW_ACCOUNT, f"{data['used']:g}%", burn_cell, target_cell, target["runs_out"]]
+
+
+def _ultra_pace_note(data: dict) -> str:
+    """The short "Pace note: " line under the table: what the row cannot carry. Route and cap, the 5h window, how long the burn
+    was measured and whether that is thin data (or why burn/target are UNKNOWN), the sample age. Plain prose, never the login."""
+    head = f"{PACE_NOTE_PREFIX}{data['head']}"
+    if data["unavailable"]:
+        return f"{head}: UNAVAILABLE ({data['unavailable']})"
+    if data["rate"] is not None:
+        measured = f"burn measured over {data['hours']:.1f}h" + (", thin data" if data["thin"] else "")
+    else:
+        measured = data["burn"]
+    parts = [data["five_hour"], measured]
+    if data["t"]["ceiling"] is None:
+        parts.append("target UNKNOWN (no live weekly reset)")
+    return f"{head}: {' · '.join(parts)} · sample {data['age_hours']:.1f}h old"
 
 
 def pace_table(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, config: Path = PACE_CONFIG,
                state: Path = PACE_STATE, persist: bool = False, sampled: bool = True, ultra: bool = False) -> str:
     """The Pace block that sits directly under the *Hourly line of every 1h report. Same calculation as pace_status.
-    Never raises: a failed check reads one UNKNOWN line. ultra=True (the 1h report) adds the Ultra route line below it."""
+    Never raises: a failed check reads one UNKNOWN line. ultra=True (the 1h report) adds the Ultra route as its own row in
+    the table (Rajiv C0ALZJHGE49 thread 1795599850.941529, ts 1795602113.842579: "why is the claude ultra account burn rate
+    missing from this report?") plus one short Pace note below it; the row is there even when the Ultra read is UNAVAILABLE."""
+    ultra_rows, ultra_notes = [], []
+    if ultra:
+        try:
+            data = _ultra_pace_read(now, snapshot)
+            ultra_rows, ultra_notes = [_ultra_pace_row(data)], [_ultra_pace_note(data)]
+        except Exception as exc:
+            data = {"head": "Ultra route (dev-scribie)", "unavailable": f"{type(exc).__name__}, Ultra pace row failed"}
+            ultra_rows, ultra_notes = [_ultra_pace_row(data)], [_ultra_pace_note(data)]
     try:
-        block = "\n".join(_pace_table_lines(_pace_resolve(now, snapshot, config, state, persist, sampled)))
+        return "\n".join(_pace_table_lines(_pace_resolve(now, snapshot, config, state, persist, sampled), ultra_rows, ultra_notes))
     except Exception as exc:
-        block = f"Pace: UNKNOWN ({type(exc).__name__}, pace check failed)"
-    return f"{block}\n{ultra_pace_line(now, snapshot)}" if ultra else block
+        failed = f"Pace: UNKNOWN ({type(exc).__name__}, pace check failed)"
+        # The Ultra row survives a failed account check: a one-row table, then the failure line.
+        return "\n".join([*_pace_table_lines([], ultra_rows, ultra_notes), failed]) if ultra_rows else failed
 
 
 def claude_memory_line(arm: bool, now: datetime) -> str:
