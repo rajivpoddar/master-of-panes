@@ -399,14 +399,14 @@ plan_main_merge() {
 # main} is still ADMITTED when ALL hold, else it REFUSEs with the overlap list: (a) the PR is not CONFLICTING; (b) the PR's changed files (merge-base..head, taken
 # against BOTH the overlap-checked main and M, unioned) do not overlap the files main changed since M (M..overlap-checked main); (c) one parent is exactly the
 # reviewed head and the other, M, is a verified ancestor of the overlap-checked main; (d) main changed none of the trusted shared CI inputs that decide WHAT
-# runs (the .github tree, the scripts a pull_request workflow executes and the selector/classifier rules and E2E selection config beside them) since M,
+# runs (the .github tree, the scripts a pull_request workflow executes, the selector/classifier rules and E2E selection config beside them, and EVERY file a
+# workflow reads out of a git revision from any directory, e.g. scripts/ci/unit-shards/durations.json read from WORKFLOW_SHA) since M,
 # because a changed selector means the PR's CI ran the OLD selection even when no PR file overlaps (CTO REVISE of MoP 9518bf9d, same thread, ts 1795586027.634509;
-# e.g. 73499dfb..6ee67558 changed scripts/ci/change_scope.py). The inputs are DISCOVERED by pm-admit-ci-inputs.py from the workflows' own references at M and
-# at main (rule 60: no hand-kept list), and an unreadable discovery is UNKNOWN and refuses. The ancestry, file and input reads are local git reads under the
+# e.g. 73499dfb..6ee67558 changed scripts/ci/change_scope.py; CTO REVISE #2 of MoP 494a207e, ts 1795587520.404159: a durations-only change must refuse too). The
+# inputs are DISCOVERED by pm-admit-ci-inputs.py from the workflows' own references at M and at main (rule 60: no hand-kept list). An unreadable discovery, or a
+# trusted read in a workflow that cannot be resolved to a file, is UNKNOWN and refuses (fail closed). The ancestry, file and input reads are local git reads under the
 # same deadline (no new GitHub read). The rule that admitted the PR is printed as MERGE_REF_RULE and, for the waiver, appended to pm-admit-skip.log; the waiver's
 # receipt is rule=stale_merge_ref_waived:no_overlap.
-# KNOWN GAP (CTO REVISE #2 of MoP 494a207e, ts 1795587520.404159, not addressed here): input discovery does not follow a trusted file a workflow reads from a
-# subdirectory (e.g. scripts/ci/unit-shards/durations.json), so a change to such a file alone is not detected by (d).
 stale_refuse() {
   echo "REFUSE stale_merge_ref #$PR: $1. Admission needs the PR's test merge built on the overlap-checked main $OVERLAP_MAIN_SHA, or on an older ancestor of it whose later changes touch none of this PR's files, and made NO change to the PR (no PR state change, no main merge, no push). Re-run admission; if the overlap list above is non-empty, merge main into the PR branch (non-force); if it keeps refusing, report it to the CTO"
   exit 3
@@ -461,7 +461,7 @@ lagging_ref_verify() {
   fi
   # (d) A changed trusted CI input is refused even with zero file overlap: the PR's CI ran the selection at M, not main's. The helper prints the changed
   # input paths (empty when none) and exits 1 on any unreadable git state; a late or failed run is UNKNOWN through stale_read.
-  ci_changed=$(stale_read python3 -I "$SCRIPT_DIR/pm-admit-ci-inputs.py" --repo "$MAIN_REPO" --base "$lagp" --main "$OVERLAP_MAIN_SHA") || lag_refuse "the trusted shared CI inputs main changed since $lagp are $STALE_UNKNOWN"
+  ci_changed=$(stale_read python3 -I "$SCRIPT_DIR/pm-admit-ci-inputs.py" --repo "$MAIN_REPO" --base "$lagp" --main "$OVERLAP_MAIN_SHA") || lag_refuse "the trusted shared CI inputs main changed since $lagp are $STALE_UNKNOWN (or a workflow reads a trusted file the discovery could not resolve)"
   ci_changed=$(printf '%s\n' "$ci_changed" | sed '/^$/d')
   if [ -n "$ci_changed" ]; then
     n_ci=$(printf '%s\n' "$ci_changed" | wc -l | tr -d ' ')

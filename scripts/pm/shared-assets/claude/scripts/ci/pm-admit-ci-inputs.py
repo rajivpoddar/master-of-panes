@@ -15,12 +15,22 @@ The set is DISCOVERED from the repository (rule 60: no hand-kept file list), at 
   3. every file those workflows name that sits in the same directory as such a script (selector
      rules and the E2E selection config passed as arguments);
   4. to a fixpoint, the same-directory siblings that an input names by file name or imports by
-     module name (classifier rules and configs loaded relative to the script).
+     module name (classifier rules and configs loaded relative to the script);
+  5. every file a PR-triggered workflow READS OUT OF A GIT REVISION, from any directory (CTO REVISE of
+     MoP 494a207e, ts 1795587520.404159: ci.yml reads scripts/ci/unit-shards/durations.json from
+     WORKFLOW_SHA, a data file that is neither executed nor beside an executed script). A trusted
+     read is `git show|cat-file|archive|ls-tree REV:PATH`, a contents-API `contents/PATH?ref=`, or the
+     `--path PATH` of a statement that names a `--ref`. PATH may use a shell variable that a literal
+     `for VAR in a b c; do` loop earlier in the same file binds (`$path`, `scripts/ci/$item`); every
+     expansion is an input. A trusted read whose path cannot be resolved to a file at that commit
+     (an unbound or reassigned variable, a non-literal loop list, a missing file) is UNRESOLVED, and
+     any UNRESOLVED read makes the whole run UNKNOWN: exit 1, no stdout (fail closed).
 Discovery runs at BOTH commits, so a file added or removed by the change is still caught.
 
 Usage: pm-admit-ci-inputs.py --repo <git dir> --base <older main sha> --main <newer main sha>
 Prints the changed trusted CI input paths, one per line (nothing when none changed), exit 0.
-Any failed or unreadable git read exits 1 with no stdout, so the caller treats it as UNKNOWN.
+Any failed or unreadable git read, or an UNRESOLVED trusted read, exits 1 with no stdout (the reason
+goes to stderr), so the caller treats it as UNKNOWN.
 """
 import argparse
 import posixpath
@@ -36,11 +46,25 @@ PATH_CH = r"[A-Za-z0-9_@.+-]"
 WORKSPACE = r"(?:\$\{\{[ \t]*github\.workspace[ \t]*\}\}/|\$\{?GITHUB_WORKSPACE\}?/)?"
 PATH = r"(" + PATH_CH + r"+(?:/" + PATH_CH + r"+)*)"
 # group 1: after an interpreter (+flags) or ./ ; group 2: a bare path that starts a shell command (start of line, `run:`, `|`, `&&`, `;`, `(`)
+# The bare-path alternative must not consume an interpreter word: at the start of a line `node scripts/x.mjs`
+# would otherwise match `node` there and the script argument would never be seen (multi-line `run: |` blocks).
 EXEC_RE = re.compile(
     r"(?:(?<![\w./-])" + INTERP + FLAGS + r"[ \t]+|(?<![\w./-])\./)" + WORKSPACE + PATH
-    + r"|(?:^|[;&|(]|\brun:)[ \t]*(?:-[ \t]+)?" + WORKSPACE + PATH,
+    + r"|(?:^|[;&|(]|\brun:)[ \t]*(?:-[ \t]+)?" + WORKSPACE + r"(?!" + INTERP + r"[ \t])" + PATH,
     re.M,
 )
+# Trusted reads (rule 5): a path a workflow takes out of a git revision, with optional $var pieces.
+VARPATH = r"(?:[A-Za-z0-9_@.+/-]|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?)+"
+REV = r"(?:\$\{\{[^}\n]*\}\}|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|[0-9a-f]{40}|HEAD|FETCH_HEAD|origin/[A-Za-z0-9_./-]+)"
+GIT_READ_RE = re.compile(r"\bgit[ \t]+(?:-C[ \t]+\S+[ \t]+)?(?:show|cat-file|archive|ls-tree)\b([^\n;&|>]*)")
+REV_PATH_RE = re.compile(r"(?<![\w$])" + REV + r"[\"']?:(?!/)(" + VARPATH + r")")
+CONTENTS_RE = re.compile(r"/contents/(" + VARPATH + r")\?ref=")
+OPT_PATH_RE = re.compile(r"--path(?:[ \t]+|=)[\"']?(" + VARPATH + r")")
+REF_STMT_RE = re.compile(r"--ref\b|WORKFLOW_SHA|workflow[_-]sha")
+FOR_RE = re.compile(r"\bfor[ \t]+([A-Za-z_]\w*)[ \t]+in[ \t]+([^;\n]*?)[ \t]*(?:;[ \t]*|\n[ \t]*)do\b")
+LITERAL_WORD_RE = re.compile(r"[A-Za-z0-9_@.+/-]+")
+ASSIGN_RE = re.compile(r"(?<![\w$.-])([A-Za-z_]\w*)=")
+RHS_RE = re.compile(r"\"([^\"$`\\\n]*)\"|'([^'\n]*)'|([A-Za-z0-9_@.+/-]+)(?=[\s;)&|]|$)")
 TOKEN_RE = re.compile(r"(?<![\w./@-])" + WORKSPACE + r"((?:\./)?" + PATH_CH + r"+(?:/" + PATH_CH + r"+)+)")
 USES_RE = re.compile(r"(?m)^[ \t]*(?:-[ \t]+)?uses:[ \t]*['\"]?\./(\.github/[A-Za-z0-9_@./-]+?)['\"]?[ \t]*(?:#.*)?$")
 PR_TRIGGER_RE = re.compile(r"\bpull_request(?:_target)?\b")
@@ -103,13 +127,77 @@ def pr_scope(github, wf_text):
     return scope
 
 
+def _bound_words(joined, var, pos):
+    """The literal words VAR holds at pos: the nearest earlier `for VAR in a b c; do` (all of them) or literal `VAR=word`
+    (one). None when VAR is unbound, the nearest binding is not literal (`$(...)`, another variable, a glob) or a
+    non-literal list."""
+    best = None  # (offset of the binding, words or None)
+    for m in FOR_RE.finditer(joined, 0, pos):
+        if m.group(1) == var:
+            words = [w.strip("\"'") for w in m.group(2).split()]
+            best = (m.start(), words if words and all(LITERAL_WORD_RE.fullmatch(w) for w in words) else None)
+    for m in ASSIGN_RE.finditer(joined, 0, pos):
+        if m.group(1) == var and (best is None or m.start() > best[0]):
+            rhs = RHS_RE.match(joined, m.end())
+            lit = next((g for g in rhs.groups() if g), None) if rhs else None
+            best = (m.start(), [lit] if lit else None)
+    return None if best is None else best[1]
+
+
+def trusted_reads(wf, body, tree):
+    """(paths, problems): every file the workflow text reads out of a git revision, expanded through literal for-loops and
+    literal assignments. A read of a directory is a read of every file in it. A read that cannot be resolved to a file in
+    tree is a problem (UNRESOLVED), except a read that cannot leave .github/ (every .github file is an input already)."""
+    joined = re.sub(r"(?m)^[ \t]*#.*$", "", re.sub(r"\\[ \t]*\r?\n[ \t]*", " ", body))
+    found = []  # (offset of the path expression, expression)
+    for g in GIT_READ_RE.finditer(joined):
+        for m in REV_PATH_RE.finditer(g.group(1)):
+            found.append((g.start(1) + m.start(1), m.group(1)))
+    for m in CONTENTS_RE.finditer(joined):
+        found.append((m.start(1), m.group(1)))
+    for stmt in re.finditer(r"[^\n]+", joined):
+        if REF_STMT_RE.search(stmt.group(0)):
+            for m in OPT_PATH_RE.finditer(stmt.group(0)):
+                found.append((stmt.start() + m.start(1), m.group(1)))
+    paths, problems = set(), []
+    for pos, expr in found:
+        pending, resolved = [expr], []
+        while pending:
+            cur = pending.pop()
+            var = re.search(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", cur)
+            if var is None:
+                resolved.append(cur)
+                continue
+            words = _bound_words(joined, var.group(1), pos)
+            if words is not None:
+                pending += [cur[:var.start()] + w + cur[var.end():] for w in words]
+            elif not _norm(cur[:var.start()]).startswith(".github/"):
+                problems.append(f"{wf}: ${var.group(1)} in '{expr}' is not bound to a literal path")
+        for v in resolved:
+            v = _norm(v).rstrip("/")
+            below = [t for t in tree if t.startswith(v + "/")] if v else []
+            if v in tree and tree[v][1] in ("100644", "100755"):
+                paths.add(v)
+            elif below:  # a directory: every file in it is read
+                paths.update(below)
+            else:
+                problems.append(f"{wf}: '{v}' (from '{expr}') is not a file or directory at this commit")
+    return paths, problems
+
+
 def discover(repo, rev):
-    """The trusted CI input paths at rev (see module docstring)."""
+    """(trusted CI input paths, unresolved trusted reads) at rev (see module docstring)."""
     tree = ls_tree(repo, rev)
     github = {p for p in tree if p.startswith(".github/")}
     text = read_blobs(repo, [tree[p][0] for p in github])
     wf_text = {p: text[tree[p][0]] for p in github}
-    scoped = [wf_text[p] for p in sorted(pr_scope(github, wf_text))]
+    scope_paths = sorted(pr_scope(github, wf_text))
+    scoped = [wf_text[p] for p in scope_paths]
+    problems, trusted = [], set()
+    for p in scope_paths:
+        got, bad = trusted_reads(p, wf_text[p], tree)
+        trusted |= got
+        problems += bad
 
     executed = set()
     for body in scoped:
@@ -156,7 +244,7 @@ def discover(repo, rev):
                     inputs.add(sib)
                     found.append(sib)
         level = sorted(found)
-    return inputs
+    return inputs | trusted, problems
 
 
 def main():
@@ -176,7 +264,15 @@ def main():
     }
     if not changed:
         return 0
-    inputs = discover(a.repo, a.base) | discover(a.repo, a.main)
+    inputs, problems = set(), []
+    for rev in (a.base, a.main):
+        found, bad = discover(a.repo, rev)
+        inputs |= found
+        problems += [f"{rev[:8]}: {b}" for b in bad]
+    if problems:  # an unresolved trusted read could hide a changed input: UNKNOWN, fail closed
+        for b in sorted(set(problems)):
+            print(f"pm-admit-ci-inputs: unresolved trusted read: {b}", file=sys.stderr)
+        return 1
     hit = sorted(changed & inputs)
     if hit:
         sys.stdout.write("\n".join(hit) + "\n")

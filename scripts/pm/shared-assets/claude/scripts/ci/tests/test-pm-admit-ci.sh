@@ -531,6 +531,13 @@ LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' L
 assert_stale_refused lag_selector_many
 check 'lag_selector_many: 25 changed inputs reported as the first 20 plus (+5 more)' 'grep -q "main changed 25 shared CI input file(s)" <<<"$OUT" && grep -q "w01.yml " <<<"$OUT" && grep -q "w20.yml \.\.\. (+5 more)" <<<"$OUT" && ! grep -q "w21.yml" <<<"$OUT"'
 
+echo "case: lagging merge ref - no PR file overlaps but main changed ONLY scripts/ci/unit-shards/durations.json, a data file ci.yml reads from the workflow commit in a subdirectory (CTO REVISE #2 of MoP 494a207e, ts 1795587520.404159): REFUSED naming the path"
+LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' LAG_MAIN_FILES='scripts/ci/unit-shards/durations.json\n' LAG_CI_INPUTS_CHANGED='scripts/ci/unit-shards/durations.json\n' \
+  run_lag lag_durations --no-12b-gate --reason 'lagging ref test'
+assert_stale_refused lag_durations
+check 'lag_durations: REFUSE says the lagging-ref rule is not met because a trusted CI input changed, names the older parent, the count and exactly scripts/ci/unit-shards/durations.json' 'grep -q "lagging-ref rule not met: trusted CI input changed: main changed 1 shared CI input file(s) that decide what runs since that parent $STUB_LAG_SHA, so CI ran the older selection even though no PR file overlaps: scripts/ci/unit-shards/durations.json\. Admission needs" <<<"$OUT"'
+check 'lag_durations: the overlap check passed first, nothing admitted, no label or PR write, no lagging rule line or audit entry' '! grep -q "overlap: the PR changes" <<<"$OUT" && ! grep -q "^MERGE_REF_RULE" <<<"$OUT" && ! grep -q "^ADMITTED" <<<"$OUT" && ! grep -qE -- "--add-label|--remove-label|label create|pr edit" "$STUB_LOG"'
+
 echo "case: lagging merge ref - main drifted only in unrelated files (no changed CI input): ADMITTED"
 LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' LAG_MAIN_FILES='convex/other.ts\napp/page.tsx\nmodal/x.py\n' LAG_CI_INPUTS_CHANGED='' run_lag lag_unrelated --no-12b-gate --reason 'lagging ref test'
 check 'lag_unrelated: exit 0, ADMITTED, MERGE_REF_RULE names the lagging rule with ci_inputs_changed=0, the helper ran once' '[ "$RC" = 0 ] && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT" && grep -qx "MERGE_REF_RULE rule=stale_merge_ref_waived:no_overlap pr=11173 head=$SHA merge=$STUB_FRESH_SHA main_parent=$STUB_LAG_SHA main=$STUB_MAIN_SHA pr_files=1 main_files_since_parent=3 overlap=0 ci_inputs_changed=0" <<<"$OUT" && [ "$(grep -c "^ci-inputs " "$STUB_LOG")" = 1 ]'
@@ -539,6 +546,7 @@ echo "case: lagging merge ref - the CI-input discovery is unreadable: UNKNOWN re
 LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' LAG_MAIN_FILES='lib/main.ts\n' LAG_CI_INPUTS_FAIL=1 run_lag lag_ci_inputs_unreadable --no-12b-gate --reason 'lagging ref test'
 assert_stale_refused lag_ci_inputs_unreadable
 check 'lag_ci_inputs_unreadable: REFUSE says the trusted shared CI inputs main changed since the older parent are UNKNOWN; nothing admitted' 'grep -q "the trusted shared CI inputs main changed since $STUB_LAG_SHA are UNKNOWN (read failed, timed out or returned past the 4s deadline)" <<<"$OUT" && ! grep -q "^ADMITTED" <<<"$OUT" && ! grep -qE -- "--add-label|label create" "$STUB_LOG"'
+check 'lag_ci_inputs_unreadable: the UNKNOWN refusal also names the unresolvable trusted-file reference as a cause (the helper exits 1 for it; CTO REVISE #2 "unresolved inputs failing closed")' 'grep -q "or a workflow reads a trusted file the discovery could not resolve" <<<"$OUT"'
 
 echo "case: exact main parent - the CI-input helper is not run (nothing lagged)"
 run_case lag_exact_no_helper --no-12b-gate --reason 'lagging ref test'
@@ -558,6 +566,8 @@ LAG_ANCESTOR=yes LAG_PR_FILES='lib/shared.ts\n' LAG_PR_FILES_LAGBASE='lib/shared
 check 'lag_dry_overlap: DRY RUN merge_ref would REFUSE (rc=3) with the overlap list, dry-run exit code unchanged' '[ "$RC" = 0 ] && grep -q "^DRY RUN merge_ref: would REFUSE (rc=3)" <<<"$OUT" && grep -q "^  REFUSE stale_merge_ref #11173: .*overlap: the PR changes 1 file(s).*: lib/shared.ts\. Admission needs" <<<"$OUT"'
 LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' LAG_MAIN_FILES='scripts/ci/change_scope.py\n' LAG_CI_INPUTS_CHANGED='scripts/ci/change_scope.py\n' run_lag lag_dry_selector --dry-run --no-12b-gate --reason 'lagging ref test'
 check 'lag_dry_selector: DRY RUN merge_ref would REFUSE (rc=3) naming the changed selector, dry-run exit code unchanged' '[ "$RC" = 0 ] && grep -q "^DRY RUN merge_ref: would REFUSE (rc=3)" <<<"$OUT" && grep -q "^  REFUSE stale_merge_ref #11173: .*trusted CI input changed: .*: scripts/ci/change_scope.py\. Admission needs" <<<"$OUT"'
+LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' LAG_MAIN_FILES='scripts/ci/unit-shards/durations.json\n' LAG_CI_INPUTS_CHANGED='scripts/ci/unit-shards/durations.json\n' run_lag lag_dry_durations --dry-run --no-12b-gate --reason 'lagging ref test'
+check 'lag_dry_durations: DRY RUN merge_ref would REFUSE (rc=3) naming the changed durations file, dry-run exit code unchanged' '[ "$RC" = 0 ] && grep -q "^DRY RUN merge_ref: would REFUSE (rc=3)" <<<"$OUT" && grep -q "^  REFUSE stale_merge_ref #11173: .*trusted CI input changed: .*: scripts/ci/unit-shards/durations.json\. Admission needs" <<<"$OUT"'
 run_case lag_dry_exact --dry-run --no-12b-gate --reason 'lagging ref test'
 check 'lag_dry_exact: a fresh exact-main-parent ref previews ELIGIBLE with the exact_main_parent rule' '[ "$RC" = 0 ] && grep -q "^DRY RUN merge_ref: ELIGIBLE" <<<"$OUT" && grep -q "^  MERGE_REF_RULE rule=exact_main_parent " <<<"$OUT"'
 
