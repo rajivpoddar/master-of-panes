@@ -65,11 +65,18 @@ def test_off_switch_and_description_cap_env(tmp_path):
     assert "unrelated" not in _run(tmp_path, PROXY_AGENT_SKILL_ALLOW_EXTRA="unrelated")["skillOverrides"]
 
 
+ALLOWLIST_GUARD = 'if [[ "${PROXY_AGENT_SKILL_ALLOWLIST:-1}" != 0 ]]; then'
+
+
+def _launcher_block():
+    start = LAUNCHER.index(ALLOWLIST_GUARD)
+    return LAUNCHER[start:LAUNCHER.index("\nfi\n", start) + 4]
+
+
 def test_launcher_merges_the_fragment_into_the_lane_settings_file_only_and_fails_open():
-    local_model = LAUNCHER.index("local_model_skill_overrides_unavailable")
-    branch = LAUNCHER.index('elif [[ "${PROXY_AGENT_SKILL_ALLOWLIST:-1}" != 0 ]]; then')
-    assert local_model < branch  # local Spark lanes keep their own allowlist; every other lane takes the elif branch
-    block = LAUNCHER[branch:LAUNCHER.index("# Persist a private runner", branch)]
+    block = _launcher_block()
+    assert 'MODEL_ID' not in block  # Spark and non-Spark use the same generator and opt-out
+    assert 'local_model_skill_overrides_unavailable' not in LAUNCHER
     assert "proxy-skill-overrides.py" in block and '"$SAFETY_SETTINGS"' in block
     assert 'PROXY_AGENT_WARN reason=skill_overrides_unavailable' in block
     assert 'PROXY_AGENT_WARN reason=skill_overrides_merge_failed' in block
@@ -78,8 +85,6 @@ def test_launcher_merges_the_fragment_into_the_lane_settings_file_only_and_fails
 
 def _run_launcher_block(tmp_path, settings, fault):
     """Run the REAL skill-overrides block of proxy-agent.sh under /bin/bash (3.2 on this Mac) with set -euo pipefail."""
-    start = LAUNCHER.index('elif [[ "${PROXY_AGENT_SKILL_ALLOWLIST:-1}" != 0 ]]; then')
-    block = LAUNCHER[start:LAUNCHER.index("\nfi\n", start) + 4]
     scripts = tmp_path / ".claude" / "scripts"
     scripts.mkdir(parents=True)
     (scripts / "proxy-skill-overrides.py").write_text(GEN.read_text())
@@ -87,10 +92,9 @@ def _run_launcher_block(tmp_path, settings, fault):
         _skill(tmp_path, "unlisted-skill-%d" % n)
     agent = tmp_path / "agent.md"
     agent.write_text("x\n")
-    program = 'if [[ "${MODEL_ID:-}" == inkling-2-mini ]]; then :\n' + block
     return subprocess.run(
         ["/bin/bash", "-c", "set -euo pipefail\n" + ("ulimit -f 4\n" if fault else "") + 'eval "$PROG"; echo block-exit=0'],
-        env={**os.environ, "HOME": str(tmp_path), "PROG": program, "MODEL_ID": "gpt-6.1-terra", "PM_ROLE": "1",
+        env={**os.environ, "HOME": str(tmp_path), "PROG": _launcher_block(), "PM_ROLE": "1",
              "CWD": str(tmp_path), "AGENT_FILE": str(agent), "PROMPT_FILE": str(agent), "SAFETY_SETTINGS": str(settings)},
         capture_output=True, text=True, check=False,
     )
@@ -129,5 +133,5 @@ def test_settings_merge_keeps_sandbox_and_hooks_and_adds_the_overrides(tmp_path)
 
 
 def test_launcher_never_opens_the_settings_file_for_writing_in_place():
-    block = LAUNCHER[LAUNCHER.index('elif [[ "${PROXY_AGENT_SKILL_ALLOWLIST:-1}" != 0 ]]; then'):LAUNCHER.index("# Persist a private runner")]
+    block = _launcher_block()
     assert 'open(p, "w")' not in block and "os.replace(tmp, p)" in block and "os.fsync" in block

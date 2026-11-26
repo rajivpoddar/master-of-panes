@@ -133,6 +133,48 @@ proxy_agent_disk_free_kib() {
   printf '%s\n' "$out"
 }
 
+# Host capacity is measured at admission, not inferred from the number of live lanes
+# (Rajiv, 1795703768.051439). Do not use memory_pressure flags that apply pressure.
+proxy_agent_memory_gate() {
+  local pressure swap_usage decision free swap_mb
+  pressure="$(LC_ALL=C command memory_pressure -Q 2>/dev/null)" || pressure=""
+  swap_usage="$(LC_ALL=C command sysctl -n vm.swapusage 2>/dev/null)" || swap_usage=""
+  if ! read -r decision free swap_mb < <(
+    printf '%s\n%s\n' "$pressure" "$swap_usage" | LC_ALL=C awk \
+      -v min_free="${PROXY_AGENT_MIN_FREE_PCT:-20}" -v max_swap="${PROXY_AGENT_MAX_SWAP_MB:-1024}" '
+      /^System-wide memory free percentage:[[:blank:]]*[0-9]+%[[:blank:]]*$/ {
+        sub(/^.*:[[:blank:]]*/, ""); sub(/%.*/, ""); if ($0 + 0 <= 100) free = $0
+      }
+      match($0, /[[:blank:]]used[[:blank:]]*=[[:blank:]]*[0-9]+([.][0-9]+)?[BKMGT]([[:blank:]]|$)/) {
+        used = substr($0, RSTART, RLENGTH)
+        sub(/^.*=[[:blank:]]*/, "", used); sub(/[[:blank:]]+$/, "", used)
+        swap = (used + 0) * (1024 ^ (index("BKMGT", substr(used, length(used), 1)) - 3))
+      }
+      END {
+        if (min_free !~ /^[0-9]+([.][0-9]+)?$/ || min_free + 0 > 100) min_free = 20
+        if (max_swap !~ /^[0-9]+([.][0-9]+)?$/) max_swap = 1024
+        if (free == "" || swap == "") {
+          print "unknown", (free == "" ? "unknown" : free), (swap == "" ? "unknown" : sprintf("%.10g", swap))
+        } else {
+          printf "%s %s %.10g\n", (free + 0 < min_free + 0 || swap > max_swap + 0 ? "refuse" : "allow"), free, swap
+        }
+      }' 2>/dev/null
+  ); then
+    decision=unknown free=unknown swap_mb=unknown
+  fi
+  case "$decision" in
+    refuse)
+      printf 'proxy-agent: REFUSED reason=MEMORY_PRESSURE free=%s swap_used=%s\n' "$free" "$swap_mb" >&2
+      return 75;;
+    allow)
+      if [[ "${PROXY_AGENT_DRY_RUN:-}" == 1 ]]; then
+        printf 'proxy-agent: ALLOWED reason=MEMORY_PRESSURE free=%s swap_used=%s\n' "$free" "$swap_mb" >&2
+      fi;;
+    *)
+      printf 'proxy-agent: WARN reason=MEMORY_PRESSURE_UNAVAILABLE free=%s swap_used=%s action=allow\n' "$free" "$swap_mb" >&2;;
+  esac
+}
+
 STATE_HELPER="$HOME/.claude/scripts/proxy-run-state.py"
 unset PROXY_RESUME_ORIGINAL
 if [[ -n "$RESUME_NAME" ]]; then
@@ -2645,6 +2687,9 @@ fi
 LOG="${OUT%.md}.log"
 DELIVERY="${OUT}.delivery"
 JSONL="${OUT%.md}.jsonl"
+if [[ "${PROXY_AGENT_DRY_RUN:-}" == 1 ]]; then
+  proxy_agent_memory_gate || exit $?
+fi
 # Direct DeepSeek bench gate (CTO REVISE of 248ae25b, ts 1795600640.261439): the ONE admission for a deepseek-direct/* start and for a --dry-run of one (a dry run takes
 # a slot for PROXY_AGENT_DSD_DRYRUN_HOLD_S seconds, default 0, so concurrent previews see each other). run.sh re-admits every continuation through the same script. It
 # checks the bench scope token, the stop flag, the budget and the cap, all read now under one lock. rc 75 = cap (capacity: queueing a retry is meaningful); rc 2 =
@@ -3076,6 +3121,10 @@ PY
   fi
 fi
 
+# Measure after launch preparation and before consuming a review round or starting tmux.
+# A refusal reaches the launcher's EXIT trap and preserves the existing capacity-wait path.
+proxy_agent_memory_gate || exit $?
+
 # Persist a private runner, not credentials in tmux's command line/global env.
 JOB_DIR="$(mktemp -d "${TMPDIR:-/tmp}/proxy-agent-job.XXXXXX")"
 CHANNEL="proxy-agent-$$-$STAMP"
@@ -3233,7 +3282,9 @@ RESULT_CONTRACT
   printf 'if [[ -n "${PROXY_AGENT_RUN_NAME:-}" && -n "${PROXY_AGENT_RUN_TOKEN:-}" ]]; then ( python3 -I %q running --name "$PROXY_AGENT_RUN_NAME" --token "$PROXY_AGENT_RUN_TOKEN" --wait-s %q </dev/null >/dev/null 2>>%q & ) 2>/dev/null; fi\n' "$STATE_HELPER" "${PROXY_AGENT_RUNNING_WAIT_S:-180}" "$LOG"
   printf 'pa_n=0; pa_max=${PROXY_AGENT_MAX_CONTINUE:-6}; pa_wall=${PROXY_AGENT_MAX_WALL_S:-10800}\n'
   printf 'pa_account=""; if [[ "$pa_claude_429" == 1 && -r "$HOME/.claude/state/proxy-claude-account-pin" ]]; then IFS= read -r pa_account < "$HOME/.claude/state/proxy-claude-account-pin"; fi\n'
+  declare -f proxy_agent_memory_gate
   printf 'while :; do\n'
+  printf 'if [[ "$pa_retry" == 1 ]]; then proxy_agent_memory_gate >> %q 2>&1 || exit $?; fi\n' "$LOG"
   printf 'if [[ "$pa_claude_429" == 1 ]]; then pa_log_start=$(wc -c < "$PA_LOG"); pa_terminal_jsonl="$PA_JSONL"; fi\n'
   # Direct DeepSeek: tell the gate claude is about to start (a lane that never got here spent nothing and is released, not held), then cap the segment.
   if [[ "$PA_DSD_ADMITTED" == 1 ]]; then  # decided here, not in run.sh: MODEL_ID and the helper functions are only defined in run.sh AFTER its first claude command
@@ -3277,6 +3328,7 @@ RESULT_CONTRACT
   printf '  if pa_terminal_429 || python3 -I %q quota --out %q --log %q --jsonl %q; then break; fi\n' "$STATE_HELPER" "$OUT" "$LOG" "$JSONL"
   printf '  IFS=$'"'"'\\t'"'"' read -r pa_sid pa_term < <(python3 -I %q %q)\n' "$HOME/.claude/scripts/proxy-agent-result.py" "$JSONL"
   printf '  [[ "$pa_term" == 1 || -z "$pa_sid" ]] && break\n'
+  printf '  proxy_agent_memory_gate >> %q 2>&1 || exit $?\n' "$LOG"
   printf '  pa_reason=other; if pa_maxturns; then pa_reason=max_turns; elif [[ "$rc" != 0 ]]; then pa_reason=stream_error; fi\n'
   printf '  pa_n=$((pa_n+1)); printf "[%%s] PROXY_AGENT_CONTINUE n=%%s reason=%%s sid=%%s\\n" "$(date -u +%%FT%%TZ)" "$pa_n" "$pa_reason" "$pa_sid" >> %q\n' "$LOG"
   printf '  if proxy_agent_is_opencode_id "$MODEL_ID"; then\n'

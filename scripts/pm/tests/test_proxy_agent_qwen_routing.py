@@ -131,14 +131,8 @@ def test_thinking_budget_defaults_to_2048_for_both_aliases():
     assert '-z "${MAX_THINKING_TOKENS:-}"' in block
 
 
-def test_skill_allowlist_branch_covers_both_aliases_and_writes_atomically():
-    guard = f'if [[ "$MODEL_ID" == {ORNITH} || "$MODEL_ID" == {QWEN} || "$MODEL_ID" == {INKLING} ]]; then'
-    start = SRC.index(guard)
-    block = SRC[start:SRC.index('elif [[ "${PROXY_AGENT_SKILL_ALLOWLIST:-1}" != 0 ]]; then')]
-    assert "inkling-skill-overrides.py" in block
-    assert 'open(p, "w")' not in block
-    assert "os.replace(tmp, p)" in block and "os.fsync" in block and "tempfile.mkstemp" in block
-    assert 'PROXY_AGENT_WARN reason=local_model_skill_overrides_unavailable' in block
+def test_spark_has_no_separate_skill_override_generator():
+    assert not re.search(r'^\s*if .*python3.*inkling-skill-overrides\.py', SRC, re.M)
 
 
 def test_every_tier_model_is_probe_able():
