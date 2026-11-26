@@ -237,11 +237,14 @@ export class ProcessHealthChecker {
   private PM_FORCE_SHELL_TIMEOUT_MS = 30_000;
   /** launcher typed -> the agent process runs in the pane (no idle prompt required; also bounds a non-episode continuation's pre-effect retries). */
   private PM_PROMPT_TIMEOUT_MS = 90_000;
-  /** launcher typed -> MoP presses Enter itself (Rajiv ts 1795716529.803219: "enter should be triggered by MoP after a delay"). */
-  private PM_LAUNCH_ENTER_DELAY_MS = 1_000;
-  /** Enter sent -> the launcher process must appear in the pane before the next bounded Enter retry. */
-  private PM_LAUNCH_ENTER_CONFIRM_MS = 5_000;
-  private PM_LAUNCH_ENTER_ATTEMPTS = 3;
+  /**
+   * Shell prompt seen -> the one guarded launcher submission (Rajiv ts 1795716529.803219: "enter should be triggered by MoP
+   * after a delay"). The delay comes BEFORE the final empty-shell check, never between the text and its Enter (CTO REVISE
+   * C0ALZJHGE49 thread 1795715075.690009, ts 1795717248.453549).
+   */
+  private PM_LAUNCH_DELAY_MS = 1_000;
+  /** Submission sent -> the launcher (or the agent) must show up as a process; confirmation only, never a resend. */
+  private PM_LAUNCH_CONFIRM_MS = 10_000;
   /** tmux runner for the PM restart effects (tests substitute a fake pane). */
   private runShell: PaneCommandRunner = execShell;
   /** Single owner of a PM restart; concurrent triggers join it. */
@@ -505,10 +508,10 @@ export class ProcessHealthChecker {
   }
 
   /** Written BEFORE the step's effect: an uncertain or failed effect stays consumed, across a MoP restart too. */
-  private markRestartStep(episode: string | null, step: string): void {
+  private markRestartStep(episode: string | null, ...step: string[]): void {
     if (!episode) return;
     const steps = (this.db.getConfig("exit_pending_restart_steps") ?? "").split(",").filter(Boolean);
-    this.db.setConfig("exit_pending_restart_steps", [...steps, step].join(","));
+    this.db.setConfig("exit_pending_restart_steps", [...steps, ...step].join(","));
   }
 
   /** True for a crash/unresponsive restart (no episode) or while the same exit episode is still pending. */
@@ -795,83 +798,63 @@ export class ProcessHealthChecker {
   }
 
   /**
-   * Types the launcher, then submits it; each key runs inside the slot send lock (CTO REVISE finding 2). Right before
-   * typing it rechecks the same episode, pane and shell command and that the VISIBLE screen ends at an empty prompt, so a
-   * half-typed draft is never joined to the launcher. After a short delay MoP presses Enter itself and confirms the
-   * submission from PROCESSES, never from screen text: the 26 Nov restart typed the launcher and then refused Enter
-   * because the visible line did not match (pm_launch_text_not_owned), leaving the command buffered until Rajiv pressed
-   * Enter (C0ALZJHGE49 thread 1795715075.690009, ts 1795716529.803219). Enter is retried a bounded number of times while
-   * the pane shell provably has no launcher child. Each key is recorded durably BEFORE its effect: an uncertain or failed
-   * send stays consumed, also across a MoP restart. Returns a refusal or null.
+   * ONE owned launcher submission (CTO REVISE C0ALZJHGE49 thread 1795715075.690009, ts 1795717248.453549): "Make the
+   * delayed action one owned launcher submission. Delay before the final guarded empty-shell check, then send the exact
+   * --continue command and its terminator together through the existing pane owner. Use the process probe for
+   * confirmation only. Preserve uncertain submissions as consumed."
+   *
+   * 1. Wait PM_LAUNCH_DELAY_MS first (the 26 Nov restart left the typed launcher buffered; Rajiv ts 1795716529.803219).
+   * 2. Inside the slot send lock, the final guard: same episode, the pane foreground is still a shell, same pane, and its
+   *    VISIBLE bottom line is an empty prompt. A draft a person typed meanwhile (or any other non-empty line) refuses at
+   *    once, before any key, and is never joined or submitted; that refusal is recorded ("launch") so later ticks of the
+   *    same episode do not retry it. Only a pane or screen that cannot be read yet waits, bounded.
+   * 3. The step is recorded durably BEFORE the effect, then the exact launcher text and its Enter go out as ONE tmux
+   *    command (`send-keys -l <text> ; send-keys Enter`), which the tmux server runs as one unit with no key from
+   *    another client in between. MoP never sends a bare Enter, so it can never submit text it did not type.
+   * 4. The process probe only confirms. Unconfirmed or failed sends stay consumed: there is no second submission.
+   * Returns a refusal or null.
    */
   private async sendPMLaunch(paneId: string, typed: string, episode: string | null, exactPM = false): Promise<string | null> {
+    if (this.restartStepDone(episode, "launch") || this.restartStepDone(episode, "launched")) return "launch_already_attempted";
+    await this.sleepMs(this.PM_LAUNCH_DELAY_MS);
     const deadline = Date.now() + this.PM_PROMPT_TIMEOUT_MS;
     for (;;) {
       const outcome = await withSlotSendLock(0, async () => {
-        if (this.restartStepDone(episode, "launch")) return "launch_already_attempted";
+        if (this.restartStepDone(episode, "launch") || this.restartStepDone(episode, "launched")) return "launch_already_attempted";
         if (!this.sameEpisode(episode)) return "exit_pending_changed";
         const command = await this.getPaneCommand(0, exactPM, exactPM ? paneId : undefined);
         if (!command || !SHELL_COMMANDS.has(command)) return "pm_shell_changed";
         const identity = await verifyPaneIdentity(0, this.runShell);
-        if (identity.ok && identity.snapshot.paneId !== paneId) return "pm_pane_changed";
-        const screen = identity.ok ? await this.visiblePane(paneId) : null;
-        if (screen === null || !isShellPromptVisible(screen)) return "wait";
-        this.markRestartStep(episode, "launch");
-        await this.runShell(`tmux send-keys -l -t ${paneId} ${shellEscape(typed)}`, { timeout: 10_000 });
-        return null;
+        if (!identity.ok) return "wait";
+        if (identity.snapshot.paneId !== paneId) return "pm_pane_changed";
+        const screen = await this.visiblePane(paneId);
+        if (screen === null) return "wait";
+        if (!isShellPromptVisible(screen)) {
+          // A refused submission is consumed too: later ticks of this episode never retry it behind a person's draft.
+          this.markRestartStep(episode, "launch");
+          return "pm_launch_prompt_not_empty";
+        }
+        this.markRestartStep(episode, "launch", "launched");
+        await this.runShell(`tmux send-keys -t ${paneId} -l ${shellEscape(typed)} \\; send-keys -t ${paneId} Enter`, { timeout: 10_000 });
+        return "sent";
       }).catch((err) => `launcher send failed: ${String(err).slice(0, 200)}`);
-      if (outcome === null) break;
+      if (outcome === "sent") break;
       if (outcome !== "wait") return outcome;
-      if (Date.now() >= deadline) return "pm_launch_prompt_not_empty";
+      if (Date.now() >= deadline) return "pm_launch_screen_unreadable";
       await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, deadline - Date.now()));
     }
-    await this.sleepMs(this.PM_LAUNCH_ENTER_DELAY_MS);
-    return this.submitPMLaunch(paneId, episode, exactPM);
-  }
-
-  /** Durable step name of the n-th Enter (the first keeps the historical "launched" marker resumePMExitEpisode reads). */
-  private static launchEnterStep(attempt: number): string {
-    return attempt === 1 ? "launched" : `launch_enter_${attempt}`;
-  }
-
-  /**
-   * Presses Enter on the typed launcher until the pane runs it, bounded by PM_LAUNCH_ENTER_ATTEMPTS. Before each Enter,
-   * inside the send lock: same episode and pane, and the launcher is provably not running yet (a running launcher or
-   * agent means the line was submitted: no further Enter). An UNKNOWN process listing waits, it never presses blind.
-   */
-  private async submitPMLaunch(paneId: string, episode: string | null, exactPM: boolean): Promise<string | null> {
-    const deadline = Date.now() + this.PM_PROMPT_TIMEOUT_MS;
-    for (let attempt = 1; attempt <= this.PM_LAUNCH_ENTER_ATTEMPTS; attempt++) {
-      const step = ProcessHealthChecker.launchEnterStep(attempt);
-      for (;;) {
-        const outcome = await withSlotSendLock(0, async () => {
-          if (this.restartStepDone(episode, step)) return "consumed";
-          if (!this.sameEpisode(episode)) return "exit_pending_changed";
-          const submitted = await this.pmLaunchSubmitted(paneId, exactPM);
-          if (submitted === true) return "submitted";
-          if (submitted === null) return "wait";
-          const identity = await verifyPaneIdentity(0, this.runShell);
-          if (!identity.ok) return "wait";
-          if (identity.snapshot.paneId !== paneId) return "pm_pane_changed";
-          this.markRestartStep(episode, step);
-          await this.runShell(`tmux send-keys -t ${paneId} Enter`, { timeout: 10_000 });
-          return "sent";
-        }).catch((err) => `launcher submit failed: ${String(err).slice(0, 200)}`);
-        if (outcome === "submitted") return null;
-        if (outcome === "sent" || outcome === "consumed") break;
-        if (outcome !== "wait") return outcome;
-        if (Date.now() >= deadline) return "pm_launch_enter_not_confirmed";
-        await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, deadline - Date.now()));
-      }
-      // The submitted launcher shows up as a process within the confirm window; otherwise press Enter again.
-      const confirmBy = Date.now() + this.PM_LAUNCH_ENTER_CONFIRM_MS;
-      for (;;) {
-        if (await this.pmLaunchSubmitted(paneId, exactPM) === true) return null;
-        if (Date.now() >= confirmBy) break;
-        await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, confirmBy - Date.now()));
-      }
+    // Confirmation only. An UNKNOWN listing is left to the bounded agent-process wait that follows; a listing that
+    // provably has neither the launcher nor the agent for the whole window (for example a fast launcher failure) fails
+    // the restart once. Nothing is resent either way.
+    const confirmBy = Date.now() + this.PM_LAUNCH_CONFIRM_MS;
+    let submitted: boolean | null = null;
+    for (;;) {
+      submitted = await this.pmLaunchSubmitted(paneId, exactPM);
+      if (submitted === true || Date.now() >= confirmBy) break;
+      await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, confirmBy - Date.now()));
     }
-    return "pm_launch_enter_not_submitted";
+    this.db.logEvent(0, "pm_launch_submitted", null, null, { episode, pane_id: paneId, confirmed: submitted });
+    return submitted === false ? "pm_launch_not_confirmed" : null;
   }
 
   /**

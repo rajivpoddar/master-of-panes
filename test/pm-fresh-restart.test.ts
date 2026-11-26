@@ -24,19 +24,15 @@ type PaneState = "menu" | "exiting" | "idle" | "busy" | "shell" | "restoring" | 
 
 // failIdentityProbe: how many `tmux display-message` probes fail first (Infinity = always). noSessionStart: the new Claude
 // boots but its SessionStart hook never arrives (a late or missing hook).
-// swallowEnters: how many launcher Enters the shell ignores (a buffered line, Rajiv ts 1795716529.803219). submitOnType:
-// the shell runs the launcher as soon as it is typed, so no Enter is needed.
+// launcherFailsFast: the submitted launcher exits at once and the pane is back at the shell (no launcher process seen).
 function harness(options: { state?: PaneState; neverBoots?: boolean; failIdentityProbe?: number; noSessionStart?: boolean;
-  swallowEnters?: number; submitOnType?: boolean } = {}) {
+  launcherFailsFast?: boolean } = {}) {
   const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: ":memory:" });
   const pane = { state: options.state ?? "exiting" as PaneState, polls: 0, typed: [] as string[], shell: [] as string[], sends: [] as string[],
     onPoll: undefined as undefined | ((polls: number) => void),
-    // The VISIBLE screen (capture-pane) when it differs from the scrollback the other fakes show, and text a user appends
-    // to the typed launcher after it was typed.
-    visible: undefined as undefined | string, appended: "", probeFailures: options.failIdentityProbe ?? 0,
-    swallowEnters: options.swallowEnters ?? 0 };
+    // The VISIBLE screen (capture-pane) when it differs from the scrollback the other fakes show.
+    visible: undefined as undefined | string, probeFailures: options.failIdentityProbe ?? 0 };
   const order: string[] = [];
-  const typedRaw = () => (pane.typed.at(-1) ?? "").replace(/^tmux send-keys -l -t %7 /, "").slice(1, -1).replace(/'\\''/g, "'");
   const runShell = async (command: string) => {
     pane.shell.push(command);
     let stdout = "";
@@ -55,25 +51,22 @@ function harness(options: { state?: PaneState; neverBoots?: boolean; failIdentit
     } else if (command.startsWith("git -C ") && command.endsWith("rev-parse --show-toplevel")) stdout = `${PM_PATH}\n`;
     else if (command.startsWith("tmux list-panes")) stdout = `%7|${PM_PATH}\n`;
     else if (command === "tmux capture-pane -t %7 -p -J") {
-      stdout = pane.visible ?? (pane.state === "shell" ? (pane.typed.length ? `earlier output\n$ ${typedRaw()}${pane.appended}\n` : SHELL_TEXT)
-        : pane.state === "menu" ? EXIT_MENU_TEXT : COMPOSER_TEXT);
+      stdout = pane.visible ?? (pane.state === "shell" ? SHELL_TEXT : pane.state === "menu" ? EXIT_MENU_TEXT : COMPOSER_TEXT);
     } else if (command.startsWith("tmux respawn-pane")) { pane.state = "shell"; order.push("respawn"); }
     else if (command === "tmux send-keys -t %7 1") order.push("1");
-    else if (command.startsWith("tmux send-keys -l")) {
+    else if (SUBMIT.test(command)) {
+      // The one owned submission: the launcher text and its Enter in ONE tmux command (CTO ts 1795717248.453549).
       pane.typed.push(command);
-      order.push("type");
-      if (options.submitOnType && pane.state === "shell") pane.state = "fresh";
-    }
-    else if (command.startsWith("tmux send-keys") && command.endsWith(" Enter")) {
-      if (pane.state === "menu") { order.push("menu-enter"); pane.state = "exiting"; }
-      else {
-        order.push("enter");
-        if (pane.state === "shell" && pane.typed.length && pane.swallowEnters > 0) pane.swallowEnters--;
-        else if (pane.state === "shell" && pane.typed.length) {
-          pane.state = options.neverBoots ? "booting" : "fresh";
-          if (!options.neverBoots && !options.noSessionStart) db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "fresh-session", cwd: PM_PATH });
-        }
+      order.push("submit");
+      if (pane.state === "shell" && !options.launcherFailsFast) {
+        pane.state = options.neverBoots ? "booting" : "fresh";
+        if (!options.neverBoots && !options.noSessionStart) db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "fresh-session", cwd: PM_PATH });
       }
+    }
+    else if (command === "tmux send-keys -t %7 Enter") {
+      // Only the exit menu may take a bare Enter; anywhere else it could submit someone else's input.
+      order.push(pane.state === "menu" ? "menu-enter" : "bare-enter");
+      if (pane.state === "menu") pane.state = "exiting";
     } else throw new Error(`Unexpected shell command: ${command}`);
     return { stdout, stderr: "" };
   };
@@ -104,8 +97,8 @@ function harness(options: { state?: PaneState; neverBoots?: boolean; failIdentit
   health.PM_EXIT_SHELL_TIMEOUT_MS = 200;
   health.PM_FORCE_SHELL_TIMEOUT_MS = 100;
   health.PM_PROMPT_TIMEOUT_MS = 100;
-  health.PM_LAUNCH_ENTER_DELAY_MS = 2;
-  health.PM_LAUNCH_ENTER_CONFIRM_MS = 20;
+  health.PM_LAUNCH_DELAY_MS = 2;
+  health.PM_LAUNCH_CONFIRM_MS = 20;
   health.pmAgentProcess = async () => "4000:4001";
   // The launcher process is a child of the pane shell once the line was submitted (booting) or Claude is up (fresh).
   health.paneShellRunsLauncher = async () => pane.state === "booting" || pane.state === "fresh";
@@ -129,7 +122,8 @@ function armPmOnlyEpisode(db: MoPDatabase, prompt?: string): string {
   return episode;
 }
 
-const launchTyped = (pane: { typed: string[] }) => pane.typed.map((cmd) => cmd.replace(/^tmux send-keys -l -t %7 /, ""));
+const SUBMIT = /^tmux send-keys -t %7 -l ('(?:[^']|'\\'')*') \\; send-keys -t %7 Enter$/;
+const launchTyped = (pane: { typed: string[] }) => pane.typed.map((cmd) => SUBMIT.exec(cmd)?.[1] ?? `UNPARSED ${cmd}`);
 const LAUNCH = `'cd '\\''${PM_PATH}'\\'' && bash /Users/rajiv/.claude/scripts/launch-pm.sh --via cliproxy --model claude-opus-5-5 --continue'`;
 
 test("launcher contract: configured model, default opus; the base command carries no --continue (the restart adds it)", () => {
@@ -166,7 +160,7 @@ for (const prompt of [undefined, "Read /saved/resume.md and resume."]) {
       const episode = armPmOnlyEpisode(h.db, prompt);
       const result = await h.health.restartPMFresh("exit", episode);
       assert.equal(result.success, true, result.reason);
-      assert.deepEqual(h.order, ["1", "menu-enter", "type", "enter", "continuation", "drain"]);
+      assert.deepEqual(h.order, ["1", "menu-enter", "submit", "continuation", "drain"]);
       assert.deepEqual(launchTyped(h.pane), [LAUNCH]);
       assert.match(launchTyped(h.pane)[0], / --continue'$/, "restart should use --continue (Rajiv ts 1795716529.803219)");
       assert.deepEqual(h.pane.sends, [prompt ?? PM_RESTART_CONTINUATION_PROMPT]);
@@ -189,7 +183,7 @@ test("exit flow without an exit menu: nothing is typed until the shell prompt, t
     const result = await h.health.restartPMFresh("exit", episode);
     assert.equal(result.success, true, result.reason);
     assert.ok(h.pane.polls >= 3);
-    assert.deepEqual(h.order, ["type", "enter", "continuation", "drain"], "no 1 or Enter without a menu");
+    assert.deepEqual(h.order, ["submit", "continuation", "drain"], "no 1 or Enter without a menu");
     assert.deepEqual(h.pane.sends, [PM_RESTART_CONTINUATION_PROMPT]);
   } finally { h.db.close(); }
 });
@@ -202,7 +196,7 @@ test("a transient tmux identity probe failure never aborts the exit flow", async
     const episode = armPmOnlyEpisode(h.db);
     const result = await h.health.restartPMFresh("exit", episode);
     assert.equal(result.success, true, result.reason);
-    assert.deepEqual(h.order, ["1", "menu-enter", "type", "enter", "continuation", "drain"]);
+    assert.deepEqual(h.order, ["1", "menu-enter", "submit", "continuation", "drain"]);
   } finally { h.db.close(); }
 });
 
@@ -248,68 +242,108 @@ test("a menu key is recorded durably once: the same episode never answers the me
   } finally { h.db.close(); }
 });
 
-test("launcher: a half-typed draft at the prompt is never joined to the launcher", async () => {
-  const h = harness({ state: "shell" });
-  try {
-    h.pane.visible = "$ half typed draft\n";
-    const result = await h.health.restartPMFresh("crash");
-    assert.equal(result.success, false);
-    assert.match(result.reason, /pm_launch_prompt_not_empty/);
-    assert.deepEqual(h.order, [], "nothing typed, nothing submitted");
-  } finally { h.db.close(); }
-});
+// CTO REVISE C0ALZJHGE49 thread 1795715075.690009, ts 1795717248.453549: "Make the delayed action one owned launcher
+// submission. Delay before the final guarded empty-shell check, then send the exact --continue command and its terminator
+// together through the existing pane owner. Use the process probe for confirmation only. Preserve uncertain submissions
+// as consumed." The delay is recognisable in the trace because the harness gives it a distinct length.
+const DELAY = 7;
+function traceDelay(h: ReturnType<typeof harness>, onDelay?: () => void) {
+  h.health.PM_LAUNCH_DELAY_MS = DELAY;
+  const sleep = h.health.sleepMs.bind(h.health);
+  h.health.sleepMs = (ms: number) => {
+    if (ms === DELAY) { h.pane.shell.push("sleep:delay"); onDelay?.(); }
+    return sleep(ms);
+  };
+}
 
-// Rajiv C0ALZJHGE49 thread 1795715075.690009, ts 1795716529.803219: "the restart didn't work. the command got buffered in
-// the shell prompt. i had to press enter manually. enter should be triggered by MoP after a delay." The 26 Nov restart
-// refused Enter with pm_launch_text_not_owned because the visible line did not match the typed text.
-test("launcher: screen text after typing (autosuggest ghost text, a wrapped line) never withholds Enter", async () => {
+test("launcher: one owned submission after the delay: exact --continue text and its Enter in ONE tmux command, never a bare Enter", async () => {
   const h = harness({ state: "shell" });
   try {
-    h.pane.appended = " ghost-suggestion";
+    traceDelay(h);
     const episode = armPmOnlyEpisode(h.db, "saved prompt");
     const result = await h.health.restartPMFresh("exit", episode);
     assert.equal(result.success, true, result.reason);
-    assert.deepEqual(h.order, ["type", "enter", "continuation", "drain"]);
+    assert.deepEqual(h.order, ["submit", "continuation", "drain"], "no separate type step, no bare Enter");
+    assert.deepEqual(launchTyped(h.pane), [LAUNCH]);
+    const delay = h.pane.shell.indexOf("sleep:delay");
+    const finalCheck = h.pane.shell.lastIndexOf("tmux capture-pane -t %7 -p -J");
+    const submit = h.pane.shell.findIndex((cmd) => SUBMIT.test(cmd));
+    assert.ok(delay >= 0 && delay < finalCheck && finalCheck < submit, "delay, then the guarded empty-shell check, then the submission");
+    assert.equal(h.db.getConfig("exit_pending_restart_steps"), null, "the completed episode reset its step list");
+    assert.match(String(h.db.getEvents(0, 5, "pm_launch_submitted")[0]?.payload ?? ""), /"confirmed":true/);
     assert.deepEqual(h.pane.sends, ["saved prompt"], "the continuation note is still injected after --continue");
   } finally { h.db.close(); }
 });
 
-test("launcher: a buffered line gets a bounded Enter retry until the launcher process runs", async () => {
-  const h = harness({ state: "shell", neverBoots: true, swallowEnters: 1 });
+test("launcher: a draft a person types during the delay stays unsubmitted and unjoined; the refusal is consumed", async () => {
+  const h = harness({ state: "shell" });
   try {
-    const episode = armPmOnlyEpisode(h.db, "saved prompt");
-    await h.health.restartPMFresh("exit", episode);
-    assert.deepEqual(h.order, ["type", "enter", "enter"]);
-    assert.equal(h.db.getConfig("exit_pending_restart_steps"), "launch,launched,launch_enter_2");
-  } finally { h.db.close(); }
-});
-
-test("launcher: Enter attempts are bounded; a line that never runs fails once with no continuation", async () => {
-  const h = harness({ state: "shell", swallowEnters: Infinity });
-  try {
-    const result = await h.health.restartPMFresh("crash");
+    traceDelay(h, () => { h.pane.visible = "earlier output\nrajiv@heydonna ~ »\n$ git status --sh\n"; });
+    const episode = armPmOnlyEpisode(h.db);
+    const result = await h.health.restartPMFresh("exit", episode);
     assert.equal(result.success, false);
-    assert.equal(result.reason, "pm_launch_enter_not_submitted");
-    assert.deepEqual(h.order, ["type", "enter", "enter", "enter"]);
-    assert.deepEqual(h.pane.sends, []);
-    assert.equal(h.db.getEvents(0, 5, "pm_restart_failed").length, 1);
+    assert.equal(result.reason, "pm_launch_prompt_not_empty");
+    assert.deepEqual(h.order, [], "no launcher text, no Enter");
+    assert.equal(h.db.getConfig("exit_pending_restart_steps"), "launch");
+    // The next health tick of the same episode, even with the line cleared, never retries behind the person.
+    h.pane.visible = undefined;
+    assert.equal((await h.health.restartPMFresh("exit", episode)).reason, "launch_already_attempted");
+    assert.deepEqual(h.order, []);
   } finally { h.db.close(); }
 });
 
-test("launcher: no Enter once the launcher already runs, and none blind while the process listing is unknown", async () => {
-  const running = harness({ state: "shell", submitOnType: true });
+test("launcher: the foreground is no longer the shell at the final check: nothing is sent", async () => {
+  const h = harness({ state: "shell" });
   try {
-    const result = await running.health.restartPMFresh("crash");
-    assert.equal(result.success, true, result.reason);
-    assert.deepEqual(running.order, ["type", "continuation", "drain"]);
-  } finally { running.db.close(); }
-  const unknown = harness({ state: "shell" });
+    let delayed = false;
+    traceDelay(h, () => { delayed = true; });
+    const getPaneCommand = h.health.getPaneCommand;
+    h.health.getPaneCommand = async (...args: unknown[]) => (delayed ? "vim" : getPaneCommand(...args));
+    const result = await h.health.restartPMFresh("crash");
+    assert.equal(result.reason, "pm_shell_changed");
+    assert.deepEqual(h.order, []);
+  } finally { h.db.close(); }
+});
+
+test("launcher: a launcher that fails fast is never resubmitted; the submission stays consumed", async () => {
+  const h = harness({ state: "shell", launcherFailsFast: true });
   try {
-    unknown.health.paneShellRunsLauncher = async () => null;
-    const result = await unknown.health.restartPMFresh("crash");
-    assert.equal(result.reason, "pm_launch_enter_not_confirmed");
-    assert.deepEqual(unknown.order, ["type"]);
-  } finally { unknown.db.close(); }
+    const episode = armPmOnlyEpisode(h.db);
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.equal(result.reason, "pm_launch_not_confirmed");
+    assert.deepEqual(h.order, ["submit"]);
+    assert.equal(h.db.getConfig("exit_pending_restart_steps"), "launch,launched");
+    assert.equal((await h.health.restartPMFresh("exit", episode)).reason, "launch_already_attempted");
+    assert.deepEqual(h.order, ["submit"], "a later retry sends nothing");
+    assert.equal(h.db.getEvents(0, 5, "pm_restart_failed").length, 2);
+  } finally { h.db.close(); }
+});
+
+test("launcher: an unknown process listing only leaves confirmation to the bounded agent wait; nothing is resent", async () => {
+  const h = harness({ state: "shell", neverBoots: true });
+  try {
+    h.health.paneShellRunsLauncher = async () => null;
+    const result = await h.health.restartPMFresh("crash");
+    assert.match(result.reason, /claude process not observed/);
+    assert.deepEqual(h.order, ["submit"]);
+  } finally { h.db.close(); }
+});
+
+test("launcher: an uncertain send (tmux error) stays consumed and is never retried", async () => {
+  const h = harness({ state: "shell" });
+  try {
+    const runShell = h.health.runShell;
+    h.health.runShell = async (command: string, opts: unknown) => {
+      if (SUBMIT.test(command)) { h.pane.shell.push(command); throw new Error("tmux: server exited unexpectedly"); }
+      return runShell(command, opts);
+    };
+    const episode = armPmOnlyEpisode(h.db);
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.match(result.reason, /^launcher send failed/);
+    assert.equal(h.db.getConfig("exit_pending_restart_steps"), "launch,launched");
+    assert.equal((await h.health.restartPMFresh("exit", episode)).reason, "launch_already_attempted");
+    assert.equal(h.pane.shell.filter((cmd) => SUBMIT.test(cmd)).length, 1);
+  } finally { h.db.close(); }
 });
 
 test("launcher process check reads the pane shell's children: prompt helpers never count, a probe failure is unknown", async () => {
@@ -381,7 +415,7 @@ test("crash recovery (no exit episode) uses the same fresh launch and one standa
     h.db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "old-session", cwd: PM_PATH });
     const result = await h.health.restartPMFresh("crash");
     assert.equal(result.success, true, result.reason);
-    assert.deepEqual(h.order, ["type", "enter", "continuation", "drain"]);
+    assert.deepEqual(h.order, ["submit", "continuation", "drain"]);
     assert.deepEqual(h.pane.sends, [PM_RESTART_CONTINUATION_PROMPT]);
     // Same boot and same live process, second attempt: the per-boot claim refuses a resend.
     const boot = h.db.getEvents(0, 1, "SessionStart")[0].id;
@@ -398,7 +432,7 @@ test("a late or missing SessionStart never delays or drops the continuation", as
     const episode = armPmOnlyEpisode(h.db, "saved prompt");
     const result = await h.health.restartPMFresh("exit", episode);
     assert.equal(result.success, true, result.reason);
-    assert.deepEqual(h.order, ["type", "enter", "continuation", "drain"]);
+    assert.deepEqual(h.order, ["submit", "continuation", "drain"]);
     assert.deepEqual(h.pane.sends, ["saved prompt"]);
     assert.equal(h.db.getExitStatus().pending, false);
   } finally { h.db.close(); }
@@ -552,7 +586,7 @@ for (const state of ["shell", "restoring", "missing", "idle"] as const) {
       }
       assert.equal(launchTyped(h.pane).length, 1);
       assert.match(launchTyped(h.pane)[0], /launch-pm\.sh --via cliproxy --model claude-opus-5-5 --continue'$/);
-      assert.deepEqual(h.order, [...(state === "missing" ? ["create"] : []), "type", "enter", "drain"]);
+      assert.deepEqual(h.order, [...(state === "missing" ? ["create"] : []), "submit", "drain"]);
       assert.deepEqual(h.pane.sends, [], "--continue does not need an extra synthetic turn");
     } finally { h.health.stop(); h.db.close(); }
   });
@@ -603,7 +637,7 @@ test("crash/unresponsive never kills a running agent without proof: busy PM keep
   try {
     const result = await idle.health.restartPMFresh("unresponsive");
     assert.equal(result.success, true, result.reason);
-    assert.deepEqual(idle.order, ["respawn", "type", "enter", "continuation", "drain"]);
+    assert.deepEqual(idle.order, ["respawn", "submit", "continuation", "drain"]);
     assert.equal(idle.db.getEvents(0, 1, "pm_restart_force_respawn").length, 1);
   } finally { idle.db.close(); }
 });

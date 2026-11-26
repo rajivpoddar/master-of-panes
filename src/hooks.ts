@@ -230,7 +230,7 @@ export class HookProcessor {
   /**
    * Set by the server: after the PM-only Stop takes its single /exit attempt,
    * MoP waits for the zsh prompt and relaunches the PM with the configured
-   * model plus --continue, presses Enter itself, then injects one continuation (health.restartPMFresh).
+   * model plus --continue, submits the launcher text and its Enter in one owned send, then injects one continuation (health.restartPMFresh).
    */
   pmExitRestartHandler: ((episode: string | null, delivery: string) => void) | null = null;
 

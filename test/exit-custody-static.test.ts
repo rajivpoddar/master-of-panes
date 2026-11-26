@@ -108,10 +108,15 @@ test("PM restart effects are rechecked inside the send lock and recorded durably
   const launch = health.slice(health.indexOf("private async sendPMLaunch"), health.indexOf("private isAgentCommand"));
   assert.ok(launch.includes("withSlotSendLock(0") && launch.includes("isShellPromptVisible(screen)"));
   assert.ok(launch.indexOf("this.markRestartStep(") < launch.indexOf("send-keys"), "the launcher step is recorded before it is sent");
-  // Enter is confirmed from processes, never from screen text (Rajiv C0ALZJHGE49 thread 1795715075.690009, ts 1795716529.803219).
-  const submit = launch.slice(launch.indexOf("private async submitPMLaunch"));
-  assert.ok(submit.includes("withSlotSendLock(0") && submit.includes("this.pmLaunchSubmitted(paneId, exactPM)") && !submit.includes("visiblePane"));
-  assert.ok(submit.indexOf("this.markRestartStep(") < submit.indexOf("send-keys"), "each Enter is recorded before it is sent");
+  // CTO REVISE C0ALZJHGE49 thread 1795715075.690009, ts 1795717248.453549: one owned launcher submission. The delay comes
+  // before the final guarded empty-shell check, then the exact --continue text and its Enter go in ONE tmux command list.
+  assert.ok(launch.includes("SHELL_COMMANDS.has(command)") && launch.includes("this.sameEpisode(episode)"), "the final check also proves the foreground is the shell");
+  assert.ok(launch.indexOf("this.sleepMs(this.PM_LAUNCH_DELAY_MS)") < launch.indexOf("withSlotSendLock(0"), "the delay comes before the guarded check, never between text and Enter");
+  const sends = launch.match(/tmux send-keys[^`]*/g) ?? [];
+  assert.equal(sends.length, 1, "exactly one send in the launcher path");
+  assert.ok(/-l \$\{shellEscape\(typed\)\} \\\\; send-keys -t \$\{paneId\} Enter/.test(sends[0]), "the launcher text and its Enter travel together");
+  assert.ok(!health.includes("submitPMLaunch") && !health.includes("PM_LAUNCH_ENTER_"), "no separate delayed Enter path remains");
+  assert.ok(launch.includes("this.pmLaunchSubmitted(paneId, exactPM)"), "the process probe confirms only");
 });
 test("the next tick after a MoP restart settles a confirmed receipt and resumes only a positively identified unsent launch (CTO REVISE ts 1795004139.496649, finding 3)", () => {
   const resume = health.slice(health.indexOf("private async resumePMExitEpisode"), health.indexOf("// ─── Post-Restart Continue Injection"));
