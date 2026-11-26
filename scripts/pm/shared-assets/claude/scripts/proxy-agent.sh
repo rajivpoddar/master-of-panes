@@ -153,11 +153,11 @@ proxy_agent_memory_gate() {
       END {
         if (min_free !~ /^[0-9]+([.][0-9]+)?$/ || min_free + 0 > 100) min_free = 20
         if (max_swap !~ /^[0-9]+([.][0-9]+)?$/) max_swap = 1024
-        if (free == "" || swap == "") {
-          print "unknown", (free == "" ? "unknown" : free), (swap == "" ? "unknown" : sprintf("%.10g", swap))
-        } else {
-          printf "%s %s %.10g\n", (free + 0 < min_free + 0 || swap > max_swap + 0 ? "refuse" : "allow"), free, swap
-        }
+        have_free = (free != "")
+        have_swap = (swap != "")
+        if ((have_free && free + 0 < min_free + 0) || (have_swap && swap > max_swap + 0)) decision = "refuse"
+        else decision = (have_free && have_swap ? "allow" : "unknown")
+        print decision, (have_free ? free : "unknown"), (have_swap ? sprintf("%.10g", swap) : "unknown")
       }' 2>/dev/null
   ); then
     decision=unknown free=unknown swap_mb=unknown
@@ -2645,6 +2645,8 @@ proxy_agent_fence_policy() {
   printf 'proxy-agent: fence policy light-work-only (PROXY_AGENT_SANDBOX=1 only for cleanup/deletion, triage, read-only investigators; builders, provers/QA, admission and box lanes unfenced) type=%s PROXY_AGENT_SANDBOX=%s\n' "$TYPE" "${sb:-unset}" >&2
 }
 proxy_agent_fence_policy || exit $?
+# Selection can preempt an incumbent for a P0. Refuse known pressure before that side effect.
+proxy_agent_memory_gate || exit $?
 proxy_agent_select || exit 75  # includes the primary burn check (proxy_agent_primary_burn_check), before alias probes
 # Direct DeepSeek emergency gate, on the CANONICAL router identity and BEFORE the dry-run return (CTO REVISE of fbdfbdc, C0ALZJHGE49
 # thread 1795038046.056679, ts 1795038184.764339). The earlier gate matched the raw $MODEL after the dry-run exit, so a supported suffix
@@ -2687,9 +2689,6 @@ fi
 LOG="${OUT%.md}.log"
 DELIVERY="${OUT}.delivery"
 JSONL="${OUT%.md}.jsonl"
-if [[ "${PROXY_AGENT_DRY_RUN:-}" == 1 ]]; then
-  proxy_agent_memory_gate || exit $?
-fi
 # Direct DeepSeek bench gate (CTO REVISE of 248ae25b, ts 1795600640.261439): the ONE admission for a deepseek-direct/* start and for a --dry-run of one (a dry run takes
 # a slot for PROXY_AGENT_DSD_DRYRUN_HOLD_S seconds, default 0, so concurrent previews see each other). run.sh re-admits every continuation through the same script. It
 # checks the bench scope token, the stop flag, the budget and the cap, all read now under one lock. rc 75 = cap (capacity: queueing a retry is meaningful); rc 2 =
