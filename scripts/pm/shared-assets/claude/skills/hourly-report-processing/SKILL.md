@@ -143,6 +143,9 @@ It also records the main CI state: the latest COMPLETED `ci.yml` run on main (sk
 - **Rate check: `opened_6h` > `merged_6h` + 3:** treat it as an unhealthy pipeline even under the cap. Name the bottleneck stage (main red, CI queue, review, merge ask, rework) and act on it in the same turn: launch an agent, or send a merge ask or a re-admission.
 - **Queue triage, each hour while over the cap:** close superseded PRs and park PRs waiting on a product decision (`pm-blocked:product`, with the decision ask sent). A draft older than 24h with no owner gets closed, keeping its branch.
 
+### Step 2c-0: Main-merge breaker (Rajiv C0ALZJHGE49 thread 1795669948.123989, ts 1795676115.108879 "ok", retro control 3)
+Each hourly, pass the pinned main SHA and the open PRs' {number, headRefOid} rows to `python3 -I ~/.claude/scripts/pm/heartbeat/merge-main-breaker.py --repo-dir ~/.cache/heydonna-mirror.git --main "$main_sha"` (read-only). Every PR flagged `slice/freeze due` (3+ merge-main commits) gets ONE disposition this hour: slice the remaining scope into a new child, or freeze the head and take the S157/fix decision; no further main merge without it. UNAVAILABLE rows are reported, never read as clean.
+
 ### Step 2c: Stale and stuck PRs (Rajiv 2026-10-22, C0ALZJHGE49 thread 1792651516.322139, ts 1792652087.924089)
 *"update the hourly report processing to check for stale/stuck pr's."* Trigger: Rajiv asked where #9936 (open 7d) and #10322 (open 4d) were stuck; the hourly reports had not flagged either.
 
