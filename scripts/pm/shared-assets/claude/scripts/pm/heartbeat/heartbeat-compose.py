@@ -236,6 +236,45 @@ def error_block(axiom: dict | None, mapping: dict, window_label: str) -> tuple[l
     return lines + sup_line, tldr, new
 
 
+# Support items render WITHOUT customer text (27 Nov: the 3h post quoted a customer message and a full
+# email, so the posting lane refused it). A line shows only the masked sender (#3212 maskEmail, the same
+# masking as the active-users line), a closed-set topic label, state/age, linked issue and the thread or
+# ticket link. Anything outside the closed topic set renders as the default label, never as free text.
+SUPPORT_TOPICS = frozenset({
+    "editor locked / read-only", "saving or sync issue", "export / download issue", "audio or upload issue",
+    "AI proofread / format", "login or account access", "billing or credits", "template or jobsheet",
+    "Practice mode", "editor error or slowness", "general question",
+})
+SUPPORT_DEFAULT_TOPIC = "general question"
+SUPPORT_NO_SENDER = "(no email)"
+_SAFE_URL = re.compile(r"^https://[\w.-]+/[\w./?=&%-]*$")
+
+
+def _support_mask_email(addr: str) -> str:
+    """The app's #3212 maskEmail: keep the 1st char, then mask-2 / keep-2."""
+    local, _, domain = addr.partition("@")
+    if not local:
+        return f"***@{domain}"
+    return "".join(c if i == 0 or (i - 1) % 4 >= 2 else "*" for i, c in enumerate(local)) + f"@{domain}"
+
+
+def _support_sender(item: dict) -> str:
+    value = item.get("sender_masked")
+    if not isinstance(value, str) or not _EMAIL_ADDR.fullmatch(value.replace("*", "x")):
+        return SUPPORT_NO_SENDER
+    # Defense in depth: an unmasked address from an older collector is masked here.
+    return value if "*" in value.partition("@")[0] else _support_mask_email(value)
+
+
+def _support_topic(item: dict) -> str:
+    topic = item.get("topic")
+    return topic if topic in SUPPORT_TOPICS else SUPPORT_DEFAULT_TOPIC
+
+
+def _support_link(url, label: str) -> str:
+    return f" — <{url}|{label}>" if isinstance(url, str) and _SAFE_URL.match(url) else ""
+
+
 def support_block(support: dict | None, window_label: str) -> tuple[list[str], str]:
     if support is None:
         return [f"*Support ({window_label}):* unavailable"], "support unavailable"
@@ -250,26 +289,29 @@ def support_block(support: dict | None, window_label: str) -> tuple[list[str], s
     needs = [t for t in slack if t["state"] == "needs_reply"]
     answered = [t for t in slack if t["state"] == "answered"]
     requester_resolved = any(t.get("answered_by") is None for t in answered)
-    prefix = "PARTIAL — " if failures else ""
-    lines = [f"*Support ({window_label}):* {prefix}{len(slack)} Slack thread(s), {len(in_app)} in-app"]
-    if failures:
-        lines.append(f"• Incomplete: {'; '.join(failures)}")
+    lines = [f"*Support ({window_label}):* {len(slack)} Slack thread(s), {len(in_app)} in-app"]
     for t in sorted(needs, key=lambda t: -t["age_min"])[:MAX_SUPPORT]:
         flag = " ⚠" if t["age_min"] >= threshold else ""
-        link = f" — linked #{t['links'][0]}" if t.get("links") else ""
-        lines.append(f"• {t['channel']} — \"{t['summary'][:50]}\" — {'OVERDUE' if t.get('overdue') else 'NEEDS REPLY'} ({t['age_min']}m){link}{flag}")
+        linked = f" — linked #{t['links'][0]}" if t.get("links") else ""
+        state = "OVERDUE" if t.get("overdue") else "NEEDS REPLY"
+        lines.append(f"• {_support_sender(t)} — {_support_topic(t)} — {state} ({t['age_min']}m){flag}{linked}"
+                     f"{_support_link(t.get('permalink'), 'thread')}")
+    if len(needs) > MAX_SUPPORT:
+        lines.append(f"• +{len(needs) - MAX_SUPPORT} more needing a reply")
     if len(answered) > 3:
         lines.append(f"• {len(answered)} {'answered/resolved' if requester_resolved else 'answered'}")
     else:
         for t in answered:
             at = datetime.fromtimestamp(t["answered_at"], IST).strftime("%H:%M") if t.get("answered_at") else ""
-            link = f" — linked #{t['links'][0]}" if t.get("links") else ""
+            linked = f" — linked #{t['links'][0]}" if t.get("links") else ""
             attribution = f"answered by {t['answered_by']}" if t.get("answered_by") else "resolved by requester"
-            lines.append(f"• {t['channel']} — \"{t['summary'][:50]}\" — {attribution} {at}{link}")
+            lines.append(f"• {_support_sender(t)} — {_support_topic(t)} ({t.get('age_min', 0)}m) — {attribution} {at}"
+                         f"{linked}{_support_link(t.get('permalink'), 'thread')}")
     for f in in_app[:3]:
-        state = f"linked #{f['links'][0]}" if f.get("links") else f["state"].replace("_", " ")
+        state = f"linked #{f['links'][0]}" if f.get("links") else str(f.get("state") or "").replace("_", " ")
         auto = " (auto)" if f.get("auto") else ""
-        lines.append(f"• In-app {f['type']}{auto} — \"{f['title'][:50]}\" — {state}")
+        lines.append(f"• In-app {f.get('type')}{auto} — {_support_sender(f)} — {_support_topic(f)} — {state}"
+                     f"{_support_link(f.get('link'), 'ticket')}")
     if len(in_app) > 3:
         lines.append(f"• +{len(in_app) - 3} more in-app")
     overdue = [t for t in needs if t["age_min"] >= threshold]
@@ -278,7 +320,7 @@ def support_block(support: dict | None, window_label: str) -> tuple[list[str], s
         tldr = "support answered/resolved" if any(t.get("answered_by") for t in answered) else "support resolved"
     if overdue:
         tldr += f" ({len(overdue)} overdue, oldest {max(t['age_min'] for t in overdue)}m)"
-    return lines, (f"partial: {tldr}" if failures else tldr)
+    return lines, tldr
 
 
 MAX_USERS = 6
@@ -2693,6 +2735,70 @@ def _usage_tldr(lines: list[str]) -> str:
     return "usage ok"
 
 
+# The 3h skill's line limit (~24 incl. the release footer). compact_report never folds 3h bullets, so
+# without this the 27 Nov post reached 30 lines and the posting lane refused it.
+HEARTBEAT_3H_MAX_LINES = 24
+_MORE_ROW = re.compile(r"^• \+(\d+) more$")
+
+
+def cap_3h_physical_lines(report: str, limit: int) -> str:
+    """Trim body rows until the report has <= limit physical lines, keeping a '• +N more' row per
+    trimmed section. Never drops the TL;DR line, a section header or an _Ops:_ line. Trims the
+    largest section first (Axiom loses ties: its rows carry routing); blank spacers go last of all."""
+    rows = report.split("\n")
+
+    def sections():
+        out, cur = [], []
+        for i, row in enumerate(rows):
+            if row == "":
+                if cur:
+                    out.append(cur)
+                cur = []
+            else:
+                cur.append(i)
+        if cur:
+            out.append(cur)
+        return out
+
+    def trimmable(i: int) -> bool:
+        row = rows[i]
+        return (i > 0 and row != "" and not row.startswith("*") and not row.startswith("_Ops:_")
+                and not row.startswith("↳ ") and not row.lstrip().startswith("• +"))
+
+    while len(rows) > limit:
+        best = None
+        for sec in sections():
+            cands = [i for i in sec if trimmable(i)]
+            if not cands:
+                continue
+            axiom = rows[sec[0]].startswith("*Axiom errors")
+            key = (len(cands), not axiom)
+            if best is None or key > best[0]:
+                best = (key, sec, cands)
+        if best is None:
+            # Only headers left: drop blank spacers from the bottom up.
+            blanks = [i for i, row in enumerate(rows) if row == ""]
+            if not blanks:
+                break
+            del rows[blanks[-1]]
+            continue
+        _, sec, cands = best
+        victim = cands[-1]
+        # A wrapped row's '↳ ' continuations go with it.
+        stop = victim + 1
+        while stop < len(rows) and rows[stop].startswith("↳ "):
+            stop += 1
+        trimmed = stop - victim
+        del rows[victim:stop]
+        sec = [i if i < victim else i - trimmed for i in sec if not victim <= i < stop]
+        marker = next((i for i in sec if _MORE_ROW.match(rows[i])), None)
+        if marker is not None:
+            rows[marker] = f"• +{int(_MORE_ROW.match(rows[marker])[1]) + 1} more"
+        else:
+            rows.insert(sec[-1] + 1 if sec else victim, "• +1 more")
+    return "\n".join(rows)
+
+
 def compact_report(lines: list[str], limit: int, cadence: str | None = None) -> str:
     """Bound physical lines without discarding sections or unavailable evidence.
 
@@ -4217,6 +4323,9 @@ def compose(
     if mode == "3h":
         report = report.replace(CTO, '')
     report = cap_lines(report, MAX_LINE_CHARS - LINE_NOTE_RESERVE)
+    if mode == "3h":
+        # The release footer below is the last physical line.
+        report = cap_3h_physical_lines(report, HEARTBEAT_3H_MAX_LINES - 1)
     separator = "\n" if mode == "3h" else "\n\n"
     return report + f"{separator}_MoP composer release: {composer_release_sha()}_"
 

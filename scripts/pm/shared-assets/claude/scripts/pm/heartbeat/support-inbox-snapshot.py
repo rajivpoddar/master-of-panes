@@ -91,6 +91,70 @@ REOPEN_CUE_RE = re.compile(
     re.IGNORECASE,
 )
 CLOSING_MAX_CHARS = 100
+# ── privacy-safe rendering fields (3h heartbeat support block, 27 Nov) ─────────────────────
+# The heartbeat never quotes customer text and never shows a full email. Each item carries a
+# masked sender (the app's #3212 maskEmail: keep the 1st char, then mask-2 / keep-2, the same
+# masking the hourly active-users line uses), a topic label from a FIXED set (never customer
+# words) and a link to the Slack thread or the in-app ticket.
+SLACK_WORKSPACE_URL = "https://scribiers.slack.com"
+FEEDBACK_ADMIN_URL = "https://app.heydonna.law/admin/feedback/"
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+TOPIC_RULES = (
+    (r"\block(ed|out)?\b|read[- ]?only|can['’]?t edit|cannot edit|unable to edit|not editable", "editor locked / read-only"),
+    (r"\bsav(e|ed|ing)\b|\bsync|lost (my )?(work|changes|edits)|unsaved", "saving or sync issue"),
+    (r"\bexport|\bdocx\b|\bpdf\b|download", "export / download issue"),
+    (r"upload|\baudio\b|playback|\bmp3\b|\bwav\b|waveform", "audio or upload issue"),
+    (r"proofread|speaker|\bformat", "AI proofread / format"),
+    (r"log ?in|sign ?in|sign ?up|password|\baccount\b|verif", "login or account access"),
+    (r"credit|billing|payment|refund|invoice|subscription|\bcharge", "billing or credits"),
+    (r"template|job ?sheet|\bris\b", "template or jobsheet"),
+    (r"practice|trainee", "Practice mode"),
+    (r"\bslow|freez|crash|\berror|stuck|\bbug\b|not working|doesn['’]?t work|broken|lag", "editor error or slowness"),
+)
+TOPIC_RES = tuple((re.compile(rx, re.IGNORECASE), label) for rx, label in TOPIC_RULES)
+DEFAULT_TOPIC = "general question"
+
+
+def mask_email(addr: str | None) -> str | None:
+    """Pure: the app's #3212 maskEmail (lib/logger.ts). 'abilaasha@x' -> 'a**la**ha@x'."""
+    if not addr or "@" not in addr:
+        return None
+    local, _, domain = addr.strip().partition("@")
+    if not domain:
+        return None
+    if not local:
+        return f"***@{domain}"
+    masked = "".join(c if i == 0 or (i - 1) % 4 >= 2 else "*" for i, c in enumerate(local))
+    return f"{masked}@{domain}"
+
+
+def first_email_masked(text: str | None) -> str | None:
+    """Pure: the first email in free text (mailto labels included), masked; None if absent."""
+    m = EMAIL_RE.search(text or "")
+    return mask_email(m.group(0)) if m else None
+
+
+def topic_label(text: str | None) -> str:
+    """Pure: a <=6-word label from a closed set. Never returns customer words."""
+    body = EMAIL_RE.sub(" ", re.sub(r"<mailto:[^>]*>|<https?:[^>]*>", " ", text or ""))
+    for rx, label in TOPIC_RES:
+        if rx.search(body):
+            return label
+    return DEFAULT_TOPIC
+
+
+def thread_permalink(channel_id: str | None, ts: str | None) -> str | None:
+    """Pure: the Slack archive permalink (same shape chat.getPermalink returns)."""
+    if not channel_id or not ts or not _is_ts(ts):
+        return None
+    return f"{SLACK_WORKSPACE_URL}/archives/{channel_id}/p{ts.replace('.', '')}"
+
+
+def stamp_channel(item: dict, channel: str) -> dict:
+    item["channel"] = CHANNELS.get(channel, channel)
+    item["channel_id"] = channel
+    item["permalink"] = thread_permalink(channel, item.get("ts"))
+    return item
 MAIN_CHECKOUT = Path.home() / "Downloads/projects/heydonna-app"
 OPEN_STATE = Path.home() / ".claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/support-inbox-open.json"
 
@@ -227,7 +291,9 @@ def classify_thread(messages: list[dict], now_ts: float) -> dict | None:
         "answered_at": float(last["ts"]) if team_answered else self_closed_ts,
         "age_min": int((now_ts - last_requester_ts) / 60),
         "links": links,
-        "summary": re.sub(r"<@[A-Z0-9]+>|\s+", " ", root.get("text") or "").strip()[:70],
+        # No customer text leaves the collector: masked sender + closed-set topic only.
+        "sender_masked": first_email_masked(root.get("text")),
+        "topic": topic_label(root.get("text")),
         "last_activity": float(messages[-1]["ts"]),
         "last_requester_ts": last_requester_ts,
     }
@@ -306,7 +372,7 @@ def fetch_thread(token: str, channel: str, ts: str, now_ts: float) -> dict | Non
         messages = [m for page in slack_pages(token, "conversations.replies", {"channel": channel, "ts": parent, "limit": 100}) for m in page]
     item = classify_thread(messages, now_ts)
     if item:
-        item["channel"] = CHANNELS.get(channel, channel)
+        stamp_channel(item, channel)
     return item
 
 
@@ -331,7 +397,7 @@ def fetch_channel(token: str, channel: str, oldest: float, now_ts: float) -> lis
                 else:
                     item = classify_thread([root], now_ts)
                     if item:
-                        item["channel"] = CHANNELS.get(channel, channel)
+                        stamp_channel(item, channel)
                 if item:
                     out.append(item)
     except Exception as exc:
@@ -612,7 +678,10 @@ def classify_feedback_rows(rows: list[dict], window_start_ms: int) -> list[dict]
             "severity": row.get("severity"),
             "auto": bool(row.get("autoSubmitted")),
             "status": row.get("status"),
-            "title": (row.get("title") or "")[:70],
+            # No title/description text: masked submitter, closed-set topic, admin ticket link.
+            "sender_masked": mask_email(row.get("userEmail")),
+            "topic": topic_label(f"{row.get('title') or ''} {row.get('description') or ''}"),
+            "link": f"{FEEDBACK_ADMIN_URL}{row.get('_id')}" if row.get("_id") else None,
             "links": links,
             "state": "linked" if links else ("answered" if row.get("status") in ("resolved", "wont_fix") else "needs_triage"),
         })
