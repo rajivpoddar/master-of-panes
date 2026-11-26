@@ -2184,7 +2184,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill-executable",
-      "sha256": "b193cea3ab594aefbcb322dbbbc58068e4ef399661b15739a5d001837634c6dc",
+      "sha256": "4ab1be1e3f1fa0b6665fe55aceea18405a8fd6289f8a6e22e6705967ca83e206",
       "source_path": "codex/skills/heydonna-cto-label-gated-ci/scripts/admit.py"
     },
     {

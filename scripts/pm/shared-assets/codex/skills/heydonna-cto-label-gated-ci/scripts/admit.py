@@ -294,7 +294,7 @@ def _fetch_head_and_main(checkout, head, main, branch):
                    cwd=checkout, timeout=remaining)
 
 
-def main_integration_reason(pr, main, checkout):
+def main_integration_reason(pr, main, expected_base, checkout):
     """Fetch the pinned commits once; reuse them if an overlap needs integration."""
     head, branch = pr["head"]["sha"], pr["head"]["ref"]
 
@@ -307,16 +307,19 @@ def main_integration_reason(pr, main, checkout):
         command("git", "init", "--quiet", checkout)
         command("git", "remote", "add", "origin", f"https://github.com/{REPO}.git", cwd=checkout)
         _fetch_head_and_main(checkout, head, main, branch)
-        base = command("git", "merge-base", main, head, cwd=checkout).strip()
-        if base not in (head, main):
-            result = subprocess.run(["git", "merge-tree", "--write-tree", head, main],
-                                    cwd=checkout, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                    text=True, timeout=DEFAULT_COMMAND_TIMEOUT)
-            if result.returncode == 1:
-                return "conflict"
-            if result.returncode != 0:
-                raise Refusal(result.stderr.strip() or f"merge-tree exited {result.returncode}")
-        return "overlap" if paths(base, head) & paths(base, main) else None
+        bases = command("git", "merge-base", "--all", main, head, cwd=checkout).splitlines()
+        if bases != [expected_base] or not re.fullmatch(r"[0-9a-f]{40}", expected_base):
+            raise Refusal("MAIN_PROBE_AMBIGUOUS_MERGE_BASE")
+        result = subprocess.run(["git", "merge-tree", "--write-tree", "--no-messages", head, main],
+                                cwd=checkout, capture_output=True, text=True,
+                                timeout=DEFAULT_COMMAND_TIMEOUT)
+        if result.returncode == 1:
+            return "conflict"
+        if result.returncode != 0:
+            raise Refusal(result.stderr.strip() or f"merge-tree exited {result.returncode}")
+        if not re.fullmatch(r"[0-9a-f]{40}", result.stdout.strip()):
+            raise Refusal("MAIN_PROBE_INCOMPLETE_MERGE")
+        return "overlap" if paths(expected_base, head) & paths(expected_base, main) else None
     except (Refusal, OSError, subprocess.TimeoutExpired) as exc:
         raise Refusal(f"MAIN_MERGE_PROBE_FAILED: {exc}") from exc
 
@@ -330,10 +333,13 @@ def integrate(pr, main, checkout):
     command("git", "merge-base", "--is-ancestor", head, new_head, cwd=checkout)
     command("git", "merge-base", "--is-ancestor", main, new_head, cwd=checkout)
     pr_at(pr["number"], head)
+    if api("git/ref/heads/main")["object"]["sha"] != main:
+        raise Refusal(f"MAIN_MOVED_BEFORE_INTEGRATION head={head}")
     try:
         command("git", "push", f"--force-with-lease=refs/heads/{branch}:{head}",
                 "origin", f"HEAD:refs/heads/{branch}", cwd=checkout)
-    except (Refusal, subprocess.TimeoutExpired) as exc:
+        pr_at(pr["number"], new_head)
+    except (Refusal, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
         raise Refusal(f"PUSH_UNCERTAIN expected_head={new_head}: {exc}") from exc
     return new_head
 
@@ -343,10 +349,10 @@ def admit(number, head, apply=False, integrate_only=False, no_update=False):
     if pr.get("mergeable") is False:
         raise Refusal("CONFLICT_WITH_MAIN: route to PR owner")
     main = api("git/ref/heads/main")["object"]["sha"]
-    comparison = api(f"compare/{main}...{head}")
-    if comparison["merge_base_commit"]["sha"] != main:
+    base = api(f"compare/{main}...{head}")["merge_base_commit"]["sha"]
+    if base != main:
         with tempfile.TemporaryDirectory(prefix="heydonna-admission-") as checkout:
-            reason = main_integration_reason(pr, main, checkout)
+            reason = main_integration_reason(pr, main, base, checkout)
             if reason == "conflict":
                 raise Refusal("CONFLICT_WITH_MAIN: route to PR owner")
             if reason == "overlap":
@@ -361,11 +367,18 @@ def admit(number, head, apply=False, integrate_only=False, no_update=False):
                     return {"status": "MAIN_INTEGRATION_REQUIRED", "head": head, "main": main}
                 head = integrate(pr, main, checkout)
                 if integrate_only:
+                    if api("git/ref/heads/main")["object"]["sha"] != main:
+                        raise Refusal(f"MAIN_MOVED_AFTER_INTEGRATION head={head}")
                     return {"status": "MAIN_INTEGRATED", "head": head, "main": main}
     if not apply or integrate_only:
         prior = existing(pr)
         if prior:
             return {"status": "ALREADY_ADMITTED", "head": head, **prior}
+        if integrate_only and apply:
+            pr_at(number, head)
+            if api("git/ref/heads/main")["object"]["sha"] != main:
+                raise Refusal(f"MAIN_MOVED_AFTER_INTEGRATION head={head}")
+            return {"status": "MAIN_INTEGRATION_NOT_REQUIRED", "head": head, "main": main}
         return {"status": "READY_TO_ADMIT", "head": head, "main": main}
     pr = pr_at(number, head)
     if pr.get("mergeable") is False:
@@ -379,6 +392,8 @@ def admit(number, head, apply=False, integrate_only=False, no_update=False):
     command("gh", "label", "create", label, "--repo", REPO, "--color", "0e8a16",
             "--description", "CI and E2E for this PR head", "--force")
     pr_at(number, head)
+    if api("git/ref/heads/main")["object"]["sha"] != main:
+        raise Refusal(f"MAIN_MOVED_BEFORE_ADMISSION head={head}")
     try:
         # Adding a label preserves unrelated labels and never toggles an existing request.
         labels = api(f"issues/{number}/labels", {"labels": [label]})
