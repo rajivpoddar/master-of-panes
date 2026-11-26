@@ -723,8 +723,11 @@ class ControlPlaneExemptionTests(unittest.TestCase):
             {"number": CONTROL_PLANE_PR, "base": {"sha": CONTROL_PLANE_BASE}}])
         job = dict(control_plane_exemption_jobs()[0], run_id=CONTROL_PLANE_RUN_ID,
                    run_attempt=1, head_sha=CONTROL_PLANE_HEAD)
+        test_job = dict(job, id=CONTROL_PLANE_SCOPE_ID + 1, name="test", steps=[{
+            "name": "Run classifier unit tests (every test that exercises change_scope.py)",
+            "status": "completed", "conclusion": "success"}])
         # This case relies on the native association: the live receipt omits PR_NUMBER.
-        return {"site_runs": [run], "control_plane_jobs": [job],
+        return {"site_runs": [run], "control_plane_jobs": [job, test_job],
                 "site_log": control_plane_exemption_log(
                     receipt={"changed_files": paths, **(receipt or {})},
                     bindings=bindings).replace(f"PR_NUMBER={CONTROL_PLANE_PR}\n", ""),
@@ -741,6 +744,11 @@ class ControlPlaneExemptionTests(unittest.TestCase):
                              (CONTROL_PLANE_HEAD, CONTROL_PLANE_RUN_ID, CONTROL_PLANE_SCOPE_ID))
         self.assertIn(f"compare/{CONTROL_PLANE_BASE}...{CONTROL_PLANE_HEAD}", stub.api_calls)
         self.assertFalse(any("actions/workflows/ci.yml/runs?" in path for path in stub.calls))
+
+    def test_classifier_self_edit_refuses_green_job_with_skipped_classifier_tests(self):
+        world = self.classifier_self_edit_world()
+        world["control_plane_jobs"][1]["steps"][0]["conclusion"] = "skipped"
+        self.assert_falls_through(**world)
 
     def test_classifier_self_edit_requires_all_exact_exemption_flags(self):
         for key, value in (("control_plane_only", False), ("product_changed", True),

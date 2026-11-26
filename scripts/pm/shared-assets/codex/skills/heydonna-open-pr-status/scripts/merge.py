@@ -20,6 +20,7 @@ SAME_REPO_NAMES = {REPO.lower(), "heydonna-app/heydonna-app"}
 WORKFLOWS = {"ci.yml": ("typescript", "python", "test"), "e2e.yml": ("e2e",)}
 SITE_EXEMPTION_WORKFLOW = "ci-dummy.yml"
 SITE_CLASSIFIER_JOB_NAME = "detect-docs-only"
+SITE_CLASSIFIER_TEST_STEP = "Run classifier unit tests (every test that exercises change_scope.py)"
 
 
 class Refusal(RuntimeError):
@@ -733,7 +734,7 @@ def merge_parent_base(base_sha, head_sha, parents):
     return None
 
 
-def classifier_exemption(pr, workflow, run, scope, expected_scope="control_plane_only"):
+def classifier_exemption(pr, workflow, run, scope, expected_scope="control_plane_only", *, jobs=()):
     """Fail-closed verifier. Returns an exemption proof, or None to fall through."""
     head = pr["head"]["sha"]
     if not successful(run) or not successful(scope):
@@ -789,10 +790,20 @@ def classifier_exemption(pr, workflow, run, scope, expected_scope="control_plane
         return None
     site_only_paths = False
     if classifier_self_edit:
-        # The PR can change the producer of this receipt, so require native
-        # run/job binding and independently confine the commit-pinned diff.
-        if (not bound_attempt_jobs(pr, run, [scope])
-                or (run["pull_requests"][0].get("base") or {}).get("sha") != base_sha
+        # The PR can change the receipt and skip its own tests. A green test
+        # job alone is not evidence that the conditional classifier step ran.
+        test_jobs = [job for job in jobs if job.get("name") == "test"]
+        if (len(test_jobs) != 1 or not successful(test_jobs[0])
+                or not bound_attempt_jobs(pr, run, [scope, test_jobs[0]])):
+            return None
+        steps = test_jobs[0].get("steps")
+        if not isinstance(steps, list):
+            return None
+        classifier_steps = [step for step in steps
+                            if isinstance(step, dict) and step.get("name") == SITE_CLASSIFIER_TEST_STEP]
+        if len(classifier_steps) != 1 or not successful(classifier_steps[0]):
+            return None
+        if ((run["pull_requests"][0].get("base") or {}).get("sha") != base_sha
                 or merge_parent_base(base_sha, head_sha, commit_parent_rows) is None
                 or not control_plane_self_edit_confined(pr, base_sha, receipt, rules[1])):
             return None
@@ -2074,7 +2085,7 @@ def ci_exemption_proof(pr, expected_scope):
         if len(scope_jobs) != 1 or not successful(scope_jobs[0]):
             return None
         return classifier_exemption(pr, SITE_EXEMPTION_WORKFLOW, run, scope_jobs[0],
-                                    expected_scope=expected_scope)
+                                    expected_scope=expected_scope, jobs=jobs)
     return None
 
 

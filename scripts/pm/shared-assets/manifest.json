@@ -2265,7 +2265,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill-executable",
-      "sha256": "806decef05ce652fc1d341e116eb0b6377c9bbd45112d2c70586744ef7f06e95",
+      "sha256": "33ddc6109b956469b10046fa5589097bfa18f6df8236c79b3f4d1d83e586afbf",
       "source_path": "codex/skills/heydonna-open-pr-status/scripts/merge.py"
     },
     {
