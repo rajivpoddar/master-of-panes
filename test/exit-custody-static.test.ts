@@ -106,8 +106,12 @@ test("PM restart effects are rechecked inside the send lock and recorded durably
   assert.ok(menu.indexOf("this.markRestartStep(") < menu.indexOf("send-keys"), "the key is recorded before it is sent");
   assert.ok(!menu.includes("observeSlotPane"), "the in-lock menu read is the visible screen, not scrollback");
   const launch = health.slice(health.indexOf("private async sendPMLaunch"), health.indexOf("private isAgentCommand"));
-  assert.ok(launch.includes("withSlotSendLock(0") && launch.includes("isShellPromptVisible(screen)") && launch.includes("bottomLine(screen)"));
+  assert.ok(launch.includes("withSlotSendLock(0") && launch.includes("isShellPromptVisible(screen)"));
   assert.ok(launch.indexOf("this.markRestartStep(") < launch.indexOf("send-keys"), "the launcher step is recorded before it is sent");
+  // Enter is confirmed from processes, never from screen text (Rajiv C0ALZJHGE49 thread 1795715075.690009, ts 1795716529.803219).
+  const submit = launch.slice(launch.indexOf("private async submitPMLaunch"));
+  assert.ok(submit.includes("withSlotSendLock(0") && submit.includes("this.pmLaunchSubmitted(paneId, exactPM)") && !submit.includes("visiblePane"));
+  assert.ok(submit.indexOf("this.markRestartStep(") < submit.indexOf("send-keys"), "each Enter is recorded before it is sent");
 });
 test("the next tick after a MoP restart settles a confirmed receipt and resumes only a positively identified unsent launch (CTO REVISE ts 1795004139.496649, finding 3)", () => {
   const resume = health.slice(health.indexOf("private async resumePMExitEpisode"), health.indexOf("// ─── Post-Restart Continue Injection"));

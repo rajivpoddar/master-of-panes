@@ -53,7 +53,7 @@ export const PM_EXIT_HANDOFF_ACTION =
   + "(~/.claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/memory/) and "
   + "data/pm-continuation-note.md. 2) Let running background agents/tasks finish or hand off; never kill them to force /exit. "
   + "3) End the turn. MoP sends /exit at the next PM Stop after the save (a busy pane queues it); "
-  + "MoP waits for the zsh prompt, relaunches PM fresh with the configured model and injects the saved continuation "
+  + "MoP waits for the zsh prompt, relaunches PM with the configured model and --continue, and injects the saved continuation "
   + "(daily 04:00: dev slots exit at their own next Stop in the same episode). Nothing is blocked meanwhile.";
 
 export const PM_HANDOFF_EXIT_VARIANT: HandoffObligationVariant = {

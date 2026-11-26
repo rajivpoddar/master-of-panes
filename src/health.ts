@@ -14,12 +14,13 @@
  * PM restart (Rajiv, DM D0AMF0XE6TS thread 1793979986.975849, ts 1793988738.009889
  * and 1793989226.288339): "MoP injects /exit, waits for the zsh prompt, then injects
  * launch-pm.sh or launch-pm-cliproxy.sh with opus/deepseek. then injects the
- * continuation pompt at the claude prompt" ... "switching models with continue is not
- * probably a good idea. MoP should run the right launcher and then inject the
- * continuation prompt or point to the saved handoff file." The PM is therefore
- * relaunched FRESH (no --continue) with the configured model, and receives ONE
- * continuation prompt once its Claude input prompt is up. PM crash recovery uses
- * the same path. Dev slots keep `--continue` + "continue".
+ * continuation pompt at the claude prompt" ... "MoP should run the right launcher and then inject the
+ * continuation prompt or point to the saved handoff file." The PM is relaunched with
+ * the configured model plus `--continue` (Rajiv C0ALZJHGE49 thread 1795715075.690009,
+ * ts 1795716529.803219: "enter should be triggered by MoP after a delay. note that
+ * restart should use --continue."), and still receives ONE continuation prompt once
+ * its Claude input prompt is up. PM crash recovery uses the same path. Dev slots keep
+ * `--continue` + "continue".
  */
 
 import { createHash } from "node:crypto";
@@ -111,7 +112,7 @@ export function pmConfiguredLauncher(db: Pick<MoPDatabase, "getConfig">): PmLaun
   return value === "direct" ? "direct" : PM_DEFAULT_LAUNCHER;
 }
 
-/** Fresh PM launcher command (never --continue) for a model and backend. */
+/** PM launcher command for a model and backend; runPMFreshRestart appends --continue. */
 export function pmFreshLaunchCommand(model: string = PM_DEFAULT_MODEL, launcher: PmLauncher = PM_DEFAULT_LAUNCHER): string {
   const safe = /^[A-Za-z0-9._-]{1,64}$/.test(model) ? model : PM_DEFAULT_MODEL;
   const arg = PM_MODEL_LAUNCH_ARGS[safe] ?? safe;
@@ -138,12 +139,6 @@ export function isShellPromptVisible(text: string | null | undefined): boolean {
   const last = lines.at(-1)?.trim();
   if (!last || /^Pane is dead/.test(last)) return false;
   return /^(?:\S.*\s)?[$%#»]$/.test(last);
-}
-
-/** Bottom non-empty line of a captured screen, whitespace collapsed ("" when blank). */
-function bottomLine(text: string): string {
-  const lines = text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").split(/\r?\n/).filter((line) => line.trim() !== "");
-  return (lines.at(-1) ?? "").replace(/\s+/g, " ").trim();
 }
 
 // Dev slots: always --continue (crash recovery preserves session/work).
@@ -242,6 +237,11 @@ export class ProcessHealthChecker {
   private PM_FORCE_SHELL_TIMEOUT_MS = 30_000;
   /** launcher typed -> the agent process runs in the pane (no idle prompt required; also bounds a non-episode continuation's pre-effect retries). */
   private PM_PROMPT_TIMEOUT_MS = 90_000;
+  /** launcher typed -> MoP presses Enter itself (Rajiv ts 1795716529.803219: "enter should be triggered by MoP after a delay"). */
+  private PM_LAUNCH_ENTER_DELAY_MS = 1_000;
+  /** Enter sent -> the launcher process must appear in the pane before the next bounded Enter retry. */
+  private PM_LAUNCH_ENTER_CONFIRM_MS = 5_000;
+  private PM_LAUNCH_ENTER_ATTEMPTS = 3;
   /** tmux runner for the PM restart effects (tests substitute a fake pane). */
   private runShell: PaneCommandRunner = execShell;
   /** Single owner of a PM restart; concurrent triggers join it. */
@@ -691,7 +691,8 @@ export class ProcessHealthChecker {
     Promise<{ success: boolean; launched: boolean; reason: string }> {
     const { model, launcher, command } = pmLaunchPlan(this.db);
     const recover = trigger === "recover";
-    const launchCommand = recover ? `${command} --continue` : command;
+    // Every PM restart resumes the previous conversation (Rajiv ts 1795716529.803219: "restart should use --continue").
+    const launchCommand = `${command} --continue`;
     const cwd = SLOT_CWDS[0];
     const fail = (reason: string, launched = false, extra: Record<string, unknown> = {}) => {
       this.db.logEvent(0, "pm_restart_failed", null, null, { trigger, episode, model, reason, ...extra });
@@ -795,42 +796,116 @@ export class ProcessHealthChecker {
 
   /**
    * Types the launcher, then submits it; each key runs inside the slot send lock (CTO REVISE finding 2). Right before
-   * typing it rechecks the same episode, pane and shell command and that the VISIBLE screen ends at an empty prompt; right
-   * before Enter, that the visible line is exactly that prompt plus the owned launch text, so a draft typed in between is
-   * never submitted. Each step is recorded durably BEFORE its effect: an uncertain or failed send stays consumed, also
-   * across a MoP restart. A screen that cannot be read yet waits within the existing bound. Returns a refusal or null.
+   * typing it rechecks the same episode, pane and shell command and that the VISIBLE screen ends at an empty prompt, so a
+   * half-typed draft is never joined to the launcher. After a short delay MoP presses Enter itself and confirms the
+   * submission from PROCESSES, never from screen text: the 26 Nov restart typed the launcher and then refused Enter
+   * because the visible line did not match (pm_launch_text_not_owned), leaving the command buffered until Rajiv pressed
+   * Enter (C0ALZJHGE49 thread 1795715075.690009, ts 1795716529.803219). Enter is retried a bounded number of times while
+   * the pane shell provably has no launcher child. Each key is recorded durably BEFORE its effect: an uncertain or failed
+   * send stays consumed, also across a MoP restart. Returns a refusal or null.
    */
   private async sendPMLaunch(paneId: string, typed: string, episode: string | null, exactPM = false): Promise<string | null> {
     const deadline = Date.now() + this.PM_PROMPT_TIMEOUT_MS;
-    let promptLine = "";
-    for (const step of ["launch", "launched"] as const) {
+    for (;;) {
+      const outcome = await withSlotSendLock(0, async () => {
+        if (this.restartStepDone(episode, "launch")) return "launch_already_attempted";
+        if (!this.sameEpisode(episode)) return "exit_pending_changed";
+        const command = await this.getPaneCommand(0, exactPM, exactPM ? paneId : undefined);
+        if (!command || !SHELL_COMMANDS.has(command)) return "pm_shell_changed";
+        const identity = await verifyPaneIdentity(0, this.runShell);
+        if (identity.ok && identity.snapshot.paneId !== paneId) return "pm_pane_changed";
+        const screen = identity.ok ? await this.visiblePane(paneId) : null;
+        if (screen === null || !isShellPromptVisible(screen)) return "wait";
+        this.markRestartStep(episode, "launch");
+        await this.runShell(`tmux send-keys -l -t ${paneId} ${shellEscape(typed)}`, { timeout: 10_000 });
+        return null;
+      }).catch((err) => `launcher send failed: ${String(err).slice(0, 200)}`);
+      if (outcome === null) break;
+      if (outcome !== "wait") return outcome;
+      if (Date.now() >= deadline) return "pm_launch_prompt_not_empty";
+      await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, deadline - Date.now()));
+    }
+    await this.sleepMs(this.PM_LAUNCH_ENTER_DELAY_MS);
+    return this.submitPMLaunch(paneId, episode, exactPM);
+  }
+
+  /** Durable step name of the n-th Enter (the first keeps the historical "launched" marker resumePMExitEpisode reads). */
+  private static launchEnterStep(attempt: number): string {
+    return attempt === 1 ? "launched" : `launch_enter_${attempt}`;
+  }
+
+  /**
+   * Presses Enter on the typed launcher until the pane runs it, bounded by PM_LAUNCH_ENTER_ATTEMPTS. Before each Enter,
+   * inside the send lock: same episode and pane, and the launcher is provably not running yet (a running launcher or
+   * agent means the line was submitted: no further Enter). An UNKNOWN process listing waits, it never presses blind.
+   */
+  private async submitPMLaunch(paneId: string, episode: string | null, exactPM: boolean): Promise<string | null> {
+    const deadline = Date.now() + this.PM_PROMPT_TIMEOUT_MS;
+    for (let attempt = 1; attempt <= this.PM_LAUNCH_ENTER_ATTEMPTS; attempt++) {
+      const step = ProcessHealthChecker.launchEnterStep(attempt);
       for (;;) {
         const outcome = await withSlotSendLock(0, async () => {
-          if (this.restartStepDone(episode, step)) return "launch_already_attempted";
+          if (this.restartStepDone(episode, step)) return "consumed";
           if (!this.sameEpisode(episode)) return "exit_pending_changed";
-          const command = await this.getPaneCommand(0, exactPM, exactPM ? paneId : undefined);
-          if (!command || !SHELL_COMMANDS.has(command)) return "pm_shell_changed";
+          const submitted = await this.pmLaunchSubmitted(paneId, exactPM);
+          if (submitted === true) return "submitted";
+          if (submitted === null) return "wait";
           const identity = await verifyPaneIdentity(0, this.runShell);
-          if (identity.ok && identity.snapshot.paneId !== paneId) return "pm_pane_changed";
-          const screen = identity.ok ? await this.visiblePane(paneId) : null;
-          if (screen === null) return "wait";
-          if (step === "launch") {
-            if (!isShellPromptVisible(screen)) return "wait";
-            promptLine = bottomLine(screen);
-          } else if (bottomLine(screen) !== `${promptLine} ${typed}`.replace(/\s+/g, " ").trim()) return "wait";
+          if (!identity.ok) return "wait";
+          if (identity.snapshot.paneId !== paneId) return "pm_pane_changed";
           this.markRestartStep(episode, step);
-          await this.runShell(step === "launch"
-            ? `tmux send-keys -l -t ${paneId} ${shellEscape(typed)}`
-            : `tmux send-keys -t ${paneId} Enter`, { timeout: 10_000 });
-          return null;
-        }).catch((err) => `launcher send failed: ${String(err).slice(0, 200)}`);
-        if (outcome === null) break;
+          await this.runShell(`tmux send-keys -t ${paneId} Enter`, { timeout: 10_000 });
+          return "sent";
+        }).catch((err) => `launcher submit failed: ${String(err).slice(0, 200)}`);
+        if (outcome === "submitted") return null;
+        if (outcome === "sent" || outcome === "consumed") break;
         if (outcome !== "wait") return outcome;
-        if (Date.now() >= deadline) return `pm_launch_${step === "launch" ? "prompt_not_empty" : "text_not_owned"}`;
+        if (Date.now() >= deadline) return "pm_launch_enter_not_confirmed";
         await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, deadline - Date.now()));
       }
+      // The submitted launcher shows up as a process within the confirm window; otherwise press Enter again.
+      const confirmBy = Date.now() + this.PM_LAUNCH_ENTER_CONFIRM_MS;
+      for (;;) {
+        if (await this.pmLaunchSubmitted(paneId, exactPM) === true) return null;
+        if (Date.now() >= confirmBy) break;
+        await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, confirmBy - Date.now()));
+      }
     }
-    return null;
+    return "pm_launch_enter_not_submitted";
+  }
+
+  /**
+   * Whether the typed launcher was submitted, read from processes only: true when the pane runs the agent, or the pane
+   * shell has a direct child running launch-pm.sh or claude; false when the pane's terminal listing provably has none;
+   * null when UNKNOWN (probe error, unreadable listing, listing without the pane shell). Other shell children, such as
+   * prompt helpers (gitstatusd, async workers), never count as the launcher.
+   */
+  private async pmLaunchSubmitted(paneId: string, exactPM = false): Promise<boolean | null> {
+    const command = await this.getPaneCommand(0, exactPM, exactPM ? paneId : undefined);
+    if (this.isAgentCommand(0, command)) return true;
+    return this.paneShellRunsLauncher(paneId);
+  }
+
+  private async paneShellRunsLauncher(paneId: string): Promise<boolean | null> {
+    let pane = "";
+    let tty = "";
+    try {
+      [pane, tty] = (await this.runShell(`tmux display-message -t ${paneId} -p '#{pane_pid}|#{pane_tty}'`, { timeout: 5_000 }))
+        .stdout.trim().split("|");
+    } catch {
+      return null;
+    }
+    if (!/^\d+$/.test(pane ?? "") || !/^\/dev\/[\w/.-]+$/.test(tty ?? "")) return null;
+    let listing = "";
+    try {
+      listing = (await this.runShell(`ps -t ${shellEscape(tty.replace(/^\/dev\//, ""))} -o pid=,ppid=,command=`, { timeout: 5_000 })).stdout;
+    } catch {
+      return null;
+    }
+    const rows = listing.split(/\r?\n/).map((line) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line)).filter(Boolean) as RegExpExecArray[];
+    if (!rows.some((row) => row[1] === pane)) return null;
+    return rows.some((row) => row[2] === pane
+      && (/(^|[\s/])launch-pm\.sh(\s|$)/.test(row[3]) || (row[3].split(/\s/, 1)[0].split("/").pop() ?? "") === "claude"));
   }
 
   private isAgentCommand(slotNum: number, command: string | null): boolean {

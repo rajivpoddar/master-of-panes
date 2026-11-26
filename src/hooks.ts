@@ -229,8 +229,8 @@ export class HookProcessor {
   pmExitHandoffFiles: readonly string[] | undefined = undefined;
   /**
    * Set by the server: after the PM-only Stop takes its single /exit attempt,
-   * MoP waits for the zsh prompt and relaunches the PM fresh with the
-   * configured model, then injects one continuation (health.restartPMFresh).
+   * MoP waits for the zsh prompt and relaunches the PM with the configured
+   * model plus --continue, presses Enter itself, then injects one continuation (health.restartPMFresh).
    */
   pmExitRestartHandler: ((episode: string | null, delivery: string) => void) | null = null;
 

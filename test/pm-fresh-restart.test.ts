@@ -24,13 +24,17 @@ type PaneState = "menu" | "exiting" | "idle" | "busy" | "shell" | "restoring" | 
 
 // failIdentityProbe: how many `tmux display-message` probes fail first (Infinity = always). noSessionStart: the new Claude
 // boots but its SessionStart hook never arrives (a late or missing hook).
-function harness(options: { state?: PaneState; neverBoots?: boolean; failIdentityProbe?: number; noSessionStart?: boolean } = {}) {
+// swallowEnters: how many launcher Enters the shell ignores (a buffered line, Rajiv ts 1795716529.803219). submitOnType:
+// the shell runs the launcher as soon as it is typed, so no Enter is needed.
+function harness(options: { state?: PaneState; neverBoots?: boolean; failIdentityProbe?: number; noSessionStart?: boolean;
+  swallowEnters?: number; submitOnType?: boolean } = {}) {
   const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: ":memory:" });
   const pane = { state: options.state ?? "exiting" as PaneState, polls: 0, typed: [] as string[], shell: [] as string[], sends: [] as string[],
     onPoll: undefined as undefined | ((polls: number) => void),
     // The VISIBLE screen (capture-pane) when it differs from the scrollback the other fakes show, and text a user appends
     // to the typed launcher after it was typed.
-    visible: undefined as undefined | string, appended: "", probeFailures: options.failIdentityProbe ?? 0 };
+    visible: undefined as undefined | string, appended: "", probeFailures: options.failIdentityProbe ?? 0,
+    swallowEnters: options.swallowEnters ?? 0 };
   const order: string[] = [];
   const typedRaw = () => (pane.typed.at(-1) ?? "").replace(/^tmux send-keys -l -t %7 /, "").slice(1, -1).replace(/'\\''/g, "'");
   const runShell = async (command: string) => {
@@ -55,12 +59,17 @@ function harness(options: { state?: PaneState; neverBoots?: boolean; failIdentit
         : pane.state === "menu" ? EXIT_MENU_TEXT : COMPOSER_TEXT);
     } else if (command.startsWith("tmux respawn-pane")) { pane.state = "shell"; order.push("respawn"); }
     else if (command === "tmux send-keys -t %7 1") order.push("1");
-    else if (command.startsWith("tmux send-keys -l")) { pane.typed.push(command); order.push("type"); }
+    else if (command.startsWith("tmux send-keys -l")) {
+      pane.typed.push(command);
+      order.push("type");
+      if (options.submitOnType && pane.state === "shell") pane.state = "fresh";
+    }
     else if (command.startsWith("tmux send-keys") && command.endsWith(" Enter")) {
       if (pane.state === "menu") { order.push("menu-enter"); pane.state = "exiting"; }
       else {
         order.push("enter");
-        if (pane.state === "shell" && pane.typed.length) {
+        if (pane.state === "shell" && pane.typed.length && pane.swallowEnters > 0) pane.swallowEnters--;
+        else if (pane.state === "shell" && pane.typed.length) {
           pane.state = options.neverBoots ? "booting" : "fresh";
           if (!options.neverBoots && !options.noSessionStart) db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "fresh-session", cwd: PM_PATH });
         }
@@ -95,7 +104,11 @@ function harness(options: { state?: PaneState; neverBoots?: boolean; failIdentit
   health.PM_EXIT_SHELL_TIMEOUT_MS = 200;
   health.PM_FORCE_SHELL_TIMEOUT_MS = 100;
   health.PM_PROMPT_TIMEOUT_MS = 100;
+  health.PM_LAUNCH_ENTER_DELAY_MS = 2;
+  health.PM_LAUNCH_ENTER_CONFIRM_MS = 20;
   health.pmAgentProcess = async () => "4000:4001";
+  // The launcher process is a child of the pane shell once the line was submitted (booting) or Claude is up (fresh).
+  health.paneShellRunsLauncher = async () => pane.state === "booting" || pane.state === "fresh";
   health.getPaneCommand = async () => {
     pane.polls++;
     pane.onPoll?.(pane.polls);
@@ -117,9 +130,9 @@ function armPmOnlyEpisode(db: MoPDatabase, prompt?: string): string {
 }
 
 const launchTyped = (pane: { typed: string[] }) => pane.typed.map((cmd) => cmd.replace(/^tmux send-keys -l -t %7 /, ""));
-const LAUNCH = `'cd '\\''${PM_PATH}'\\'' && bash /Users/rajiv/.claude/scripts/launch-pm.sh --via cliproxy --model claude-opus-5-5'`;
+const LAUNCH = `'cd '\\''${PM_PATH}'\\'' && bash /Users/rajiv/.claude/scripts/launch-pm.sh --via cliproxy --model claude-opus-5-5 --continue'`;
 
-test("launcher contract: fresh start, configured model, default opus, never --continue", () => {
+test("launcher contract: configured model, default opus; the base command carries no --continue (the restart adds it)", () => {
   assert.equal(pmFreshLaunchCommand("opus"), "bash /Users/rajiv/.claude/scripts/launch-pm.sh --via cliproxy --model claude-opus-5-5");
   assert.equal(pmFreshLaunchCommand("deepseek"), "bash /Users/rajiv/.claude/scripts/launch-pm.sh --via cliproxy --model deepseek");
   assert.equal(pmFreshLaunchCommand("bad; rm -rf /"), pmFreshLaunchCommand("opus"), "malformed model never reaches the shell");
@@ -155,7 +168,7 @@ for (const prompt of [undefined, "Read /saved/resume.md and resume."]) {
       assert.equal(result.success, true, result.reason);
       assert.deepEqual(h.order, ["1", "menu-enter", "type", "enter", "continuation", "drain"]);
       assert.deepEqual(launchTyped(h.pane), [LAUNCH]);
-      assert.equal(h.pane.shell.some((cmd) => cmd.includes("--continue")), false);
+      assert.match(launchTyped(h.pane)[0], / --continue'$/, "restart should use --continue (Rajiv ts 1795716529.803219)");
       assert.deepEqual(h.pane.sends, [prompt ?? PM_RESTART_CONTINUATION_PROMPT]);
       const status = h.db.getExitStatus();
       assert.equal(status.continuation_delivery, "delivered");
@@ -246,15 +259,81 @@ test("launcher: a half-typed draft at the prompt is never joined to the launcher
   } finally { h.db.close(); }
 });
 
-test("launcher: a draft appended after the launcher was typed is never submitted", async () => {
+// Rajiv C0ALZJHGE49 thread 1795715075.690009, ts 1795716529.803219: "the restart didn't work. the command got buffered in
+// the shell prompt. i had to press enter manually. enter should be triggered by MoP after a delay." The 26 Nov restart
+// refused Enter with pm_launch_text_not_owned because the visible line did not match the typed text.
+test("launcher: screen text after typing (autosuggest ghost text, a wrapped line) never withholds Enter", async () => {
   const h = harness({ state: "shell" });
   try {
-    h.pane.appended = " && rm draft";
+    h.pane.appended = " ghost-suggestion";
+    const episode = armPmOnlyEpisode(h.db, "saved prompt");
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.equal(result.success, true, result.reason);
+    assert.deepEqual(h.order, ["type", "enter", "continuation", "drain"]);
+    assert.deepEqual(h.pane.sends, ["saved prompt"], "the continuation note is still injected after --continue");
+  } finally { h.db.close(); }
+});
+
+test("launcher: a buffered line gets a bounded Enter retry until the launcher process runs", async () => {
+  const h = harness({ state: "shell", neverBoots: true, swallowEnters: 1 });
+  try {
+    const episode = armPmOnlyEpisode(h.db, "saved prompt");
+    await h.health.restartPMFresh("exit", episode);
+    assert.deepEqual(h.order, ["type", "enter", "enter"]);
+    assert.equal(h.db.getConfig("exit_pending_restart_steps"), "launch,launched,launch_enter_2");
+  } finally { h.db.close(); }
+});
+
+test("launcher: Enter attempts are bounded; a line that never runs fails once with no continuation", async () => {
+  const h = harness({ state: "shell", swallowEnters: Infinity });
+  try {
     const result = await h.health.restartPMFresh("crash");
     assert.equal(result.success, false);
-    assert.match(result.reason, /pm_launch_text_not_owned/);
-    assert.deepEqual(h.order, ["type"], "typed once, Enter withheld");
+    assert.equal(result.reason, "pm_launch_enter_not_submitted");
+    assert.deepEqual(h.order, ["type", "enter", "enter", "enter"]);
     assert.deepEqual(h.pane.sends, []);
+    assert.equal(h.db.getEvents(0, 5, "pm_restart_failed").length, 1);
+  } finally { h.db.close(); }
+});
+
+test("launcher: no Enter once the launcher already runs, and none blind while the process listing is unknown", async () => {
+  const running = harness({ state: "shell", submitOnType: true });
+  try {
+    const result = await running.health.restartPMFresh("crash");
+    assert.equal(result.success, true, result.reason);
+    assert.deepEqual(running.order, ["type", "continuation", "drain"]);
+  } finally { running.db.close(); }
+  const unknown = harness({ state: "shell" });
+  try {
+    unknown.health.paneShellRunsLauncher = async () => null;
+    const result = await unknown.health.restartPMFresh("crash");
+    assert.equal(result.reason, "pm_launch_enter_not_confirmed");
+    assert.deepEqual(unknown.order, ["type"]);
+  } finally { unknown.db.close(); }
+});
+
+test("launcher process check reads the pane shell's children: prompt helpers never count, a probe failure is unknown", async () => {
+  const h = harness({ state: "shell" });
+  try {
+    delete h.health.paneShellRunsLauncher;
+    const check = async (listing: string | Error) => {
+      h.health.runShell = async (command: string) => {
+        if (command.startsWith("tmux display-message")) return { stdout: "500|/dev/ttys009\n", stderr: "" };
+        if (command.startsWith("ps -t ttys009")) {
+          if (listing instanceof Error) throw listing;
+          return { stdout: listing, stderr: "" };
+        }
+        throw new Error(`Unexpected shell command: ${command}`);
+      };
+      return h.health.paneShellRunsLauncher("%7");
+    };
+    const shell = "  500     1 -zsh\n";
+    assert.equal(await check(`${shell}  510   500 /Users/rajiv/.cache/gitstatus/gitstatusd-darwin-arm64 -G v1\n`), false);
+    assert.equal(await check(`${shell}  520   500 bash /Users/rajiv/.claude/scripts/launch-pm.sh --via cliproxy --model x --continue\n`), true);
+    assert.equal(await check(`${shell}  530   500 claude --model claude-opus-5-5 --continue\n`), true);
+    assert.equal(await check(`${shell}  540   777 bash /Users/rajiv/.claude/scripts/launch-pm.sh\n`), false, "not a child of the pane shell");
+    assert.equal(await check("  540   777 bash /Users/rajiv/.claude/scripts/launch-pm.sh\n"), null, "listing without the pane shell");
+    assert.equal(await check(new Error("ps failed")), null);
   } finally { h.db.close(); }
 });
 
@@ -438,8 +517,8 @@ test("resume tick: skipped while this process runs the restart flow itself", asy
 
 test("configured model and launcher reach the typed command", async () => {
   for (const [config, pattern] of [
-    [[PM_MODEL_CONFIG_KEY, "deepseek"], /launch-pm\.sh --via cliproxy --model deepseek'$/],
-    [["pm_launcher", "direct"], /launch-pm\.sh --via direct --model claude-opus-5-5'$/],
+    [[PM_MODEL_CONFIG_KEY, "deepseek"], /launch-pm\.sh --via cliproxy --model deepseek --continue'$/],
+    [["pm_launcher", "direct"], /launch-pm\.sh --via direct --model claude-opus-5-5 --continue'$/],
   ] as const) {
     const h = harness({ state: "shell" });
     try {
