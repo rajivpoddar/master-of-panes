@@ -65,6 +65,24 @@ USED = (
     "qa-preexisting-failure-merge-base-verification",  # 3
 )
 
+# Builder/prover and every other proxy lane also get every DEV-RELATED skill by name family (Rajiv D0AMF0XE6TS thread
+# 1795681316.700169, ts 1795698486.948819: "the builder/prover proxy agents should load all the related skills"; ts
+# 1795698742.957419: "the skill overrides should apply to all proxy agents"). Structural, no hand list of domain skills (rule 60):
+# a new skill in one of these families is on with no edit. PM ops, growth, Workspace, video and persona skills stay off.
+RELATED_PREFIXES = (
+    "affected-test", "algorithm-", "apply-", "behavioral-", "cache-key", "capture-", "cherry-pick", "closure-test",
+    "cloudflare-workers", "codex-", "convex-", "css-", "debug-loop", "dependent-pr", "diff-", "document-position",
+    "docx-", "dual-text", "e2e-", "enforcing-test", "fallback-defeats", "flexbox-", "gemini-", "gh-", "git-",
+    "github-", "guided-tour", "heading-detection", "heydonna-docx", "heydonna-proofread", "heydonna-static",
+    "intentional-contract", "jsdom-", "label-gated", "langsmith-", "lcs-", "legal-transcript", "llm-",
+    "merge-conflict", "mocked-function", "modal", "multipath-", "multi-provider", "mutation-", "nextjs-",
+    "ny-deposition", "observability-", "ooxml-", "paired-formatter", "parallel-traversal", "phantom-test",
+    "pipeline-", "playwright-", "producer-consumer", "prosemirror-", "python-wall", "qa-", "r2-", "react",
+    "red-on-revert", "reproduce-bug", "resize-observer", "s3-", "semantic-merge", "shell-cli", "sibling-pattern",
+    "strict-replay", "tdd-", "test-value", "tiptap-", "validator-boundary", "verify-data", "vitest-", "whitespace-",
+)
+PM_ONLY = {"capture-alert-processing", "codex-app-restart", "codex-comment-processing"}  # PM-ops skills sharing a dev prefix
+
 DESC_CHARS = 160
 
 HOME = Path(os.path.expanduser("~"))
@@ -158,7 +176,11 @@ def main(argv=None):
     known = discover([str(p) for p in skill_roots if p.is_dir()], [str(p) for p in command_roots if p.is_dir()])
     extra = {n.strip() for n in os.environ.get("PROXY_AGENT_SKILL_ALLOW_EXTRA", "").split(",") if n.strip()}
     allowed = allowlist(known, args.agent_file, args.brief, extra)
-    overrides = {name: "off" for name in sorted(known) if name not in allowed}
+    # Related dev skills outside the core list are listed NAME-ONLY: the listing is capped at ~1% of the context window
+    # (docstring above), so full descriptions for ~270 skills would crowd out the core ones, worst on small-context local
+    # models. A name-only skill is still visible and invocable; its SKILL.md loads when used.
+    related = {n for n in known if n.startswith(RELATED_PREFIXES) and n not in PM_ONLY and n not in allowed}
+    overrides = {name: ("name-only" if name in related else "off") for name in sorted(known) if name not in allowed}
     fragment = {"skillOverrides": overrides}
     try:
         chars = int(os.environ.get("PROXY_AGENT_SKILL_DESC_CHARS", DESC_CHARS))
@@ -168,8 +190,8 @@ def main(argv=None):
         fragment["skillListingMaxDescChars"] = chars
     if args.stats:
         print(
-            "proxy-skill-overrides: discovered=%d allowed=%d off=%d allowed_names=%s"
-            % (len(known), len(allowed & set(known)), len(overrides), ",".join(sorted(allowed & set(known)))),
+            "proxy-skill-overrides: discovered=%d allowed=%d name_only=%d off=%d allowed_names=%s"
+            % (len(known), len(allowed & set(known)), len(related), sum(v == "off" for v in overrides.values()), ",".join(sorted(allowed & set(known)))),
             file=sys.stderr,
         )
     json.dump(fragment, sys.stdout)

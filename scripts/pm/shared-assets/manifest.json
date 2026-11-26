@@ -375,7 +375,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-pm-buddhi",
-      "sha256": "ded53332f8c04ea9d6d611a3025dfc226f3c55e0a156cc93b8ce272c8bddab60",
+      "sha256": "14c3146d58eaf0521449f1675d097775bb07b9e90183c3953b77576ae10407a3",
       "source_path": "claude/rules/20-buddhi-pm.md"
     },
     {
@@ -981,7 +981,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "890077d9f05aeb81915344c4d518eccbb84965f9baa67191d55e486c94cd85a2",
+      "sha256": "dba3b2c6a37b91ff6890f8c655d58acb0cb9a2ba10adaa509088519d02128316",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -1062,7 +1062,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "856c897d2fee12452937c6d04beda0224e88dbdd8c2c7751413ba4d8fb50df82",
+      "sha256": "33ce4e09b44915436bc61e7708fc4e91f70b903a7c9554e3cc1eb014e0170ea3",
       "source_path": "claude/scripts/proxy-skill-overrides.py"
     },
     {
@@ -1604,7 +1604,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "b8f67d7821ce05b400fdfd3095ec16bd185a7d505ff6f147430ab1f51dfd5107",
+      "sha256": "e2e4fbe137b5bd32f0a0a5ffaf20514f4ac56cb61de1edd0764ecf2aa0b36a96",
       "source_path": "claude/skills/hourly-report-processing/SKILL.md"
     },
     {
