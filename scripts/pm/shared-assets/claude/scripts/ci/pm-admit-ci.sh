@@ -8,9 +8,8 @@
 # 12b: --check-12b-only <PR> is read-only; --no-12b-gate --reason "<text>" audits an explicit override.
 # Main-red gate REMOVED (Rajiv C0ALZJHGE49 thread 1793958692.281499, ts 1793960417.571149: "remove it outright. note main red flakes have to be rerun. ... the skip pr has to be immediately merged with a followup issue. for affected pr's, merge main and re-admit."). Supersedes DM ts 1791877690.725089. --allow-main-red is still accepted (no-op) for compatibility.
 # Scope gate (Rajiv 2026-10-08, DM thread 1791461793.117869): site/docs-only PRs are refused (no CI/E2E); PM may override with --force-ci.
-# Admission cap (Rajiv C0ALZJHGE49 thread 1795324302.697259, ts 1795324706.834969 "yes"): after 2 admitted heads of the PR ended red with a
-# PR-caused classification, admission is refused (ADMISSION_CAP_2, exit 10) and the PR goes to the S131 handoff. See admission_cap_gate below;
-# CTO-approved re-admission: PM_ADMIT_CAP_OVERRIDE=cto:<slack ts> pm-admit-ci.sh <PR>.
+# Admission round breaker (Rajiv C0ALZJHGE49 thread 1795669948.123989, ts 1795676115.108879 "ok"): after 2 admissions on the PR,
+# the next admission is refused regardless of cause (ADMISSION_ROUND_BREAKER, exit 10). See admission_cap_gate below for the decision and audited override.
 # Stale test-merge ref (CTO REVISE of d644cece, C0ALZJHGE49 thread 1795543629.469469, ts 1795543730.370159; REVISE #2 ts 1795544911.112579): this script never
 # changes PR state. No close/reopen (close queues e2e.yml teardown of the PR's Modal apps), no main merge, no push. ONE deadline-bounded read-only pass,
 # bound to the SAME main sha that passed the overlap check, runs before any admission write; anything unreadable, late or mismatching is UNKNOWN and
@@ -125,12 +124,8 @@ gate_12b() {
   python3 -I "$SCRIPT_DIR/../pm-ops.py" record --source pm-admit-ci --event 12b_gate_override --actor PM --target-type github_pr --target-id "$PR" --pr "$PR" --head-sha "$head" --payload-json "$payload" >/dev/null || return 3
 }
 
-# Admission cap (Rajiv C0ALZJHGE49 thread 1795324302.697259, ts 1795324706.834969 "yes"), mirroring the 2-round review cap.
-# pm-admit-cap.py (read-only) counts distinct admitted heads of this PR whose CI or E2E ended red with a PR-caused classification:
-# anything except a red recorded as infra / flaky / out-of-diff / inherited-main in the run's ci-failure-investigation verdict comment.
-# At 2 the PR stops re-admitting. Override: PM_ADMIT_CAP_OVERRIDE=cto:<slack ts> (or rajiv:<slack ts>), audited in pm-admit-skip.log.
-# An unreadable record is UNAVAILABLE (REFUSE github_api_error admission_cap), never a guess. Admission mode only: --merge-only and
-# --check-12b-only never admit, so they never reach it. It runs before the 12b gate so a capped PR is not sent to another review first.
+# Each exact ci-head label addition is one round, including re-admissions on the same head.
+# Apply this before the 12b gate, only in admission mode. A CTO/Rajiv override lifts a known cap, not unreadable history.
 admission_cap_gate() {
   local out rc=0 ov="${PM_ADMIT_CAP_OVERRIDE:-}"
   if [ -n "$ov" ] && [[ ! "$ov" =~ ^(cto|rajiv):[0-9]{10}\.[0-9]{6}$ ]]; then
@@ -142,19 +137,17 @@ admission_cap_gate() {
     0) return 0 ;;
     10)
       if [ -n "$ov" ]; then
+        if [ "$DRY" = 0 ] && ! printf '%s PR=%s head=%s admission-cap-override=%s\n' "$(date -u +%FT%TZ)" "$PR" "$H0" "$ov" >> "$HOME/.claude/logs/pm-admit-skip.log"; then
+          echo 'REFUSE: admission_cap_override_audit_unavailable'; exit 7
+        fi
         echo "ADMISSION_CAP_OVERRIDE: $ov pr=$PR; cap reached, re-admission authorized by the override"
-        [ "$DRY" = 1 ] || echo "$(date -u +%FT%TZ) PR=$PR admission-cap-override=$ov" >> "$HOME/.claude/logs/pm-admit-skip.log" 2>/dev/null || true
         return 0
       fi
-      echo "REFUSE: ADMISSION_CAP_2 #$PR; nothing admitted"
-      echo "S131 handoff: stop re-admitting #$PR. Preserve and push any WIP, fence the old writer, and transfer ONE owner one tier up (Skill(hourly-report-processing) Step 3/3b), or send the CTO a head-pinned packet (PR, the heads and run ids above, classification, recommendation). A red that is really infra/flaky/out-of-diff stops counting once the run's ci-failure-investigation verdict records that. CTO-approved re-admission only: PM_ADMIT_CAP_OVERRIDE=cto:<slack ts> pm-admit-ci.sh $PR"
+      echo "REFUSE: ADMISSION_ROUND_BREAKER #$PR; nothing admitted"
+      echo "Decision required (choose one for #$PR at $H0): S157 admin-merge ask for out-of-diff/flake/infra only with executed-green E2E at this head; fix a PR-caused failure; or slice/freeze."
+      echo 'Re-admission requires an audited override: PM_ADMIT_CAP_OVERRIDE=cto:<slack ts> (or rajiv:<slack ts>).'
       exit 10 ;;
-    *)
-      if [ -n "$ov" ]; then
-        echo "ADMISSION_CAP_OVERRIDE: $ov pr=$PR; cap lookup unavailable (rc=$rc), proceeding on the override"
-        return 0
-      fi
-      api_fail admission_cap ;;
+    *) api_fail admission_cap ;;
   esac
 }
 

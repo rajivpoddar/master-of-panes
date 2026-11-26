@@ -1,7 +1,7 @@
 """Shared definition of an ADMITTED ci.yml / e2e.yml pull_request run (read-only helpers, no I/O).
 
-Rajiv approval C0ALZJHGE49 thread 1795324302.697259, ts 1795324706.834969 ("yes"): the merged-PR "rounds" in the
-morning brief (pm/merged-pr-rounds.py) and the CI-admission cap (ci/pm-admit-cap.py) both count admissions only.
+The morning brief (pm/merged-pr-rounds.py) uses these helpers to identify substantive workflow runs.
+The admission round breaker (ci/pm-admit-cap.py) counts exact label events, not workflow runs.
 
 Every pull_request label event (a P2 priority label, pm-state:*, the exact ci-head:<sha> admission label) starts
 a ci.yml and an e2e.yml run. Only the exact-head label activates the lane jobs; every other label event is a
@@ -11,8 +11,7 @@ What does: no job that executed did real work. A no-op run's executed jobs (scop
 each finish within seconds, while an admitted run executes lane jobs that run for minutes (observed on #14302:
 no-op runs 22-99 s wall, red or green, with every executed job at most ~15 s; admitted runs 30-65 min wall).
 Known limit: an admitted run in which EVERY executed job fails within QUICK_JOB_S (a total runner/setup outage)
-reads as a no-op. For the rounds report that undercounts one round; for the admission cap it is an infra-class
-red, which the cap does not count anyway.
+reads as a no-op, so the report may undercount it. The label-based breaker is not affected.
 """
 
 from __future__ import annotations
