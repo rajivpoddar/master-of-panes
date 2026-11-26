@@ -129,7 +129,7 @@ case "$args" in
   "pr view"*"--json baseRefName"*) printf 'main\n' ;;
   "pr view"*"--json closingIssuesReferences"*) printf '11173\n' ;;
   "api -X PUT repos/"*"/update-branch -f expected_head_sha=$STUB_SHA")
-    [ "${S166_CASE:-}" = overlap ] || exit 1
+    [ "${S166_CASE:-}" = overlap ] || [ "${UPDATE_OK:-}" = 1 ] || exit 1   # UPDATE_OK=1: GitHub accepts the update (merge-only CI-input and conflict cases)
     : > "$STUB_DIR/updated" ;;
   "run list"*) exit 1 ;;
   "pr diff"*) exit 1 ;;
@@ -163,7 +163,13 @@ if [[ "$*" = *pm-admit-ci-inputs.py* ]]; then   # the trusted-CI-input helper: c
 fi
 exec "$REAL_PYTHON" "$@"
 EOF
-  chmod +x "$T/bin/gh" "$T/bin/git" "$T/bin/python3"
+  # --merge-only waits 8s for GitHub's asynchronous update-branch; skip exactly that wait. Every other sleep (the gh stub's hung/late modes) stays real.
+  cat > "$T/bin/sleep" <<'EOF'
+#!/usr/bin/env bash
+[ "${1:-}" = 8 ] && exit 0
+exec /bin/sleep "$@"
+EOF
+  chmod +x "$T/bin/gh" "$T/bin/git" "$T/bin/python3" "$T/bin/sleep"
 }
 
 run_script() { # name, then script arguments; fixture env pre-set by caller
@@ -204,13 +210,93 @@ for fixture in no_overlap overlap; do
     check 'merge-only/overlap: performed with merged head' '[ "$RC" = 0 ] && grep -qx "MAIN_MERGE: performed head=$STUB_MERGED_SHA reason=overlap files=1" <<<"$OUT"'
     check 'merge-only/overlap: one update-branch pinned to original head' '[ "$(grep -c update-branch "$STUB_LOG")" = 1 ] && grep -q "update-branch -f expected_head_sha=$SHA$" "$STUB_LOG"'
   fi
-  check "merge-only/$fixture: no 12b, labels or CI/E2E dispatch" '! grep "^gh " "$STUB_LOG" | grep -qvE "^gh (pr view .*--json (state|headRefOid,mergeable|baseRefName) |api -X PUT .*/update-branch )" && ! grep -qE "12B_GATE|ADMITTED" <<<"$OUT"'
+  # The merge-only stale-ref probe (CI-input deadlock fix) adds read-only guard reads: pulls/N, git/ref/heads/main and the test merge's commit.
+  check "merge-only/$fixture: no 12b, labels or CI/E2E dispatch" '! grep "^gh " "$STUB_LOG" | grep -qvE "^gh (pr view .*--json (state|headRefOid,mergeable|baseRefName) |api -X PUT .*/update-branch |api repos/[^ ]*/(pulls/[0-9]+|git/ref/heads/main|commits/[0-9a-f]{40}) )" && ! grep -qE "12B_GATE|ADMITTED" <<<"$OUT"'
 done
 
 # If main moved again after review, admission must not do the preflight's write itself.
 S166_CASE=overlap GATE_MODE=exempt run_script admission_overlap 11173
 check 'admission/overlap: requires a fresh preflight' '[ "$RC" = 2 ] && grep -q "REFUSE: main integration required reason=overlap .*--merge-only 11173" <<<"$OUT"'
 check 'admission/overlap: no merge or dispatch' '! grep -qE "update-branch|pr edit|label create|workflow run|run rerun" "$STUB_LOG" && ! grep -q ADMITTED <<<"$OUT"'
+
+# ---- --merge-only and a changed trusted CI input (PM brief 2026-11-26, ladder pel-mwx1mo05-a904f753) ----
+# Deadlock: a lagging refs/pull/N/merge whose main parent M lacks a changed shared CI input (scripts/ci/change-scope-rules.json, scripts/ci/e2e-functional-areas.json,
+# scripts/ci/tests/*) is REFUSED by admission (stale_merge_ref, exit 3), --merge-only skipped the same PR on no_conflict_no_overlap, and GitHub never rebuilds the ref.
+# Now --merge-only runs the guard read-only (ci_input_probe) and treats EXACTLY "the changed-CI-input list is non-empty" as an overlap-class reason (the non-force
+# update-branch, pinned to the pre-merge head). Every other guard outcome keeps the old skip with no write. run_mo = a no-conflict/no-overlap PR whose test merge is
+# built on the older main STUB_LAG_SHA (lagging); the caller sets UPDATE_OK, LAG_CI_INPUTS_CHANGED / LAG_CI_INPUTS_FAIL and MO_MODE / MO_ANCESTOR / MO_MAIN_FILES / STALE_DL.
+run_mo() { local name="$1"; shift
+  S166_CASE=no_overlap GATE_MODE=none LAG_CASE=1 STALE_MODE="${MO_MODE:-lagging}" LAG_ANCESTOR="${MO_ANCESTOR:-yes}" \
+    LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' LAG_MAIN_FILES="${MO_MAIN_FILES:-lib/main.ts\\n}" \
+    run_script "$name" --merge-only 11173 "$@"
+}
+skiplog_lines() { { cat "$T/home/.claude/logs/pm-admit-skip.log" 2>/dev/null || true; } | wc -l | tr -d ' '; }
+CI_WRITES='^gh (pr edit|pr close|pr reopen|label create|workflow run|run rerun)|--add-label|--remove-label|^git (-C [^ ]+ )?(merge |push|reset|rebase)|--force'
+CI_TWO='scripts/ci/change-scope-rules.json\nscripts/ci/e2e-functional-areas.json\n'
+assert_mo_skipped() { # name: the old skip (exit 0, head unchanged), and nothing was written
+  check "$1: skipped at the unchanged head, exit 0, no probe line" '[ "$RC" = 0 ] && grep -qx "MAIN_MERGE: skipped head=$SHA reason=no_conflict_no_overlap" <<<"$OUT" && ! grep -q "STALE_REF_PROBE\|reason=ci_input_changed\|performed" <<<"$OUT"'
+  check "$1: no update-branch, no PR/label/branch write, no skip-log audit line" '! grep -q update-branch "$STUB_LOG" && ! grep -qE "$CI_WRITES" "$STUB_LOG" && [ "$(skiplog_lines)" = "$SKIPLOG_N" ]'
+}
+
+echo 'case: --merge-only, changed trusted CI inputs on a lagging test merge (the deadlock): non-force main merge pinned to the pre-merge head'
+SKIPLOG_N=$(skiplog_lines)
+UPDATE_OK=1 LAG_CI_INPUTS_CHANGED="$CI_TWO" run_mo mo_ci_changed
+check 'mo_ci_changed: performed at the merged head with reason ci_input_changed and the changed-input count (2)' '[ "$RC" = 0 ] && grep -qx "MAIN_MERGE: performed head=$STUB_MERGED_SHA reason=ci_input_changed files=2" <<<"$OUT"'
+check 'mo_ci_changed: the probe line names the count, the older main parent, the overlap-checked main and exactly the changed inputs' 'grep -qx "STALE_REF_PROBE ci_inputs_changed n=2 main_parent=$STUB_LAG_SHA main=$STUB_MAIN_SHA files=scripts/ci/change-scope-rules.json scripts/ci/e2e-functional-areas.json" <<<"$OUT"'
+check 'mo_ci_changed: exactly one update-branch, non-force, pinned to the original head, after every guard read' '[ "$(grep -c update-branch "$STUB_LOG")" = 1 ] && grep -q "^gh api -X PUT repos/.*/pulls/11173/update-branch -f expected_head_sha=$SHA$" "$STUB_LOG" && [ "$(grep -n "git/ref/heads/main" "$STUB_LOG" | tail -1 | cut -d: -f1)" -lt "$(grep -n update-branch "$STUB_LOG" | head -1 | cut -d: -f1)" ]'
+check 'mo_ci_changed: the helper ran once, read-only, bound to the older parent and the overlap-checked main' '[ "$(grep -c "^ci-inputs " "$STUB_LOG")" = 1 ] && grep -q "^ci-inputs -I .*pm-admit-ci-inputs.py --repo .* --base $STUB_LAG_SHA --main $STUB_MAIN_SHA" "$STUB_LOG"'
+check 'mo_ci_changed: the probe wrote nothing else: no label/PR/branch write, no skip-log audit line, no waiver or admission output, no refusal' '! grep -qE "$CI_WRITES" "$STUB_LOG" && [ "$(skiplog_lines)" = "$SKIPLOG_N" ] && ! grep -qE "12B_GATE|ADMITTED|MERGE_REF_RULE|MERGE_REF_VERIFIED|REFUSE" <<<"$OUT"'
+
+echo 'case: --merge-only, lagging test merge but no changed trusted CI input (and no overlap): skipped, nothing written'
+SKIPLOG_N=$(skiplog_lines)
+UPDATE_OK=1 LAG_CI_INPUTS_CHANGED='' run_mo mo_ci_unchanged
+assert_mo_skipped mo_ci_unchanged
+check 'mo_ci_unchanged: the guard did consult the helper once (the skip is a decision, not a shortcut), and the lagging waiver left no audit line' '[ "$(grep -c "^ci-inputs " "$STUB_LOG")" = 1 ]'
+
+echo 'case: --merge-only, conflict with main: still the non-force update-branch (conflict is a merge reason; the CI-input probe is not consulted)'
+HM_VALUE="$SHA CONFLICTING" S166_CASE=conflict GATE_MODE=none UPDATE_OK=1 run_script mo_conflict --merge-only 11173
+check 'mo_conflict: performed at the merged head with reason conflict' '[ "$RC" = 0 ] && grep -qx "MAIN_MERGE: performed head=$STUB_MERGED_SHA reason=conflict files=0" <<<"$OUT"'
+check 'mo_conflict: one update-branch pinned to the original head; no stale-ref guard read, no helper call' '[ "$(grep -c update-branch "$STUB_LOG")" = 1 ] && grep -q "update-branch -f expected_head_sha=$SHA$" "$STUB_LOG" && ! grep -q "^ci-inputs " "$STUB_LOG" && ! grep -q "git/ref/heads/main" "$STUB_LOG"'
+HM_VALUE="$SHA CONFLICTING" S166_CASE=conflict GATE_MODE=none run_script mo_conflict_rejected --merge-only 11173
+check 'mo_conflict_rejected: GitHub refuses the update -> REFUSE conflict, route to slot (exit 2), one update-branch attempt, no helper call' '[ "$RC" = 2 ] && grep -qx "REFUSE: conflict with main; route to slot" <<<"$OUT" && [ "$(grep -c update-branch "$STUB_LOG")" = 1 ] && ! grep -q "^ci-inputs " "$STUB_LOG"'
+
+echo 'case: --merge-only, ordinary file overlap is unchanged (merge; the CI-input probe is not consulted)'
+S166_CASE=overlap GATE_MODE=none run_script mo_overlap --merge-only 11173
+check 'mo_overlap: performed at the merged head with reason overlap, no stale-ref guard read, no helper call' '[ "$RC" = 0 ] && grep -qx "MAIN_MERGE: performed head=$STUB_MERGED_SHA reason=overlap files=1" <<<"$OUT" && ! grep -q "^ci-inputs " "$STUB_LOG" && ! grep -q "git/ref/heads/main" "$STUB_LOG"'
+
+echo 'case: --merge-only, every other guard outcome stays the old no-write skip (fail closed): unreadable helper, overlap with the older parent, older parent not an ancestor, unreadable PR, main moved, timeout'
+SKIPLOG_N=$(skiplog_lines)
+UPDATE_OK=1 LAG_CI_INPUTS_FAIL=1 LAG_CI_INPUTS_CHANGED="$CI_TWO" run_mo mo_unknown_helper
+assert_mo_skipped mo_unknown_helper
+UPDATE_OK=1 MO_MAIN_FILES='lib/pr.ts\n' LAG_CI_INPUTS_CHANGED="$CI_TWO" run_mo mo_lag_overlap
+assert_mo_skipped mo_lag_overlap
+check 'mo_lag_overlap: refused on overlap before the CI-input check, so the helper was never asked' '! grep -q "^ci-inputs " "$STUB_LOG"'
+UPDATE_OK=1 MO_ANCESTOR=no LAG_CI_INPUTS_CHANGED="$CI_TWO" run_mo mo_not_ancestor
+assert_mo_skipped mo_not_ancestor
+check 'mo_not_ancestor: the older parent is unverified, so the helper was never asked' '! grep -q "^ci-inputs " "$STUB_LOG"'
+UPDATE_OK=1 MO_MODE=unreadable LAG_CI_INPUTS_CHANGED="$CI_TWO" run_mo mo_unreadable_pr
+assert_mo_skipped mo_unreadable_pr
+UPDATE_OK=1 MO_MODE=main_moved LAG_CI_INPUTS_CHANGED="$CI_TWO" run_mo mo_main_moved
+assert_mo_skipped mo_main_moved
+UPDATE_OK=1 MO_MODE=hung STALE_DL=2 LAG_CI_INPUTS_CHANGED="$CI_TWO" run_mo mo_timeout
+assert_mo_skipped mo_timeout
+
+echo 'case: --merge-only --dry-run previews the decision and never calls update-branch'
+SKIPLOG_N=$(skiplog_lines)
+UPDATE_OK=1 LAG_CI_INPUTS_CHANGED="$CI_TWO" run_mo mo_dry_ci --dry-run
+check 'mo_dry_ci: would attempt update-branch for ci_input_changed (2 inputs) at the current head and main, exit 0, nothing changed' '[ "$RC" = 0 ] && grep -qx "MAIN_MERGE: dry-run would attempt update-branch head=$SHA reason=ci_input_changed files=2 main=$STUB_MAIN_SHA (nothing was changed)" <<<"$OUT" && grep -q "^STALE_REF_PROBE ci_inputs_changed n=2 " <<<"$OUT"'
+check 'mo_dry_ci: no update-branch, no PR/label/branch write, no skip-log audit line, no fetch of the PR head after a merge' '! grep -q update-branch "$STUB_LOG" && ! grep -qE "$CI_WRITES" "$STUB_LOG" && [ "$(skiplog_lines)" = "$SKIPLOG_N" ] && ! grep -q "fetch -q --no-tags origin refs/pull/" "$STUB_LOG"'
+UPDATE_OK=1 LAG_CI_INPUTS_CHANGED='' run_mo mo_dry_unchanged --dry-run
+assert_mo_skipped mo_dry_unchanged
+S166_CASE=overlap GATE_MODE=none run_script mo_dry_overlap --merge-only 11173 --dry-run
+check 'mo_dry_overlap: would attempt update-branch for an ordinary overlap, and made no update-branch call' '[ "$RC" = 0 ] && grep -qx "MAIN_MERGE: dry-run would attempt update-branch head=$SHA reason=overlap files=1 main=$STUB_MAIN_SHA (nothing was changed)" <<<"$OUT" && ! grep -q update-branch "$STUB_LOG"'
+
+echo 'case: --merge-only argument errors (usage, exit 64, no GitHub call)'
+for bad in 'abc' '11173 --bogus' '11173 --no-update' '11173 --dry-run --dry-run' '11173 --dry-run extra'; do
+  # shellcheck disable=SC2086
+  S166_CASE=no_overlap GATE_MODE=none run_script mo_usage --merge-only $bad
+  check "mo_usage '$bad': usage line, exit 64, nothing called" '[ "$RC" = 64 ] && grep -qx "Usage: pm-admit-ci.sh --merge-only <PR number> \[--dry-run\]" <<<"$OUT" && [ ! -s "$STUB_LOG" ]'
+done
 [ "${1:-}" != --merge-only ] || finish
 
 echo "case: head lookup fails (HTTP 499) twice"

@@ -16,6 +16,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -43,6 +44,75 @@ MOP_URL = os.environ.get("MOP_URL", "http://127.0.0.1:3100")
 TRACKING_LABEL = "pm-nonclaimable:tracking"
 LINKED_ISSUE_MODE = "linked_issue"
 ISSUE_LESS_MODE = "merged_pr_issue_less"
+
+# Delivery retro (Rajiv C0ALZJHGE49 thread 1795669948.123989, 2026-11-26: "why are
+# all the retros missing"). The retired cleanup-pr Step 9.54 was the only producer of
+# retros/pr-<N>.json, and the post-cutover skill + this caller dropped it, so the
+# morning brief (6c) found no record for four of its top-five PRs. The retro now runs
+# here, after the journaled run(), so no runner has to remember it.
+# Same env var and default as pr-delivery-retro.py RETRO_STORE_DIR, so the path this
+# caller checks is the path the writer fills and the morning brief reads.
+RETROS_DIR = Path(
+    os.environ.get("HEYDONNA_RETRO_STORE_DIR")
+    or str(Path.home() / ".claude" / "projects" / "-Users-rajiv-Downloads-projects-heydonna-app" / "retros")
+).expanduser()
+RETRO_SCRIPT = Path(os.environ.get(
+    "PR_DELIVERY_RETRO_SCRIPT",
+    "/Users/rajiv/Downloads/projects/heydonna-app/.claude/scripts/pr-delivery-retro.py",
+)).expanduser()
+RETRO_TIMEOUT_S = 300
+RETRO_SCHEMA = "heydonna_pr_delivery_retro"
+
+
+def _retro_record_ok(path: Path, pr: int) -> bool:
+    """True when `path` is a readable delivery retro for exactly this PR."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    meta = data.get("pr") if isinstance(data, dict) else None
+    return (
+        isinstance(data, dict)
+        and data.get("schema") == RETRO_SCHEMA
+        and isinstance(meta, dict)
+        and meta.get("number") == pr
+        and isinstance(data.get("delay_attribution"), dict)
+        and data.get("data_quality") not in (None, "missing")
+    )
+
+
+def ensure_delivery_retro(
+    pr: int, issue: int | None, *, retros_dir: Path | None = None,
+    script: Path | None = None, runner: Any = None,
+) -> dict[str, Any]:
+    """Make sure retros/pr-<pr>.json exists; never raises, never touches the journal."""
+    retros_dir = retros_dir or RETROS_DIR
+    script = script or RETRO_SCRIPT
+    runner = runner or subprocess.run
+    durable = retros_dir / f"pr-{pr}.json"
+    if _retro_record_ok(durable, pr):
+        return {"delivery_retro_status": "present", "delivery_retro_path": str(durable)}
+    if not script.is_file():
+        return {"delivery_retro_status": "failed", "delivery_retro_reason": f"retro_script_missing:{script}"}
+    try:
+        with tempfile.TemporaryDirectory(prefix="pm-cleanup-retro-") as scratch:
+            cmd = [sys.executable, "-I", str(script), "--pr", str(pr)]
+            if isinstance(issue, int):
+                cmd += ["--issue", str(issue)]
+            cmd += [
+                "--out", str(Path(scratch) / f"pr-retro-{pr}.md"),
+                "--json-out", str(Path(scratch) / f"pr-retro-{pr}.json"),
+            ]
+            proc = runner(cmd, capture_output=True, text=True, timeout=RETRO_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"delivery_retro_status": "failed", "delivery_retro_reason": f"retro_run_error:{type(exc).__name__}"}
+    if proc.returncode == 0 and _retro_record_ok(durable, pr):
+        return {"delivery_retro_status": "generated", "delivery_retro_path": str(durable)}
+    tail = ((proc.stderr or proc.stdout or "").strip().splitlines() or [""])[-1][:200]
+    return {
+        "delivery_retro_status": "failed",
+        "delivery_retro_reason": f"retro_rc={proc.returncode}:{tail}",
+    }
 
 
 def _now_iso() -> str:
@@ -1192,7 +1262,17 @@ def main(argv: list[str] | None = None) -> int:
             path = args.receipt_path or Path(os.environ.get("MOP_CLEANUP_RECEIPT_PATH", str(DEFAULT_RECEIPT))).expanduser()
             result = reconcile_ambiguous(args.reconcile_ambiguous, path, dry_run=args.dry_run)
         else:
-            result = run(json.load(__import__("sys").stdin), mapping_path=args.mapping_path, receipt_path=args.receipt_path)
+            request = json.load(sys.stdin)
+            result = run(request, mapping_path=args.mapping_path, receipt_path=args.receipt_path)
+            # Retro runs only after the journaled terminal state is verified, outside
+            # the journal, and can only add fields: it never changes closed-clean.
+            pr_number = request.get("pr") if isinstance(request, dict) else None
+            if result.get("success") is True and isinstance(pr_number, int) and not isinstance(pr_number, bool):
+                issue_number = request.get("issue")
+                result.update(ensure_delivery_retro(pr_number, issue_number if isinstance(issue_number, int) else None))
+                if result["delivery_retro_status"] == "failed":
+                    print(f"pm-cleanup-pr: delivery retro FAILED for PR {pr_number}: "
+                          f"{result.get('delivery_retro_reason')}", file=sys.stderr)
     except CleanupError as exc:
         print(json.dumps({"success": False, "error": exc.reason, "ambiguous": exc.ambiguous, **exc.details}, separators=(",", ":")))
         return 2

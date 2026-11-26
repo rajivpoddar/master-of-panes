@@ -20,6 +20,12 @@
 # invalidates green). A test merge whose parents are not exactly {head, overlap-checked main} is WAIVED, not refused, ONLY when the PR is not CONFLICTING and its
 # changed files do not overlap the files main changed since the ref's main parent (plus the verified-parent and trusted-CI-input conditions of lagging_ref_verify).
 # Receipt: MERGE_REF_RULE rule=stale_merge_ref_waived:no_overlap (also appended to pm-admit-skip.log). Any overlap still REFUSEs stale_merge_ref with the overlap list.
+# CI-input deadlock fix (PM brief 2026-11-26, ladder pel-mwx1mo05-a904f753): a lagging test merge whose main parent M lacks a changed trusted CI input is REFUSED by the
+# guard (exit 3, "trusted CI input changed"), yet --merge-only skipped the same PR on no_conflict_no_overlap and GitHub never rebuilds a lagging ref, so nothing could
+# clear it. --merge-only now runs the guard read-only (ci_input_probe: same deadline-bounded reads, no audit write) on a no-conflict/no-overlap PR and, ONLY when its
+# outcome is exactly "the changed-CI-input list is non-empty", treats that as an overlap-class reason (MERGE_REASON=ci_input_changed) and does the usual non-force
+# update-branch (pinned to the pre-merge head). Every other outcome (guard passes, any other refusal, unreadable read, timeout, conflict handling) is unchanged:
+# a skip with no write. Admission stays the fail-closed gate. `--merge-only <PR> --dry-run` prints the decision and exits before update-branch.
 set -euo pipefail
 CHECK_12B_ONLY=0; MERGE_ONLY=0
 case "${1:-}" in
@@ -28,14 +34,15 @@ case "${1:-}" in
 esac
 PR="${1:-}"; [ -n "$PR" ] || exit 64
 shift; REPO=Scribie/heydonna-app
-if [ "$MERGE_ONLY" = 1 ] && { [[ ! "$PR" =~ ^[0-9]+$ ]] || [ "$#" -ne 0 ]; }; then
-  echo 'Usage: pm-admit-ci.sh --merge-only <PR number>'; exit 64
+if [ "$MERGE_ONLY" = 1 ] && { [[ ! "$PR" =~ ^[0-9]+$ ]] || { [ "$#" -ne 0 ] && { [ "$#" -ne 1 ] || [ "$1" != --dry-run ]; }; }; }; then
+  echo 'Usage: pm-admit-ci.sh --merge-only <PR number> [--dry-run]'; exit 64
 fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MAIN_REPO=/Users/rajiv/Downloads/projects/heydonna-app
 # Crash = non-zero (never 0): any unexpected error/unbound var exits 70 with a REFUSE line.
 trap 'rc=$?; echo "REFUSE: script_error line $LINENO rc=$rc"; exit 70' ERR
 H="" H0="" HM="" HEAD="" MERGEABLE="" LJ="" L=""
+STALE_PROBE_CI=0   # 1 only inside ci_input_probe (--merge-only): lagging_ref_verify reports a changed CI input and exits 4 instead of refusing
 # Fail-closed GitHub reads (2026-10-27: a GraphQL HTTP 499 on #11173 yielded an EMPTY head,
 # "ADMITTED #11173 at" and an empty `ci-head:` label). Every value admission needs is validated;
 # one retry after a short backoff, then REFUSE: github_api_error <step>.
@@ -469,6 +476,11 @@ lagging_ref_verify() {
     n_ci=$(printf '%s\n' "$ci_changed" | wc -l | tr -d ' ')
     list=$(printf '%s\n' "$ci_changed" | sed -n '1,20p' | tr '\n' ' ' | sed 's/ $//')
     [ "$n_ci" -le 20 ] || list="$list ... (+$((n_ci - 20)) more)"
+    # --merge-only probe (ci_input_probe, run in a subshell): report exactly this outcome to the caller with a distinct exit code instead of refusing.
+    if [ "$STALE_PROBE_CI" = 1 ]; then
+      echo "STALE_REF_PROBE ci_inputs_changed n=$n_ci main_parent=$lagp main=$OVERLAP_MAIN_SHA files=$list"
+      exit 4
+    fi
     lag_refuse "trusted CI input changed: main changed $n_ci shared CI input file(s) that decide what runs since that parent $lagp, so CI ran the older selection even though no PR file overlaps: $list"
   fi
   MERGE_REF_LAGGING=1
@@ -505,7 +517,7 @@ merge_ref_guard() {
   STALE_MAIN_AGAIN=$(stale_read gh api "repos/$REPO/git/ref/heads/main" --jq .object.sha) || stale_refuse "confirming main read $STALE_UNKNOWN"
   [ "$STALE_MAIN_AGAIN" = "$OVERLAP_MAIN_SHA" ] || stale_refuse "main moved during the check (overlap checked $OVERLAP_MAIN_SHA, main is now $STALE_MAIN_AGAIN); a fresh admission run is needed"
   echo "$MERGE_REF_RULE_LINE"
-  if [ "$MERGE_REF_LAGGING" = 1 ] && [ "$DRY" != 1 ]; then
+  if [ "$MERGE_REF_LAGGING" = 1 ] && [ "$DRY" != 1 ] && [ "$STALE_PROBE_CI" != 1 ]; then   # a --merge-only probe admits nothing, so it leaves no waiver receipt
     # Best-effort audit trail beside the other admission overrides; the printed line above is the primary record.
     printf '%s %s\n' "$(date -u +%FT%TZ)" "${MERGE_REF_RULE_LINE#MERGE_REF_RULE }" >> "$HOME/.claude/logs/pm-admit-skip.log" 2>/dev/null || true
   fi
@@ -530,18 +542,45 @@ dry_merge_ref_verdict() {
   printf '%s\n' "$out" | sed 's/^/  /'
 }
 
+# --merge-only only: is the stale-ref guard's ONLY objection to this no-conflict/no-overlap PR a non-empty changed-trusted-CI-input list? Runs merge_ref_guard
+# in a subshell with STALE_PROBE_CI=1 (same deadline-bounded reads, same fail-closed checks, no audit write, no PR/branch/label write). Returns 0 and sets
+# CI_PROBE_LINE only when the guard exits 4 AND printed its STALE_REF_PROBE line. The guard passing (exact parents, or the waiver), any other refusal (exit 3), a crash,
+# an unreadable or late read and a missing timeout binary all return 1, so the caller keeps its old no-write skip.
+CI_PROBE_LINE=""
+ci_input_probe() {
+  local out rc=0
+  CI_PROBE_LINE=""
+  out=$(STALE_PROBE_CI=1; merge_ref_guard) || rc=$?
+  [ "$rc" = 4 ] || return 1
+  CI_PROBE_LINE=$(printf '%s\n' "$out" | grep '^STALE_REF_PROBE ci_inputs_changed ') || return 1
+  [ -n "$CI_PROBE_LINE" ] || return 1
+  return 0
+}
+
 # Integrate main before review, not during admission. Exit before any admission effects.
 if [ "$MERGE_ONLY" = 1 ]; then
   read_pr_head
   plan_main_merge
   if [ "$MERGE_REASON" = no_conflict_no_overlap ]; then
-    echo "MAIN_MERGE: skipped head=$HEAD reason=$MERGE_REASON"
-    exit 0
+    if ci_input_probe; then
+      # A changed trusted CI input is an overlap-class reason: the PR's lagging test merge ran the older selection, GitHub will not rebuild it, and only a
+      # main merge into the PR head clears it. MERGE_FILES = the number of changed CI input files (the probe line's n=).
+      echo "$CI_PROBE_LINE"
+      MERGE_FILES="${CI_PROBE_LINE#STALE_REF_PROBE ci_inputs_changed n=}"; MERGE_FILES="${MERGE_FILES%% *}"
+      MERGE_REASON=ci_input_changed
+    else
+      echo "MAIN_MERGE: skipped head=$HEAD reason=$MERGE_REASON"
+      exit 0
+    fi
   fi
 
   PRE_MERGE_HEAD="$HEAD"
   PR_BASE=$(gh_get pr_base ok gh pr view "$PR" --repo "$REPO" --json baseRefName --jq .baseRefName) || api_fail pr_base
   [ "$PR_BASE" = main ] || { echo 'REFUSE: update-branch would not merge main; route to slot'; exit 2; }
+  if [ "$DRY" = 1 ]; then   # preview only: everything above is a read; no update-branch, no sleep, no push
+    echo "MAIN_MERGE: dry-run would attempt update-branch head=$HEAD reason=$MERGE_REASON files=$MERGE_FILES main=$MAIN_SHA (nothing was changed)"
+    exit 0
+  fi
   if ! gh api -X PUT "repos/$REPO/pulls/$PR/update-branch" -f "expected_head_sha=$PRE_MERGE_HEAD" >/dev/null 2>&1; then
     if [ "$MERGE_REASON" = conflict ]; then echo 'REFUSE: conflict with main; route to slot'
     else echo 'REFUSE: required main update-branch was rejected; retry --merge-only or route to slot'; fi
