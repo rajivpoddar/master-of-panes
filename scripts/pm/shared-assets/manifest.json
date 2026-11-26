@@ -1181,7 +1181,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-tooling",
-      "sha256": "f9d3170a06c4cf9d1293084c074a3e4d00662b5825f5002941350eb856ff9580",
+      "sha256": "deb45712df97889ab681cb2e5b1d7638be502275f6233fc1dc0510b9b138780f",
       "source_path": "claude/scripts/remote-qa-spec.sh"
     },
     {

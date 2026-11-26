@@ -642,8 +642,47 @@ qa_spec_fetch_remote() {
     timeout --kill-after=5 "$limit" ssh "${ssho[@]}" "root@$ip" "$command"
   fi
 }
+# Media transfer: bounded retry plus a progress watchdog (2026-11-26). The one-shot transfer failed
+# whenever the stream stalled or dropped (scp "Connection closed", or the fixed deadline cutting a
+# slow tar mid-entry). Each attempt is a fresh verified fetch (own stage, atomic no-replace publish),
+# so a failed attempt never leaves a partial out/ and a retry into the same media_dir is safe.
+qa_media_knob() {
+  local v="${!1:-}"
+  case "$v" in ''|*[!0-9]*) v="$2" ;; esac
+  printf '%s\n' "$v"
+}
+qa_media_kb() {
+  local kb
+  kb=$(du -sk "$1" 2>/dev/null | cut -f1)
+  case "$kb" in ''|*[!0-9]*) kb=0 ;; esac
+  printf '%s\n' "$kb"
+}
+# One watched attempt: kill the fetch after $2 seconds without $4 KB of growth in $media_dir.
+# Returns the fetch status; sets media_stalled=1 when the watchdog killed it.
+qa_media_fetch_attempt() {
+  local limit="$1" stall="$2" poll="$3" min_kb="$4" pid idle=0 last now grace
+  media_stalled=0
+  RTB_FETCH_TIMEOUT_SECONDS="$limit" timeout --kill-after=5 "$((limit + 30))" "$HOME/.claude/scripts/remote-browser-box.sh" fetch "$box" "$remote_out" "$media_dir" &
+  pid=$!
+  last=$(qa_media_kb "$media_dir")
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep "$poll"
+    now=$(qa_media_kb "$media_dir")
+    if [ "$((now - last))" -ge "$min_kb" ]; then idle=0; last="$now"; else idle=$((idle + poll)); fi
+    if [ "$idle" -ge "$stall" ] && kill -0 "$pid" 2>/dev/null; then
+      media_stalled=1
+      kill -TERM "$pid" 2>/dev/null
+      grace=0
+      while kill -0 "$pid" 2>/dev/null && [ "$grace" -lt 10 ]; do sleep 1; grace=$((grace + 1)); done
+      if kill -0 "$pid" 2>/dev/null; then kill -KILL "-$pid" 2>/dev/null; kill -KILL "$pid" 2>/dev/null; fi
+      break
+    fi
+  done
+  wait "$pid"
+}
 qa_spec_fetch() {
   local root helper remote_out media_dir
+  local attempts attempt_limit total stall poll min_kb retry_sleep n=0 started left limit began fetched=0 media_rc=1 media_stalled=0
   [[ "$run_id" =~ ^qa-spec-[0-9]{8}T[0-9]{6}Z-[0-9]+$ ]] || { echo 'QA_FETCH_UNAVAILABLE: invalid run id'; return 1; }
   command -v timeout >/dev/null 2>&1 || { echo 'QA_FETCH_UNAVAILABLE: timeout command missing'; return 1; }
   root="/root/qa/.spec-fetch-$run_id"
@@ -664,8 +703,24 @@ qa_spec_fetch() {
     echo 'QA_FETCH_MEDIA=PARTIAL reason=media-snapshot-unavailable'; return 3
   fi
   mkdir -p "$media_dir" || { echo 'QA_FETCH_MEDIA=PARTIAL reason=media-directory-unavailable'; return 3; }
-  if ! RTB_FETCH_TIMEOUT_SECONDS=900 timeout --kill-after=5 930 "$HOME/.claude/scripts/remote-browser-box.sh" fetch "$box" "$remote_out" "$media_dir"; then
-    echo 'QA_FETCH_MEDIA=PARTIAL reason=media-transfer-unavailable'; return 3
+  attempts=$(qa_media_knob QA_MEDIA_FETCH_ATTEMPTS 3); attempt_limit=$(qa_media_knob QA_MEDIA_FETCH_ATTEMPT_SECONDS 900)
+  total=$(qa_media_knob QA_MEDIA_FETCH_TOTAL_SECONDS 1500); stall=$(qa_media_knob QA_MEDIA_FETCH_STALL_SECONDS 180)
+  poll=$(qa_media_knob QA_MEDIA_FETCH_POLL_SECONDS 2); min_kb=$(qa_media_knob QA_MEDIA_FETCH_STALL_MIN_KB 1)
+  retry_sleep=$(qa_media_knob QA_MEDIA_FETCH_RETRY_SLEEP_SECONDS 5)
+  [ "$attempts" -ge 1 ] || attempts=1; [ "$stall" -ge 1 ] || stall=1; [ "$poll" -ge 1 ] || poll=1
+  started=$SECONDS
+  while [ "$n" -lt "$attempts" ]; do
+    left=$((total - (SECONDS - started))); limit=$attempt_limit
+    [ "$left" -ge "$limit" ] || limit=$left
+    [ "$limit" -ge 1 ] || break
+    n=$((n + 1)); began=$SECONDS
+    qa_media_fetch_attempt "$limit" "$stall" "$poll" "$min_kb"; media_rc=$?
+    echo "QA_FETCH_MEDIA_ATTEMPT n=$n/$attempts rc=$media_rc stalled=$media_stalled limit_s=$limit elapsed_s=$((SECONDS - began)) staged_kb=$(qa_media_kb "$media_dir")"
+    if [ "$media_rc" -eq 0 ]; then fetched=1; break; fi
+    if [ "$n" -lt "$attempts" ]; then sleep "$retry_sleep"; fi
+  done
+  if [ "$fetched" -ne 1 ]; then
+    echo "QA_FETCH_MEDIA=PARTIAL reason=media-transfer-unavailable attempts=$n last_rc=$media_rc stalled=$media_stalled"; return 3
   fi
   python3 -I "$fetch_helper" publish "$media_dir/out" "$out/out" || { echo 'QA_FETCH_MEDIA=PARTIAL reason=media-publication-unavailable'; return 3; }
   media_status=COMPLETE
