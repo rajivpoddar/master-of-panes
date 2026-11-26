@@ -1508,6 +1508,42 @@ def t75_ci_label_verdict_with_skipped_literal_reads_uses_only_the_executed_attem
     expect_refusal(lambda: proof(ran_literal_reads, paid), "VERIFIER_SHAPE_AMBIGUOUS")
 
 
+def t76_ci_label_verdict_with_skipped_convex_deploy_check_pair_uses_the_paid_run():
+    # #15010 / #14931 / #15008 (CTO ts 1795717168.102149): the admission rerun also lists
+    # convex-deploy-check + teardown-convex-deploy-check, skipped with zero steps.
+    def rerun(conclusion="success", minutes=40, pair=("convex-deploy-check", "teardown-convex-deploy-check")):
+        run, jobs = ci_verifier_entry(8002, 2, conclusion, minutes)
+        for name in ("literal-test-reads",) + tuple(pair):
+            jobs.append(_job(name, "skipped", (), run["id"], run["run_attempt"]))
+        return run, jobs
+
+    def proof(*entries):
+        install_run_set({"ci.yml": entries})
+        return merge.workflow_proof(make_pr(), "ci.yml", merge.WORKFLOWS["ci.yml"])
+
+    paid = ci_substantive_entry(8001, 1, "success", 20)
+    # Both green: the authenticated wrapper yields to the run that executed the tests.
+    assert proof(rerun(), paid) == {"run": paid[0]["id"], "attempt": 1, "head": HEAD}
+    # One red: a red paid run still refuses; a red wrapper is never authenticated.
+    expect_refusal(lambda: proof(rerun(), ci_substantive_entry(8001, 1, "failure", 20)),
+                   "WORKFLOW_NOT_GREEN workflow=ci.yml")
+    expect_refusal(lambda: proof(rerun("failure"), paid), "VERIFIER_SHAPE_AMBIGUOUS")
+    # None substantive: the wrapper alone never proves CI.
+    expect_refusal(lambda: proof(rerun()), "WORKFLOW_MISSING workflow=ci.yml")
+    # Pending wrapper is not authenticated.
+    pending = rerun()
+    pending[0].update(status="in_progress", conclusion=None)
+    expect_refusal(lambda: proof(pending, paid), "VERIFIER_SHAPE_AMBIGUOUS")
+    # Only one of the pair, or a pair job that ran / belongs to another attempt, refuses.
+    expect_refusal(lambda: proof(rerun(pair=("convex-deploy-check",)), paid), "VERIFIER_SHAPE_AMBIGUOUS")
+    for mutate in (lambda j: j.update(conclusion="success", steps=[_step("Deploy check", "success")]),
+                   lambda j: j.update(steps=[_step("Deploy check", "skipped")]),
+                   lambda j: j.update(run_attempt=1)):
+        bad = rerun()
+        mutate(next(j for j in bad[1] if j["name"] == "teardown-convex-deploy-check"))
+        expect_refusal(lambda: proof(bad, paid), "VERIFIER_SHAPE_AMBIGUOUS")
+
+
 def _tests():
     return sorted((k, v) for k, v in list(globals().items())
                   if len(k) > 1 and k[0] == "t" and k[1].isdigit() and callable(v))

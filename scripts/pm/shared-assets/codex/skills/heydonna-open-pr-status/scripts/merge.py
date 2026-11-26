@@ -130,6 +130,7 @@ def verifier_job_names(workflow):
 
 
 CI_LITERAL_READS_JOB = "literal-test-reads"
+CI_CONVEX_DEPLOY_CHECK_JOBS = frozenset({"convex-deploy-check", "teardown-convex-deploy-check"})
 LEGACY_CI_VERIFIER_JOBS = {"test", "classify-change-scope", "python-contracts", "unit-tests", "unit-tests-isolated", "typescript", "python-docx", "python", "theme-palette", "ci-receipt-publish", "functional-selection-manifest", "ci-infra", "python-modal"}
 LEGACY_CI_WORKFLOW_BLOB = "eb973c3382478b845d1d0541f12f95ee4efc7d33"
 
@@ -167,8 +168,15 @@ def verifier_only_outcome(pr, workflow, run, jobs):
     expected = verifier_job_names(workflow)
     # The label-verdict rerun also lists literal-test-reads. Like the rest
     # of the paid roster it must be skipped with no steps (checked below).
+    # The current ci.yml rerun also lists the convex deploy-check pair; it is
+    # accepted only with BOTH jobs present, each skipped with zero steps, at
+    # this run id/attempt/head (CTO C0ALZJHGE49 ts 1795717168.102149).
+    rerun_rosters = (expected | {CI_LITERAL_READS_JOB},
+                     expected | {CI_LITERAL_READS_JOB} | CI_CONVEX_DEPLOY_CHECK_JOBS)
     green_ci_rerun = (workflow == "ci.yml" and outcome == "success"
-                      and set(by_name) == expected | {CI_LITERAL_READS_JOB})
+                      and any(set(by_name) == roster for roster in rerun_rosters))
+    if green_ci_rerun and any(by_name[n].get("conclusion") != "skipped" or by_name[n].get("steps") != []
+                              for n in CI_CONVEX_DEPLOY_CHECK_JOBS & set(by_name)): return None
     if (set(by_name) != expected and not green_ci_rerun
             and not (workflow == "ci.yml" and legacy_ci_roster_authenticated(pr, run, jobs))): return None
     scope=by_name.get(CLASSIFIER_JOB_NAME,{})
