@@ -268,7 +268,7 @@ test("native version-titled Claude delivers only with executable identity proof"
       const relay = new TmuxRelay(DEFAULT_CONFIG, { pmRuntime: "claude",
         runShell: async command => {
           commands.push(command);
-          return { stdout: command.includes("pane_current_command") ? "2.1.312"
+          return { stdout: command.includes("pane_current_command") ? "2.1.312|%1|0:0.0|0"
             : command.includes("pane_pid") ? "321"
             : command.startsWith("ps -p 321") ? executable : "", stderr: "", code: 0 };
         },

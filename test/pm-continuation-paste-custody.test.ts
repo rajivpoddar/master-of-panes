@@ -35,7 +35,7 @@ function pane(opts: { lineCtrlU?: boolean } = {}) {
   const trace: string[] = [];
   const runShell = async (command: string) => {
     if (command.includes("#{pane_id}|#{pane_current_command}")) return { stdout: "%1|claude\n", stderr: "" };
-    if (command.includes("#{pane_current_command}")) return { stdout: "claude\n", stderr: "" };
+    if (command.includes("#{pane_current_command}")) return { stdout: "claude|%1|0:0.0|0\n", stderr: "" };
     if (command.includes("#{pane_id}|#{pane_current_path}")) return { stdout: `%1|${CHECKOUT}\n`, stderr: "" };
     if (command.includes("rev-parse --show-toplevel")) return { stdout: `${CHECKOUT}\n`, stderr: "" };
     if (command.startsWith("tmux capture-pane")) {

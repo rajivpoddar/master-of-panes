@@ -174,6 +174,9 @@ const SLOT_CWDS: Record<number, string> = {
   ...Object.fromEntries(DEV_SLOT_NUMBERS.map((slot) => [slot, SLOT_RUNTIME_IDENTITIES[slot].checkoutPath])),
 };
 
+type PMRestartTrigger = "exit" | "crash" | "unresponsive" | "recover";
+type PMRecoveryTarget = "session" | "window" | `%${number}`;
+
 type PaneProbe = {
   fingerprint: string;
   jsonlActivityToken: string;
@@ -305,14 +308,25 @@ export class ProcessHealthChecker {
    * Get the current command running in a tmux pane.
    * Returns "claude" when Claude Code is running, "zsh" when it's dead.
    */
-  private async getPaneCommand(slotNum: number): Promise<string | null> {
-    const identity = await verifyPaneIdentity(slotNum);
+  private async getPaneCommand(slotNum: number, exactPM = false): Promise<string | null> {
+    const identity = await verifyPaneIdentity(slotNum, this.runShell);
     if (!identity.ok) {
       console.warn(`[health] pane identity unavailable for slot ${slotNum}: ${identity.detail}`);
       return null;
     }
     const paneTarget = identity.snapshot.paneId;
     try {
+      if (slotNum === 0) {
+        const result = await this.runShell(
+          `tmux display-message -t ${paneTarget} -p '#{pane_id}|#{pane_dead}|#{pane_current_command}|#{session_name}:#{window_index}.#{pane_index}'`,
+          { timeout: 5_000 },
+        );
+        const [id, dead, command, address] = result.stdout.trim().split("|");
+        if (id !== paneTarget || (exactPM && address !== identity.snapshot.address) || dead !== "0" || !command) return null;
+        if (this.isAgentCommand(0, command)) return command;
+        const process = await this.pmAgentProcess(paneTarget);
+        return ProcessHealthChecker.ownedAgent(process) ? "claude" : process === null ? null : command;
+      }
       const result = await execShell(
         `tmux display-message -t ${paneTarget} -p '#{pane_current_command}'`,
         { timeout: 5_000 },
@@ -465,17 +479,18 @@ export class ProcessHealthChecker {
    * runs the agent, so scrollback left over after the exit never counts as a live menu. This is the only sender of that 1
    * for slot 0 (relay.ts leaves the PM menu to this flow). Probe failures just retry on the next poll.
    */
-  private async waitForPMShellPrompt(timeoutMs: number, episode: string | null = null): Promise<{ paneId: string } | null> {
+  private async waitForPMShellPrompt(timeoutMs: number, episode: string | null = null, allowExitMenu = true): Promise<{ paneId: string } | null> {
     const deadline = Date.now() + timeoutMs;
     const sent = new Set<string>();
     for (;;) {
-      const command = await this.getPaneCommand(0);
+      const command = await this.getPaneCommand(0, !allowExitMenu);
       const observed = command ? await this.relay.observeSlotPane(0) : null;
       if (observed && command) {
         if (SHELL_COMMANDS.has(command)) {
           if (isShellPromptVisible(observed.text)) return { paneId: observed.paneId };
-        } else if (this.isAgentCommand(0, command) && parsePMExitMenu(observed.text)) {
-          await this.answerPMExitMenu(observed.paneId, episode, sent);
+        } else if (this.isAgentCommand(0, command)) {
+          if (!allowExitMenu) return null; // A manual launch won recovery; do not touch it.
+          if (parsePMExitMenu(observed.text)) await this.answerPMExitMenu(observed.paneId, episode, sent);
         }
       }
       if (Date.now() >= deadline) return null;
@@ -534,10 +549,10 @@ export class ProcessHealthChecker {
    * without waiting for a quiet prompt (CTO REVISE C0ALZJHGE49 thread 1794970059.617269, ts 1794973351.556359, item 1).
    * The guarded writer decides when the composer can safely take the continuation.
    */
-  private async waitForPMAgentProcess(timeoutMs: number): Promise<string | null> {
+  private async waitForPMAgentProcess(timeoutMs: number, exactPM = false): Promise<string | null> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const command = await this.getPaneCommand(0);
+      const command = await this.getPaneCommand(0, exactPM);
       if (this.isAgentCommand(0, command)) return command;
       if (Date.now() >= deadline) return null;
       await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, deadline - Date.now()));
@@ -546,10 +561,11 @@ export class ProcessHealthChecker {
 
   /**
    * The PM restart contract (see runPMFreshRestart): after /exit, wait for the zsh prompt (answering the exit menu with 1),
-   * type the configured-model launcher as a FRESH start, wait for the agent process, then inject ONE continuation.
-   * Every wait is bounded and none gates PM input. Never force-kills a busy PM turn. Used for /exit episodes and PM crashes.
+   * type the configured-model launcher, then wait for the agent process. Planned restarts stay fresh with one
+   * continuation prompt; PM availability recovery resumes the previous conversation without sending another prompt.
+   * Every wait is bounded and none gates PM input. Recovery never force-kills a pane.
    */
-  restartPMFresh(trigger: "exit" | "crash" | "unresponsive", episode: string | null = null): Promise<{ success: boolean; reason: string }> {
+  restartPMFresh(trigger: PMRestartTrigger, episode: string | null = null, target: PMRecoveryTarget | null = null): Promise<{ success: boolean; reason: string }> {
     if (this.pmRestartInFlight) return this.pmRestartInFlight;
     if (this.pmInitiatedRespawns.has(0)) return Promise.resolve({ success: false, reason: "controlled_respawn_owns_pm" });
     // A just-completed restart owns the cooldown: a late duplicate trigger must
@@ -559,7 +575,7 @@ export class ProcessHealthChecker {
     const run = (async () => {
       let launched = false;
       try {
-        const result = await this.runPMFreshRestart(trigger, episode);
+        const result = await this.runPMFreshRestart(trigger, episode, target);
         launched = result.launched;
         return { success: result.success, reason: result.reason };
       } finally {
@@ -670,9 +686,11 @@ export class ProcessHealthChecker {
    * only delays a wait, it never aborts the flow (the 16:21 IST 18 Nov restart aborted at a single-shot identity probe
    * before it launched anything).
    */
-  private async runPMFreshRestart(trigger: "exit" | "crash" | "unresponsive", episode: string | null):
+  private async runPMFreshRestart(trigger: PMRestartTrigger, episode: string | null, target: PMRecoveryTarget | null):
     Promise<{ success: boolean; launched: boolean; reason: string }> {
-    const { model, launcher, command: launchCommand } = pmLaunchPlan(this.db);
+    const { model, launcher, command } = pmLaunchPlan(this.db);
+    const recover = trigger === "recover";
+    const launchCommand = recover ? `${command} --continue` : command;
     const cwd = SLOT_CWDS[0];
     const fail = (reason: string, launched = false, extra: Record<string, unknown> = {}) => {
       this.db.logEvent(0, "pm_restart_failed", null, null, { trigger, episode, model, reason, ...extra });
@@ -680,12 +698,29 @@ export class ProcessHealthChecker {
       return { success: false, launched, reason };
     };
     this.db.logEvent(0, "pm_restart_started", null, null, { trigger, episode, model, launcher, launch_command: launchCommand });
+    if (recover && target) {
+      try {
+        const prepared = await withSlotSendLock(0, async () => {
+          if (await this.probeMissingPMPane() !== target) return false;
+          const startDir = shellEscape(cwd);
+          const create = target === "session" ? `tmux new-session -d -s 0 -n pm -c ${startDir}`
+            : target === "window" ? `tmux new-window -d -t '=0:0' -n pm -c ${startDir}`
+              : `tmux respawn-pane -t ${target} -c ${startDir}`;
+          // No -k: concurrent creation or a live pane must never be replaced.
+          await this.runShell(create, { timeout: 10_000 });
+          return true;
+        });
+        if (!prepared) return fail("pm_recovery_target_changed");
+      } catch (err) {
+        return fail(`pm_recovery_pane_create_failed: ${String(err).slice(0, 200)}`);
+      }
+    }
 
-    // 1. Shell prompt (the exit menu is answered inside the wait). A graceful /exit never escalates to a kill; only a PM
-    //    that is gone or hung (crash, unresponsive) may be respawned, and a busy PM turn is never killed.
-    let shell = await this.waitForPMShellPrompt(trigger === "unresponsive" ? 0 : this.PM_EXIT_SHELL_TIMEOUT_MS, episode);
+    // 1. Wait for a visibly empty shell. Availability recovery cannot kill a process or answer a live Claude's exit menu.
+    let shell = await this.waitForPMShellPrompt(trigger === "unresponsive" ? 0 : this.PM_EXIT_SHELL_TIMEOUT_MS, episode, !recover);
     if (!shell) {
       if (trigger === "exit") return fail("exit_blocked_shell_not_observed_no_force");
+      if (recover) return fail("pm_recovery_shell_not_observed_no_force");
       const command = await this.getPaneCommand(0);
       if (!command) return fail("shell_prompt_timeout_pane_unknown");
       const identity = await verifyPaneIdentity(0, this.runShell);
@@ -716,14 +751,14 @@ export class ProcessHealthChecker {
 
     // 2. The launch command, typed at the shell prompt.
     const paneId = shell.paneId;
-    const refusal = await this.sendPMLaunch(paneId, `cd ${shellEscape(cwd)} && ${launchCommand}`, episode);
+    const refusal = await this.sendPMLaunch(paneId, `cd ${shellEscape(cwd)} && ${launchCommand}`, episode, recover);
     if (refusal) return fail(refusal);
     this.db.logEvent(0, "pm_restart_launched", null, null, { trigger, episode, model, launcher, launch_command: launchCommand });
 
     // 3. The replacement Claude process in the launched pane. The destination is that live process plus the guarded
     //    composer below, not a SessionStart row (CTO REVISE finding 1): the SessionStart id is evidence only, and a late
     //    or missing hook delays nothing. Busy or idle, the guarded writer decides when the composer can take the paste.
-    const bootCommand = await this.waitForPMAgentProcess(this.PM_PROMPT_TIMEOUT_MS);
+    const bootCommand = await this.waitForPMAgentProcess(this.PM_PROMPT_TIMEOUT_MS, recover);
     if (!bootCommand) return fail(`claude process not observed within ${this.PM_PROMPT_TIMEOUT_MS}ms`, true);
     this.db.logEvent(0, "agent_booted", null, null, {
       command: bootCommand, launch_command: launchCommand, observed_at: new Date().toISOString(),
@@ -732,7 +767,13 @@ export class ProcessHealthChecker {
       command: launchCommand, restarted_at: new Date().toISOString(), trigger, model,
     });
 
-    // 4. The continuation prompt.
+    // --continue already restored the session. Do not add a synthetic PM turn on recovery.
+    if (recover) {
+      void this.relay.drainPMQueue().catch((err) => console.error("[health] PM queue recovery drain failed:", err));
+      return { success: true, launched: true, reason: "previous session resumed" };
+    }
+
+    // 4. The planned-restart continuation prompt.
     const identity = await this.pmAgentProcess(paneId);
     const outcome = await this.deliverPMRestartContinuation(paneId, latestSessionStartEventId(this.db, 0), trigger, episode,
       ProcessHealthChecker.ownedAgent(identity) ? identity : null);
@@ -748,7 +789,7 @@ export class ProcessHealthChecker {
    * never submitted. Each step is recorded durably BEFORE its effect: an uncertain or failed send stays consumed, also
    * across a MoP restart. A screen that cannot be read yet waits within the existing bound. Returns a refusal or null.
    */
-  private async sendPMLaunch(paneId: string, typed: string, episode: string | null): Promise<string | null> {
+  private async sendPMLaunch(paneId: string, typed: string, episode: string | null, exactPM = false): Promise<string | null> {
     const deadline = Date.now() + this.PM_PROMPT_TIMEOUT_MS;
     let promptLine = "";
     for (const step of ["launch", "launched"] as const) {
@@ -756,7 +797,7 @@ export class ProcessHealthChecker {
         const outcome = await withSlotSendLock(0, async () => {
           if (this.restartStepDone(episode, step)) return "launch_already_attempted";
           if (!this.sameEpisode(episode)) return "exit_pending_changed";
-          const command = await this.getPaneCommand(0);
+          const command = await this.getPaneCommand(0, exactPM);
           if (!command || !SHELL_COMMANDS.has(command)) return "pm_shell_changed";
           const identity = await verifyPaneIdentity(0, this.runShell);
           if (identity.ok && identity.snapshot.paneId !== paneId) return "pm_pane_changed";
@@ -971,23 +1012,36 @@ export class ProcessHealthChecker {
 
   // ─── Main Check Loop ──────────────────────────────────
 
+  /** A failed checkout probe isn't proof of absence. Enumerate the exact PM window; display-message may fall back to another pane. */
+  private async probeMissingPMPane(): Promise<PMRecoveryTarget | null> {
+    try {
+      const { stdout } = await this.runShell(
+        "tmux list-panes -t '=0:0' -F '#{pane_index}|#{pane_id}|#{pane_dead}'", { timeout: 5_000 });
+      const dead = /^0\|(%\d+)\|1$/m.exec(stdout);
+      return dead ? dead[1] as `%${number}` : null;
+    } catch (err) {
+      const message = String(err);
+      if (/^(?:can't find session: 0|no server running on .+|error connecting to .+ \(No such file or directory\))$/m.test(message)) return "session";
+      if (/^can't find window: 0$/m.test(message)) return "window";
+      return null; // Unreadable is not a missing pane.
+    }
+  }
+
   /**
    * Check all slots (0-8) for dead processes and restart if needed.
    *
    * Slot 0 = PM (claude-pm)
    * Slots 1-8 = isolated dev runtimes.
    */
-  async checkAll(): Promise<void> {
+  async checkAll(boot = false): Promise<void> {
     const now = Date.now();
-
-    // Startup grace period — skip checks for first 30s after MoP starts
-    // Prevents false "process dead" alerts during MoP restart
-    if (now - this.startTime < 30_000) return;
+    const pmOnly = boot || now - this.startTime < 30_000;
 
     for (const slot of RUNTIME_SLOT_NUMBERS) {
-      if (isDecommissionedSlot(slot)) continue;
+      // Keep the startup grace for dev slots, never for PM availability.
+      if ((pmOnly && slot !== 0) || isDecommissionedSlot(slot)) continue;
       // Skip controlled or recently completed respawns.
-      if (this.isRestartSuppressed(slot, now)) continue;
+      if (slot !== 0 && this.isRestartSuppressed(slot, now)) continue;
 
       // DND does NOT skip health checks — Claude must run on all slots always.
       // DND only means "don't assign new work" — NOT "don't keep alive."
@@ -1006,11 +1060,15 @@ export class ProcessHealthChecker {
       const paneCommand = await this.getPaneCommand(slot);
 
       if (this.isAgentCommand(slot, paneCommand)) {
-        await this.checkClaudeResponsiveness(slot);
+        if (slot === 0 && this.db.getPendingPMEventCount() > 0) {
+          void this.relay.drainPMQueue().catch((err) => console.error("[health] PM queue drain failed:", err));
+        }
+        if (boot && slot === 0) console.log("[health] PM boot check: already running; no launch");
+        if (!pmOnly && !this.isRestartSuppressed(slot)) await this.checkClaudeResponsiveness(slot);
         continue;
       }
 
-      if (!paneCommand || !SHELL_COMMANDS.has(paneCommand)) {
+      if ((!paneCommand || !SHELL_COMMANDS.has(paneCommand)) && slot !== 0) {
         this.unresponsiveStates.delete(slot);
         continue;
       }
@@ -1037,13 +1095,15 @@ export class ProcessHealthChecker {
         continue;
       }
 
-      // ─── PM is dead — fresh relaunch + one continuation ──
-      // Runs detached under its own fence so dev-slot health ticks continue.
+      // Run under the same single restart owner at boot and on later ticks.
       if (slot === 0) {
-        console.log("[health] PM process DEAD — fresh relaunch with configured model + continuation");
+        const target = paneCommand ? null : await this.probeMissingPMPane();
+        if ((!paneCommand && !target) || this.isRestartSuppressed(0)) continue;
         const status = this.db.getExitStatus();
-        const trigger = status.pending && status.pm_only && this.db.hasExitAttemptSubmitted(0) ? "exit" : "crash";
-        void this.restartPMFresh(trigger, status.episode).catch((err) => console.error("[health] PM restart failed:", err));
+        const planned = !target && status.pending && status.pm_only && this.db.hasExitAttemptSubmitted(0);
+        const trigger = planned ? "exit" : "recover";
+        console.log(`[health] PM unavailable (${target ?? paneCommand}); starting ${trigger} from ${boot ? "boot" : "tick"}`);
+        void this.restartPMFresh(trigger, planned ? status.episode : null, target).catch((err) => console.error("[health] PM restart failed:", err));
         continue;
       }
 
@@ -1120,8 +1180,8 @@ export class ProcessHealthChecker {
       }
     }
 
-    // After dead-process checks, scan for exit_pending on idle slots
-    await this.checkExitPending();
+    // After periodic dead-process checks, scan for exit_pending on idle slots.
+    if (!pmOnly) await this.checkExitPending();
   }
 
   // ─── Exit Pending: process receipts only, never timer-driven /exit ───
@@ -1363,14 +1423,14 @@ export class ProcessHealthChecker {
 
   // ─── Lifecycle ─────────────────────────────────────────
 
-  private async runCheck(): Promise<void> {
+  private async runCheck(boot = false): Promise<void> {
     if (this.checkInFlight) {
       console.warn("[health] Skipping overlapping health check");
       return;
     }
     this.checkInFlight = true;
     try {
-      await this.checkAll();
+      await this.checkAll(boot);
     } catch (err) {
       console.error("[health] Check failed:", err);
     } finally {
@@ -1386,6 +1446,7 @@ export class ProcessHealthChecker {
     this.timer = setInterval(() => {
       void this.runCheck();
     }, this.CHECK_INTERVAL_MS);
+    void this.runCheck(true);
     console.log(
       `[health] Process health checker started — ` +
       `checking every ${this.CHECK_INTERVAL_MS / 1000}s, ` +

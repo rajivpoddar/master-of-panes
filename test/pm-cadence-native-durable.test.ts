@@ -32,7 +32,7 @@ test("native cadence preserves one durable occurrence through unavailable, ACK l
     const relay = new TmuxRelay(config, {
       pmRuntime: "claude",
       runShell: async command => {
-        if (command.includes("pane_current_command")) return { stdout: ready ? "claude\n" : "zsh\n", stderr: "" };
+        if (command.includes("pane_current_command")) return { stdout: `${ready ? "claude" : "zsh"}|%1|0:0.0|0\n`, stderr: "" };
         const load = /^tmux load-buffer -b \S+ '([^']+)'$/.exec(command);
         if (load) buffer = readFileSync(load[1], "utf8");
         if (command.startsWith("tmux paste-buffer")) {

@@ -20,7 +20,7 @@ function withPastedText(command: string): string {
 
 function pmReadyCommandResult(command: string, runtime: "claude" | "omp" = "omp") {
   return command.includes("pane_current_command")
-    ? { stdout: `${runtime}\n`, stderr: "" }
+    ? { stdout: `${runtime}|%1|0:0.0|0\n`, stderr: "" }
     : null;
 }
 
@@ -44,7 +44,7 @@ test("native Claude submits immediately during a busy turn without a MoP queue r
       pmRuntime: "claude",
       runShell: async (command) => {
         commands.push(command);
-        return { stdout: command.includes("pane_current_command") ? "claude\n" : "", stderr: "" };
+        return pmReadyCommandResult(command, "claude") ?? { stdout: "", stderr: "" };
       },
     });
     relay.setDatabase(db);
@@ -78,7 +78,7 @@ test("native Claude serializes complete paste-delay-Enter sequences", async () =
     runShell: async (command) => {
       command = withPastedText(command);
       commands.push(command);
-      if (command.includes("pane_current_command")) return { stdout: "claude\n", stderr: "" };
+      if (command.includes("pane_current_command")) return pmReadyCommandResult(command, "claude")!;
       if (command.includes("native A")) firstPasteAt = Date.now();
       if (command.endsWith(" Enter")) {
         enters += 1;
@@ -116,7 +116,7 @@ test("one Enter submits a complete bracketed multiline paste after the inject dw
     runShell: async (command) => {
       commands.push(command);
       timestamps.push(Date.now());
-      if (command.includes("pane_current_command")) return { stdout: "claude\n", stderr: "" };
+      if (command.includes("pane_current_command")) return pmReadyCommandResult(command, "claude")!;
       return { stdout: "", stderr: "" };
     },
   });
@@ -134,18 +134,18 @@ test("one Enter submits a complete bracketed multiline paste after the inject dw
   assert.equal(timestamps[enter]! - timestamps[paste]! >= 1000, true);
 });
 
-test("native Claude pane shell retains a message until a booted agent can receive it", async () => {
+test("a shell or a missing PM pane retains messages until the real pane boots", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mop-pm-shell-hold-"));
   try {
     const db = new MoPDatabase({ ...DEFAULT_CONFIG, dbPath: join(directory, "mop.db") });
     const commands: string[] = [];
-    let paneCommand = "zsh";
+    let paneProbe = "zsh|%1|0:0.0|0";
     const relay = new TmuxRelay(DEFAULT_CONFIG, {
       pmRuntime: "claude",
       runShell: async (command) => {
         command = withPastedText(command);
-      commands.push(command);
-        if (command.includes("pane_current_command")) return { stdout: `${paneCommand}\n`, stderr: "" };
+        commands.push(command);
+        if (command.includes("pane_current_command")) return { stdout: `${paneProbe}\n`, stderr: "" };
         return { stdout: "", stderr: "" };
       },
     });
@@ -157,11 +157,16 @@ test("native Claude pane shell retains a message until a booted agent can receiv
     assert.equal(db.getPendingPMEventCount(), 1);
     assert.equal(commands.some((command) => command.includes("held while PM is at shell")), false);
 
-    paneCommand = "claude";
-    assert.equal(await relay.drainPMQueue(), 1);
+    paneProbe = "claude|%99|0:1.0|0"; // tmux fell back to a different, live Claude pane.
+    assert.equal((await relay.submitToPM("held while PM is missing")).queued, true);
+    assert.equal(await relay.drainPMQueue(), 0);
+    assert.equal(db.getPendingPMEventCount(), 2);
+    assert.equal(commands.some((command) => command.includes("paste-buffer")), false);
+
+    paneProbe = "claude|%7|0:0.0|0";
+    assert.equal(await relay.drainPMQueue(), 2);
     assert.equal(db.getPendingPMEventCount(), 0);
-    assert.equal(commands.filter((command) => command.includes("held while PM is at shell")).length, 1);
-    assert.equal(commands.filter((command) => command.endsWith(" Enter")).length, 1);
+    assert.equal(commands.filter((command) => command === "tmux send-keys -t %7 Enter").length, 2);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -636,7 +641,7 @@ test("long single-line PM body is buffer-pasted whole, never streamed as send-ke
     pmRuntime: "claude",
     runShell: async (command) => {
       commands.push(withPastedText(command));
-      if (command.includes("pane_current_command")) return { stdout: "claude\n", stderr: "" };
+      if (command.includes("pane_current_command")) return pmReadyCommandResult(command, "claude")!;
       return { stdout: "", stderr: "" };
     },
   });

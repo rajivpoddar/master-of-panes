@@ -879,14 +879,16 @@ export class TmuxRelay {
     const durableCadence = eventTypeOverride?.startsWith("cadence-") === true;
     if (this.pmRuntime === "claude" && !durableCadence) {
       if (!(await this.isPMPaneReady())) {
-        if (!this.db) return { ok: false, submitKey: "Enter", ambiguous: false };
+        // A caller-owned custody guard cannot be persisted in the ordinary queue.
+        // Return zero effect so its durable caller can retry with the original pin.
+        if (guard || !this.db) return { ok: false, submitKey: "Enter", ambiguous: false };
         this.enqueuePMMessage(message, eventTypeOverride, "submitToPM-pane-not-ready");
         return { ok: true, submitKey: "Enter", ambiguous: false, queued: true };
       }
       const parsed = parseRelayMessage(message);
       const decorated = withMopSlotHeader(message, parsed);
       const result = await this.injectDirectWithSubmitKey(decorated, "Enter", guard);
-      if (result.notReady && this.db) {
+      if (result.notReady && this.db && !guard) {
         this.enqueuePMMessage(message, eventTypeOverride, "submitToPM-pane-became-not-ready");
         return { ok: true, submitKey: "Enter", ambiguous: false, queued: true };
       }
@@ -1113,6 +1115,8 @@ export class TmuxRelay {
     if (state === "delivered" || state === "started" || state === "ambiguous") {
       return { ok: state === "delivered", submitKey, ambiguous: state !== "delivered" };
     }
+    // No delivery attempt exists until there is a real recipient. Rows held at boot remain replayable.
+    if (!(await this.isPMPaneReady())) return { ok: false, submitKey, ambiguous: false };
     let verdict: PMQueuedEffectVerdict = "deliver";
     try {
       verdict = this.pmQueuedEffectCheck?.(row) ?? "deliver";
@@ -1178,8 +1182,6 @@ export class TmuxRelay {
 
   private async injectDirectNow(message: string, submitKey: PMSubmitKey, guard?: PasteGuard): Promise<DirectSubmitResult> {
     let pasted = false;
-    // A guarded send targets the pinned immutable pane id, never the mutable PM address.
-    const target = guard?.paneId ?? this.pmPaneAddress;
     const effectiveSubmitKey = submitKey;
     try {
       if (this.db?.getConfig("pm_exit_cleanup_pending")) {
@@ -1188,7 +1190,9 @@ export class TmuxRelay {
         if (!observed || composerText(observed.text) !== "") return { ok: false, ambiguous: false, notReady: true };
         this.db.setConfig("pm_exit_cleanup_pending", "");
       }
-      if (!(await this.isPMPaneReady())) return { ok: false, ambiguous: false, notReady: true };
+      const target = await this.readyPMPaneId(guard?.paneId);
+      if (!target) return { ok: false, ambiguous: false, notReady: true };
+      if (guard?.paneId && guard.paneId !== target) return { ok: false, ambiguous: false, refused: "pm_pane_identity_drift" };
       const firstLine = message.split("\n", 1)[0];
       console.log(`[relay-debug] injectToPM → ${firstLine}${message.includes("\n") ? " (+multiline payload)" : ""} (submit=${effectiveSubmitKey})`);
       // Every PM payload goes through load-buffer + paste-buffer, single-line
@@ -1219,6 +1223,10 @@ export class TmuxRelay {
               return { ok: false, ambiguous: false, refused: verdict.reason };
             }
           }
+          if (await this.readyPMPaneId(guard?.paneId) !== target) {
+            await this.runShell(`tmux delete-buffer -b ${bufName}`, { timeout: 5_000 }).catch(() => undefined);
+            return { ok: false, ambiguous: false, notReady: true };
+          }
           // `-p` wraps this as a bracketed paste. Claude Code 2.1.282 keeps a
           // plain multiline paste in its composer after Enter; bracketed paste
           // lets the same single Enter submit the complete message.
@@ -1244,6 +1252,9 @@ export class TmuxRelay {
               return { ok: false, ambiguous: true, withheld: verdict.reason };
             }
           }
+          if (await this.readyPMPaneId(guard?.paneId) !== target) {
+            return { ok: false, ambiguous: true, withheld: "pm_pane_not_ready_after_paste" };
+          }
           await this.runShell(`tmux send-keys -t ${target} ${effectiveSubmitKey}`, { timeout: 10_000 });
           await sleep(500);
         } finally {
@@ -1259,15 +1270,22 @@ export class TmuxRelay {
   }
 
   private async isPMPaneReady(): Promise<boolean> {
-    if (this.pmPaneReadyOverride) return this.pmPaneReadyOverride();
+    return (await this.readyPMPaneId()) !== null;
+  }
+
+  private async readyPMPaneId(pinned?: string): Promise<string | null> {
+    if (this.pmPaneReadyOverride) return await this.pmPaneReadyOverride() ? pinned ?? this.pmPaneAddress : null;
     try {
+      // tmux display-message can silently report the active pane when the target is absent.
       const result = await this.runShell(
-        `tmux display-message -t ${this.pmPaneAddress} -p '#{pane_current_command}'`,
+        `tmux display-message -t ${this.pmPaneAddress} -p '#{pane_current_command}|#{pane_id}|#{session_name}:#{window_index}.#{pane_index}|#{pane_dead}'`,
         { timeout: 5_000 },
       );
-      return await this.isPMCommandReady(result.stdout.trim(), this.pmPaneAddress);
+      const [command, id, address, dead] = result.stdout.trim().split("|");
+      if (address !== this.pmPaneAddress || !/^%\d+$/.test(id) || dead !== "0") return null;
+      return await this.isPMCommandReady(command, id) ? id : null;
     } catch {
-      return false;
+      return null;
     }
   }
 

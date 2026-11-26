@@ -20,7 +20,7 @@ const EXIT_MENU_TEXT = "Background work is running\n❯ 1. Exit and stop tasks\n
 
 // menu: Claude is up showing the exit dialog; exiting: Claude is still up, no dialog; shell: back at the zsh prompt;
 // booting: launcher typed, no Claude yet; fresh: the new Claude session is up at its input prompt.
-type PaneState = "menu" | "exiting" | "idle" | "busy" | "shell" | "booting" | "fresh";
+type PaneState = "menu" | "exiting" | "idle" | "busy" | "shell" | "restoring" | "missing" | "booting" | "fresh";
 
 // failIdentityProbe: how many `tmux display-message` probes fail first (Infinity = always). noSessionStart: the new Claude
 // boots but its SessionStart hook never arrives (a late or missing hook).
@@ -36,7 +36,16 @@ function harness(options: { state?: PaneState; neverBoots?: boolean; failIdentit
   const runShell = async (command: string) => {
     pane.shell.push(command);
     let stdout = "";
-    if (command.startsWith("tmux display-message")) {
+    if (command.includes("#{pane_index}|#{pane_id}|#{pane_dead}")) {
+      if (pane.state === "missing") throw new Error("can't find window: 0");
+      stdout = "0|%7|0\n";
+    } else if (command.startsWith("tmux new-window")) {
+      assert.equal(pane.state, "missing");
+      assert.match(command, /-t '=0:0'/);
+      assert.doesNotMatch(command, / -k\b/);
+      pane.state = "shell";
+      order.push("create");
+    } else if (command.startsWith("tmux display-message")) {
       if (pane.probeFailures > 0) { pane.probeFailures--; throw new Error("Command failed: tmux display-message"); }
       stdout = `%7|${PM_PATH}\n`;
     } else if (command.startsWith("git -C ") && command.endsWith("rev-parse --show-toplevel")) stdout = `${PM_PATH}\n`;
@@ -77,6 +86,7 @@ function harness(options: { state?: PaneState; neverBoots?: boolean; failIdentit
       return { outcome: "delivered", paneId: "%7" };
     },
     drainPMQueue: async () => { order.push("drain"); },
+    observeExitAttempts: async () => {},
     injectToPM: () => true,
   };
   const health = new ProcessHealthChecker(db, relay as any) as any;
@@ -90,7 +100,9 @@ function harness(options: { state?: PaneState; neverBoots?: boolean; failIdentit
     pane.polls++;
     pane.onPoll?.(pane.polls);
     // Claude takes a few polls to finish exiting once nothing is blocking it (the menu was answered, or none appeared).
-    if (pane.state === "exiting" && pane.polls >= 3) pane.state = "shell";
+    if ((pane.state === "exiting" || pane.state === "restoring") && pane.polls >= 3) pane.state = "shell";
+    if (pane.state === "missing") return null;
+    if (pane.state === "restoring") return "cat";
     return pane.state === "shell" || pane.state === "booting" ? "zsh" : "claude";
   };
   return { db, pane, order, health, relay };
@@ -439,22 +451,33 @@ test("configured model and launcher reach the typed command", async () => {
   }
 });
 
-test("health tick on a dead PM pane starts the fresh restart, never the --continue launcher", async () => {
-  const h = harness({ state: "shell" });
-  try {
-    (h.health as any).startTime = 0;
-    for (let slot = 1; slot <= 8; slot++) h.db.updateSlot(slot, { dnd: true });
-    h.health.isSlotProvisioned = (slot: number) => slot === 0;
-    await h.health.checkAll();
-    await h.health.pmRestartInFlight;
-    assert.deepEqual(h.pane.sends, [PM_RESTART_CONTINUATION_PROMPT]);
-    assert.equal(launchTyped(h.pane).length, 1);
-    assert.equal(h.pane.shell.some((cmd) => cmd.includes("--continue")), false);
-    // The completed restart seeds the cooldown: the next tick launches nothing.
-    await h.health.checkAll();
-    assert.equal(launchTyped(h.pane).length, 1);
-  } finally { h.db.close(); }
-});
+for (const state of ["shell", "restoring", "missing", "idle"] as const) {
+  test(`server boot checks PM immediately (${state}) without duplicate launches on ticks`, async () => {
+    const h = harness({ state });
+    try {
+      let bootCheck: Promise<void> | undefined;
+      const runCheck = h.health.runCheck.bind(h.health);
+      h.health.runCheck = (boot: boolean) => (bootCheck = runCheck(boot));
+      h.health.start();
+      assert.ok(bootCheck, "start must check without waiting for the timer");
+      await bootCheck;
+      const recovery = h.health.pmRestartInFlight;
+      if (state !== "idle") assert.ok(recovery);
+      // While startup recovery is in progress, a second health tick owns no launch.
+      await h.health.checkAll();
+      await recovery;
+      await h.health.checkAll();
+      if (state === "idle") {
+        assert.deepEqual(h.order, []);
+        return;
+      }
+      assert.equal(launchTyped(h.pane).length, 1);
+      assert.match(launchTyped(h.pane)[0], /launch-pm\.sh --via cliproxy --model claude-opus-5-5 --continue'$/);
+      assert.deepEqual(h.order, [...(state === "missing" ? ["create"] : []), "type", "enter", "drain"]);
+      assert.deepEqual(h.pane.sends, [], "--continue does not need an extra synthetic turn");
+    } finally { h.health.stop(); h.db.close(); }
+  });
+}
 
 test("concurrent triggers join one restart: one launcher, one continuation", async () => {
   const h = harness({ state: "menu" });
