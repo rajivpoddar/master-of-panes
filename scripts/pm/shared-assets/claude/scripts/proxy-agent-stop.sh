@@ -54,6 +54,7 @@ fi
 details="$(python3 -I "$HOME/.claude/scripts/proxy-observe.py" --stop-info "${PROXY_AGENT_STOP_JSONL:-}" 2>/dev/null)" || details='elapsed_seconds=UNKNOWN last_pushed_head=UNKNOWN'
 message="PROXY_STOP name=$name rc=$rc out=$out $details $display${frag:+ $frag}"
 # Surface every proxy end in the combined pane log (Rajiv D0AMF0XE6TS ts 1794638003.427449).
+mkdir -p "$(dirname "${PROXY_AGENT_COMBINED_LOG:-/tmp/proxy-agent/all.log}")" 2>/dev/null || true
 { printf '%s %s %s [STOPPED] rc=%s %s\n' "$(date +%H:%M:%S)" "$name" "${PROXY_AGENT_STOP_MODEL:-?}" "$rc" "$(printf '%s' "$result" | tr '\n' ' ' | cut -c1-300)" >> "${PROXY_AGENT_COMBINED_LOG:-/tmp/proxy-agent/all.log}"; } 2>/dev/null || true
 if [[ -n "$reason" ]]; then
   message="$message reason=$reason model=${PROXY_AGENT_STOP_MODEL:-UNAVAILABLE}"

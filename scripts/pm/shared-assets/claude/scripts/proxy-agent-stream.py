@@ -42,6 +42,7 @@ def feed(label, text):
     print(line, flush=True)
     # Combined log for all proxies (Rajiv ts 1794635703.245649): the identical line.
     try:
+        os.makedirs(os.path.dirname(COMBINED_PATH) or '.', exist_ok=True)
         fd = os.open(COMBINED_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         os.write(fd, (line + '\n').encode('utf-8', 'replace'))
         os.close(fd)
