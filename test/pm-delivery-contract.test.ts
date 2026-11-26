@@ -18,10 +18,12 @@ function withPastedText(command: string): string {
   return match ? `${command} PASTE:${readFileSync(match[1]!, "utf8")}` : command;
 }
 
+const READY_COMPOSER = `${"─".repeat(40)}\n❯ \n${"─".repeat(40)}\n`;
+
 function pmReadyCommandResult(command: string, runtime: "claude" | "omp" = "omp") {
-  return command.includes("pane_current_command")
-    ? { stdout: `${runtime}|%1|0:0.0|0\n`, stderr: "" }
-    : null;
+  if (command.includes("pane_current_command")) return { stdout: `${runtime}|%1|0:0.0|0\n`, stderr: "" };
+  if (command.startsWith("tmux capture-pane")) return { stdout: READY_COMPOSER, stderr: "" };
+  return null;
 }
 
 test("native Claude preserves Enter composer-queue semantics while OMP remains busy-aware", () => {
@@ -78,7 +80,8 @@ test("native Claude serializes complete paste-delay-Enter sequences", async () =
     runShell: async (command) => {
       command = withPastedText(command);
       commands.push(command);
-      if (command.includes("pane_current_command")) return pmReadyCommandResult(command, "claude")!;
+      const ready = pmReadyCommandResult(command, "claude");
+      if (ready) return ready;
       if (command.includes("native A")) firstPasteAt = Date.now();
       if (command.endsWith(" Enter")) {
         enters += 1;
@@ -116,7 +119,8 @@ test("one Enter submits a complete bracketed multiline paste after the inject dw
     runShell: async (command) => {
       commands.push(command);
       timestamps.push(Date.now());
-      if (command.includes("pane_current_command")) return pmReadyCommandResult(command, "claude")!;
+      const ready = pmReadyCommandResult(command, "claude");
+      if (ready) return ready;
       return { stdout: "", stderr: "" };
     },
   });
@@ -146,7 +150,7 @@ test("a shell or a missing PM pane retains messages until the real pane boots", 
         command = withPastedText(command);
         commands.push(command);
         if (command.includes("pane_current_command")) return { stdout: `${paneProbe}\n`, stderr: "" };
-        return { stdout: "", stderr: "" };
+        return pmReadyCommandResult(command, "claude") ?? { stdout: "", stderr: "" };
       },
     });
     relay.setDatabase(db);
@@ -641,7 +645,8 @@ test("long single-line PM body is buffer-pasted whole, never streamed as send-ke
     pmRuntime: "claude",
     runShell: async (command) => {
       commands.push(withPastedText(command));
-      if (command.includes("pane_current_command")) return pmReadyCommandResult(command, "claude")!;
+      const ready = pmReadyCommandResult(command, "claude");
+      if (ready) return ready;
       return { stdout: "", stderr: "" };
     },
   });

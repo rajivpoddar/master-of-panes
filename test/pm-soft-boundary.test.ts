@@ -270,7 +270,8 @@ test("native version-titled Claude delivers only with executable identity proof"
           commands.push(command);
           return { stdout: command.includes("pane_current_command") ? "2.1.312|%1|0:0.0|0"
             : command.includes("pane_pid") ? "321"
-            : command.startsWith("ps -p 321") ? executable : "", stderr: "", code: 0 };
+            : command.startsWith("ps -p 321") ? executable
+            : command.startsWith("tmux capture-pane") ? `${"─".repeat(40)}\n❯ \n${"─".repeat(40)}` : "", stderr: "", code: 0 };
         },
       });
       relay.setDatabase(f.db);

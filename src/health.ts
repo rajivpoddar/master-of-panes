@@ -175,7 +175,7 @@ const SLOT_CWDS: Record<number, string> = {
 };
 
 type PMRestartTrigger = "exit" | "crash" | "unresponsive" | "recover";
-type PMRecoveryTarget = "session" | "window" | `%${number}`;
+type PMRecoveryTarget = "session" | "window" | `%${number}` | `before:%${number}`;
 
 type PaneProbe = {
   fingerprint: string;
@@ -308,7 +308,7 @@ export class ProcessHealthChecker {
    * Get the current command running in a tmux pane.
    * Returns "claude" when Claude Code is running, "zsh" when it's dead.
    */
-  private async getPaneCommand(slotNum: number, exactPM = false): Promise<string | null> {
+  private async getPaneCommand(slotNum: number, exactPM = false, expectedPaneId?: string): Promise<string | null> {
     const identity = await verifyPaneIdentity(slotNum, this.runShell);
     if (!identity.ok) {
       console.warn(`[health] pane identity unavailable for slot ${slotNum}: ${identity.detail}`);
@@ -322,7 +322,8 @@ export class ProcessHealthChecker {
           { timeout: 5_000 },
         );
         const [id, dead, command, address] = result.stdout.trim().split("|");
-        if (id !== paneTarget || (exactPM && address !== identity.snapshot.address) || dead !== "0" || !command) return null;
+        if (id !== paneTarget || (expectedPaneId && id !== expectedPaneId)
+            || (exactPM && address !== identity.snapshot.address) || dead !== "0" || !command) return null;
         if (this.isAgentCommand(0, command)) return command;
         const process = await this.pmAgentProcess(paneTarget);
         return ProcessHealthChecker.ownedAgent(process) ? "claude" : process === null ? null : command;
@@ -549,10 +550,10 @@ export class ProcessHealthChecker {
    * without waiting for a quiet prompt (CTO REVISE C0ALZJHGE49 thread 1794970059.617269, ts 1794973351.556359, item 1).
    * The guarded writer decides when the composer can safely take the continuation.
    */
-  private async waitForPMAgentProcess(timeoutMs: number, exactPM = false): Promise<string | null> {
+  private async waitForPMAgentProcess(timeoutMs: number, recoveryPaneId?: string): Promise<string | null> {
     const deadline = Date.now() + timeoutMs;
     for (;;) {
-      const command = await this.getPaneCommand(0, exactPM);
+      const command = await this.getPaneCommand(0, recoveryPaneId !== undefined, recoveryPaneId);
       if (this.isAgentCommand(0, command)) return command;
       if (Date.now() >= deadline) return null;
       await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, deadline - Date.now()));
@@ -703,6 +704,16 @@ export class ProcessHealthChecker {
         const prepared = await withSlotSendLock(0, async () => {
           if (await this.probeMissingPMPane() !== target) return false;
           const startDir = shellEscape(cwd);
+          if (target.startsWith("before:")) {
+            const sibling = target.slice("before:".length);
+            // tmux indices start at pane-base-index. In the same server turn,
+            // require the same first pane in 0:0 with a positive base, split
+            // before it, then restore base 0. Never replace a sibling process.
+            const stillMissing = "#{&&:#{==:#{session_name}:#{window_index},0:0},#{&&:#{>:#{pane_index},0},#{==:#{pane_index},#{pane-base-index}}}}";
+            const split = `split-window -bfd -t ${sibling} -P -F created -c ${startDir} ; set-option -w -t ${sibling} pane-base-index 0`;
+            const result = await this.runShell(`tmux if-shell -F -t ${sibling} ${shellEscape(stillMissing)} ${shellEscape(split)}`, { timeout: 10_000 });
+            return result.stdout.trim() === "created";
+          }
           const create = target === "session" ? `tmux new-session -d -s 0 -n pm -c ${startDir}`
             : target === "window" ? `tmux new-window -d -t '=0:0' -n pm -c ${startDir}`
               : `tmux respawn-pane -t ${target} -c ${startDir}`;
@@ -758,7 +769,7 @@ export class ProcessHealthChecker {
     // 3. The replacement Claude process in the launched pane. The destination is that live process plus the guarded
     //    composer below, not a SessionStart row (CTO REVISE finding 1): the SessionStart id is evidence only, and a late
     //    or missing hook delays nothing. Busy or idle, the guarded writer decides when the composer can take the paste.
-    const bootCommand = await this.waitForPMAgentProcess(this.PM_PROMPT_TIMEOUT_MS, recover);
+    const bootCommand = await this.waitForPMAgentProcess(this.PM_PROMPT_TIMEOUT_MS, recover ? paneId : undefined);
     if (!bootCommand) return fail(`claude process not observed within ${this.PM_PROMPT_TIMEOUT_MS}ms`, true);
     this.db.logEvent(0, "agent_booted", null, null, {
       command: bootCommand, launch_command: launchCommand, observed_at: new Date().toISOString(),
@@ -797,7 +808,7 @@ export class ProcessHealthChecker {
         const outcome = await withSlotSendLock(0, async () => {
           if (this.restartStepDone(episode, step)) return "launch_already_attempted";
           if (!this.sameEpisode(episode)) return "exit_pending_changed";
-          const command = await this.getPaneCommand(0, exactPM);
+          const command = await this.getPaneCommand(0, exactPM, exactPM ? paneId : undefined);
           if (!command || !SHELL_COMMANDS.has(command)) return "pm_shell_changed";
           const identity = await verifyPaneIdentity(0, this.runShell);
           if (identity.ok && identity.snapshot.paneId !== paneId) return "pm_pane_changed";
@@ -1017,8 +1028,12 @@ export class ProcessHealthChecker {
     try {
       const { stdout } = await this.runShell(
         "tmux list-panes -t '=0:0' -F '#{pane_index}|#{pane_id}|#{pane_dead}'", { timeout: 5_000 });
-      const dead = /^0\|(%\d+)\|1$/m.exec(stdout);
-      return dead ? dead[1] as `%${number}` : null;
+      const panes = stdout.trim().split(/\r?\n/).map(line => /^(\d+)\|(%\d+)\|([01])$/.exec(line));
+      if (panes.some(pane => !pane)) return null;
+      const pm = panes.find(pane => pane?.[1] === "0");
+      if (pm) return pm[3] === "1" ? pm[2] as `%${number}` : null;
+      const first = panes[0];
+      return first ? `before:${first[2] as `%${number}`}` : null;
     } catch (err) {
       const message = String(err);
       if (/^(?:can't find session: 0|no server running on .+|error connecting to .+ \(No such file or directory\))$/m.test(message)) return "session";
@@ -1057,7 +1072,7 @@ export class ProcessHealthChecker {
       // as a dead process, launch into it, or alert PM about it.
       if (!this.isSlotProvisioned(slot)) continue;
 
-      const paneCommand = await this.getPaneCommand(slot);
+      const paneCommand = await this.getPaneCommand(slot, slot === 0);
 
       if (this.isAgentCommand(slot, paneCommand)) {
         if (slot === 0 && this.db.getPendingPMEventCount() > 0) {

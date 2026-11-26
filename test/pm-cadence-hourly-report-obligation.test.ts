@@ -154,6 +154,7 @@ test("crash after journalled delivery cannot leave the bucket without debt (real
       pmRuntime: "claude",
       runShell: async (command) => {
         if (command.includes("pane_current_command")) return { stdout: "claude|%1|0:0.0|0\n", stderr: "" };
+        if (command.startsWith("tmux capture-pane")) return { stdout: `${"─".repeat(40)}\n❯ \n${"─".repeat(40)}`, stderr: "" };
         const load = /^tmux load-buffer -b \S+ '([^']+)'$/.exec(command);
         if (load) buffer = readFileSync(load[1]!, "utf8");
         if (command.endsWith(" Enter")) {
@@ -326,6 +327,7 @@ test("queued reminder is revalidated at the paste boundary: expired/completed dr
     pmRuntime: "claude",
     runShell: async (command) => {
       if (command.includes("pane_current_command")) return { stdout: `${ready ? "claude" : "zsh"}|%1|0:0.0|0\n`, stderr: "" };
+      if (command.startsWith("tmux capture-pane")) return { stdout: `${"─".repeat(40)}\n❯ \n${"─".repeat(40)}`, stderr: "" };
       const load = /^tmux load-buffer -b \S+ '([^']+)'$/.exec(command);
       if (load) buffer = readFileSync(load[1]!, "utf8");
       if (command.startsWith("tmux paste-buffer")) pastes.push(buffer);

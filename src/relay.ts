@@ -580,8 +580,8 @@ export class TmuxRelay {
 
   private async drainPMQueueOnce(): Promise<number> {
     if (!this.db) return 0;
-    // Do not destructively coalesce/drain rows until the configured agent is
-    // actually running in the PM pane. In particular, never type into zsh.
+    // Do not coalesce/drain rows until the exact PM pane can accept input.
+    // A resumed Claude process can be visible before its composer is ready.
     if (!(await this.isPMPaneReady())) return 0;
     const rows = this.db.drainPendingPMEvents();
     let injected = 0;
@@ -1071,13 +1071,13 @@ export class TmuxRelay {
     }
   }
 
-  private injectDirectWithSubmitKey(message: string, submitKey: PMSubmitKey, guard?: PasteGuard): Promise<DirectSubmitResult> {
+  private injectDirectWithSubmitKey(message: string, submitKey: PMSubmitKey, guard?: PasteGuard, readyPaneId?: string): Promise<DirectSubmitResult> {
     ++this.pmInboundGeneration;
     ++this.pmInboundPending;
     // ONE PM paste/Enter lock (CTO REVISE ts 1794973351.556359, item 2): chain order plus the slot-0 send lock that
     // deliverGuardedToSlot, the clear writer and the exit confirmation already hold. An inbound paste or Enter can therefore
     // never land inside another writer's paste-to-Enter interval. It serializes writes only: no Stop, input or idle wait.
-    const run = (): Promise<DirectSubmitResult> => withSlotSendLock(0, () => this.injectDirectNow(message, submitKey, guard));
+    const run = (): Promise<DirectSubmitResult> => withSlotSendLock(0, () => this.injectDirectNow(message, submitKey, guard, readyPaneId));
     const result = this.directInjectChain.then(run, run).finally(() => { --this.pmInboundPending; });
     this.directInjectChain = result.then(() => undefined, () => undefined);
     return result;
@@ -1115,8 +1115,10 @@ export class TmuxRelay {
     if (state === "delivered" || state === "started" || state === "ambiguous") {
       return { ok: state === "delivered", submitKey, ambiguous: state !== "delivered" };
     }
-    // No delivery attempt exists until there is a real recipient. Rows held at boot remain replayable.
-    if (!(await this.isPMPaneReady())) return { ok: false, submitKey, ambiguous: false };
+    // No delivery attempt exists until there is a ready recipient. Carry that
+    // immutable pane id through the writer; a replacement gets a fresh drain.
+    const readyPaneId = await this.readyPMPaneId();
+    if (!readyPaneId) return { ok: false, submitKey, ambiguous: false };
     let verdict: PMQueuedEffectVerdict = "deliver";
     try {
       verdict = this.pmQueuedEffectCheck?.(row) ?? "deliver";
@@ -1146,7 +1148,7 @@ export class TmuxRelay {
       enqueued_at: row.enqueued_at,
       submit: submitKey,
     });
-    const result = await this.injectDirectWithSubmitKey(message, submitKey);
+    const result = await this.injectDirectWithSubmitKey(message, submitKey, undefined, readyPaneId);
     if (!result.ok) {
       this.db.logEvent(row.slot, "pm_queue_delivery_deferred", null, null, {
         event_type: row.event_type,
@@ -1180,7 +1182,7 @@ export class TmuxRelay {
     return { ok: true, submitKey, ambiguous: false };
   }
 
-  private async injectDirectNow(message: string, submitKey: PMSubmitKey, guard?: PasteGuard): Promise<DirectSubmitResult> {
+  private async injectDirectNow(message: string, submitKey: PMSubmitKey, guard?: PasteGuard, readyPaneId?: string): Promise<DirectSubmitResult> {
     let pasted = false;
     const effectiveSubmitKey = submitKey;
     try {
@@ -1190,9 +1192,10 @@ export class TmuxRelay {
         if (!observed || composerText(observed.text) !== "") return { ok: false, ambiguous: false, notReady: true };
         this.db.setConfig("pm_exit_cleanup_pending", "");
       }
-      const target = await this.readyPMPaneId(guard?.paneId);
+      const pin = guard?.paneId ?? readyPaneId;
+      const target = await this.readyPMPaneId(pin);
       if (!target) return { ok: false, ambiguous: false, notReady: true };
-      if (guard?.paneId && guard.paneId !== target) return { ok: false, ambiguous: false, refused: "pm_pane_identity_drift" };
+      if (pin && pin !== target) return { ok: false, ambiguous: false, refused: "pm_pane_identity_drift" };
       const firstLine = message.split("\n", 1)[0];
       console.log(`[relay-debug] injectToPM → ${firstLine}${message.includes("\n") ? " (+multiline payload)" : ""} (submit=${effectiveSubmitKey})`);
       // Every PM payload goes through load-buffer + paste-buffer, single-line
@@ -1223,7 +1226,7 @@ export class TmuxRelay {
               return { ok: false, ambiguous: false, refused: verdict.reason };
             }
           }
-          if (await this.readyPMPaneId(guard?.paneId) !== target) {
+          if (await this.readyPMPaneId(target) !== target) {
             await this.runShell(`tmux delete-buffer -b ${bufName}`, { timeout: 5_000 }).catch(() => undefined);
             return { ok: false, ambiguous: false, notReady: true };
           }
@@ -1252,7 +1255,7 @@ export class TmuxRelay {
               return { ok: false, ambiguous: true, withheld: verdict.reason };
             }
           }
-          if (await this.readyPMPaneId(guard?.paneId) !== target) {
+          if (await this.readyPMPaneId(target) !== target) {
             return { ok: false, ambiguous: true, withheld: "pm_pane_not_ready_after_paste" };
           }
           await this.runShell(`tmux send-keys -t ${target} ${effectiveSubmitKey}`, { timeout: 10_000 });
@@ -1283,7 +1286,15 @@ export class TmuxRelay {
       );
       const [command, id, address, dead] = result.stdout.trim().split("|");
       if (address !== this.pmPaneAddress || !/^%\d+$/.test(id) || dead !== "0") return null;
-      return await this.isPMCommandReady(command, id) ? id : null;
+      if (!(await this.isPMCommandReady(command, id))) return null;
+      if (this.pmRuntime === "claude") {
+        // Visible screen only: a composer left in scrollback by the departed
+        // process must not make the resumed process look ready. Check the
+        // same immutable pane that supplied the foreground command.
+        const screen = await this.runShell(`tmux capture-pane -t ${id} -p -J`, { timeout: 5_000 });
+        if (composerText(screen.stdout) === null) return null;
+      }
+      return id;
     } catch {
       return null;
     }
