@@ -136,3 +136,82 @@ def test_cap_increments_existing_more_row_and_keeps_headers():
     assert "_Ops:_ 1 failed — x" in rows
     more = [r for r in rows if compose._MORE_ROW.match(r)]
     assert len(more) == 1 and int(compose._MORE_ROW.match(more[0])[1]) > 2
+
+
+# CTO REVISE of 6c135e49 (C0ALZJHGE49 thread 1795719214.341069): raw Convex stderr reached the snapshot's
+# failures field (printed in Slack), and a one-character mailbox stayed unmasked in the snapshot.
+FAKE_STDERR = (f"Error fetching feedback row for {EMAIL}: description='{BODY[:60]}' "
+               "(clipped joshuachad03@gmai")
+
+
+def test_feedback_fetch_failure_is_fixed_text_and_raw_stderr_goes_to_0600_diagnostics(monkeypatch, tmp_path):
+    diag = tmp_path / "diag.log"
+    monkeypatch.setattr(support, "DIAG_LOG", diag)
+
+    class Proc:
+        returncode, stdout, stderr = 1, "", FAKE_STDERR
+
+    monkeypatch.setattr(support.subprocess, "run", lambda *a, **k: Proc())
+    monkeypatch.setattr(support, "DEADLINE", None)
+    try:
+        support.fetch_in_app(0)
+        raise AssertionError("expected FetchFailed")
+    except support.FetchFailed as exc:
+        failure = support.record_failure("in-app feedback", exc)
+    assert failure == "in-app feedback: fetch failed (exit 1)"
+    snapshot = {"failures": [failure], "slack": [], "in_app": []}
+    _assert_no_customer_text(support.json.dumps(snapshot))
+    assert "@" not in support.json.dumps(snapshot)
+    lines, status = compose.support_block(snapshot, "3h")
+    assert lines == ["*Support (3h):* UNAVAILABLE (in-app feedback: fetch failed (exit 1))"]
+    assert status == "support unavailable"
+    assert FAKE_STDERR in support.json.loads(diag.read_text().splitlines()[-1])["detail"]
+    assert (diag.stat().st_mode & 0o777) == 0o600
+
+
+def test_composer_withholds_any_non_fixed_support_failure_and_collector_stderr(monkeypatch, tmp_path):
+    diag = tmp_path / "diag.log"
+    monkeypatch.setattr(compose, "SUPPORT_DIAG_LOG", diag)
+    # An older collector's raw-text failure never reaches Slack.
+    legacy = {"failures": [f"in-app feedback: convex data feedback failed: {FAKE_STDERR}"]}
+    assert compose.support_failures(legacy) == [compose.SUPPORT_FAILURE_WITHHELD]
+    lines, _ = compose.support_block(dict(legacy, slack=[], in_app=[]), "3h")
+    _assert_no_customer_text("\n".join(lines))
+    # The collector process exiting non-zero: fixed text, raw stderr in the 0600 file only.
+
+    class Proc:
+        returncode, stdout, stderr = 2, "", FAKE_STDERR
+
+    monkeypatch.setattr(compose.subprocess, "run", lambda *a, **k: Proc())
+    failures: list[str] = []
+    assert compose._run_json(["support"], failures, "support", redact_stderr=True) is None
+    assert failures == ["support: fetch failed (exit 2)"]
+    assert FAKE_STDERR in diag.read_text() and (diag.stat().st_mode & 0o777) == 0o600
+
+
+def test_slack_api_and_carry_failures_carry_only_status(monkeypatch, tmp_path):
+    monkeypatch.setattr(support, "DIAG_LOG", tmp_path / "diag.log")
+
+    def fetch(ts):
+        raise RuntimeError(FAKE_STDERR)
+
+    stats: dict = {}
+    support.carry_forward([], {"1795684309.275549": 0.0}, fetch, stats=stats)
+    problems = support.carry_problems(stats)
+    text = support.failure_text("#heydonna-pm", "partial: " + "; ".join(problems))
+    assert text == "#heydonna-pm: fetch failed (partial: 1 of 1 tracked threads failed RuntimeError)"
+    assert compose.support_failures({"failures": [text]}) == [text]
+    assert support.record_failure("#heydonna-pm", RuntimeError(FAKE_STDERR)) == "#heydonna-pm: fetch failed (RuntimeError)"
+
+
+def test_one_character_and_short_mailboxes_are_masked_at_collection():
+    for addr in ("a@x.com", "ab@x.com"):
+        assert support.mask_email(addr) == "***@x.com"
+        assert compose._support_mask_email(addr) == "***@x.com"
+        root = {"ts": "1795684309.275549", "user": "U09L1CTGP9T", "text": f"<mailto:{addr}|{addr}> locked editor"}
+        item = support.stamp_channel(support.classify_thread([root], 1795684309.275549 + 60), "C0AGWPQFKHA")
+        assert item["sender_masked"] == "***@x.com"
+        row = support.classify_feedback_rows([{"_id": "k1", "createdAt": 5000, "userEmail": addr}], 1000)[0]
+        assert row["sender_masked"] == "***@x.com"
+        assert addr not in support.json.dumps([item, row]).replace("***@x.com", "")
+    assert support.mask_email("abc@x.com") == "a**@x.com"

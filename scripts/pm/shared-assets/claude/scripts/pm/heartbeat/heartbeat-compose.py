@@ -251,9 +251,10 @@ _SAFE_URL = re.compile(r"^https://[\w.-]+/[\w./?=&%-]*$")
 
 
 def _support_mask_email(addr: str) -> str:
-    """The app's #3212 maskEmail: keep the 1st char, then mask-2 / keep-2."""
+    """The app's #3212 maskEmail: keep the 1st char, then mask-2 / keep-2. A local part of 2 chars or
+    fewer is masked whole, as the collector does (CTO REVISE 27 Nov: 'a@x.com' stayed unmasked)."""
     local, _, domain = addr.partition("@")
-    if not local:
+    if len(local) <= 2:
         return f"***@{domain}"
     return "".join(c if i == 0 or (i - 1) % 4 >= 2 else "*" for i, c in enumerate(local)) + f"@{domain}"
 
@@ -275,10 +276,43 @@ def _support_link(url, label: str) -> str:
     return f" — <{url}|{label}>" if isinstance(url, str) and _SAFE_URL.match(url) else ""
 
 
+# CTO REVISE of 6c135e49 (C0ALZJHGE49 thread 1795719214.341069): the support collector's failures carried
+# raw Convex CLI stderr, which could hold a clipped email or customer excerpt that the final masker misses.
+# Only the collector's fixed shape "<source>: fetch failed (<status>)" is printed; anything else is
+# replaced by fixed text (the raw detail stays in the collector's 0600 diagnostics file).
+_SUPPORT_FAILURE = re.compile(r"^[A-Za-z0-9_ #.-]{1,40}: fetch failed \([A-Za-z0-9_ #.,;:=/-]{0,160}\)$")
+SUPPORT_FAILURE_WITHHELD = "support: fetch failed (detail withheld)"
+SUPPORT_DIAG_LOG = Path(os.environ.get("SUPPORT_DIAG_LOG") or Path.home() / ".claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/support-inbox-diagnostics.log")
+
+
+def support_failures(support: dict | None) -> list[str]:
+    """Fixed-text support failures, safe for Slack."""
+    raw = (support or {}).get("failures") or []
+    if not isinstance(raw, list):
+        raw = [raw]
+    return [f if isinstance(f, str) and _SUPPORT_FAILURE.fullmatch(f) else SUPPORT_FAILURE_WITHHELD for f in raw]
+
+
+def _support_diagnostic(status: str, detail: str) -> None:
+    """Raw collector stderr goes to the 0600 diagnostics file only. Best effort."""
+    try:
+        SUPPORT_DIAG_LOG.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(SUPPORT_DIAG_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            line = json.dumps({"at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                               "source": "support collector", "status": status, "detail": (detail or "")[-4000:]})
+            os.write(fd, (line + "\n").encode("utf-8", "replace"))
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
 def support_block(support: dict | None, window_label: str) -> tuple[list[str], str]:
     if support is None:
         return [f"*Support ({window_label}):* unavailable"], "support unavailable"
-    failures = support.get("failures") or []
+    failures = support_failures(support)
     threshold = support.get("threshold_min", 60)
     slack = support.get("slack", [])
     in_app = support.get("in_app", [])
@@ -4462,14 +4496,19 @@ def unblockable_block(failures: list[str], issues: list[dict] | None = None, res
 # ---------------------------------------------------------------------------
 
 
-def _run_json(cmd: list[str], failures: list[str], label: str, timeout: int = 20):
+def _run_json(cmd: list[str], failures: list[str], label: str, timeout: int = 20, redact_stderr: bool = False):
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         failures.append(f"{label}: UNAVAILABLE (timeout {timeout}s)")
         return None
     if proc.returncode != 0:
-        failures.append(f"{label}: rc={proc.returncode} {proc.stderr.strip()[-120:]}")
+        if redact_stderr:
+            # Support collector stderr can carry customer text: fixed text here, raw in diagnostics.
+            _support_diagnostic(f"exit {proc.returncode}", proc.stderr)
+            failures.append(f"{label}: fetch failed (exit {proc.returncode})")
+        else:
+            failures.append(f"{label}: rc={proc.returncode} {proc.stderr.strip()[-120:]}")
         return None
     try:
         return json.loads(proc.stdout)
@@ -4890,9 +4929,9 @@ def main() -> int:
             cmd = [py, str(SCRIPTS / "support-inbox-snapshot.py"), "--hours", hours]
             if args.no_in_app:
                 cmd.append("--no-in-app")
-            support = _run_json(cmd, failures, "support", COLLECTOR_TIMEOUTS["support"])
+            support = _run_json(cmd, failures, "support", COLLECTOR_TIMEOUTS["support"], redact_stderr=True)
         if support:
-            failures += support.get("failures", [])
+            failures += support_failures(support)
     prs = hourly.get("prs") if args.mode == "1h" else _load(args.prs_json)
     if args.mode != "1h" and prs is None and not args.prs_json:
         prs = _run_json([py, str(SCRIPTS / "pr-open-snapshot.py")], failures, "pr-open-snapshot", COLLECTOR_TIMEOUTS["pr-open-snapshot"])

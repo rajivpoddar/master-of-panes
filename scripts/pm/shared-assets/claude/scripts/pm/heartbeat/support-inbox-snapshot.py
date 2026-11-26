@@ -115,14 +115,21 @@ TOPIC_RES = tuple((re.compile(rx, re.IGNORECASE), label) for rx, label in TOPIC_
 DEFAULT_TOPIC = "general question"
 
 
+SHORT_LOCAL_MAX = 2  # #3212 would mask 0 or 1 char of these, so they are fully masked instead
+
+
 def mask_email(addr: str | None) -> str | None:
-    """Pure: the app's #3212 maskEmail (lib/logger.ts). 'abilaasha@x' -> 'a**la**ha@x'."""
+    """Pure: the app's #3212 maskEmail (lib/logger.ts). 'abilaasha@x' -> 'a**la**ha@x'.
+
+    CTO REVISE of 6c135e49 (27 Nov): #3212 keeps the 1st char, so a one-character local part
+    ('a@x.com') came back unchanged and the snapshot carried the full address. A local part of
+    SHORT_LOCAL_MAX chars or fewer is masked whole ('***@x.com'), like an empty one."""
     if not addr or "@" not in addr:
         return None
     local, _, domain = addr.strip().partition("@")
     if not domain:
         return None
-    if not local:
+    if len(local) <= SHORT_LOCAL_MAX:
         return f"***@{domain}"
     masked = "".join(c if i == 0 or (i - 1) % 4 >= 2 else "*" for i, c in enumerate(local))
     return f"{masked}@{domain}"
@@ -157,6 +164,70 @@ def stamp_channel(item: dict, channel: str) -> dict:
     return item
 MAIN_CHECKOUT = Path.home() / "Downloads/projects/heydonna-app"
 OPEN_STATE = Path.home() / ".claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/support-inbox-open.json"
+
+# ── failures: fixed text in the snapshot, raw detail in restricted diagnostics ──
+# CTO REVISE of 6c135e49 (C0ALZJHGE49 thread 1795719214.341069, 27 Nov): a feedback-fetch failure
+# put the tail of Convex CLI stderr into `failures`, which the composer prints in Slack, so a clipped
+# email or customer excerpt could bypass the final email masker. Every failure is now the fixed text
+# "<source>: fetch failed (<status>)"; status is an exit code, Slack error code, exception class or
+# count; FAILURE_STATUS_DROP strips anything else (no "@", quotes or brackets). Raw stderr / exception text goes ONLY to DIAG_LOG (0600,
+# local, never the snapshot or Slack).
+DIAG_LOG = Path(os.environ.get("SUPPORT_DIAG_LOG") or OPEN_STATE.with_name("support-inbox-diagnostics.log"))
+DIAG_MAX_BYTES = 1_000_000
+DIAG_DETAIL_MAX = 4000
+FAILURE_STATUS_DROP = re.compile(r"[^A-Za-z0-9_ #.,;:=/-]")
+
+
+class FetchFailed(RuntimeError):
+    """A source read failed. `status` is safe fixed text; `detail` is raw and diagnostics-only."""
+
+    def __init__(self, status: str, detail: str = ""):
+        super().__init__(status)
+        self.status = status
+        self.detail = detail
+
+
+def failure_status(exc: BaseException) -> str:
+    """Pure: the safe status for an exception (never its message text)."""
+    if isinstance(exc, FetchFailed):
+        raw = exc.status
+    elif isinstance(exc, (TimeoutError, socket.timeout, subprocess.TimeoutExpired)):
+        raw = "timeout"
+    else:
+        raw = type(exc).__name__
+    return FAILURE_STATUS_DROP.sub("", str(raw))[:60] or "error"
+
+
+def failure_text(source: str, status: str) -> str:
+    """Pure: the only failure shape that leaves the collector."""
+    return f"{FAILURE_STATUS_DROP.sub('', source)[:40]}: fetch failed ({FAILURE_STATUS_DROP.sub('', status)[:160]})"
+
+
+def write_diagnostic(source: str, status: str, detail: str, path: Path | None = None) -> None:
+    """Append raw failure detail to the 0600 diagnostics file. Best effort; never raises."""
+    target = Path(path or DIAG_LOG)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() and target.stat().st_size > DIAG_MAX_BYTES:
+            target.unlink()
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            line = json.dumps({"at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                               "source": source, "status": status, "detail": (detail or "")[-DIAG_DETAIL_MAX:]})
+            os.write(fd, (line + "\n").encode("utf-8", "replace"))
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def record_failure(source: str, exc: BaseException) -> str:
+    """Diagnostics get the raw text; the caller gets the fixed failure text."""
+    status = failure_status(exc)
+    detail = exc.detail if isinstance(exc, FetchFailed) else f"{type(exc).__name__}: {exc}"
+    write_diagnostic(source, status, detail)
+    return failure_text(source, status)
 
 # Fallback deadline for direct function calls. main assigns bounded per-source
 # deadlines; the composer enforces the overall process timeout.
@@ -323,7 +394,7 @@ def slack_get(token: str, method: str, params: dict) -> dict:
         except (TimeoutError, socket.timeout, urllib.error.URLError) as exc:
             if attempt < 2 and remaining_budget() > 0:
                 continue
-            raise RuntimeError(f"slack {method}: request failed after retries: {exc}") from exc
+            raise FetchFailed(f"slack {method} request", f"slack {method}: request failed after retries: {exc}") from exc
         if body.get("ok"):
             return body
         if body.get("error") == "ratelimited" and attempt < 2:
@@ -331,8 +402,9 @@ def slack_get(token: str, method: str, params: dict) -> dict:
                 raise TimeoutError(f"slack {method}: rate limited; support deadline exceeded")
             time.sleep(min(1, remaining_budget()))
             continue
-        raise RuntimeError(f"slack {method}: {body.get('error')}")
-    raise RuntimeError(f"slack {method}: ratelimited")
+        code = str(body.get("error") or "error")
+        raise FetchFailed(f"slack {method} {code}", f"slack {method}: {code}")
+    raise FetchFailed(f"slack {method} ratelimited", f"slack {method}: ratelimited")
 
 
 def slack_pages(token: str, method: str, params: dict):
@@ -345,10 +417,10 @@ def slack_pages(token: str, method: str, params: dict):
         cursor = (page.get("response_metadata") or {}).get("next_cursor", "")
         if not cursor:
             if page.get("has_more"):
-                raise RuntimeError(f"slack {method}: more results without cursor")
+                raise FetchFailed(f"slack {method} missing cursor", f"slack {method}: more results without cursor")
             return
         if cursor in seen:
-            raise RuntimeError(f"slack {method}: repeated cursor")
+            raise FetchFailed(f"slack {method} repeated cursor", f"slack {method}: repeated cursor")
         seen.add(cursor)
         params["cursor"] = cursor
 
@@ -548,7 +620,8 @@ def carry_forward(threads: list[dict], prev_tracked, fetch_thread, *, deadline: 
             if isinstance(exc, RuntimeError) and "thread_not_found" in str(exc):
                 stats["gone"].append(window[i])
             else:
-                stats["failed"].append((window[i], str(exc)[:120]))
+                write_diagnostic("tracked thread refresh", failure_status(exc), f"{type(exc).__name__}: {exc}")
+                stats["failed"].append((window[i], failure_status(exc)))
         elif results.get(i):
             out.append(results[i])
     stats.update(attempted=attempted, refreshed=attempted - len(errors))
@@ -563,9 +636,9 @@ def carry_problems(stats: dict) -> list[str]:
     total, attempted = stats.get("total", 0), stats.get("attempted", 0)
     failed = stats.get("failed") or []
     if failed:
-        problems.append(f"{len(failed)} of {attempted} tracked threads failed to refresh ({failed[0][1][:80]})")
+        problems.append(f"{len(failed)} of {attempted} tracked threads failed {failed[0][1]}")
     if total - attempted > 0:
-        problems.append(f"{total - attempted} of {total} tracked threads not refreshed this run (time or cap)")
+        problems.append(f"{total - attempted} of {total} tracked threads not refreshed time or cap")
     return problems
 
 
@@ -694,7 +767,8 @@ def fetch_in_app(window_start_ms: int, limit: int = 50) -> list[dict]:
         capture_output=True, text=True, errors="replace", timeout=min(45.0, remaining_budget()), cwd=str(MAIN_CHECKOUT),
     )
     if proc.returncode != 0:
-        raise RuntimeError(f"convex data feedback failed: {proc.stderr.strip()[-200:]}")
+        # Raw stderr can carry customer emails or feedback text: diagnostics only (CTO REVISE 27 Nov).
+        raise FetchFailed(f"exit {proc.returncode}", proc.stderr)
     rows = [json.loads(line) for line in proc.stdout.splitlines() if line.strip().startswith("{")]
     return classify_feedback_rows(rows, window_start_ms)
 
@@ -716,7 +790,7 @@ def main() -> int:
                     "diagnostics": {}}
     token = load_env("SLACK_BOT_TOKEN")
     if not token:
-        result["failures"].append("SLACK_BOT_TOKEN missing")
+        result["failures"].append(failure_text("slack", "SLACK_BOT_TOKEN missing"))
     else:
         skips = load_slack_reply_skips()
         prev_state = load_open_state()
@@ -746,7 +820,7 @@ def main() -> int:
                 threads = apply_skips(threads, channel, skips)
                 problems = carry_problems(carry_stats)
                 if problems:
-                    result["failures"].append(f"{CHANNELS[channel]}: partial; " + "; ".join(problems))
+                    result["failures"].append(failure_text(CHANNELS[channel], "partial: " + "; ".join(problems)))
                 new_state[channel] = tracked_roots(threads, now_ts, prev_state.get(channel) or {})
                 for gone_ts in carry_stats.get("gone", []):
                     new_state[channel].pop(gone_ts, None)  # deleted in Slack: stop tracking it
@@ -763,21 +837,23 @@ def main() -> int:
                 exc_threads = apply_skips(exc.threads, channel, skips)
                 new_state[channel] = tracked_roots(exc_threads, now_ts, prev_state.get(channel) or {})
                 result["slack"].extend(select_items(exc_threads, window_start))
-                result["failures"].append(f"{CHANNELS[channel]}: partial; {exc}")
+                cause = exc.__cause__ or exc
+                write_diagnostic(CHANNELS[channel], failure_status(cause), f"{type(cause).__name__}: {cause}")
+                result["failures"].append(failure_text(CHANNELS[channel], "partial: " + failure_status(cause)))
             except Exception as exc:  # noqa: BLE001
                 # Keep the previous open set for this channel so nothing is dropped.
-                result["failures"].append(f"{CHANNELS[channel]}: {exc}")
+                result["failures"].append(record_failure(CHANNELS[channel], exc))
         try:
             if not args.dry_run:
                 save_open_state(new_state)
         except OSError as exc:
-            result["failures"].append(f"open-state save: {exc}")
+            result["failures"].append(record_failure("open-state save", exc))
     if not args.no_in_app:
         DEADLINE = time.monotonic() + 45.0
         try:
             result["in_app"] = fetch_in_app(int(window_start * 1000))
         except Exception as exc:  # noqa: BLE001
-            result["failures"].append(f"in-app feedback: {exc}")
+            result["failures"].append(record_failure("in-app feedback", exc))
     print(json.dumps(result, indent=2))
     return 0
 

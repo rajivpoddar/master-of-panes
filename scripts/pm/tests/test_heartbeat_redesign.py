@@ -212,8 +212,9 @@ def test_support_deadline_and_failure_are_visible(monkeypatch):
     monkeypatch.setattr(support, "DEADLINE", support.time.monotonic() - 1)
     with pytest.raises(TimeoutError, match="deadline"):
         support.remaining_budget()
-    lines, status = compose.support_block({"failures": ["Slack: timed out"], "slack": [], "in_app": []}, "3h")
-    assert "UNAVAILABLE" in lines[0] and "timed out" in lines[0]
+    # Fixed-text failure shape (CTO REVISE of 6c135e49: no raw error text reaches Slack).
+    lines, status = compose.support_block({"failures": ["slack: fetch failed (timeout)"], "slack": [], "in_app": []}, "3h")
+    assert "UNAVAILABLE" in lines[0] and "fetch failed (timeout)" in lines[0]
     assert status == "support unavailable"
 
 
