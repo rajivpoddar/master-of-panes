@@ -72,6 +72,17 @@ separate QA receipt format.
 pair. Consume workflow events; do not poll or retrigger. `*_UNCERTAIN` means
 reconcile the named effect before any retry. Never raw-dispatch workflows.
 
-If auxiliary tooling delays this path for five minutes, use the same direct
-Git/GitHub operations with the current head and duplicate check. Repair the
-tooling separately. Add no other dependency, review, or approval step.
+The executor counts all historical `ci-head:<full SHA>` additions to the PR,
+including remove/re-add on the same head. `ADMISSION_ROUND_BREAKER: cap_reached`
+means no third addition: route for an S157 admin-merge decision if eligible,
+a fix for a PR-caused failure, or slice/freeze. `UNAVAILABLE` means retry the
+read when GitHub history or the counter is available; an override cannot lift it.
+Never create or attach the admission label manually if the executor refuses or
+is unavailable.
+
+Only with explicit CTO or Rajiv approval naming this PR and full head, pass
+`--cap-override cto:SLACK_TS --cap-override-head FULL_HEAD` (or `rajiv:SLACK_TS`)
+alongside `--pr` and `--head`. The read-only invocation previews the decision;
+`--apply` records an at-cap override in `~/.codex/admission-cap-overrides.jsonl`
+before either label write. If integration would change the head, use
+`--integrate-only --apply` without an override and seek approval for the new head.

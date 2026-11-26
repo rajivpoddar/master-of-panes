@@ -67,6 +67,9 @@ def stub_gh(args):
             git("-C", origin, "update-ref", PR_REF, new_head, head)
             record("integration", new_head)
     elif args[:2] in (["pr", "edit"], ["label", "create"]):
+        audit = Path.home() / ".codex" / "admission-cap-overrides.jsonl"
+        if args[:2] == ["label", "create"] and audit.is_file():
+            record("audit-before-label", json.loads(audit.read_text()))
         record(*args)
     elif args[0] == "api":
         path = next(arg for arg in args if arg.startswith("repos/"))
@@ -82,6 +85,15 @@ def stub_gh(args):
             print(json.dumps({"merge_base_commit": {"sha": base}}))
         elif "/actions/workflows/" in path:
             print('[{"workflow_runs":[]}]')
+        elif path.endswith(f"/issues/{PR}/events?per_page=100"):
+            rounds = int(os.environ["ADMISSION_ROUNDS"])
+            if rounds < 0:
+                sys.exit(1)
+            label = {"name": f"ci-head:{head}"}
+            print(json.dumps([[
+                {"id": index * 2 + i + 1, "event": event, "label": label}
+                for index in range(rounds) for i, event in enumerate(("labeled", "unlabeled"))
+            ]]))
         elif path.endswith(f"/issues/{PR}/labels"):
             labels = json.load(sys.stdin)["labels"]
             record("add-ci-label", *labels)
@@ -93,12 +105,15 @@ def stub_gh(args):
 
 
 class AdmissionMainIntegrationTests(unittest.TestCase):
-    def run_cli(self, lane, scenario, no_update):
+    def run_cli(self, lane, scenario, no_update, *, rounds=0, override=None, wrong_head=False,
+                audit_available=True, apply=True):
         with tempfile.TemporaryDirectory(prefix="mop-admission-fixture-") as directory:
             root = Path(directory)
             origin, checkout, bin_dir = (root / name for name in ("origin", "checkout", "bin"))
             bin_dir.mkdir()
             (root / ".claude/logs").mkdir(parents=True)
+            if audit_available:
+                (root / ".codex").mkdir()
             writes = root / "writes"
             writes.touch()
             env = dict(os.environ, HOME=directory, TMPDIR=directory,
@@ -107,7 +122,8 @@ class AdmissionMainIntegrationTests(unittest.TestCase):
                        LANE=lane, GIT_ALLOW_PROTOCOL="file", GIT_CONFIG_NOSYSTEM="1",
                        GIT_CONFIG_GLOBAL=os.devnull, GIT_AUTHOR_NAME="Fixture",
                        GIT_AUTHOR_EMAIL="fixture@example.invalid", GIT_COMMITTER_NAME="Fixture",
-                       GIT_COMMITTER_EMAIL="fixture@example.invalid", PM_ADMIT_RETRY_SLEEP="0")
+                       GIT_COMMITTER_EMAIL="fixture@example.invalid", PM_ADMIT_RETRY_SLEEP="0",
+                       ADMISSION_ROUNDS=str(rounds))
 
             def local_git(*args):
                 return subprocess.check_output([env["REAL_GIT"], *args], env=env, text=True).strip()
@@ -144,10 +160,15 @@ class AdmissionMainIntegrationTests(unittest.TestCase):
             if lane == "pm":
                 # Stub only the independent 12b check; execute the unmodified admission CLI bytes.
                 shutil.copyfile(PM, root / PM.name)
+                shutil.copyfile(PM.with_name("pm-admit-cap.py"), root / "pm-admit-cap.py")
                 (root / "pm-admit-12b.py").write_text("print('12B_GATE: PASS fixture')\n")
                 cmd = ["bash", str(root / PM.name), PR]
             else:
-                cmd = [sys.executable, "-I", str(CTO), "--pr", PR, "--head", old, "--apply"]
+                cmd = [sys.executable, "-I", str(CTO), "--pr", PR, "--head", old]
+                if apply:
+                    cmd += ["--apply"]
+                if override is not None:
+                    cmd += ["--cap-override", override, "--cap-override-head", main if wrong_head else old]
             if no_update:
                 cmd += ["--no-update"]
             result = subprocess.run(cmd, env=env, cwd=root, text=True, capture_output=True, timeout=30)
@@ -157,6 +178,46 @@ class AdmissionMainIntegrationTests(unittest.TestCase):
                 local_git("-C", str(origin), "merge-base", "--is-ancestor", old, final)
                 local_git("-C", str(origin), "merge-base", "--is-ancestor", main, final)
             return result, old, final, effects
+
+    def test_cto_cap_refusals_do_not_write(self):
+        approval = "cto:1700000000.000001"
+        cases = [
+            ("disjoint", "cap_reached", {"rounds": 2}),
+            ("overlap", "cap_reached", {"rounds": 2}),  # Refuse before a branch push too.
+            ("disjoint", "cap_reached", {"rounds": 2, "apply": False}),
+            ("disjoint", "ADMISSION_CAP_OVERRIDE_HEAD_MISMATCH",
+             {"rounds": 2, "override": approval, "wrong_head": True}),
+            ("disjoint", "UNAVAILABLE", {"rounds": -1}),
+            ("disjoint", "UNAVAILABLE", {"rounds": -1, "override": approval}),
+            ("disjoint", "ADMISSION_CAP_OVERRIDE_AUDIT_UNAVAILABLE",
+             {"rounds": 2, "override": approval, "audit_available": False}),
+        ]
+        for scenario, reason, kwargs in cases:
+            with self.subTest(scenario=scenario, reason=reason, options=kwargs):
+                result, old, final, effects = self.run_cli("cto", scenario, False, **kwargs)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                receipt = json.loads(result.stdout)
+                self.assertEqual(receipt["status"], "REFUSED")
+                self.assertIn(reason, receipt["reason"])
+                if reason == "cap_reached":
+                    self.assertIn("rounds=2 cap=2", receipt["reason"])
+                self.assertEqual(final, old)
+                self.assertEqual(effects, [])
+
+    def test_cto_pinned_override_is_audited_before_writing(self):
+        approval = "rajiv:1700000000.000002"
+        result, old, final, effects = self.run_cli("cto", "disjoint", False, rounds=2, override=approval)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["status"], "ADMISSION_REQUESTED")
+        self.assertEqual(final, old)
+        self.assertEqual(len(effects), 3, effects)
+        name, audit = effects[0]
+        self.assertEqual(name, "audit-before-label")
+        self.assertEqual({k: v for k, v in audit.items() if k != "ts"},
+                         {"repo": REPO, "pr": int(PR), "head": old,
+                          "admission-cap-override": approval, "rounds": 2})
+        self.assertEqual(effects[1][:3], ["label", "create", f"ci-head:{old}"])
+        self.assertEqual(effects[2], ["add-ci-label", f"ci-head:{old}"])
 
     def test_admission_only_labels_a_head_with_a_clean_or_confirmed_plan(self):
         for lane in ("pm", "cto"):

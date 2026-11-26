@@ -5,12 +5,15 @@ import argparse
 import json
 import os
 import re
+import runpy
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "scripts"))
+CODEX_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(CODEX_ROOT / "scripts"))
 from classifier_requirements import classify as workflow_requirements
 
 # Canonical repository after the move (Rajiv 2026-11-06, C0ALZJHGE49 thread 1793926051.510819,
@@ -344,7 +347,44 @@ def integrate(pr, main, checkout):
     return new_head
 
 
-def admit(number, head, apply=False, integrate_only=False, no_update=False):
+def admission_cap(number, head, override):
+    # Installed by the shared manifest from the same source as the live PM counter.
+    helper = CODEX_ROOT / "scripts" / "admission_rounds.py"
+    if CODEX_ROOT.parent.name == "shared-assets":  # Source checkout / staged release.
+        helper = CODEX_ROOT.parent / "claude" / "scripts" / "ci" / "pm-admit-cap.py"
+    try:
+        counter = runpy.run_path(str(helper))
+    except (OSError, ImportError, SyntaxError) as exc:
+        raise Refusal(f"ADMISSION_ROUND_BREAKER: UNAVAILABLE counter={type(exc).__name__}") from exc
+    try:
+        rounds = counter["fetch_rounds"](REPO, number)
+    except counter["Unavailable"] as exc:
+        raise Refusal(f"ADMISSION_ROUND_BREAKER: UNAVAILABLE reason={exc}") from exc
+    cap = counter["CAP"]
+    if rounds >= cap and not override:
+        raise Refusal(f"ADMISSION_ROUND_BREAKER: cap_reached pr={number} head={head} rounds={rounds} cap={cap}")
+    return rounds, rounds >= cap
+
+
+def audit_cap_override(number, head, override, rounds):
+    record = {"ts": datetime.now(timezone.utc).isoformat(), "repo": REPO, "pr": number,
+              "head": head, "admission-cap-override": override, "rounds": rounds}
+    try:
+        with (Path.home() / ".codex" / "admission-cap-overrides.jsonl").open("a", encoding="utf-8") as log:
+            log.write(json.dumps(record, sort_keys=True) + "\n")
+            log.flush()
+            os.fsync(log.fileno())
+    except OSError as exc:
+        raise Refusal("ADMISSION_CAP_OVERRIDE_AUDIT_UNAVAILABLE") from exc
+
+
+def admit(number, head, apply=False, integrate_only=False, no_update=False, *,
+          cap_override=None, cap_override_head=None):
+    if cap_override is not None or cap_override_head is not None:
+        if integrate_only or not re.fullmatch(r"(?:cto|rajiv):[0-9]{10}\.[0-9]{6}", cap_override or ""):
+            raise Refusal("ADMISSION_CAP_OVERRIDE_INVALID: pass an approval for admission as cto:<ts> or rajiv:<ts>")
+        if cap_override_head != head:
+            raise Refusal("ADMISSION_CAP_OVERRIDE_HEAD_MISMATCH: --cap-override-head must match --head")
     pr = pr_at(number, head)
     if pr.get("mergeable") is False:
         raise Refusal("CONFLICT_WITH_MAIN: route to PR owner")
@@ -363,6 +403,11 @@ def admit(number, head, apply=False, integrate_only=False, no_update=False):
                 prior = existing(pr)
                 if prior and prior.get("runs"):
                     return {"status": "ALREADY_ADMITTED", "head": head, **prior}
+                if not integrate_only:
+                    # Admission must not push an integration commit after a cap refusal.
+                    admission_cap(number, head, cap_override)
+                    if cap_override is not None:
+                        raise Refusal("ADMISSION_CAP_OVERRIDE_HEAD_MISMATCH: integrate only, then seek approval at the new head")
                 if not apply:
                     return {"status": "MAIN_INTEGRATION_REQUIRED", "head": head, "main": main}
                 head = integrate(pr, main, checkout)
@@ -370,24 +415,29 @@ def admit(number, head, apply=False, integrate_only=False, no_update=False):
                     if api("git/ref/heads/main")["object"]["sha"] != main:
                         raise Refusal(f"MAIN_MOVED_AFTER_INTEGRATION head={head}")
                     return {"status": "MAIN_INTEGRATED", "head": head, "main": main}
-    if not apply or integrate_only:
-        prior = existing(pr)
-        if prior:
-            return {"status": "ALREADY_ADMITTED", "head": head, **prior}
-        if integrate_only and apply:
+    if apply and not integrate_only:
+        pr = pr_at(number, head)
+        if pr.get("mergeable") is False:
+            raise Refusal("CONFLICT_WITH_MAIN: route to PR owner")
+    prior = existing(pr)
+    if prior:
+        return {"status": "ALREADY_ADMITTED", "head": head, **prior}
+    if integrate_only:
+        if apply:
             pr_at(number, head)
             if api("git/ref/heads/main")["object"]["sha"] != main:
                 raise Refusal(f"MAIN_MOVED_AFTER_INTEGRATION head={head}")
             return {"status": "MAIN_INTEGRATION_NOT_REQUIRED", "head": head, "main": main}
         return {"status": "READY_TO_ADMIT", "head": head, "main": main}
-    pr = pr_at(number, head)
-    if pr.get("mergeable") is False:
-        raise Refusal("CONFLICT_WITH_MAIN: route to PR owner")
+    rounds, needs_override = admission_cap(number, head, cap_override)
+    if not apply:
+        return {"status": "READY_TO_ADMIT", "head": head, "main": main,
+                "admission_rounds": rounds, "cap_override_required": needs_override}
     if api("git/ref/heads/main")["object"]["sha"] != main:
         raise Refusal(f"MAIN_MOVED_BEFORE_ADMISSION head={head}")
-    prior = existing(pr)
-    if prior:
-        return {"status": "ALREADY_ADMITTED", "head": head, **prior}
+    pr_at(number, head)
+    if needs_override:
+        audit_cap_override(number, head, cap_override, rounds)
     label = f"ci-head:{head}"
     command("gh", "label", "create", label, "--repo", REPO, "--color", "0e8a16",
             "--description", "CI and E2E for this PR head", "--force")
@@ -411,6 +461,8 @@ def main():
     parser.add_argument("--pr", required=True, type=int)
     parser.add_argument("--head", required=True)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--cap-override", help="explicit CTO/Rajiv approval reference: cto:<ts> or rajiv:<ts>")
+    parser.add_argument("--cap-override-head", help="full SHA named in that approval; must equal --head")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--integrate-only", action="store_true")
     modes.add_argument("--no-update", action="store_true", help="refuse when main integration is required")
@@ -418,7 +470,9 @@ def main():
     if args.pr <= 0 or not re.fullmatch(r"[0-9a-f]{40}", args.head):
         parser.error("positive PR number and full lowercase head SHA required")
     try:
-        print(json.dumps(admit(args.pr, args.head, args.apply, args.integrate_only, args.no_update), sort_keys=True))
+        result = admit(args.pr, args.head, args.apply, args.integrate_only, args.no_update,
+                       cap_override=args.cap_override, cap_override_head=args.cap_override_head)
+        print(json.dumps(result, sort_keys=True))
         return 0
     except (Refusal, OSError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
         print(json.dumps({"status": "REFUSED", "reason": str(exc)}))

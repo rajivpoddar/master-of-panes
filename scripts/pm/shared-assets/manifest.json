@@ -442,6 +442,9 @@
       "source_path": "claude/scripts/ci/pm-admit-12b.py"
     },
     {
+      "additional_targets": [
+        "/Users/rajiv/.codex/scripts/admission_rounds.py"
+      ],
       "canonical_target": "/Users/rajiv/.claude/scripts/ci/pm-admit-cap.py",
       "dependencies": [],
       "dependency_status": "closed",
@@ -2175,7 +2178,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
-      "sha256": "3c6b00e1381c38c062968237a175aa0e60e8215c60299804f248144a2573a21c",
+      "sha256": "87d551f9daaa4afb238a7185e08f4fc5635c6bef221d95119ed583640a999fab",
       "source_path": "codex/skills/heydonna-cto-label-gated-ci/SKILL.md"
     },
     {
@@ -2184,7 +2187,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill-executable",
-      "sha256": "4ab1be1e3f1fa0b6665fe55aceea18405a8fd6289f8a6e22e6705967ca83e206",
+      "sha256": "7603496365a50d65c0ddd60ac683991379472d3649e5d5f8138a192584f6a8ee",
       "source_path": "codex/skills/heydonna-cto-label-gated-ci/scripts/admit.py"
     },
     {
