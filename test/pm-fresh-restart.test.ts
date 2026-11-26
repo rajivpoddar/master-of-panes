@@ -7,8 +7,8 @@ import test from "node:test";
 import { MoPDatabase } from "../src/db.js";
 import { HookProcessor } from "../src/hooks.js";
 import {
-  isShellPromptVisible, pmConfiguredModel, pmFreshLaunchCommand, PM_MODEL_CONFIG_KEY,
-  PM_RESTART_CONTINUATION_PROMPT, ProcessHealthChecker, RESTART_COMMANDS,
+  isShellPromptVisible, parseShellInputEvidence, pmConfiguredModel, pmFreshLaunchCommand, PM_MODEL_CONFIG_KEY,
+  PM_RESTART_CONTINUATION_PROMPT, ProcessHealthChecker, RESTART_COMMANDS, shellInputProvablyEmpty,
 } from "../src/health.js";
 import { DEFAULT_CONFIG } from "../src/types.js";
 
@@ -31,7 +31,9 @@ function harness(options: { state?: PaneState; neverBoots?: boolean; failIdentit
   const pane = { state: options.state ?? "exiting" as PaneState, polls: 0, typed: [] as string[], shell: [] as string[], sends: [] as string[],
     onPoll: undefined as undefined | ((polls: number) => void),
     // The VISIBLE screen (capture-pane) when it differs from the scrollback the other fakes show.
-    visible: undefined as undefined | string, probeFailures: options.failIdentityProbe ?? 0 };
+    visible: undefined as undefined | string, probeFailures: options.failIdentityProbe ?? 0,
+    // Cursor override (default: end of the last non-blank row) and scrollback size for the shell-input evidence.
+    cursor: undefined as undefined | { x: number; y: number }, history: 0 };
   const order: string[] = [];
   const runShell = async (command: string) => {
     pane.shell.push(command);
@@ -45,6 +47,10 @@ function harness(options: { state?: PaneState; neverBoots?: boolean; failIdentit
       assert.doesNotMatch(command, / -k\b/);
       pane.state = "shell";
       order.push("create");
+    } else if (command.startsWith(EVIDENCE)) {
+      const nonce = /display-message -p -t %7 '(@@mop-evidence-[^']+@@)'/.exec(command)?.[1];
+      assert.ok(nonce, "the evidence call carries its nonce");
+      stdout = paneEvidence(pane, nonce);
     } else if (command.startsWith("tmux display-message")) {
       if (pane.probeFailures > 0) { pane.probeFailures--; throw new Error("Command failed: tmux display-message"); }
       stdout = `%7|${PM_PATH}\n`;
@@ -55,9 +61,18 @@ function harness(options: { state?: PaneState; neverBoots?: boolean; failIdentit
     } else if (command.startsWith("tmux respawn-pane")) { pane.state = "shell"; order.push("respawn"); }
     else if (command === "tmux send-keys -t %7 1") order.push("1");
     else if (SUBMIT.test(command)) {
-      // The one owned submission: the launcher text and its Enter in ONE tmux command (CTO ts 1795717248.453549).
+      // The one owned submission: an atomic tmux if-shell that re-checks the cursor, then the launcher text, its Enter
+      // and the `sent` receipt in ONE tmux command (CTO ts 1795717248.453549, ts 1795719337.686639).
+      const [, x, y, history] = /#\{cursor_x\},(\d+)\},#\{&&:#\{==:#\{cursor_y\},(\d+)\},#\{&&:#\{==:#\{history_size\},(\d+)\}/
+        .exec(command) ?? [];
+      const now = parseShellInputEvidence(paneEvidence(pane, "@@n@@"), "@@n@@")!;
+      if (`${now.cursorX},${now.cursorY},${now.historySize}` !== `${x},${y},${history}`) {
+        order.push("submit-condition-false");
+        return { stdout: "", stderr: "" };
+      }
       pane.typed.push(command);
       order.push("submit");
+      stdout = "sent\n";
       if (pane.state === "shell" && !options.launcherFailsFast) {
         pane.state = options.neverBoots ? "booting" : "fresh";
         if (!options.neverBoots && !options.noSessionStart) db.logEvent(0, "SessionStart", "SessionStart", null, { source: "startup", session_id: "fresh-session", cwd: PM_PATH });
@@ -122,9 +137,31 @@ function armPmOnlyEpisode(db: MoPDatabase, prompt?: string): string {
   return episode;
 }
 
-const SUBMIT = /^tmux send-keys -t %7 -l ('(?:[^']|'\\'')*') \\; send-keys -t %7 Enter$/;
-const launchTyped = (pane: { typed: string[] }) => pane.typed.map((cmd) => SUBMIT.exec(cmd)?.[1] ?? `UNPARSED ${cmd}`);
-const LAUNCH = `'cd '\\''${PM_PATH}'\\'' && bash /Users/rajiv/.claude/scripts/launch-pm.sh --via cliproxy --model claude-opus-5-5 --continue'`;
+// The shell-input evidence: cursor + screen in ONE tmux call (CTO REVISE ts 1795719337.686639).
+const EVIDENCE = "tmux display-message -p -t %7 '#{cursor_x} #{cursor_y} #{history_size} #{alternate_on} #{pane_in_mode} #{pane_height}'";
+const PANE_HEIGHT = 12;
+/** What the fake pane's evidence call prints: cursor at the end of the last non-blank row unless overridden. */
+function paneEvidence(pane: { state: PaneState; visible?: string; cursor?: { x: number; y: number }; history: number }, nonce: string) {
+  const text = pane.visible ?? (pane.state === "shell" ? SHELL_TEXT : pane.state === "menu" ? EXIT_MENU_TEXT : COMPOSER_TEXT);
+  const rows = text.split("\n").slice(0, PANE_HEIGHT);
+  while (rows.length < PANE_HEIGHT) rows.push("");
+  const plain = (row: string) => row.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+  let y = rows.length - 1;
+  while (y > 0 && plain(rows[y]).trim() === "") y--;
+  const cursor = pane.cursor ?? { x: plain(rows[y]).length, y };
+  const trimmed = rows.map((row) => row.replace(/ +$/, "")); // capture-pane -p drops trailing spaces
+  return `${cursor.x} ${cursor.y} ${pane.history} 0 0 ${PANE_HEIGHT}\n${trimmed.join("\n")}\n${nonce}\n${rows.join("\n")}\n`;
+}
+// tmux if-shell -F -t %7 '<cursor condition>' '<send-keys -l "TEXT" ; send-keys Enter ; display-message -p sent>'
+const SUBMIT = /^tmux if-shell -F -t %7 '([^']*)' ('(?:[^']|'\\'')*')$/;
+/** The exact text a submission types, decoded through the shell and tmux quoting layers. */
+function submittedText(command: string): string {
+  const inner = SUBMIT.exec(command)?.[2]?.slice(1, -1).replace(/'\\''/g, "'");
+  const typed = inner && /^send-keys -t %7 -l "((?:[^"\\$]|\\.)*)" ; send-keys -t %7 Enter ; display-message -p sent$/.exec(inner)?.[1];
+  return typed ? typed.replace(/\\(.)/g, "$1") : `UNPARSED ${command}`;
+}
+const launchTyped = (pane: { typed: string[] }) => pane.typed.map(submittedText);
+const LAUNCH = `cd '${PM_PATH}' && bash /Users/rajiv/.claude/scripts/launch-pm.sh --via cliproxy --model claude-opus-5-5 --continue`;
 
 test("launcher contract: configured model, default opus; the base command carries no --continue (the restart adds it)", () => {
   assert.equal(pmFreshLaunchCommand("opus"), "bash /Users/rajiv/.claude/scripts/launch-pm.sh --via cliproxy --model claude-opus-5-5");
@@ -162,7 +199,7 @@ for (const prompt of [undefined, "Read /saved/resume.md and resume."]) {
       assert.equal(result.success, true, result.reason);
       assert.deepEqual(h.order, ["1", "menu-enter", "submit", "continuation", "drain"]);
       assert.deepEqual(launchTyped(h.pane), [LAUNCH]);
-      assert.match(launchTyped(h.pane)[0], / --continue'$/, "restart should use --continue (Rajiv ts 1795716529.803219)");
+      assert.match(launchTyped(h.pane)[0], / --continue$/, "restart should use --continue (Rajiv ts 1795716529.803219)");
       assert.deepEqual(h.pane.sends, [prompt ?? PM_RESTART_CONTINUATION_PROMPT]);
       const status = h.db.getExitStatus();
       assert.equal(status.continuation_delivery, "delivered");
@@ -266,7 +303,7 @@ test("launcher: one owned submission after the delay: exact --continue text and 
     assert.deepEqual(h.order, ["submit", "continuation", "drain"], "no separate type step, no bare Enter");
     assert.deepEqual(launchTyped(h.pane), [LAUNCH]);
     const delay = h.pane.shell.indexOf("sleep:delay");
-    const finalCheck = h.pane.shell.lastIndexOf("tmux capture-pane -t %7 -p -J");
+    const finalCheck = h.pane.shell.findLastIndex((cmd) => cmd.startsWith(EVIDENCE));
     const submit = h.pane.shell.findIndex((cmd) => SUBMIT.test(cmd));
     assert.ok(delay >= 0 && delay < finalCheck && finalCheck < submit, "delay, then the guarded empty-shell check, then the submission");
     assert.equal(h.db.getConfig("exit_pending_restart_steps"), null, "the completed episode reset its step list");
@@ -290,6 +327,98 @@ test("launcher: a draft a person types during the delay stays unsubmitted and un
     assert.equal((await h.health.restartPMFresh("exit", episode)).reason, "launch_already_attempted");
     assert.deepEqual(h.order, []);
   } finally { h.db.close(); }
+});
+
+// CTO REVISE C0ALZJHGE49 thread 1795715075.690009, ts 1795719337.686639: "A real draft ending in a spaced #, for
+// example, passes that predicate ... replace the prompt-suffix heuristic at the final send with evidence that the shell
+// input is actually empty." The old suffix check accepted these drafts; the cursor evidence refuses every one.
+for (const draft of ["echo hi #", "echo hi $", "printf 100 %", "cat x >"]) {
+  test(`launcher: a draft ending in a spaced prompt character (${JSON.stringify(draft)}) stays intact: zero sends`, async () => {
+    const h = harness({ state: "shell" });
+    try {
+      const screen = `earlier output\nrajiv@heydonna ~ »\n$ ${draft}\n`;
+      traceDelay(h, () => { h.pane.visible = screen; });
+      const episode = armPmOnlyEpisode(h.db);
+      const result = await h.health.restartPMFresh("exit", episode);
+      assert.equal(result.reason, "pm_launch_prompt_not_empty");
+      assert.deepEqual(h.order, [], "no launcher text, no Enter, no if-shell");
+      assert.equal(h.pane.shell.filter((cmd) => cmd.startsWith("tmux if-shell") || cmd.includes("send-keys")).length, 0);
+      assert.equal(h.db.getConfig("exit_pending_restart_steps"), "launch");
+      assert.equal(h.pane.visible, screen, "the draft is untouched");
+      if (draft.at(-1) !== ">") assert.equal(isShellPromptVisible(screen), true, "the old suffix heuristic would have sent here");
+    } finally { h.db.close(); }
+  });
+}
+
+test("launcher: a draft already present before the delay is refused at the anchor, before any wait or key", async () => {
+  const h = harness({ state: "shell" });
+  try {
+    traceDelay(h);
+    h.pane.onPoll = () => { if (h.pane.state === "shell") h.pane.visible = "rajiv@heydonna ~ »\n$ ls #"; };
+    const result = await h.health.restartPMFresh("crash");
+    assert.equal(result.reason, "pm_launch_prompt_not_empty");
+    assert.equal(h.pane.shell.indexOf("sleep:delay"), -1, "refused before the delay");
+    assert.deepEqual(h.order, []);
+  } finally { h.db.close(); }
+});
+
+test("launcher: a draft with the cursor moved home, or a screen that scrolled during the delay, is refused", async () => {
+  for (const change of [
+    (h: ReturnType<typeof harness>) => { h.pane.visible = "x\nrajiv@heydonna ~ »\n$ echo hi"; h.pane.cursor = { x: 2, y: 2 }; },
+    (h: ReturnType<typeof harness>) => { h.pane.history = 3; }, // same-looking empty prompt, different absolute row
+  ]) {
+    const h = harness({ state: "shell" });
+    try {
+      traceDelay(h, () => change(h));
+      const result = await h.health.restartPMFresh("crash");
+      assert.equal(result.reason, "pm_launch_prompt_not_empty");
+      assert.deepEqual(h.order, []);
+    } finally { h.db.close(); }
+  }
+});
+
+test("launcher: input that arrives between the final check and the send loses the atomic if-shell: nothing typed, consumed", async () => {
+  const h = harness({ state: "shell" });
+  try {
+    const runShell = h.health.runShell;
+    h.health.runShell = async (command: string, opts: unknown) => {
+      if (SUBMIT.test(command)) h.pane.visible = "rajiv@heydonna ~ »\n$ g"; // a key landed first
+      return runShell(command, opts);
+    };
+    const episode = armPmOnlyEpisode(h.db);
+    const result = await h.health.restartPMFresh("exit", episode);
+    assert.equal(result.reason, "pm_launch_prompt_changed");
+    assert.deepEqual(h.order, ["submit-condition-false"], "the tmux server ran no send-keys");
+    assert.deepEqual(h.pane.typed, []);
+    assert.equal(h.db.getConfig("exit_pending_restart_steps"), "launch,launched");
+    assert.equal((await h.health.restartPMFresh("exit", episode)).reason, "launch_already_attempted");
+  } finally { h.db.close(); }
+});
+
+test("shell-input evidence: parser and emptiness predicate", () => {
+  const ev = (head: string, rows: string[], joined = rows, nonce = "@@n@@") =>
+    parseShellInputEvidence(`${head}\n${rows.join("\n")}\n${nonce}\n${joined.join("\n")}\n`, "@@n@@");
+  const prompt = ["out", "rajiv@heydonna ~/Downloads/projects/heydonna-app ±main⚡ »", "$", "", ""];
+  assert.equal(shellInputProvablyEmpty(ev("2 2 40 0 0 5", prompt)), true, "empty prompt");
+  assert.equal(shellInputProvablyEmpty(ev("2 2 0 0 0 5", ["", "root@box /etc #", "$", "", ""])), true, "root prompt head");
+  for (const draft of ["$ ls #", "$ ls $", "$ ls %", "$ ls >", "$ ls »"]) {
+    const rows = ["out", "rajiv@heydonna ~ »", draft, "", ""];
+    assert.equal(shellInputProvablyEmpty(ev(`${draft.length} 2 0 0 0 5`, rows)), false, draft);
+    assert.equal(shellInputProvablyEmpty(ev("2 2 0 0 0 5", rows)), false, `${draft} with the cursor moved home`);
+  }
+  assert.equal(shellInputProvablyEmpty(ev("2 2 0 0 0 5", ["rajiv@heydonna ~ »", "$", "$", "", ""])), false, "a second buffer line that only looks like the prompt");
+  assert.equal(shellInputProvablyEmpty(ev("2 2 0 0 0 5", ["rajiv@heydonna ~ »", "$", "", "echo later", ""])), false, "buffer line below");
+  assert.equal(shellInputProvablyEmpty(ev("2 2 0 0 0 4", ["x", "rajiv@heydonna ~ »", "$", ""], ["x", "rajiv@heydonna ~ »$", ""])), false,
+    "the cursor row is the wrapped tail of a long line");
+  assert.equal(shellInputProvablyEmpty(ev("2 1 0 0 0 3", ["$ x", "$", ""])), false, "no prompt head above");
+  assert.equal(shellInputProvablyEmpty(ev("2 1 0 0 0 3", ["rajiv@heydonna ~ »", "$                 1 ↵", ""])), false,
+    "a right prompt fails closed");
+  assert.equal(shellInputProvablyEmpty(ev("2 1 0 1 0 3", ["rajiv@heydonna ~ »", "$", ""])), false, "alternate screen");
+  assert.equal(shellInputProvablyEmpty(ev("2 1 0 0 1 3", ["rajiv@heydonna ~ »", "$", ""])), false, "copy mode");
+  assert.equal(ev("2 1 0 0 0 3", ["rajiv@heydonna ~ »", "$", ""], undefined, "@@other@@"), null, "nonce mismatch");
+  assert.equal(ev("2 1 0 0 0 4", ["rajiv@heydonna ~ »", "$", ""]), null, "short physical block");
+  assert.equal(parseShellInputEvidence("garbage", "@@n@@"), null);
+  assert.equal(shellInputProvablyEmpty(null), false);
 });
 
 test("launcher: the foreground is no longer the shell at the final check: nothing is sent", async () => {
@@ -551,8 +680,8 @@ test("resume tick: skipped while this process runs the restart flow itself", asy
 
 test("configured model and launcher reach the typed command", async () => {
   for (const [config, pattern] of [
-    [[PM_MODEL_CONFIG_KEY, "deepseek"], /launch-pm\.sh --via cliproxy --model deepseek --continue'$/],
-    [["pm_launcher", "direct"], /launch-pm\.sh --via direct --model claude-opus-5-5 --continue'$/],
+    [[PM_MODEL_CONFIG_KEY, "deepseek"], /launch-pm\.sh --via cliproxy --model deepseek --continue$/],
+    [["pm_launcher", "direct"], /launch-pm\.sh --via direct --model claude-opus-5-5 --continue$/],
   ] as const) {
     const h = harness({ state: "shell" });
     try {
@@ -585,7 +714,7 @@ for (const state of ["shell", "restoring", "missing", "idle"] as const) {
         return;
       }
       assert.equal(launchTyped(h.pane).length, 1);
-      assert.match(launchTyped(h.pane)[0], /launch-pm\.sh --via cliproxy --model claude-opus-5-5 --continue'$/);
+      assert.match(launchTyped(h.pane)[0], /launch-pm\.sh --via cliproxy --model claude-opus-5-5 --continue$/);
       assert.deepEqual(h.order, [...(state === "missing" ? ["create"] : []), "submit", "drain"]);
       assert.deepEqual(h.pane.sends, [], "--continue does not need an extra synthetic turn");
     } finally { h.health.stop(); h.db.close(); }

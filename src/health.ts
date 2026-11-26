@@ -23,7 +23,7 @@
  * `--continue` + "continue".
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -128,9 +128,10 @@ export function pmLaunchPlan(db: Pick<MoPDatabase, "getConfig">): { launcher: Pm
 }
 
 /**
- * True when the pane's bottom line is an empty interactive shell prompt (zsh
- * jreese theme renders `user@host <cwd> »` then `$ `). Read from the pane, never
- * inferred from elapsed time. Claude's composer chevron is not a shell prompt.
+ * True when the pane's bottom line LOOKS like a shell prompt (zsh jreese theme renders `user@host <cwd> »` then `$ `).
+ * Readiness only: the restart flow uses it to notice that the shell is back. It is NOT evidence that the shell input
+ * is empty (a draft ending in a spaced `#`, `$`, `%` or `>` passes it), so it never authorizes a send; the launcher's
+ * final guard is shellInputProvablyEmpty below (CTO REVISE C0ALZJHGE49 thread 1795715075.690009, ts 1795719337.686639).
  */
 export function isShellPromptVisible(text: string | null | undefined): boolean {
   if (!text) return false;
@@ -139,6 +140,82 @@ export function isShellPromptVisible(text: string | null | undefined): boolean {
   const last = lines.at(-1)?.trim();
   if (!last || /^Pane is dead/.test(last)) return false;
   return /^(?:\S.*\s)?[$%#»]$/.test(last);
+}
+
+/** The PM shell's input line: ~/.zshrc appends a second prompt line `$ ` to the jreese theme. */
+export const PM_SHELL_PROMPT_TAIL = "$ ";
+/** The jreese prompt's first line, ANSI stripped: `user@host <cwd> [±branch] »` (`#` as root). */
+const PM_PROMPT_HEAD = /^[^\s@]+@\S+ .*[»#]$/;
+
+/** Cursor and screen state of a pane, read in ONE tmux call (see ProcessHealthChecker.pmShellInputEvidence). */
+export type ShellInputEvidence = {
+  cursorX: number;
+  cursorY: number;
+  historySize: number;
+  alternateOn: boolean;
+  inMode: boolean;
+  /** Physical screen rows (capture-pane -p): index === cursor_y for the cursor row. */
+  rows: string[];
+  /** The same screen with wrapped rows joined (capture-pane -p -J). */
+  joined: string[];
+};
+
+/**
+ * Parses `display-message -p "<x> <y> <history> <alt> <mode> <height>" ; capture-pane -p ; display-message -p <nonce> ;
+ * capture-pane -p -J`. The physical block is sliced by the pane height and the nonce line must sit right after it, so
+ * pane text can never shift the split. Anything malformed is null (unreadable), never a guess.
+ */
+export function parseShellInputEvidence(stdout: string, nonce: string): ShellInputEvidence | null {
+  const lines = stdout.split("\n");
+  const head = /^(\d+) (\d+) (\d+) ([01]) ([01]) (\d+)$/.exec(lines[0] ?? "");
+  if (!head) return null;
+  const height = Number(head[6]);
+  if (height < 1 || lines[1 + height] !== nonce) return null;
+  const joined = lines.slice(2 + height);
+  if (joined.at(-1) === "") joined.pop();
+  return {
+    cursorX: Number(head[1]), cursorY: Number(head[2]), historySize: Number(head[3]),
+    alternateOn: head[4] === "1", inMode: head[5] === "1",
+    rows: lines.slice(1, 1 + height), joined,
+  };
+}
+
+/**
+ * Evidence that the PM shell's input buffer is EMPTY, from cursor geometry rather than from what the text ends with
+ * (CTO REVISE ts 1795719337.686639: "replace the prompt-suffix heuristic at the final send with evidence that the shell
+ * input is actually empty"). All must hold:
+ *  - normal screen, not copy mode;
+ *  - the cursor sits exactly at the end of the `$ ` input prompt (cursor_x === 2), and that physical row is exactly `$`
+ *    plus spaces: any typed character moves the cursor right, and a draft with the cursor moved home still shows its
+ *    text after it on the row;
+ *  - every physical row below the cursor is blank (no later buffer lines);
+ *  - with wrapped rows joined, the last non-blank logical line is exactly `$` (the cursor row is not the wrapped tail of
+ *    a long draft) and the logical line right above it is the jreese prompt head `user@host <cwd> »`. A draft line
+ *    always follows the real `$ ` on its row, so it can never be that line.
+ * Draft content alone cannot satisfy this; the caller also pins the cursor position across the launch delay and
+ * re-checks it atomically at the send. A right prompt (RPS1 `N ↵` after a failed command) fails closed, as before.
+ */
+export function shellInputProvablyEmpty(evidence: ShellInputEvidence | null): boolean {
+  if (!evidence || evidence.alternateOn || evidence.inMode) return false;
+  const clean = (line: string) => line.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").trimEnd();
+  const rows = evidence.rows.map(clean);
+  if (evidence.cursorX !== PM_SHELL_PROMPT_TAIL.length) return false;
+  if (rows[evidence.cursorY] !== PM_SHELL_PROMPT_TAIL.trimEnd()) return false;
+  if (rows.slice(evidence.cursorY + 1).some((row) => row !== "")) return false;
+  const logical = evidence.joined.map(clean);
+  while (logical.length && logical.at(-1) === "") logical.pop();
+  if (logical.at(-1) !== PM_SHELL_PROMPT_TAIL.trimEnd()) return false;
+  return PM_PROMPT_HEAD.test(logical.at(-2) ?? "");
+}
+
+/** Same prompt cursor (same absolute row and column): nothing was typed, pasted, scrolled or cleared in between. */
+export function samePromptCursor(a: ShellInputEvidence, b: ShellInputEvidence): boolean {
+  return a.cursorX === b.cursorX && a.cursorY === b.cursorY && a.historySize === b.historySize;
+}
+
+/** tmux command-parser double quoting: inside "..." only `\`, `"` and `$` are special. */
+function tmuxQuote(value: string): string {
+  return `"${value.replace(/[\\"$]/g, (ch) => `\\${ch}`)}"`;
 }
 
 // Dev slots: always --continue (crash recovery preserves session/work).
@@ -526,6 +603,18 @@ export class ProcessHealthChecker {
     try { return (await this.runShell(`tmux capture-pane -t ${paneId} -p -J`, { timeout: 10_000 })).stdout; } catch { return null; }
   }
 
+  /** Cursor + screen evidence for the PM shell input, in ONE tmux call; null when unreadable or malformed. */
+  private async pmShellInputEvidence(paneId: string): Promise<ShellInputEvidence | null> {
+    const nonce = `@@mop-evidence-${randomUUID()}@@`;
+    const format = "#{cursor_x} #{cursor_y} #{history_size} #{alternate_on} #{pane_in_mode} #{pane_height}";
+    try {
+      const { stdout } = await this.runShell(`tmux display-message -p -t ${paneId} ${shellEscape(format)} \\; `
+        + `capture-pane -p -t ${paneId} \\; display-message -p -t ${paneId} ${shellEscape(nonce)} \\; `
+        + `capture-pane -p -J -t ${paneId}`, { timeout: 10_000 });
+      return parseShellInputEvidence(stdout, nonce);
+    } catch { return null; }
+  }
+
   /**
    * ONE exit-menu key, inside the slot send lock. Right before the key it rechecks the same pane, the menu on the visible
    * screen (older scrollback never counts) and the same episode, then records the key durably first (CTO REVISE
@@ -803,21 +892,43 @@ export class ProcessHealthChecker {
    * --continue command and its terminator together through the existing pane owner. Use the process probe for
    * confirmation only. Preserve uncertain submissions as consumed."
    *
-   * 1. Wait PM_LAUNCH_DELAY_MS first (the 26 Nov restart left the typed launcher buffered; Rajiv ts 1795716529.803219).
-   * 2. Inside the slot send lock, the final guard: same episode, the pane foreground is still a shell, same pane, and its
-   *    VISIBLE bottom line is an empty prompt. A draft a person typed meanwhile (or any other non-empty line) refuses at
-   *    once, before any key, and is never joined or submitted; that refusal is recorded ("launch") so later ticks of the
-   *    same episode do not retry it. Only a pane or screen that cannot be read yet waits, bounded.
-   * 3. The step is recorded durably BEFORE the effect, then the exact launcher text and its Enter go out as ONE tmux
-   *    command (`send-keys -l <text> ; send-keys Enter`), which the tmux server runs as one unit with no key from
-   *    another client in between. MoP never sends a bare Enter, so it can never submit text it did not type.
-   * 4. The process probe only confirms. Unconfirmed or failed sends stay consumed: there is no second submission.
+   * Final guard rework (CTO REVISE C0ALZJHGE49 thread 1795715075.690009, ts 1795719337.686639): "Keep the one combined
+   * submission and replace the prompt-suffix heuristic at the final send with evidence that the shell input is actually
+   * empty." A draft ending in a spaced `#`/`$`/`%`/`>` passed the old suffix check and would have been submitted.
+   *
+   * 1. Anchor: read the shell-input evidence (cursor + screen, one tmux call) and require shellInputProvablyEmpty. A
+   *    pane that stays unreadable until the deadline, or a non-empty input, refuses and is consumed.
+   * 2. Wait PM_LAUNCH_DELAY_MS (the 26 Nov restart left the typed launcher buffered; Rajiv ts 1795716529.803219).
+   * 3. Inside the slot send lock, the final guard: same episode, the pane foreground is still a shell, same pane, the
+   *    input is still provably empty AND the prompt cursor has not moved since the anchor (same absolute row and
+   *    column). Anything a person typed, pasted or cleared meanwhile refuses at once, before any key, and that refusal is
+   *    recorded ("launch") so later ticks of the same episode never retry it. Only an unreadable pane waits, bounded.
+   * 4. The step is recorded durably BEFORE the effect. The send is ONE atomic tmux `if-shell -F`: the tmux server
+   *    re-checks the same cursor position, normal screen and no copy mode, and only then runs `send-keys -l <text> ;
+   *    send-keys Enter ; display-message -p sent` as one unit with no key from another client in between. Output other
+   *    than `sent` means the condition changed (nothing typed) or the effect is uncertain: consumed, no retry. MoP never
+   *    sends a bare Enter, so it can never submit text it did not type.
+   * 5. The process probe only confirms. Unconfirmed or failed sends stay consumed: there is no second submission.
    * Returns a refusal or null.
    */
   private async sendPMLaunch(paneId: string, typed: string, episode: string | null, exactPM = false): Promise<string | null> {
     if (this.restartStepDone(episode, "launch") || this.restartStepDone(episode, "launched")) return "launch_already_attempted";
+    const deadline = Date.now() + this.PM_LAUNCH_DELAY_MS + this.PM_PROMPT_TIMEOUT_MS;
+    let anchor: ShellInputEvidence | null = null;
+    for (;;) {
+      anchor = await this.pmShellInputEvidence(paneId);
+      if (anchor) break;
+      if (Date.now() >= deadline) {
+        this.markRestartStep(episode, "launch");
+        return "pm_launch_screen_unreadable";
+      }
+      await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, deadline - Date.now()));
+    }
+    if (!shellInputProvablyEmpty(anchor)) {
+      this.markRestartStep(episode, "launch");
+      return "pm_launch_prompt_not_empty";
+    }
     await this.sleepMs(this.PM_LAUNCH_DELAY_MS);
-    const deadline = Date.now() + this.PM_PROMPT_TIMEOUT_MS;
     for (;;) {
       const outcome = await withSlotSendLock(0, async () => {
         if (this.restartStepDone(episode, "launch") || this.restartStepDone(episode, "launched")) return "launch_already_attempted";
@@ -827,20 +938,27 @@ export class ProcessHealthChecker {
         const identity = await verifyPaneIdentity(0, this.runShell);
         if (!identity.ok) return "wait";
         if (identity.snapshot.paneId !== paneId) return "pm_pane_changed";
-        const screen = await this.visiblePane(paneId);
-        if (screen === null) return "wait";
-        if (!isShellPromptVisible(screen)) {
-          // A refused submission is consumed too: later ticks of this episode never retry it behind a person's draft.
+        const evidence = await this.pmShellInputEvidence(paneId);
+        if (evidence === null) return "wait";
+        if (!shellInputProvablyEmpty(evidence) || !samePromptCursor(anchor, evidence)) {
+          // A refused submission is consumed too: later ticks of this episode never retry it behind a person's input.
           this.markRestartStep(episode, "launch");
           return "pm_launch_prompt_not_empty";
         }
         this.markRestartStep(episode, "launch", "launched");
-        await this.runShell(`tmux send-keys -t ${paneId} -l ${shellEscape(typed)} \\; send-keys -t ${paneId} Enter`, { timeout: 10_000 });
-        return "sent";
+        const unchanged = `#{&&:#{==:#{cursor_x},${evidence.cursorX}},#{&&:#{==:#{cursor_y},${evidence.cursorY}},`
+          + `#{&&:#{==:#{history_size},${evidence.historySize}},#{&&:#{==:#{alternate_on},0},#{==:#{pane_in_mode},0}}}}}`;
+        const submit = `send-keys -t ${paneId} -l ${tmuxQuote(typed)} ; send-keys -t ${paneId} Enter ; display-message -p sent`;
+        const { stdout } = await this.runShell(`tmux if-shell -F -t ${paneId} ${shellEscape(unchanged)} ${shellEscape(submit)}`,
+          { timeout: 10_000 });
+        return stdout.trim() === "sent" ? "sent" : "pm_launch_prompt_changed";
       }).catch((err) => `launcher send failed: ${String(err).slice(0, 200)}`);
       if (outcome === "sent") break;
       if (outcome !== "wait") return outcome;
-      if (Date.now() >= deadline) return "pm_launch_screen_unreadable";
+      if (Date.now() >= deadline) {
+        this.markRestartStep(episode, "launch");
+        return "pm_launch_screen_unreadable";
+      }
       await this.sleepMs(Math.min(this.PM_RESTART_POLL_MS, deadline - Date.now()));
     }
     // Confirmation only. An UNKNOWN listing is left to the bounded agent-process wait that follows; a listing that

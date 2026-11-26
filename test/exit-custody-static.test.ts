@@ -106,15 +106,21 @@ test("PM restart effects are rechecked inside the send lock and recorded durably
   assert.ok(menu.indexOf("this.markRestartStep(") < menu.indexOf("send-keys"), "the key is recorded before it is sent");
   assert.ok(!menu.includes("observeSlotPane"), "the in-lock menu read is the visible screen, not scrollback");
   const launch = health.slice(health.indexOf("private async sendPMLaunch"), health.indexOf("private isAgentCommand"));
-  assert.ok(launch.includes("withSlotSendLock(0") && launch.includes("isShellPromptVisible(screen)"));
-  assert.ok(launch.indexOf("this.markRestartStep(") < launch.indexOf("send-keys"), "the launcher step is recorded before it is sent");
-  // CTO REVISE C0ALZJHGE49 thread 1795715075.690009, ts 1795717248.453549: one owned launcher submission. The delay comes
-  // before the final guarded empty-shell check, then the exact --continue text and its Enter go in ONE tmux command list.
+  assert.ok(launch.includes("withSlotSendLock(0") && !launch.includes("isShellPromptVisible"), "the prompt-suffix heuristic never authorizes the send");
+  // CTO REVISE C0ALZJHGE49 thread 1795715075.690009, ts 1795719337.686639: "replace the prompt-suffix heuristic at the
+  // final send with evidence that the shell input is actually empty." Cursor + screen in one read, pinned across the delay.
+  assert.ok(launch.includes("shellInputProvablyEmpty(evidence)") && launch.includes("samePromptCursor(anchor, evidence)"));
+  // CTO REVISE ts 1795717248.453549: one owned launcher submission. The delay comes before the final guarded check, then
+  // the exact --continue text and its Enter go in ONE tmux command list that the tmux server runs only if nothing moved.
   assert.ok(launch.includes("SHELL_COMMANDS.has(command)") && launch.includes("this.sameEpisode(episode)"), "the final check also proves the foreground is the shell");
   assert.ok(launch.indexOf("this.sleepMs(this.PM_LAUNCH_DELAY_MS)") < launch.indexOf("withSlotSendLock(0"), "the delay comes before the guarded check, never between text and Enter");
-  const sends = launch.match(/tmux send-keys[^`]*/g) ?? [];
+  const sends = launch.match(/tmux if-shell -F[^`]*/g) ?? [];
   assert.equal(sends.length, 1, "exactly one send in the launcher path");
-  assert.ok(/-l \$\{shellEscape\(typed\)\} \\\\; send-keys -t \$\{paneId\} Enter/.test(sends[0]), "the launcher text and its Enter travel together");
+  assert.equal((launch.match(/send-keys -t \$\{paneId\} -l/g) ?? []).length, 1, "the launcher text is typed in one place only");
+  assert.ok(launch.includes("send-keys -t ${paneId} -l ${tmuxQuote(typed)} ; send-keys -t ${paneId} Enter ; display-message -p sent"),
+    "the launcher text and its Enter travel together inside the atomic condition");
+  assert.ok(launch.includes('stdout.trim() === "sent"'), "only the tmux server's own receipt counts as sent");
+  assert.ok(launch.indexOf("this.markRestartStep(") < launch.indexOf("tmux if-shell"), "the launcher step is recorded before it is sent");
   assert.ok(!health.includes("submitPMLaunch") && !health.includes("PM_LAUNCH_ENTER_"), "no separate delayed Enter path remains");
   assert.ok(launch.includes("this.pmLaunchSubmitted(paneId, exactPM)"), "the process probe confirms only");
 });
