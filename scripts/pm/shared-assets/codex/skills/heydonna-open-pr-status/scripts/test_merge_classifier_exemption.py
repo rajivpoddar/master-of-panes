@@ -246,6 +246,8 @@ class Stub:
                 raise merge.Refusal("COMPARE_FAILED")
             out = {"merge_base_commit": {"sha": w.get("main", BASE)},
                    "html_url": "https://example.invalid/compare", "files": []}
+            if path == f"compare/{CONTROL_PLANE_BASE}...{CONTROL_PLANE_HEAD}":
+                out["files"] = w.get("pinned_compare_files", [])
             if "compare_status" in w:
                 out["status"] = w["compare_status"]
             # Per-path compare responses (CTO REVISE ts 1795510573.793869: the
@@ -279,6 +281,8 @@ class Stub:
                 blob += "-drifted"
             if ref in w.get("drifted_refs", ()):
                 blob += "-drifted-at-ref"
+            if ref == CONTROL_PLANE_WORKFLOW_SHA and rel in w.get("changed_workflow_paths", ()):
+                blob += "-changed-by-pr"
             content = base64.b64encode(RULES if rel.endswith("rules.json") else b"x").decode()
             if (w.get("rules_bytes") is not None and rel.endswith("rules.json")
                     and ref in (WORKFLOW_SHA, TEST_ONLY_WORKFLOW_SHA)):
@@ -708,6 +712,76 @@ class ControlPlaneExemptionTests(unittest.TestCase):
                 "scope": "product", "paid_ci_exempt": False,
                 "control_plane_only": False, "product_changed": True,
                 "ci_required": True, "e2e_required": True}))
+
+    def classifier_self_edit_world(self, extra_files=(), receipt=None, bindings=None):
+        files = [{"filename": "scripts/ci/change_scope.py"},
+                 {"filename": "scripts/ci/tests/test_change_scope.py"},
+                 {"filename": "docs/plans/unit-selection.md"}, *extra_files]
+        paths = [item[key] for item in files
+                 for key in ("filename", "previous_filename") if key in item]
+        run = dict(control_plane_exemption_run(), pull_requests=[
+            {"number": CONTROL_PLANE_PR, "base": {"sha": CONTROL_PLANE_BASE}}])
+        job = dict(control_plane_exemption_jobs()[0], run_id=CONTROL_PLANE_RUN_ID,
+                   run_attempt=1, head_sha=CONTROL_PLANE_HEAD)
+        # This case relies on the native association: the live receipt omits PR_NUMBER.
+        return {"site_runs": [run], "control_plane_jobs": [job],
+                "site_log": control_plane_exemption_log(
+                    receipt={"changed_files": paths, **(receipt or {})},
+                    bindings=bindings).replace(f"PR_NUMBER={CONTROL_PLANE_PR}\n", ""),
+                "changed_workflow_paths": ["scripts/ci/change_scope.py"],
+                "pinned_compare_files": files, "workflow_parent": CONTROL_PLANE_BASE}
+
+    def test_classifier_self_edit_uses_green_exact_head_control_plane_receipt(self):
+        stub = self.setup_world(**self.classifier_self_edit_world())
+        result = merge.merge(CONTROL_PLANE_PR, CONTROL_PLANE_HEAD)
+        self.assertEqual(result["status"], "READY_TO_MERGE")
+        for proof in result["workflows"].values():
+            self.assertEqual(proof["exempt"], "control_plane_only")
+            self.assertEqual((proof["head"], proof["run"], proof["scope_job_id"]),
+                             (CONTROL_PLANE_HEAD, CONTROL_PLANE_RUN_ID, CONTROL_PLANE_SCOPE_ID))
+        self.assertIn(f"compare/{CONTROL_PLANE_BASE}...{CONTROL_PLANE_HEAD}", stub.api_calls)
+        self.assertFalse(any("actions/workflows/ci.yml/runs?" in path for path in stub.calls))
+
+    def test_classifier_self_edit_requires_all_exact_exemption_flags(self):
+        for key, value in (("control_plane_only", False), ("product_changed", True),
+                           ("ci_required", True), ("e2e_required", True),
+                           ("product_changed", 0)):
+            with self.subTest(key=key, value=value):
+                self.assert_falls_through(**self.classifier_self_edit_world(receipt={key: value}))
+
+    def test_classifier_self_edit_refuses_stale_logged_head(self):
+        self.assert_falls_through(**self.classifier_self_edit_world(bindings={"HEAD_SHA": "0" * 40}))
+
+    def test_classifier_self_edit_refuses_stale_or_missing_run(self):
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                world = self.classifier_self_edit_world()
+                world["site_runs"][0]["head_sha"] = "0" * 40
+                if missing:
+                    world["site_runs"] = []
+                self.assert_falls_through(**world)
+
+    def test_classifier_self_edit_refuses_out_of_scope_paths_even_with_exempt_receipt(self):
+        for row in ({"filename": "app/page.tsx"}, {"filename": "scripts/ci/run-ci.sh"},
+                    {"filename": "docs/moved.md", "previous_filename": "app/old.tsx"}):
+            with self.subTest(row=row):
+                self.assert_falls_through(**self.classifier_self_edit_world(extra_files=[row]))
+
+    def test_classifier_self_edit_requires_receipt_to_cover_pinned_files(self):
+        self.assert_falls_through(**self.classifier_self_edit_world(receipt={
+            "changed_files": ["scripts/ci/change_scope.py"]}))
+
+    def test_classifier_self_edit_refuses_wrong_attempt_job(self):
+        world = self.classifier_self_edit_world()
+        world["control_plane_jobs"][0]["run_attempt"] = 2
+        self.assert_falls_through(**world)
+
+    def test_classifier_self_edit_does_not_exempt_modified_workflow_or_rules(self):
+        for path in (".github/workflows/ci-dummy.yml", "scripts/ci/change-scope-rules.json"):
+            with self.subTest(path=path):
+                world = self.classifier_self_edit_world()
+                world["changed_workflow_paths"].append(path)
+                self.assert_falls_through(**world)
 
     def test_parent_without_control_plane_ci_exemption_is_red(self):
         rev = "0889385c7679198a10006c086c1da9b2c95b7d41"

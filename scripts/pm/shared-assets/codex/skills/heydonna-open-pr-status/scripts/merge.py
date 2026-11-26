@@ -540,12 +540,14 @@ CLASSIFIER_JOB_NAME = "classify-change-scope"
 TEST_ONLY_SCOPE = "app_test_only"  # legacy receipt spelling, still accepted
 CANONICAL_TEST_ONLY_SCOPE = "test_only"  # canonical classifier receipt: scope=test_only, test_only=true
 EXEMPTION_RECEIPT = {
-    "schema_version": 1,
     "paid_ci_exempt": True,
     "product_changed": False,
     "ci_required": False,
     "e2e_required": False,
 }
+CLASSIFIER_SOURCE = "scripts/ci/change_scope.py"
+# The canonical classifier self-exempts these two files; do not extend this to scripts/ci/**.
+CLASSIFIER_SELF_EDIT_PATHS = (CLASSIFIER_SOURCE, "scripts/ci/tests/test_change_scope.py")
 REQUIRED_BINDINGS = ("BASE_SHA", "HEAD_SHA", "WORKFLOW_SHA", "EVENT_NAME", "PR_NUMBER")
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -588,7 +590,7 @@ def classifier_receipt(lines, expected_scope):
     if receipt is None:
         return None
     for key, expected in EXEMPTION_RECEIPT.items():
-        if receipt.get(key) != expected:
+        if receipt.get(key) is not expected:
             return None
     if receipt.get("control_plane_only") is not (expected_scope == "control_plane_only"):
         return None
@@ -765,11 +767,17 @@ def classifier_exemption(pr, workflow, run, scope, expected_scope="control_plane
         if trusted_base is None:
             return None
     workflow_path = f".github/workflows/{workflow}"
-    for path in (workflow_path, "scripts/ci/change_scope.py", "scripts/ci/change-scope-rules.json"):
+    control_plane = workflow == SITE_EXEMPTION_WORKFLOW and expected_scope == "control_plane_only"
+    classifier_self_edit = False
+    for path in (workflow_path, CLASSIFIER_SOURCE, "scripts/ci/change-scope-rules.json"):
         at_base = contents_identity(path, trusted_base)
         at_workflow = contents_identity(path, workflow_sha)
-        if at_base is None or at_workflow is None or at_base[0] != at_workflow[0]:
+        if at_base is None or at_workflow is None:
             return None
+        if at_base[0] != at_workflow[0]:
+            if path != CLASSIFIER_SOURCE or not control_plane:
+                return None
+            classifier_self_edit = True
     rules = contents_identity("scripts/ci/change-scope-rules.json", workflow_sha)
     if rules is None:
         return None
@@ -780,8 +788,15 @@ def classifier_exemption(pr, workflow, run, scope, expected_scope="control_plane
             and not site_paths_confined(pr, rules[1]):
         return None
     site_only_paths = False
-    if (workflow == SITE_EXEMPTION_WORKFLOW and expected_scope == "control_plane_only"
-            and not control_plane_paths_confined(pr, rules[1])):
+    if classifier_self_edit:
+        # The PR can change the producer of this receipt, so require native
+        # run/job binding and independently confine the commit-pinned diff.
+        if (not bound_attempt_jobs(pr, run, [scope])
+                or (run["pull_requests"][0].get("base") or {}).get("sha") != base_sha
+                or merge_parent_base(base_sha, head_sha, commit_parent_rows) is None
+                or not control_plane_self_edit_confined(pr, base_sha, receipt, rules[1])):
+            return None
+    elif control_plane and not control_plane_paths_confined(pr, rules[1]):
         # The shared classifier's marketing-only rule (every path under
         # website/**) deliberately emits a scope=control_plane_only receipt with
         # site_scoped=false while ownership stays "site" (change_scope.py
@@ -1971,44 +1986,70 @@ def site_only_paths_confined(pr, rules_bytes):
     return paths_confined(pr, rules_bytes, ("site",))
 
 
+CONTROL_PLANE_RULE_GROUPS = ("control_plane_only", "control_plane_legacy", "control_plane_ci")
+
+
 def control_plane_paths_confined(pr, rules_bytes):
     """Require every changed path to match trusted control-plane classifier globs."""
-    return paths_confined(pr, rules_bytes,
-                          ("control_plane_only", "control_plane_legacy", "control_plane_ci"))
+    return paths_confined(pr, rules_bytes, CONTROL_PLANE_RULE_GROUPS,
+                          exact_paths=CLASSIFIER_SELF_EDIT_PATHS)
 
 
-def paths_confined(pr, rules_bytes, rule_names):
+def control_plane_self_edit_confined(pr, base_sha, receipt, rules_bytes):
+    """Check the classifier's own edit against GitHub's immutable base/head diff."""
+    comparison = read_with_retry(api, f"compare/{base_sha}...{pr['head']['sha']}")
+    files = comparison.get("files") if isinstance(comparison, dict) else None
+    # GitHub compare caps file rows at 300, even with commit pagination.
+    if not isinstance(files, list) or not 0 < len(files) < 300:
+        return False
+    paths = changed_paths(files)
+    logged = receipt.get("changed_files")
+    return (paths is not None and CLASSIFIER_SOURCE in paths
+            and isinstance(logged, list) and all(isinstance(p, str) for p in logged)
+            and set(logged) == paths
+            and paths_match_rules(paths, rules_bytes, CONTROL_PLANE_RULE_GROUPS,
+                                  exact_paths=CLASSIFIER_SELF_EDIT_PATHS))
+
+
+def changed_paths(files):
+    paths = set()
+    for item in files:
+        if not isinstance(item, dict) or not isinstance(item.get("filename"), str):
+            return None
+        paths.add(item["filename"])
+        previous = item.get("previous_filename")
+        if previous is not None:
+            if not isinstance(previous, str):
+                return None
+            paths.add(previous)
+    return paths
+
+
+def paths_match_rules(paths, rules_bytes, rule_names, *, exact_paths=()):
+    rules = json.loads(rules_bytes)
+    if not isinstance(rules, dict):
+        return False
+    pattern_lists = [rules.get(name, []) for name in rule_names]
+    if any(not isinstance(patterns, list) or not all(
+            isinstance(pattern, str) and pattern for pattern in patterns)
+           for patterns in pattern_lists):
+        return False
+    patterns = [pattern for group in pattern_lists for pattern in group]
+    return bool(paths) and all(
+        path in exact_paths or any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
+        for path in paths)
+
+
+def paths_confined(pr, rules_bytes, rule_names, *, exact_paths=()):
     try:
-        rules = json.loads(rules_bytes)
-        pattern_lists = [rules.get(name, []) for name in rule_names]
-        if any(not isinstance(patterns, list) or not all(
-                isinstance(pattern, str) and pattern for pattern in patterns)
-               for patterns in pattern_lists):
-            return False
-        patterns = [pattern for group in pattern_lists for pattern in group]
-        if not patterns:
-            return False
         pages_json = json.loads(command(
             "gh", "api", "--paginate", "--slurp",
             f"repos/{REPO}/pulls/{pr['number']}/files?per_page=100"))
-        if not isinstance(pages_json, list) or not pages_json:
+        if not isinstance(pages_json, list) or not all(isinstance(page, list) for page in pages_json):
             return False
-        paths = []
-        for page in pages_json:
-            if not isinstance(page, list):
-                return False
-            for item in page:
-                if not isinstance(item, dict) or not isinstance(item.get("filename"), str):
-                    return False
-                paths.append(item["filename"])
-                previous = item.get("previous_filename")
-                if previous is not None:
-                    if not isinstance(previous, str):
-                        return False
-                    paths.append(previous)
-        return bool(paths) and all(
-            any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
-            for path in paths)
+        paths = changed_paths(item for page in pages_json for item in page)
+        return paths is not None and paths_match_rules(paths, rules_bytes, rule_names,
+                                                       exact_paths=exact_paths)
     except (KeyError, TypeError, ValueError, Refusal, OSError, subprocess.TimeoutExpired):
         return False
 
