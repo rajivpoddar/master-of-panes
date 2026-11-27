@@ -981,7 +981,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "37447379b506b7aa2419cffb8a995812d718631a63ac16019f62d7dabe31b1f3",
+      "sha256": "afeced35fbb1b68dd7440fa963a208162cc6b421b1e80dce163fbb8b74509d49",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
