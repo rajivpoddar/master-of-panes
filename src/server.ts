@@ -48,7 +48,7 @@ import { serve } from "@hono/node-server";
 import { z } from "zod";
 import { MoPDatabase } from "./db.js";
 import { evaluateLaneEvents, readLaneEvents } from "./laneEvents.js";
-import { handoffHourlyReceipt, tickHourlyReminders, tickHourlyProcessing } from "./hourlyReceiptReminder.js";
+import { handoffHourlyReceipt, tickHourlyReminders } from "./hourlyReceiptReminder.js";
 import { assignmentIdentityPatchFields, registerAssignmentRoute } from "./assignmentRoute.js";
 import {
   evaluateRespawnTurnPersistence,
@@ -352,15 +352,8 @@ const hourlyReminderTick = async (): Promise<void> => {
   if (hourlyReminderTickRunning) return;
   hourlyReminderTickRunning = true;
   try {
-    // Both consume the same confirmed parent. Neither outcome suppresses the
-    // other; queued processing is not evidence that inspection or steering ran.
-    const results = await Promise.allSettled([
-      tickHourlyReminders(db),
-      tickHourlyProcessing(db, (message, event) => relay.submitToPM(message, event)),
-    ]);
-    for (const result of results) {
-      if (result.status === "rejected") console.error(`[hourly-receipt] ${String(result.reason)}`);
-    }
+    // The Alerts post is the sole processing trigger; retain the independent CTO reminder.
+    await tickHourlyReminders(db);
   }
   catch (error) { console.error(`[hourly-reminder] ${String(error)}`); }
   finally { hourlyReminderTickRunning = false; }
