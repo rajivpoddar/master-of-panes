@@ -1842,7 +1842,7 @@ proxy_agent_tier_models() {
   local models _m _kept=""
   case "$1" in
     LOW) models="inkling-2-mini ornith-1.5-35b-a3b sarvam-glm-5.3 sarvam-deepseek-v4.1-flash sarvam-105b sarvam-gemma4 gpt-6-luna claude-haiku-5-5";;  # inkling-2-mini FIRST for light lanes (Rajiv D0AMF0XE6TS thread 1795763208.280539, ts 1795767932.789039); re-enabled 14:18 IST after proxy-tool-inkfix (--strict-mcp-config) proved multi-turn lanes; earns heavier stages only at >=70% over >=20 lanes
-    MID) models="hy4-flash-free claude-sonnet-5-5 ultra/claude-sonnet-5-5 inkling-2-mini gpt-6.1-terra";;  # OpenCode Go weekly 62% at 1.87 vs 0.28 %/h budget: paid OpenCode ids (glm, deepseek, muse) out of MID until the Mon 30 Nov 05:30 IST reset (Rajiv D0AMF0XE6TS thread 1795513877.716279, ts 1795515247.892709 "ok"); was: glm-5.3 deepseek-v4.1-flash hy4-flash-free claude-sonnet-5-5 gpt-6.1-terra muse-spark-1.3-contributor;  # Sarvam moved to LOW only (Rajiv ts 1795420232.692599); ornith LOW only (Rajiv ts 1795484559.513619, 24 Nov)
+    MID) models="inkling-2-mini hy4-flash-free claude-sonnet-5-5 ultra/claude-sonnet-5-5 gpt-6.1-terra";;  # inkling-2-mini FIRST in MID (Rajiv C0ALZJHGE49 thread 1795783481.695039, ts 1795783781.604859 "add inkling to the mid tier as well. maximise it's use")  # OpenCode Go weekly 62% at 1.87 vs 0.28 %/h budget: paid OpenCode ids (glm, deepseek, muse) out of MID until the Mon 30 Nov 05:30 IST reset (Rajiv D0AMF0XE6TS thread 1795513877.716279, ts 1795515247.892709 "ok"); was: glm-5.3 deepseek-v4.1-flash hy4-flash-free claude-sonnet-5-5 gpt-6.1-terra muse-spark-1.3-contributor;  # Sarvam moved to LOW only (Rajiv ts 1795420232.692599); ornith LOW only (Rajiv ts 1795484559.513619, 24 Nov)
     TOP) models="claude-opus-5-5 ultra/claude-opus-5-5 claude-fable-5-2 gpt-6.2-sol sarvam-kimi-k3 grok-4.7 muse-spark-1.3-contributor";;  # Rajiv D0AMF0XE6TS thread 1795485653.099709, ts 1795486375.339929 (24 Nov): value-per-$ order, Opus (77x) first, Grok (11-13x) last
     *) return 1;;
   esac
@@ -1870,10 +1870,10 @@ proxy_agent_tier_models() {
 }
 # Single eligibility predicate for both tier and raw Inkling selections.
 proxy_agent_inkling_eligible() {
-  [[ "${PROXY_AGENT_SANDBOX:-1}" == 1 ]] || return 1
+  # Unfenced allowed (Rajiv D0AMF0XE6TS thread 1795778423.893189, ts 1795784407.240529 "yes to unfenced allow"): MID builder/QA too; pool cap stays 2.
   proxy_agent_is_judgment_lane && return 1
   [[ "$(proxy_agent_type_level "$TYPE")" == LOW ]] && return 0
-  case "$TYPE" in docx-artifact-forensics|issue-contract-auditor) return 0;; *) return 1;; esac
+  case "$TYPE" in docx-artifact-forensics|issue-contract-auditor|hd-builder|hd-proof-qa) return 0;; *) return 1;; esac
 }
 
 proxy_agent_unfenced_eligible() {
@@ -1881,6 +1881,7 @@ proxy_agent_unfenced_eligible() {
   case "$1" in
     gpt-*|claude-*|ultra/claude-*) return 0;;
     hy4-flash-free) case "$TYPE" in hd-builder|hd-proof-qa) return 0;; esac;;
+    inkling-2-mini) return 0;;  # local Spark; Rajiv ts 1795784407.240529 "yes to unfenced allow" (type gate in proxy_agent_inkling_eligible)
   esac
   return 1
 }
