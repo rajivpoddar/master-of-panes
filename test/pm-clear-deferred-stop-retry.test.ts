@@ -112,3 +112,41 @@ test("Stop hook does not claim an undelivered latch is awaiting acknowledgement"
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("regression control: a post-paste pre_enter refusal (zero_effect=false) stays uncertain and sends nothing more", async () => {
+  // CTO C0ALZJHGE49 ts 1795798875.140719 (16:49:15Z, clear 45610): the writer had already pasted /clear
+  // before the pre-Enter check, so a pre_enter refusal alone never proves non-delivery.
+  const { db, directory } = freshDb("mop-pm-clear-pre-enter-");
+  try {
+    const now = Date.now();
+    const requestedAt = new Date(now - 30_000).toISOString();
+    db.setPendingClear(0);
+    db.setConfig("pm_clear_requested_at", requestedAt);
+    db.setConfig("pm_clear_delivery_state", "deferred_busy");
+    const counter = { sends: 0 };
+    const preEnterRefused = {
+      ...baseOptions(db, now, counter),
+      send: async () => {
+        counter.sends += 1;
+        db.logEvent(0, "pm_clear_write_refused", null, null, { stage: "pre_enter", reason: "pm_turn_started", zero_effect: false, pane_id: "%1" });
+        return { success: false, zeroEffect: false, busy: false, error: "PM clear refused (pm_turn_started)." };
+      },
+    };
+    const first = await retryDeferredPmClearOnStop(preEnterRefused);
+    assert.equal(first.kind, "uncertain");
+    assert.equal(db.getConfig("pm_clear_delivery_state"), "uncertain");
+    assert.equal(db.hasPendingClear(0), true);
+    assert.equal(db.getEvents(0, 10, "pm_clear_delivery_uncertain").length, 1);
+
+    // Later Stops never resend the same request: not via the Stop retry, nor the hook Stop path.
+    const second = await retryDeferredPmClearOnStop(baseOptions(db, now + 120_000, counter));
+    assert.equal(second.kind, "skipped");
+    const relay = { sendToSlot() { counter.sends += 100; return true; } } as unknown as TmuxRelay;
+    await new HookProcessor(db, relay).process(0, { type: "Stop", session_id: "pm" });
+    assert.equal(counter.sends, 1);
+    assert.equal(db.getConfig("pm_clear_requested_at"), requestedAt);
+    assert.equal(db.getConfig("pm_clear_delivery_state"), "uncertain");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
