@@ -517,14 +517,14 @@ unset CAP_COMMENTS_JSON
 printf '[{"workflow_runs":[]}]\n' > "$CAP_FIX/runs.$SHA"   # the live head has no CI run again for the override cases below (events: CH1 + CH2 only)
 
 echo "case: cap - a CTO-approved override re-admits and is audited; a dry run is not"
-PM_ADMIT_CAP_OVERRIDE=$OVR; export PM_ADMIT_CAP_OVERRIDE
+PM_ADMIT_CAP_OVERRIDE=$OVR@11173:$SHA; export PM_ADMIT_CAP_OVERRIDE
 run_case cap_override --no-12b-gate --reason 'cap test'
 check 'cap_override: override line, admitted' '[ "$RC" = 0 ] && grep -q "^ADMISSION_CAP_OVERRIDE: $OVR pr=11173" <<<"$OUT" && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT"'
 check 'cap_override: granted at gate time AND consumed once before the label add, both bound to the head and approval' 'grep -q "PR=11173 head=$SHA admission-cap-override-granted=$OVR" "$T/home/.claude/logs/pm-admit-skip.log" && [ "$(grep -c "PR=11173 head=$SHA admission-cap-override-consumed=$OVR\$" "$T/home/.claude/logs/pm-admit-skip.log")" = 1 ] && grep -q "^ADMISSION_CAP_OVERRIDE_CONSUMED: $OVR pr=11173 head=$SHA" <<<"$OUT"'
 check 'cap_override: the consumed record already existed when the ci-head label add was issued (consumed before admission, not after)' '[ "$(cat "$T/cap_override/consumed_at_label_add")" = 1 ]'
 check 'cap_override: one override line pair only, no legacy un-kinded line' '! grep -qE "admission-cap-override=" "$T/home/.claude/logs/pm-admit-skip.log"'
 AUDITED=$(grep -c admission-cap-override "$T/home/.claude/logs/pm-admit-skip.log")
-PM_ADMIT_CAP_OVERRIDE=rajiv:1795676115.108879 run_case cap_override_dry --dry-run --no-12b-gate --reason 'cap test'
+PM_ADMIT_CAP_OVERRIDE=rajiv:1795676115.108879@11173:$SHA run_case cap_override_dry --dry-run --no-12b-gate --reason 'cap test'
 check 'cap_override --dry-run: Rajiv override allowed, no admission or audit write (no granted, no consumed)' '[ "$RC" = 0 ] && grep -q "^ADMISSION_CAP_OVERRIDE: rajiv:" <<<"$OUT" && grep -q "nothing admitted" <<<"$OUT" && [ "$(grep -c admission-cap-override "$T/home/.claude/logs/pm-admit-skip.log")" = "$AUDITED" ] && ! grep -q "rajiv:1795676115.108879" "$T/home/.claude/logs/pm-admit-skip.log"'
 : > "$STUB_LOG"
 OUT=$(PATH="$T/bin:$PATH" HOME="$T/no-audit-home" bash "$SCRIPT" 11173 2>&1); RC=$?
@@ -535,9 +535,9 @@ check 'cap_override_bad: a malformed override is refused (64) with no writes' '[
 
 echo "case: one pair - an override id that was already consumed on this PR is refused when re-presented (a new CTO/Rajiv override is required)"
 SKIPN=$(wc -l < "$T/home/.claude/logs/pm-admit-skip.log" | tr -d ' ')
-PM_ADMIT_CAP_OVERRIDE=$OVR run_case cap_override_reuse --no-12b-gate --reason 'cap test'
+PM_ADMIT_CAP_OVERRIDE=$OVR@11173:$SHA run_case cap_override_reuse --no-12b-gate --reason 'cap test'
 check 'cap_override_reuse: exit 10, REFUSE names the spent override, nothing admitted, no label write, no new audit line' '[ "$RC" = 10 ] && grep -q "^REFUSE: ADMISSION_ROUND_BREAKER #11173; override $OVR was already consumed by an earlier admission (one override funds exactly one admission pair)" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && ! grep -qE "pr edit|label create|add-label" "$STUB_LOG" && [ "$(wc -l < "$T/home/.claude/logs/pm-admit-skip.log" | tr -d " ")" = "$SKIPN" ]'
-PM_ADMIT_CAP_OVERRIDE=cto:1795766409.314279 run_case cap_override_fresh --no-12b-gate --reason 'cap test'
+PM_ADMIT_CAP_OVERRIDE=cto:1795766409.314279@11173:$SHA run_case cap_override_fresh --no-12b-gate --reason 'cap test'
 check 'cap_override_fresh: a DIFFERENT (new) approval id is accepted at the same cap and funds exactly one more pair' '[ "$RC" = 0 ] && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT" && grep -q "admission-cap-override-granted=cto:1795766409.314279" "$T/home/.claude/logs/pm-admit-skip.log" && [ "$(grep -c "admission-cap-override-consumed=cto:1795766409.314279" "$T/home/.claude/logs/pm-admit-skip.log")" = 1 ]'
 unset PM_ADMIT_CAP_OVERRIDE
 
@@ -546,7 +546,7 @@ CAP_EVENTS_MODE=fail; export CAP_EVENTS_MODE
 run_case cap_unavailable --no-12b-gate --reason 'cap test'
 check 'cap_unavailable: reason and REFUSE github_api_error (7)' '[ "$RC" = 7 ] && grep -qx "ADMISSION_ROUND_BREAKER: UNAVAILABLE reason=issues/11173/events: gh_rc_1" <<<"$OUT" && grep -qx "REFUSE: github_api_error admission_cap" <<<"$OUT"'
 check 'cap_unavailable: no admission writes' '! grep -qE "pr edit|label create" "$STUB_LOG"'
-PM_ADMIT_CAP_OVERRIDE=$OVR; export PM_ADMIT_CAP_OVERRIDE
+PM_ADMIT_CAP_OVERRIDE=$OVR@11173:$SHA; export PM_ADMIT_CAP_OVERRIDE
 run_case cap_unavailable_override --no-12b-gate --reason 'cap test'
 check 'cap_unavailable: a cap override never bypasses unreadable history' '[ "$RC" = 7 ] && grep -q "^ADMISSION_ROUND_BREAKER: UNAVAILABLE" <<<"$OUT" && ! grep -qE "pr edit|label create" "$STUB_LOG"'
 unset PM_ADMIT_CAP_OVERRIDE CAP_EVENTS_MODE
@@ -640,7 +640,7 @@ assert_vg_nothing_admitted vg_force_ci
 cp -p "$T/home/.claude/logs/pm-admit-skip.log" "$T/skiplog.vg.save"
 CAP_EVENTS_JSON=$(cap_events $CH1 $SHA); export CAP_EVENTS_JSON   # 2 rounds = the cap is reached, so the override is what lifts it
 OVR_VG=cto:1795700000.000001   # a fresh approval: $OVR was spent by the cap_override cases above and a spent override id is refused
-PM_ADMIT_CAP_OVERRIDE=$OVR_VG run_case vg_cap_override "${VG_ARGS[@]}"
+PM_ADMIT_CAP_OVERRIDE=$OVR_VG@11173:$SHA run_case vg_cap_override "${VG_ARGS[@]}"
 check 'vg_cap_override: the cap override lifts the cap (granted audit line), but the verdict gate still refuses with the packet (exit 12)' '[ "$RC" = 12 ] && grep -q "^ADMISSION_CAP_OVERRIDE: $OVR_VG pr=11173" <<<"$OUT" && grep -q "^ADMIN_ASK_PACKET (S171/S157) #11173 head=$SHA" <<<"$OUT" && grep -q "admission-cap-override-granted=$OVR_VG" "$T/home/.claude/logs/pm-admit-skip.log"'
 assert_vg_nothing_admitted vg_cap_override
 check 'vg_cap_override: the packet refusal came BEFORE admission, so the override was granted but NOT consumed (it stays available for the next admission)' '! grep -q "admission-cap-override-consumed=$OVR_VG" "$T/home/.claude/logs/pm-admit-skip.log" && ! grep -q "ADMISSION_CAP_OVERRIDE_CONSUMED" <<<"$OUT"'
@@ -734,7 +734,7 @@ echo "case: one-pair override - once claimed/consumed the grant is spent (same h
 LEDGER_AFTER=$(wc -l < "$SKIPLOG" | tr -d ' ')
 DESC_MODE=yes run_case inh_spent "${VG_ARGS[@]}"
 check 'inh_spent: the next admission at the cap is the normal refusal, nothing admitted, no new ledger line' '[ "$RC" = 10 ] && grep -q "^Decision required" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && [ "$(wc -l < "$SKIPLOG" | tr -d " ")" = "$LEDGER_AFTER" ] && no_admission_write'
-PM_ADMIT_CAP_OVERRIDE=$OVR_B run_case inh_spent_explicit "${VG_ARGS[@]}"
+PM_ADMIT_CAP_OVERRIDE=$OVR_B@11173:$SHA run_case inh_spent_explicit "${VG_ARGS[@]}"
 check 'inh_spent_explicit: re-presenting the spent override is refused and names it as already consumed (exit 10)' '[ "$RC" = 10 ] && grep -q "^REFUSE: ADMISSION_ROUND_BREAKER #11173; override $OVR_B was already consumed" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && no_admission_write'
 OVR_C=$(ov 3)
 set_skiplog "$(gl 11173 $SHA "$OVR_C")" "2026-11-27T01:05:00Z PR=11173 head=$SHA admission-cap-override-consumed=$OVR_C"
@@ -752,16 +752,16 @@ check 'inh_legacy_carried: a historical carried record is bound to its own head,
 echo "case: one-pair override - head scope: a grant names its head and can never fund a different head or PR (explicit override, no ledger line and no claim written)"
 OVR_F=$(ov 7)
 set_skiplog "$(gl 11173 $CH1 "$OVR_F")"
-PM_ADMIT_CAP_OVERRIDE=$OVR_F run_case head_other "${VG_ARGS[@]}"
+PM_ADMIT_CAP_OVERRIDE=$OVR_F@11173:$SHA run_case head_other "${VG_ARGS[@]}"
 check 'head_other: a head-only grant for CH1 presented at head SHA refuses: exit 10, REFUSE names the grant head and the presented head, nothing admitted' '[ "$RC" = 10 ] && grep -q "^REFUSE: ADMISSION_ROUND_BREAKER #11173; override $OVR_F names PR #11173 head $CH1 and cannot fund head $SHA (a grant never funds a different head)" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT"'
 check 'head_other: no granted/consumed line appended, no claim file, no ci-head label write' '[ "$(wc -l < "$SKIPLOG" | tr -d " ")" = 1 ] && [ "$(n_claims)" = 0 ] && no_admission_write'
 OVR_G=$(ov 8)
 set_skiplog "$(gl 99999 $SHA "$OVR_G")"
-PM_ADMIT_CAP_OVERRIDE=$OVR_G run_case head_other_pr "${VG_ARGS[@]}"
+PM_ADMIT_CAP_OVERRIDE=$OVR_G@11173:$SHA run_case head_other_pr "${VG_ARGS[@]}"
 check 'head_other_pr: a grant recorded for another PR is refused even at the same head sha: exit 10, nothing admitted, no claim, no new line' '[ "$RC" = 10 ] && grep -q "names PR #99999 head $SHA and cannot fund" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && [ "$(wc -l < "$SKIPLOG" | tr -d " ")" = 1 ] && [ "$(n_claims)" = 0 ] && no_admission_write'
 OVR_H=$(ov 9)
 set_skiplog "$(gl 11173 $SHA "$OVR_H")"
-HM_VALUE="$CH2 MERGEABLE" PM_ADMIT_CAP_OVERRIDE=$OVR_H run_case head_moved "${VG_ARGS[@]}"
+HM_VALUE="$CH2 MERGEABLE" PM_ADMIT_CAP_OVERRIDE=$OVR_H@11173:$SHA run_case head_moved "${VG_ARGS[@]}"
 check 'head_moved: the PR head moves after the gate (grant names SHA, live head CH2): nothing is admitted, no claim, no consumed record, no ci-head label write (an earlier guard may refuse first; the claim-boundary refusal itself is proven next)' '[ "$RC" -ne 0 ] && ! grep -q ADMITTED <<<"$OUT" && [ "$(n_claims)" = 0 ] && [ "$(n_ledger consumed)" = 0 ] && no_admission_write'
 # The claim-boundary head check, run on the script's own function text: a grant naming SHA never funds CH2, and exits 10 before any label or claim write.
 HC_FN=$(awk '/^cap_override_head_check\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$SCRIPT")
@@ -769,6 +769,26 @@ HC_OUT=$(PR=11173 CAP_OVERRIDE_USED=$OVR_H CAP_OVERRIDE_HEAD=$SHA HEAD=$CH2 bash
 check 'head_moved: cap_override_head_check refuses (exit 10) when the live head differs from the head the grant names, naming both heads' '[ "$HC_RC" = 10 ] && grep -q "override $OVR_H names head $SHA and cannot fund head $CH2" <<<"$HC_OUT" && ! grep -q not-refused <<<"$HC_OUT"'
 HC_OUT=$(PR=11173 CAP_OVERRIDE_USED=$OVR_H CAP_OVERRIDE_HEAD=$SHA HEAD=$SHA bash -c "$HC_FN; cap_override_head_check; echo not-refused" 2>&1); HC_RC=$?
 check 'head_moved: the same check passes when the live head is the head the grant names' '[ "$HC_RC" = 0 ] && grep -q not-refused <<<"$HC_OUT"'
+
+# ---- CTO REVISE #3 (ts 1795771648.671389): a grant's FIRST presentation binds to the PR + FULL head SHA named in the approval handoff, not to whatever the caller presents ----
+# PM_ADMIT_CAP_OVERRIDE=cto:<ts>@<PR>:<full sha>. A bare id is refused (64); a tuple that differs from the live PR/head is refused (10) with NOTHING written (no ledger row, claim or label).
+echo "case: expected-tuple binding - a bare id is refused, a drifted head/PR leaves grant + labels untouched, the same authorized tuple then admits once"
+OVR_T=$(ov 19)
+claims_reset; : > "$SKIPLOG"; : > "$STUB_LOG"
+PM_ADMIT_CAP_OVERRIDE=$OVR_T run_case tuple_bare "${VG_ARGS[@]}"
+check 'tuple_bare: an override with no PR/head tuple is refused (exit 64), the message names the required form, nothing is written' '[ "$RC" = 64 ] && grep -q "PM_ADMIT_CAP_OVERRIDE must look like cto:<slack ts>@<PR>:<full 40-hex head sha>" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && [ "$(wc -l < "$SKIPLOG" | tr -d " ")" = 0 ] && [ "$(n_claims)" = 0 ] && ! grep -qE "pr edit|label create|add-label" "$STUB_LOG"'
+PM_ADMIT_CAP_OVERRIDE=$OVR_T@11173:${SHA:0:12} run_case tuple_short_sha "${VG_ARGS[@]}"
+check 'tuple_short_sha: an abbreviated head sha is refused (exit 64): the FULL head is required' '[ "$RC" = 64 ] && ! grep -q ADMITTED <<<"$OUT" && [ "$(wc -l < "$SKIPLOG" | tr -d " ")" = 0 ] && [ "$(n_claims)" = 0 ] && ! grep -qE "pr edit|label create|add-label" "$STUB_LOG"'
+PM_ADMIT_CAP_OVERRIDE=$OVR_T@11173:$CH1 run_case tuple_drift "${VG_ARGS[@]}"
+check 'tuple_drift: approved for head CH1 but the live head is SHA -> REFUSE names both heads, exit 10, nothing admitted' '[ "$RC" = 10 ] && grep -q "^REFUSE: ADMISSION_ROUND_BREAKER #11173; override $OVR_T was approved for PR #11173 head $CH1 but the live PR is #11173 at head $SHA" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && ! grep -q "^ADMISSION_CAP_OVERRIDE:" <<<"$OUT"'
+check 'tuple_drift: first presentation after drift writes NOTHING: no granted row, no consumed row, no claim file, no label write' '[ "$(wc -l < "$SKIPLOG" | tr -d " ")" = 0 ] && [ "$(n_ledger granted)" = 0 ] && [ "$(n_ledger consumed)" = 0 ] && [ "$(n_claims)" = 0 ] && ! grep -qE "pr edit|label create|add-label|--remove-label" "$STUB_LOG"'
+PM_ADMIT_CAP_OVERRIDE=$OVR_T@99999:$SHA run_case tuple_other_pr "${VG_ARGS[@]}"
+check 'tuple_other_pr: approved for another PR at the same head sha -> refused (exit 10), nothing written' '[ "$RC" = 10 ] && grep -q "was approved for PR #99999 head $SHA but the live PR is #11173 at head $SHA" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && [ "$(wc -l < "$SKIPLOG" | tr -d " ")" = 0 ] && [ "$(n_claims)" = 0 ] && ! grep -qE "pr edit|label create|add-label" "$STUB_LOG"'
+DESC_MODE=yes PM_ADMIT_CAP_OVERRIDE=$OVR_T@11173:$SHA run_case tuple_authorized "${VG_ARGS[@]}"
+check 'tuple_authorized: the SAME grant id presented with the authorized tuple at the live head admits once (the earlier refusals left it untouched)' '[ "$RC" = 0 ] && grep -q "^ADMISSION_CAP_OVERRIDE: $OVR_T pr=11173" <<<"$OUT" && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT" && [ "$(n_ledger granted)" = 1 ] && [ "$(grep -c "PR=11173 head=$SHA admission-cap-override-consumed=$OVR_T\$" "$SKIPLOG")" = 1 ] && [ "$(n_claims)" = 1 ] && grep -q -- "--add-label ci-head:$SHA" "$STUB_LOG"'
+SKIPN_T=$(wc -l < "$SKIPLOG" | tr -d ' ')
+PM_ADMIT_CAP_OVERRIDE=$OVR_T@11173:$SHA run_case tuple_spent "${VG_ARGS[@]}"
+check 'tuple_spent: re-presenting the now-spent grant with the same authorized tuple is refused (one pair only), no new row' '[ "$RC" = 10 ] && grep -q "^REFUSE: ADMISSION_ROUND_BREAKER #11173; override $OVR_T was already consumed" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && [ "$(wc -l < "$SKIPLOG" | tr -d " ")" = "$SKIPN_T" ]'
 
 echo "case: one-pair override - ledger lines that are not a well-formed grant for THIS PR are ignored (other PR, malformed approval, legacy un-kinded line)"
 OVR_I=$(ov 10)
@@ -787,14 +807,14 @@ CAP_EVENTS_JSON=$(cap_events $CH1 $SHA); export CAP_EVENTS_JSON   # the cap is r
 OVR_RP=$(ov 12)
 claims_reset; : > "$SKIPLOG"
 CAP_COMMENTS_JSON="[[$(cap_verdict $SHA 201 flaky)]]"; export CAP_COMMENTS_JSON
-PM_ADMIT_CAP_OVERRIDE=$OVR_RP run_case inh_refused_a "${VG_ARGS[@]}"
+PM_ADMIT_CAP_OVERRIDE=$OVR_RP@11173:$SHA run_case inh_refused_a "${VG_ARGS[@]}"
 check 'inh_refused_a: the explicit override lifted the cap but the verdict gate refused with the packet (exit 12): granted, NOT consumed, no claim, nothing admitted' '[ "$RC" = 12 ] && grep -q "admission-cap-override-granted=$OVR_RP" "$SKIPLOG" && [ "$(n_ledger consumed)" = 0 ] && [ "$(n_claims)" = 0 ] && ! grep -q ADMITTED <<<"$OUT"'
 CAP_COMMENTS_JSON="[[$(cap_verdict $SHA 201 pr-caused)]]"; export CAP_COMMENTS_JSON
 DESC_MODE=no run_case inh_refused_b "${VG_ARGS[@]}"
 check 'inh_refused_b: with the packet cleared and NO env override, the unused grant at this head funds the admission (no helper call, no second grant or carried line), consumed once before the label add' '[ "$RC" = 0 ] && grep -q "^ADMISSION_CAP_OVERRIDE: $OVR_RP pr=11173 already recorded at this head and unused" <<<"$OUT" && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT" && ! grep -q "^verdict-descendant " "$STUB_LOG" && [ "$(n_ledger granted)" = 1 ] && [ "$(n_ledger carried)" = 0 ] && [ "$(grep -c "PR=11173 head=$SHA admission-cap-override-consumed=$OVR_RP\$" "$SKIPLOG")" = 1 ] && [ "$(cat "$T/inh_refused_b/consumed_at_label_add")" = 1 ]'
 DESC_MODE=yes run_case inh_refused_c "${VG_ARGS[@]}"
 check 'inh_refused_c: after that admission the same override is spent: the next attempt at the cap is the normal refusal (exit 10)' '[ "$RC" = 10 ] && grep -q "^Decision required" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT"'
-PM_ADMIT_CAP_OVERRIDE=$OVR_RP run_case inh_refused_d "${VG_ARGS[@]}"
+PM_ADMIT_CAP_OVERRIDE=$OVR_RP@11173:$SHA run_case inh_refused_d "${VG_ARGS[@]}"
 check 'inh_refused_d: re-presenting the spent override explicitly is refused too (exit 10, REFUSE names it as already consumed)' '[ "$RC" = 10 ] && grep -q "^REFUSE: ADMISSION_ROUND_BREAKER #11173; override $OVR_RP was already consumed" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT"'
 unset CAP_COMMENTS_JSON
 
@@ -802,7 +822,7 @@ echo "case: one-pair override - the env override is used as presented (older unu
 CAP_EVENTS_JSON=$(cap_events $CH1 $CH2); export CAP_EVENTS_JSON   # $SHA was never admitted: the verdict gate does not judge it
 OVR_J=$(ov 13)
 set_skiplog "$(gl 11173 $CH1 "$OVR_J")"
-DESC_MODE=yes PM_ADMIT_CAP_OVERRIDE=rajiv:1795761962.862319 run_case inh_env_wins "${VG_ARGS[@]}"
+DESC_MODE=yes PM_ADMIT_CAP_OVERRIDE=rajiv:1795761962.862319@11173:$SHA run_case inh_env_wins "${VG_ARGS[@]}"
 check 'inh_env_wins: the explicit override is used and consumed, the older unused grant (other head) is not consumed' '[ "$RC" = 0 ] && grep -q "^ADMISSION_CAP_OVERRIDE: rajiv:1795761962.862319 pr=11173; cap reached" <<<"$OUT" && ! grep -q "^verdict-descendant " "$STUB_LOG" && grep -q "admission-cap-override-consumed=rajiv:1795761962.862319" "$SKIPLOG" && ! grep -q "admission-cap-override-consumed=$OVR_J" "$SKIPLOG"'
 OVR_K=$(ov 14)
 set_skiplog "$(gl 11173 $SHA "$OVR_K")"
@@ -812,7 +832,7 @@ check 'inh_dry: --dry-run with a same-head unused grant prints the override line
 echo "case: one-pair override - an unwritable ledger or claim refuses (exit 7) before any admission write; never an unaudited grant or consumption"
 OVR_L=$(ov 15)
 claims_reset; : > "$SKIPLOG"; chmod 444 "$SKIPLOG"
-PM_ADMIT_CAP_OVERRIDE=$OVR_L run_case inh_audit_fail "${VG_ARGS[@]}"
+PM_ADMIT_CAP_OVERRIDE=$OVR_L@11173:$SHA run_case inh_audit_fail "${VG_ARGS[@]}"
 chmod 644 "$SKIPLOG"
 check 'inh_audit_fail: the granted line cannot be written: REFUSE admission_cap_override_audit_unavailable, exit 7, nothing admitted' '[ "$RC" = 7 ] && grep -qx "REFUSE: admission_cap_override_audit_unavailable" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && ! grep -qE "pr edit|label create|add-label" "$STUB_LOG"'
 CAP_COMMENTS_JSON="[[$(cap_verdict $SHA 201 pr-caused)]]"; export CAP_COMMENTS_JSON
@@ -832,9 +852,9 @@ echo "case: ATOMIC CLAIM - two concurrent callers race the SAME grant: exactly o
 OVR_R=$(ov 18)
 claims_reset; : > "$SKIPLOG"
 RACE_BARRIER="$T/race-barrier"; mkdir -p "$RACE_BARRIER"
-( BARRIER_DIR="$RACE_BARRIER" BARRIER_N=2 PM_ADMIT_CAP_OVERRIDE=$OVR_R run_case race_a "${VG_ARGS[@]}"; printf '%s' "$RC" > "$T/race_a.rc"; printf '%s\n' "$OUT" > "$T/race_a.out" ) &
+( BARRIER_DIR="$RACE_BARRIER" BARRIER_N=2 PM_ADMIT_CAP_OVERRIDE=$OVR_R@11173:$SHA run_case race_a "${VG_ARGS[@]}"; printf '%s' "$RC" > "$T/race_a.rc"; printf '%s\n' "$OUT" > "$T/race_a.out" ) &
 RACE_PID_A=$!
-( BARRIER_DIR="$RACE_BARRIER" BARRIER_N=2 PM_ADMIT_CAP_OVERRIDE=$OVR_R run_case race_b "${VG_ARGS[@]}"; printf '%s' "$RC" > "$T/race_b.rc"; printf '%s\n' "$OUT" > "$T/race_b.out" ) &
+( BARRIER_DIR="$RACE_BARRIER" BARRIER_N=2 PM_ADMIT_CAP_OVERRIDE=$OVR_R@11173:$SHA run_case race_b "${VG_ARGS[@]}"; printf '%s' "$RC" > "$T/race_b.rc"; printf '%s\n' "$OUT" > "$T/race_b.out" ) &
 RACE_PID_B=$!
 wait "$RACE_PID_A" "$RACE_PID_B"
 RA=$(cat "$T/race_a.rc"); RB=$(cat "$T/race_b.rc")

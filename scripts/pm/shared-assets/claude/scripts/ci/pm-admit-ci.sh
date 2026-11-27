@@ -4,6 +4,9 @@
 # The CI/E2E trigger is the exact `ci-head:<40-hex head>` label (e2e.yml/ci.yml `labeled` gate).
 # Related-tests gate (Rajiv "go", DM D0AMF0XE6TS thread 1791298729.215119): vitest related + tsc on the PR head before admission.
 # Usage: pm-admit-ci.sh <PR> [--no-update] [--dry-run] [--skip-related-tests "<reason>"] [--force-ci "<reason>"] [--allow-main-red "<reason>"]
+# Round-breaker override (only when ADMISSION_ROUND_BREAKER trips): PM_ADMIT_CAP_OVERRIDE=<cto|rajiv>:<slack ts>@<PR>:<full 40-hex head sha> pm-admit-ci.sh <PR> ...
+#   The <PR>:<sha> tuple is the PR and FULL head named in the CTO/Rajiv approval handoff, copied from it, never from the live PR. A bare cto:<slack ts> is refused (exit 64); a tuple that differs
+#   from the live PR or head is refused (exit 10) before any ledger row, claim or label is written. The grant id stays cto:<slack ts> (ledger and claim file unchanged).
 # Pre-review: pm-admit-ci.sh --merge-only <PR> integrates main if S166 requires it; never admits CI/E2E.
 # 12b: --check-12b-only <PR> is read-only; --no-12b-gate --reason "<text>" audits an explicit override.
 # Main-red gate REMOVED (Rajiv C0ALZJHGE49 thread 1793958692.281499, ts 1793960417.571149: "remove it outright. note main red flakes have to be rerun. ... the skip pr has to be immediately merged with a followup issue. for affected pr's, merge main and re-admit."). Supersedes DM ts 1791877690.725089. --allow-main-red is still accepted (no-op) for compatibility.
@@ -39,6 +42,9 @@
 #     PR and head it was first issued at and can NEVER fund a different head (automatic carry-forward to a descendant head is PAUSED: no carry at all). It stays available when a
 #     preflight refuses before admission; it is claimed ATOMICALLY (O_EXCL file keyed by the grant id, see consume_cap_override) immediately before the first label mutation, so of
 #     two concurrent callers exactly one issues the pair and the other refuses; the consumption is recorded in pm-admit-skip.log. Legacy `admission-cap-override=` lines never fund.
+#  4. Expected-tuple binding (rework 2026-11-27, CTO REVISE #3, ts 1795771648.671389): a grant's FIRST presentation binds to the PR and FULL head named in the approval handoff, not to whatever the caller
+#     presents. PM_ADMIT_CAP_OVERRIDE must carry that tuple (<cto|rajiv>:<slack ts>@<PR>:<full sha>); a bare id is refused (64), and a live PR/head that differs from the tuple is refused (10) with NOTHING
+#     written (no granted/consumed ledger row, no claim file, no label), so a head that moved after approval can neither take the grant nor burn it: the same tuple admits once when the live head is the approved one.
 # New exit codes: 11 ci_verdict_required (classify first), 12 admin-ask packet (S171); 10 now also carries the packet for a classified-flaky red.
 set -euo pipefail
 CHECK_12B_ONLY=0; MERGE_ONLY=0
@@ -244,9 +250,13 @@ consume_cap_override() {
 # Each exact ci-head label addition is one round, including re-admissions on the same head.
 # Apply this before the 12b gate, only in admission mode. A CTO/Rajiv override lifts a known cap, not unreadable history.
 admission_cap_gate() {
-  local out rc=0 ov="${PM_ADMIT_CAP_OVERRIDE:-}" vout vrc=0
-  if [ -n "$ov" ] && [[ ! "$ov" =~ ^(cto|rajiv):[0-9]{10}\.[0-9]{6}$ ]]; then
-    echo 'REFUSE: PM_ADMIT_CAP_OVERRIDE must look like cto:<slack ts> (or rajiv:<slack ts>), e.g. cto:1795324706.834969'; exit 64
+  local out rc=0 ov="${PM_ADMIT_CAP_OVERRIDE:-}" ov_pr="" ov_head="" vout vrc=0
+  if [ -n "$ov" ]; then
+    # <cto|rajiv>:<slack ts>@<PR>:<full 40-hex head>: the PR + head the approval names. A bare grant id is refused, so the caller cannot choose what the grant binds to.
+    if [[ ! "$ov" =~ ^((cto|rajiv):[0-9]{10}\.[0-9]{6})@([0-9]+):([0-9a-f]{40})$ ]]; then
+      echo 'REFUSE: PM_ADMIT_CAP_OVERRIDE must look like cto:<slack ts>@<PR>:<full 40-hex head sha> (or rajiv:<slack ts>@<PR>:<full head sha>), the PR and head named in the approval handoff, e.g. cto:1795324706.834969@14917:<40-hex sha>; a bare cto:<slack ts> is refused; nothing admitted'; exit 64
+    fi
+    ov="${BASH_REMATCH[1]}"; ov_pr="${BASH_REMATCH[3]}"; ov_head="${BASH_REMATCH[4]}"   # ov is now the grant id (ledger and claim key), unchanged from before
   fi
   out=$(python3 -I "$SCRIPT_DIR/pm-admit-cap.py" --repo "$REPO" --pr "$PR") || rc=$?
   [ -z "$out" ] || printf '%s\n' "$out"
@@ -254,6 +264,12 @@ admission_cap_gate() {
     0) return 0 ;;
     10)
       if [ -n "$ov" ]; then
+        # Expected tuple (REVISE #3): the approval names the PR and full head; the live ones must be exactly those. Checked first, before anything can be recorded or claimed, so a mismatch
+        # (e.g. the head moved after approval) writes NO ledger row, claim or label and does not take or burn the grant.
+        if [ "$ov_pr" != "$PR" ] || [ "$ov_head" != "$H0" ]; then
+          echo "REFUSE: ADMISSION_ROUND_BREAKER #$PR; override $ov was approved for PR #$ov_pr head $ov_head but the live PR is #$PR at head $H0 (a grant binds to the PR and full head named in its approval, never to what the caller presents); nothing admitted, nothing recorded; re-run with the approved tuple at that head, or a new CTO/Rajiv override for this head"
+          exit 10
+        fi
         if cap_override_spent "$ov"; then
           echo "REFUSE: ADMISSION_ROUND_BREAKER #$PR; override $ov was already consumed by an earlier admission (one override funds exactly one admission pair); a new CTO/Rajiv override is required; nothing admitted"
           exit 10
@@ -288,7 +304,7 @@ admission_cap_gate() {
       fi
       [ -z "$vout" ] || printf '%s\n' "$vout"   # proceed (PR-caused/unknown class), classify-first or UNAVAILABLE: say why no packet was printed
       echo "Decision required (choose one for #$PR at $H0): S157 admin-merge ask for out-of-diff/flake/infra only with executed-green E2E at this head; fix a PR-caused failure; or slice/freeze."
-      echo 'Re-admission requires an audited override: PM_ADMIT_CAP_OVERRIDE=cto:<slack ts> (or rajiv:<slack ts>).'
+      echo 'Re-admission requires an audited override: PM_ADMIT_CAP_OVERRIDE=cto:<slack ts>@<PR>:<full head sha> (or rajiv:<slack ts>@<PR>:<full head sha>), the PR and head named in the approval.'
       exit 10 ;;
     *) api_fail admission_cap ;;
   esac
