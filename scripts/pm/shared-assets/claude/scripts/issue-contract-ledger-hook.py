@@ -625,7 +625,7 @@ def body_arg(parts: list[str]) -> str | None:
 
 def header_span(body: str) -> tuple[int, int] | None:
     """Find one unambiguous, standalone Ready Pool comment (not a fenced example)."""
-    openings = list(re.finditer(r"<!--\s*ready-pool\b", body, re.I))
+    openings = list(re.finditer(r"<!--\s*ready-pool\b(?!-repair\b)", body, re.I))
     if not openings:
         return None
     opening = openings[0].start()

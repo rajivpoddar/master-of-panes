@@ -13,6 +13,7 @@ import os
 import shlex
 import stat
 import subprocess
+from unittest.mock import Mock
 from pathlib import Path
 
 import pytest
@@ -309,6 +310,32 @@ def test_label_only_edits_are_not_body_writes(tmp_path, command):
     for wrapper in (HOME_WRAPPER, APP_WRAPPER):
         out = run(wrapper, PARSER, val, gh, tmp_path, command)
         assert "issue body write refused" not in out.get("message", ""), out
+
+@pytest.mark.parametrize("wrapper", [HOME_WRAPPER, APP_WRAPPER])
+@pytest.mark.parametrize("variant,expected", [
+    ("audit", True), ("audit_first", True), ("canonical", True), ("malformed", False), ("duplicate", False),
+])
+def test_label_transition_distinguishes_repair_audit(tmp_path, wrapper, variant, expected):
+    audit = "<!-- ready-pool-repair:\r\nreason: prior audit\r\n-->\r\n"
+    header = READY_HEADER + "\r\n"
+    body = header + REAL_ISSUE
+    if variant == "audit":
+        body += audit
+    elif variant == "audit_first":
+        body = audit + body
+    elif variant == "malformed":
+        body += "<!-- ready-pool:\r\npriority: P1\r\n"
+    elif variant == "duplicate":
+        body += header
+    gh, val = shims(tmp_path, validator_ok=True, live_body=body)
+    result = run(wrapper, PARSER, val, gh, tmp_path,
+                 "gh issue edit 14494 --repo Scribie/heydonna-app --add-label status:todo --remove-label status:done")
+    writer = Mock()
+    if not blocked(result):
+        writer()
+    assert (writer.call_count == 1) is expected, result
+    if not expected:
+        assert "ready_pool_header_unparseable" in result["message"]
 
 
 if __name__ == "__main__":

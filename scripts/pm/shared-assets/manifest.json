@@ -603,7 +603,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-contract-ledger",
-      "sha256": "081475910c4f4a23ddd92d8ee0d58c696bb8ef244cc357af33832c783088629d",
+      "sha256": "7759c4b259c8a7f89ba775ca7eb60b53553d28528636873fa464bd2e16b67e7f",
       "source_path": "claude/scripts/issue-contract-ledger-hook.py"
     },
     {
