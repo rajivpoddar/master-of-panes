@@ -263,6 +263,20 @@ test("saved handoff still refuses a different PM session at delivery", async () 
   } finally { h.close(); }
 });
 
+test("ordinary PM Stop records the clear-path decision", async () => {
+  const h = harness();
+  try {
+    await boot(h);
+    await h.hook("Stop");
+    const event = h.db.getEvents(0, 1, "pm_stop_maintenance_selected")[0];
+    assert.ok(event);
+    const decision = JSON.parse(event.payload);
+    assert.equal(decision.selected, "clear");
+    assert.equal(decision.clear_pending, false);
+    assert.equal(h.exits(), 0);
+  } finally { h.close(); }
+});
+
 test("inbound between save and Stop does not refuse exit or alter inbound custody", async () => {
   const h = harness();
   try {

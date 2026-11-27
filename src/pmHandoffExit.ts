@@ -264,6 +264,38 @@ export function drainPmExitStop(
   return result(current.pending && current.pm_only);
 }
 
+/**
+ * A PM /exit whose replacement MoP launched but could not bind (attempt `unknown` /
+ * replacement_not_owned_by_restart, e.g. the PM restart path never writes
+ * exit_replacement_bound) held exit custody forever, so every later PM Stop chose
+ * exit_custody and a pending handoff clear never reached the guarded /clear writer
+ * (request 45610, 2026-11-27; CTO C0ALZJHGE49 ts 1795795900.421179). A native Stop
+ * of the CURRENT session from a boot newer than the attempt proves the replacement
+ * pane is live and responsive: credit it and end the episode once, so this same
+ * Stop can select the clear path. Never creates a clear request, never gates input.
+ */
+export function reconcilePmExitReplacementAtStop(
+  db: Pick<MoPDatabase, "getConfig" | "getExitStatus" | "getExitAttempt" | "getEvents" | "reconcilePmExitReplacement">,
+  options: { sessionId: string; pendingConfirmation?: (episode: string) => boolean },
+): boolean {
+  if (!pmExitInCustody(db)) return false;
+  const status = db.getExitStatus();
+  const attempt = db.getExitAttempt(0);
+  if (!status.episode || status.with_devs || !attempt || attempt.episode !== status.episode
+      || attempt.phase !== "unknown" || attempt.blockedReason !== "replacement_not_owned_by_restart") return false;
+  // An unsent continuation still belongs to the health resume path.
+  if (status.continuation_delivery === "waiting" && status.continuation_prompt) return false;
+  if (options.pendingConfirmation?.(status.episode)) return false;
+  const boot = db.getEvents(0, 1, "SessionStart")[0];
+  let bootSession = "";
+  try { bootSession = String(JSON.parse(boot?.payload || "{}").session_id ?? ""); } catch { bootSession = ""; }
+  if (!boot || !options.sessionId || bootSession !== options.sessionId) return false;
+  if (!(typeof attempt.stopEventId === "number" && boot.id > attempt.stopEventId)) return false;
+  return db.reconcilePmExitReplacement(status.episode,
+    "Current-session PM Stop from a boot after the /exit attempt: replacement pane is live and responsive",
+    { boot_event_id: boot.id, attempt_stop_event_id: attempt.stopEventId, session_id: options.sessionId });
+}
+
 export type PmStopMaintenance = "exit" | "exit_custody" | "clear";
 
 /**

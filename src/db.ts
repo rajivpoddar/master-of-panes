@@ -2900,6 +2900,32 @@ export class MoPDatabase {
     })();
   }
 
+  /**
+   * One transaction: credit the PM's verified replacement (attempt -> verified, cycle flag), then end the PM-only
+   * episode WITHOUT writing a delivery receipt (the continuation marker is restored to what it was, never upgraded to
+   * `delivered`). Used only when a current-session native PM Stop from a boot newer than the /exit attempt proves the
+   * replacement pane is live and responsive (CTO C0ALZJHGE49 ts 1795795900.421179). Returns false if the episode moved.
+   */
+  reconcilePmExitReplacement(episode: string, reason: string, evidence: Record<string, unknown>): boolean {
+    return this.db.transaction((): boolean => {
+      const status = this.getExitStatus();
+      const attempt = this.getExitAttempt(0);
+      if (!status.pending || !status.pm_only || status.with_devs || status.episode !== episode || !attempt) return false;
+      const previousDelivery = status.continuation_delivery;
+      const previous = { phase: attempt.phase, blockedReason: attempt.blockedReason };
+      attempt.phase = "verified";
+      attempt.blockedReason = null;
+      this.saveExitAttempt(0, attempt);
+      this.markSlotExitCycled(0);
+      this.setExitPending(false);
+      this.setConfig("exit_pending_continuation_delivery", previousDelivery ?? "");
+      this.logEvent(0, "pm_exit_custody_reconciled", "Stop", null, {
+        episode, previous, continuation_delivery: previousDelivery, reason, ...evidence,
+      });
+      return true;
+    })();
+  }
+
   getExitAttempt(slot: number): import("./devExitAttempt.js").DevExitAttempt | null {
     try {
       const attempt = JSON.parse(this.getConfig(`exit_attempt_${slot}`) || "null");

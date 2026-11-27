@@ -284,12 +284,19 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
       const pin: PmExitStopPin = { work: entryWork, boot: entryBoot,
         selectedEpisode: currentStop && maintenance === "exit" ? db.getExitStatus().episode : null };
       (c as unknown as { set(key: string, value: unknown): void }).set("pmExitStopPin", pin);
-      if (maintenance !== "clear") {
-        db.logEvent(0, "pm_stop_maintenance_selected", "Stop", null, {
-          selected: maintenance, pinned_work: entryWork, pinned_boot: entryBoot,
-          reason: "Exit owns this Stop; clear intent and latch kept untouched (no resend/reset)",
-        });
-      }
+      const selected = currentStop ? maintenance : "stale_stop";
+      const attempt = db.getExitStatus().attempts?.[0];
+      const reason = !currentStop ? "Stop does not belong to the current PM session"
+        : maintenance === "clear" ? "Clear path selected; delivery still requires a current authority"
+        : maintenance === "exit_custody"
+          ? `Exit attempt in custody (phase=${attempt?.phase ?? "none"}, reason=${attempt?.blockedReason ?? "none"}); clear intent and latch kept untouched`
+          : "Exit owns this Stop; clear intent and latch kept untouched (no resend/reset)";
+      db.logEvent(0, "pm_stop_maintenance_selected", "Stop", null, {
+        selected, pinned_work: entryWork, pinned_boot: entryBoot,
+        pinned_stop: pinnedStop, clear_pending: db.hasPendingClear(0),
+        handoff_clear_pending: !!db.getConfig("pm_handoff_requested_at"), reason,
+      });
+      console.log(`[pm-stop] slot 0 Stop -> ${selected}: ${reason} (pinned_stop=${pinnedStop}, clear_pending=${db.hasPendingClear(0)})`);
     }
     if (pinnedStop && beforeClearStop && maintenance === "clear") {
       try { await beforeClearStop(raw.session_id as string, authority ?? undefined); }

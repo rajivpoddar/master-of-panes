@@ -33,6 +33,7 @@ import {
   resolvePmExitTerminalRow,
   resolveSupersededPmExitHandoff,
   selectPmStopMaintenance,
+  reconcilePmExitReplacementAtStop,
 } from "./pmHandoffExit.js";
 import type { PmExitStopPin } from "./hooks.js";
 import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
@@ -617,7 +618,11 @@ const pmStopPins: PMStopAuthorityPins = {
 };
 
 const pmSoftBoundary = registerPMSoftBoundary(app, db, relay, sendPendingPmClearAtStop, armPmClearAfterHandoffAtStop, pmStopPins,
-  () => selectPmStopMaintenance(db, { ops: processor.pmExitHandoffOps, files: processor.pmExitHandoffFiles }));
+  (sessionId) => {
+    // Settle a stale unknown exit custody once the replacement PM answers a native Stop, so this Stop can clear.
+    reconcilePmExitReplacementAtStop(db, { sessionId, pendingConfirmation: (episode) => relay.hasPendingExitConfirmation(episode) });
+    return selectPmStopMaintenance(db, { ops: processor.pmExitHandoffOps, files: processor.pmExitHandoffFiles });
+  });
 
 // ─── MoP Clear Helpers ─────────────────────────────────
 // HTTP path for deterministic schedulers that cannot call MCP tools.
