@@ -191,6 +191,19 @@ def test_label_writer_skips_and_reports_invalid_changes(tmp_path, old, new, reas
         assert blocked(out) and reason in out["message"] and "SKIP #7925" in out["message"], out
 
 
+@pytest.mark.parametrize("second_target", [" 7930", " -- 7930", " https://github.com/Scribie/heydonna-app/issues/7930"])
+@pytest.mark.parametrize("label_flag", ["", " --add-label status:backlog"])
+def test_body_edit_cannot_apply_verified_header_to_a_second_issue(tmp_path, second_target, label_flag):
+    gh, _ = shims(tmp_path, validator_ok=True, live_body=REAL_ISSUE)
+    candidate = tmp_path / "ready-pool.md"
+    candidate.write_bytes((READY_HEADER + "\r\n\r\n" + REAL_ISSUE).encode("utf-8"))
+    single = f"gh issue edit 7925 --repo Scribie/heydonna-app -F {candidate}{label_flag}"
+    for wrapper in (HOME_WRAPPER, APP_WRAPPER):
+        assert not blocked(run(wrapper, PARSER, str(VALIDATOR), gh, tmp_path, single))
+        out = run(wrapper, PARSER, str(VALIDATOR), gh, tmp_path, single + second_target)
+        assert blocked(out) and "exactly one literal issue number" in out["message"], out
+
+
 def test_routine_lane_cannot_replace_body_by_dropping_the_label_flag(tmp_path, monkeypatch):
     monkeypatch.setenv("PROXY_AGENT_NAME", "proxy-routine-synthetic")
     gh, val = shims(tmp_path, validator_ok=True, live_body=REAL_ISSUE)

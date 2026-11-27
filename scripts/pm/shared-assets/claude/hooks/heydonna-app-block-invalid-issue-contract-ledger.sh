@@ -92,6 +92,10 @@ fi
 TARGET=$(printf '%s' "$PY_OUT" | jq -r '.target // "unknown"')
 ERRORS=$(printf '%s' "$PY_OUT" | jq -r '.errors | join(",")')
 case "$ERRORS" in
+  issue_body_edit_requires_one_verified_target)
+    jq -n --arg message "BLOCKED: an issue body edit must name exactly one literal issue number (first target: #${TARGET}); no issue was mutated." '{decision:"block",message:$message}'
+    exit 0
+    ;;
   label_hygiene_*|ready_pool_*)
     jq -n --arg message "SKIP #${TARGET} label hygiene (${ERRORS}): no issue was mutated. Report this issue and reason; do not replace its body to repair labels or metadata." '{decision:"block",message:$message}'
     exit 0

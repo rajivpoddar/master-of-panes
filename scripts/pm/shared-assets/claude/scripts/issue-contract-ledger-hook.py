@@ -354,6 +354,35 @@ def owner_buffer() -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+EDIT_VALUE_FLAGS = {
+    "--add-assignee", "--add-blocked-by", "--add-blocking", "--add-label", "--add-project",
+    "--add-sub-issue", "--body", "--body-file", "--milestone", "--parent", "--remove-assignee",
+    "--remove-blocked-by", "--remove-blocking", "--remove-label", "--remove-project",
+    "--remove-sub-issue", "--repo", "--title", "--type", "-b", "-F", "-m", "-R", "-t",
+}
+EDIT_BOOL_FLAGS = {"--remove-milestone", "--remove-parent", "--remove-type"}
+
+
+def single_issue_body_edit(parts: list[str]) -> bool:
+    """After the literal issue number, accept only options and their values."""
+    args = iter(parts[4:])
+    for token in args:
+        option, sep, _ = token.partition("=")
+        if option in EDIT_BOOL_FLAGS:
+            continue
+        if option in EDIT_VALUE_FLAGS:
+            if not sep and next(args, None) is None:
+                return False
+            continue
+        if token[:2] in EDIT_VALUE_FLAGS and len(token) > 2:
+            # gh/pflag also accepts attached values, e.g. -Fbody.md.
+            continue
+        # Positional argument, '--', or unknown option: never guess how
+        # many targets gh would mutate.
+        return False
+    return True
+
+
 def body_flags(parts: list[str]) -> tuple[list[str], list[str]]:
     inline = values(parts, {"--body", "-b"})
     files = values(parts, {"--body-file", "-F"})
@@ -553,6 +582,9 @@ def main() -> int:
             target = literal
             guarded = label_hygiene_edit(parts)
             inline, files = body_flags(parts)
+            if (inline or files) and not single_issue_body_edit(parts):
+                emit(target, "issue_body_edit_requires_one_verified_target")
+                return 0
             if guarded and (inline or len(files) > 1 or (files and
                     (not os.path.isabs(files[0]) or re.search(r"[$`*?\[\n]", files[0])))):
                 emit(target, "label_hygiene_requires_one_literal_absolute_body_file")
