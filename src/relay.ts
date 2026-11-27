@@ -14,10 +14,10 @@ import type { MoPDatabase } from "./db.js";
 import type { JsonlActivitySignal } from "./jsonlActivity.js";
 import type { MoPConfig, SlotState } from "./types.js";
 import { DEFAULT_DEV_SLOT_COUNT, isDecommissionedSlot, isValidDevSlot, isValidRuntimeSlot } from "./slotConfig.js";
-import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity } from "./paneIdentity.js";
+import { commandTimeout, paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity } from "./paneIdentity.js";
 import { QUEUED_HINT, clearOwnedRefusedPasteComposer, composerOwnsOnlyPayload, composerText, INJECT_ENTER_DELAY_MS, isSlashCommand, resolveSlashCommandEnterDelayMs, slashComposerClearable, submitWithComposerCheck } from "./composer.js";
 import { withSlotSendLock } from "./slotSendLock.js";
-import { exitOwnerMatches, exitReplacementReceiptBinds, parseForegroundClaude, type DevExitAttempt } from "./devExitAttempt.js";
+import { exitOwnerMatches, exitReplacementReceiptBinds, parseForegroundClaude, PM_STOP_REPLACEMENT_PROBE_BUDGET_MS, type DevExitAttempt } from "./devExitAttempt.js";
 import type { PMClearFenceRefusal } from "./pmClearLatch.js";
 import type { PasteGuard } from "./pasteGuard.js";
 
@@ -2034,11 +2034,14 @@ export class TmuxRelay {
   /** Pin the actual terminal processes as well as the immutable pane. No input. */
   async exitProcessIdentity(_slotNum: number, paneId: string, deadline = Date.now() + 2_000): Promise<string | null> {
     try {
-      if (Date.now() >= deadline) return null;
-      const probe = await this.runShell(`tmux display-message -t ${paneId} -p '#{pane_id}|#{pane_pid}|#{pane_tty}|#{pane_current_path}|#{pane_current_command}'`, { timeout: Math.min(1_000, deadline - Date.now()) });
+      const probeTimeout = commandTimeout(deadline, 1_000);
+      if (probeTimeout === null) return null;
+      const probe = await this.runShell(`tmux display-message -t ${paneId} -p '#{pane_id}|#{pane_pid}|#{pane_tty}|#{pane_current_path}|#{pane_current_command}'`, { timeout: probeTimeout });
       const [id, pid, tty] = probe.stdout.trim().split("|");
-      if (id !== paneId || !/^\d+$/.test(pid) || !/^\/dev\/[\w/.-]+$/.test(tty ?? "") || Date.now() >= deadline) return null;
-      const processes = await this.runShell(`ps -t ${shellEscape(tty)} -o pid=,pgid=,stat=,lstart=,comm=`, { timeout: Math.min(1_000, deadline - Date.now()) });
+      if (id !== paneId || !/^\d+$/.test(pid) || !/^\/dev\/[\w/.-]+$/.test(tty ?? "")) return null;
+      const psTimeout = commandTimeout(deadline, 1_000);
+      if (psTimeout === null) return null;
+      const processes = await this.runShell(`ps -t ${shellEscape(tty)} -o pid=,pgid=,stat=,lstart=,comm=`, { timeout: psTimeout });
       // Hook/MCP children may finish normally after Stop. Pin the foreground
       // process-group leader, not every transient child sharing its terminal.
       const leader = parseForegroundClaude(processes.stdout);
@@ -2052,14 +2055,31 @@ export class TmuxRelay {
    * pane, a DIFFERENT live foreground Claude in it, the attempt still owns its slot (assignment epoch, pin, retention,
    * input) and the latest exit_replacement_bound receipt binds that LIVE process. Returns the live process or null.
    */
-  async currentExitReplacementProcess(slot: number, attempt: DevExitAttempt, deadline = Date.now() + 2_000): Promise<string | null> {
+  async currentExitReplacementProcess(slot: number, attempt: DevExitAttempt,
+    deadline = Date.now() + PM_STOP_REPLACEMENT_PROBE_BUDGET_MS): Promise<string | null> {
     const db = this.db;
     if (!db) return null;
+    // ONE deadline for the whole probe (CTO REVISE 3, C0ALZJHGE49 thread 1795798240.220189, ts 1795801872.756899): the
+    // pane identity read, its git check and the fallback scan share it with the process read, and the race below
+    // returns null at the deadline even if a command ignores its timeout. Everything here is read-only, so a late
+    // result is simply discarded: custody stays unchanged and the original Stop continues.
+    const remaining = commandTimeout(deadline, Number.MAX_SAFE_INTEGER);
+    if (remaining === null) return null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), remaining); });
     try {
-      const identity = await verifyPaneIdentity(slot, this.runShell);
+      return await Promise.race([this.probeExitReplacementProcess(db, slot, attempt, deadline), expired]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async probeExitReplacementProcess(db: MoPDatabase, slot: number, attempt: DevExitAttempt, deadline: number): Promise<string | null> {
+    try {
+      const identity = await verifyPaneIdentity(slot, this.runShell, deadline);
       if (!identity.ok || identity.snapshot.paneId !== attempt.paneId) return null;
       const process = await this.exitProcessIdentity(slot, attempt.paneId, deadline);
-      if (!process || process === attempt.originalProcess) return null;
+      if (!process || process === attempt.originalProcess || Date.now() >= deadline) return null;
       if (!exitOwnerMatches(db, slot, attempt, (row) => this.exitAssignment(row)).matches) return null;
       const restart = db.getEvents(slot, 1, "exit_replacement_bound")[0];
       return exitReplacementReceiptBinds(JSON.parse(restart?.payload ?? "null"),

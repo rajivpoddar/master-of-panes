@@ -33,7 +33,7 @@ import {
   resolvePmExitTerminalRow,
   resolveSupersededPmExitHandoff,
   selectPmStopMaintenance,
-  pmExitReplacementCandidate, reconcilePmExitReplacementAtStop,
+  selectPmStopWithReplacementProbe,
 } from "./pmHandoffExit.js";
 import type { PmExitStopPin } from "./hooks.js";
 import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
@@ -613,15 +613,14 @@ const pmStopPins: PMStopAuthorityPins = {
 const pmSoftBoundary = registerPMSoftBoundary(app, db, relay, sendPendingPmClearAtStop, armPmClearAfterHandoffAtStop, pmStopPins,
   (sessionId) => {
     // Settle a stale unknown exit custody once the live, still-owning replacement PM answers a native Stop, so this Stop
-    // can clear. Normal Stops stay synchronous; only a sync-prefiltered candidate pays the bounded (2s) live probe, and
+    // can clear. Normal Stops stay synchronous; only a sync-prefiltered candidate pays the bounded (1.5s) live probe, and
     // any failure keeps custody (the selection below still runs). Never gates PM input or tools.
-    const pendingConfirmation = (episode: string) => relay.hasPendingExitConfirmation(episode);
-    const select = () => selectPmStopMaintenance(db, { ops: processor.pmExitHandoffOps, files: processor.pmExitHandoffFiles });
-    const candidate = pmExitReplacementCandidate(db, { sessionId, pendingConfirmation });
-    if (!candidate) return select();
-    return relay.currentExitReplacementProcess(0, candidate).catch(() => null).then((liveProcess) => {
-      try { reconcilePmExitReplacementAtStop(db, { sessionId, pendingConfirmation, liveProcess }); } catch { /* custody kept */ }
-      return select();
+    // ONE deadline covers the whole live probe (CTO REVISE 3, ts 1795801872.756899); expiry keeps custody unchanged.
+    return selectPmStopWithReplacementProbe(db, {
+      sessionId,
+      pendingConfirmation: (episode) => relay.hasPendingExitConfirmation(episode),
+      select: () => selectPmStopMaintenance(db, { ops: processor.pmExitHandoffOps, files: processor.pmExitHandoffFiles }),
+      probe: (candidate, deadline) => relay.currentExitReplacementProcess(0, candidate, deadline),
     });
   });
 

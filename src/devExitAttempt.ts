@@ -18,6 +18,13 @@ export type DevExitAttempt = {
   blockedReason: string | null;
 };
 
+/**
+ * Whole budget of the live replacement probe a PM Stop may pay (CTO REVISE 3, C0ALZJHGE49 thread 1795798240.220189,
+ * ts 1795801872.756899). The installed hook relay gives the whole Stop HTTP request 3 s (scripts/hook-relay.sh,
+ * urlopen timeout=3); half of it is left for body parsing, selection and the downstream Stop handling.
+ */
+export const PM_STOP_REPLACEMENT_PROBE_BUDGET_MS = 1_500;
+
 /** Select only an unambiguous foreground Claude process-group leader. */
 export function parseForegroundClaude(ps: string): { pid: number; start: string } | null {
   const leaders = ps.split(/\r?\n/).flatMap(line => {

@@ -35,6 +35,17 @@ function parsePaneIdentityLine(line: string): { paneId: string; panePath: string
   return { paneId, panePath };
 }
 
+/**
+ * Per-command timeout under ONE caller deadline (CTO REVISE C0ALZJHGE49 thread 1795798240.220189,
+ * ts 1795801872.756899): never more than `capMs`, never past `deadline`. Returns null once the deadline has passed,
+ * so a caller never starts a command it cannot finish, and never passes 0 (child_process treats 0 as "no timeout").
+ */
+export function commandTimeout(deadline: number | undefined, capMs: number, now = Date.now()): number | null {
+  if (deadline === undefined) return capMs;
+  const remaining = Math.floor(deadline - now);
+  return remaining > 0 ? Math.min(capMs, remaining) : null;
+}
+
 export function expectedCheckoutPath(slot: number): string | null {
   if (slot === 0) return "/Users/rajiv/Downloads/projects/heydonna-app";
   return runtimeIdentity(slot)?.checkoutPath ?? null;
@@ -82,25 +93,32 @@ export function validatePaneIdentity(
 export async function verifyPaneIdentity(
   slot: number,
   runShell: PaneCommandRunner = execShell,
+  /** Optional absolute deadline (ms epoch) shared by EVERY probe below, the fallback scan included. */
+  deadline?: number,
 ): Promise<PaneIdentityResult> {
   if (!expectedCheckoutPath(slot)) {
     return { ok: false, reason: "unknown_slot", detail: `no runtime identity is configured for slot ${slot}` };
   }
   const address = paneAddress(slot);
+  const expired: PaneIdentityResult = { ok: false, reason: "pane_unavailable", detail: `pane ${address} identity probe deadline expired` };
   try {
+    const firstTimeout = commandTimeout(deadline, 3_000);
+    if (firstTimeout === null) return expired;
     const result = await runShell(
       // A literal tab is rendered as an underscore by tmux under the
       // launchd environment used by the service.  Use a stable delimiter
       // so the immutable pane id/path probe is environment-independent.
       `tmux display-message -t ${address} -p '#{pane_id}|#{pane_current_path}'`,
-      { timeout: 3_000 },
+      { timeout: firstTimeout },
     );
     const direct = parsePaneIdentityLine(result.stdout.trimEnd().split(/\r?\n/, 1)[0] ?? "");
     if (direct) {
+      const gitTimeout = commandTimeout(deadline, 3_000);
+      if (gitTimeout === null) return expired;
       try {
         const checkout = await runShell(
           `git -C ${shellEscape(direct.panePath)} rev-parse --show-toplevel`,
-          { timeout: 3_000 },
+          { timeout: gitTimeout },
         );
         const validated = validatePaneIdentity(slot, checkout.stdout, direct.paneId);
         if (validated.ok) return validated;
@@ -112,9 +130,11 @@ export async function verifyPaneIdentity(
     // Numeric pane addresses can be rebound by layout changes. Resolve the
     // slot by its expected checkout in the fixed MoP window, then pin all
     // subsequent effects to the one immutable tmux pane id returned here.
+    const listTimeout = commandTimeout(deadline, 3_000);
+    if (listTimeout === null) return expired;
     const listed = await runShell(
       `tmux list-panes -t ${address.slice(0, address.lastIndexOf("."))} -F '#{pane_id}|#{pane_current_path}'`,
-      { timeout: 3_000 },
+      { timeout: listTimeout },
     );
     const matches: PaneIdentitySnapshot[] = [];
     const lines = listed.stdout.trimEnd().split(/\r?\n/).filter(Boolean);
@@ -126,10 +146,13 @@ export async function verifyPaneIdentity(
       if (!candidate) {
         return { ok: false, reason: "pane_unavailable", detail: `pane ${address} enumeration contained malformed identity` };
       }
+      // A scan cut short by the deadline cannot prove "exactly one match": fail closed, never a partial answer.
+      const scanTimeout = commandTimeout(deadline, 3_000);
+      if (scanTimeout === null) return expired;
       try {
         const checkout = await runShell(
           `git -C ${shellEscape(candidate.panePath)} rev-parse --show-toplevel`,
-          { timeout: 3_000 },
+          { timeout: scanTimeout },
         );
         const validated = validatePaneIdentity(slot, checkout.stdout, candidate.paneId);
         if (validated.ok) matches.push(validated.snapshot);

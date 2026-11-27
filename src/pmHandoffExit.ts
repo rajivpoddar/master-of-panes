@@ -29,7 +29,7 @@
  * PM Stops fall through to normal handling and the exit stays pending.
  */
 import type { MoPDatabase } from "./db.js";
-import { exitOwnerMatches, exitReplacementReceiptBinds, pmContinuationSettled, type DevExitAttempt } from "./devExitAttempt.js";
+import { exitOwnerMatches, exitReplacementReceiptBinds, pmContinuationSettled, PM_STOP_REPLACEMENT_PROBE_BUDGET_MS, type DevExitAttempt } from "./devExitAttempt.js";
 import {
   handoffFilesSaved,
   PM_HANDOFF_FILES,
@@ -340,6 +340,32 @@ export function reconcilePmExitReplacementAtStop(
 }
 
 export type PmStopMaintenance = "exit" | "exit_custody" | "clear";
+
+/**
+ * The PM Stop selection with the exit custody backstop (server.ts selectStop). Normal Stops stay synchronous; only a
+ * sync-prefiltered candidate pays the live probe, under ONE deadline computed here and passed through the whole probe
+ * (pane identity, git, fallback scan, process read; CTO REVISE 3, C0ALZJHGE49 thread 1795798240.220189,
+ * ts 1795801872.756899). At the deadline, or on any failure, the probe yields null: custody is unchanged and the
+ * selection (and so the original Stop) continues. Never gates PM input or tools.
+ */
+export function selectPmStopWithReplacementProbe(db: ReconcileDb, options: {
+  sessionId: string;
+  pendingConfirmation: (episode: string) => boolean;
+  select: () => PmStopMaintenance;
+  probe: (attempt: DevExitAttempt, deadline: number) => Promise<string | null>;
+  budgetMs?: number;
+}): PmStopMaintenance | Promise<PmStopMaintenance> {
+  const { sessionId, pendingConfirmation } = options;
+  const candidate = pmExitReplacementCandidate(db, { sessionId, pendingConfirmation });
+  if (!candidate) return options.select();
+  const deadline = Date.now() + (options.budgetMs ?? PM_STOP_REPLACEMENT_PROBE_BUDGET_MS);
+  let probe: Promise<string | null>;
+  try { probe = options.probe(candidate, deadline); } catch { probe = Promise.resolve(null); }
+  return probe.catch(() => null).then((liveProcess) => {
+    try { reconcilePmExitReplacementAtStop(db, { sessionId, pendingConfirmation, liveProcess }); } catch { /* custody kept */ }
+    return options.select();
+  });
+}
 
 /**
  * ONE maintenance command per pinned PM Stop. A latched clear keeps custody;
