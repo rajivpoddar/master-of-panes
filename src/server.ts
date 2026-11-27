@@ -33,7 +33,7 @@ import {
   resolvePmExitTerminalRow,
   resolveSupersededPmExitHandoff,
   selectPmStopMaintenance,
-  reconcilePmExitReplacementAtStop,
+  pmExitReplacementCandidate, reconcilePmExitReplacementAtStop,
 } from "./pmHandoffExit.js";
 import type { PmExitStopPin } from "./hooks.js";
 import { appendFile, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
@@ -612,9 +612,17 @@ const pmStopPins: PMStopAuthorityPins = {
 
 const pmSoftBoundary = registerPMSoftBoundary(app, db, relay, sendPendingPmClearAtStop, armPmClearAfterHandoffAtStop, pmStopPins,
   (sessionId) => {
-    // Settle a stale unknown exit custody once the replacement PM answers a native Stop, so this Stop can clear.
-    reconcilePmExitReplacementAtStop(db, { sessionId, pendingConfirmation: (episode) => relay.hasPendingExitConfirmation(episode) });
-    return selectPmStopMaintenance(db, { ops: processor.pmExitHandoffOps, files: processor.pmExitHandoffFiles });
+    // Settle a stale unknown exit custody once the live, still-owning replacement PM answers a native Stop, so this Stop
+    // can clear. Normal Stops stay synchronous; only a sync-prefiltered candidate pays the bounded (2s) live probe, and
+    // any failure keeps custody (the selection below still runs). Never gates PM input or tools.
+    const pendingConfirmation = (episode: string) => relay.hasPendingExitConfirmation(episode);
+    const select = () => selectPmStopMaintenance(db, { ops: processor.pmExitHandoffOps, files: processor.pmExitHandoffFiles });
+    const candidate = pmExitReplacementCandidate(db, { sessionId, pendingConfirmation });
+    if (!candidate) return select();
+    return relay.currentExitReplacementProcess(0, candidate).catch(() => null).then((liveProcess) => {
+      try { reconcilePmExitReplacementAtStop(db, { sessionId, pendingConfirmation, liveProcess }); } catch { /* custody kept */ }
+      return select();
+    });
   });
 
 // ─── MoP Clear Helpers ─────────────────────────────────

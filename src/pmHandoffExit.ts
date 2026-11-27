@@ -29,7 +29,7 @@
  * PM Stops fall through to normal handling and the exit stays pending.
  */
 import type { MoPDatabase } from "./db.js";
-import { exitReplacementReceiptBinds } from "./devExitAttempt.js";
+import { exitOwnerMatches, exitReplacementReceiptBinds, pmContinuationSettled, type DevExitAttempt } from "./devExitAttempt.js";
 import {
   handoffFilesSaved,
   PM_HANDOFF_FILES,
@@ -279,34 +279,64 @@ export function drainPmExitStop(
  * this Stop must come from that bound boot session. A newer UNBOUND boot keeps
  * UNKNOWN. Never creates a clear request, never gates input.
  */
-export function reconcilePmExitReplacementAtStop(
-  db: Pick<MoPDatabase, "getConfig" | "getExitStatus" | "getExitAttempt" | "getEvents" | "reconcilePmExitReplacement">,
-  options: { sessionId: string; pendingConfirmation?: (episode: string) => boolean },
-): boolean {
-  if (!pmExitInCustody(db)) return false;
+type ReconcileDb = Pick<MoPDatabase, "getConfig" | "getExitStatus" | "getExitAttempt" | "getEvents" | "getSlot"
+  | "isExitSlotRetained" | "reconcilePmExitReplacement">;
+
+/**
+ * Sync prefilter: the exit in custody is UNKNOWN / replacement_not_owned_by_restart, its continuation is SETTLED, no
+ * exit confirmation is open, the attempt still owns slot 0 (assignment epoch, pin, retention) and the latest
+ * exit_replacement_bound receipt is from a launch after this attempt's Stop and names this Stop's session. Returns the
+ * attempt to probe live, or null (custody kept). Never mutates.
+ */
+export function pmExitReplacementCandidate(db: Omit<ReconcileDb, "reconcilePmExitReplacement">,
+  options: { sessionId: string; pendingConfirmation?: (episode: string) => boolean }): DevExitAttempt | null {
+  if (!pmExitInCustody(db)) return null;
   const status = db.getExitStatus();
   const attempt = db.getExitAttempt(0);
   if (!status.episode || status.with_devs || !attempt || attempt.episode !== status.episode
-      || attempt.phase !== "unknown" || attempt.blockedReason !== "replacement_not_owned_by_restart") return false;
-  // An unsent continuation still belongs to the health resume path.
-  if (status.continuation_delivery === "waiting" && status.continuation_prompt) return false;
-  if (options.pendingConfirmation?.(status.episode)) return false;
+      || attempt.phase !== "unknown" || attempt.blockedReason !== "replacement_not_owned_by_restart") return null;
+  // CTO REVISE ts 1795800748.304029 item 1: "attempted" is written BEFORE the guarded send, so it stays in custody
+  // until authoritative delivery (this episode's delivered receipt) or an existing terminal disposition; "waiting" is
+  // still owned by the health resume path.
+  if (!pmContinuationSettled(db, status.episode, status.continuation_delivery)) return null;
+  if (options.pendingConfirmation?.(status.episode)) return null;
+  // Item 2: the relay's ownership checks (assignment epoch, pin, retention) before any credit.
+  if (!exitOwnerMatches(db, 0, attempt, () => "").matches) return null;
+  let receipt: any = null;
+  try { receipt = JSON.parse(db.getEvents(0, 1, "exit_replacement_bound")[0]?.payload ?? "null"); } catch { receipt = null; }
+  if (!receipt || !options.sessionId || receipt.bootSession !== options.sessionId) return null;
+  // The receipt's launch must follow this attempt's own Stop: an older restart never binds a newer exit.
+  if (!(typeof attempt.stopEventId === "number" && Number.isInteger(receipt.launchEventId)
+      && receipt.launchEventId > attempt.stopEventId)) return null;
+  return attempt;
+}
+
+/**
+ * Exit custody backstop at a current-session PM Stop. An UNKNOWN PM exit (phase unknown,
+ * replacement_not_owned_by_restart) holds exit custody, so later PM Stops choose exit_custody (request 45610,
+ * 2026-11-27). Credit only with proof-bound custody (CTO REVISE C0ALZJHGE49 thread 1795798240.220189,
+ * ts 1795798363.328589) AND live authority (REVISE 2, ts 1795800748.304029): `liveProcess` is the relay's
+ * currentExitReplacementProcess for this attempt (same pane, a different live foreground Claude, the attempt still owns
+ * slot 0, the latest receipt binds that LIVE process). The receipt's own replacementProcess is never the expected value.
+ * The continuation must be settled. A newer UNBOUND boot keeps UNKNOWN. Never creates a clear request, never gates input.
+ */
+export function reconcilePmExitReplacementAtStop(
+  db: ReconcileDb,
+  options: { sessionId: string; pendingConfirmation?: (episode: string) => boolean; liveProcess: string | null },
+): boolean {
+  const attempt = pmExitReplacementCandidate(db, options);
+  const process = options.liveProcess ?? "";
+  if (!attempt || !process || process === attempt.originalProcess) return false;
   const receiptEvent = db.getEvents(0, 1, "exit_replacement_bound")[0];
   let receipt: any = null;
   try { receipt = JSON.parse(receiptEvent?.payload ?? "null"); } catch { receipt = null; }
-  const process = typeof receipt?.replacementProcess === "string" ? receipt.replacementProcess : "";
   const boot = db.getEvents(0, 1, "SessionStart")[0];
-  if (!receiptEvent || !process || process === attempt.originalProcess || !options.sessionId) return false;
-  // The receipt's launch must follow this attempt's own Stop: an older restart never binds a newer exit.
-  if (!(typeof attempt.stopEventId === "number" && Number.isInteger(receipt.launchEventId)
-      && receipt.launchEventId > attempt.stopEventId)) return false;
-  if (!exitReplacementReceiptBinds(receipt, boot, attempt, process)) return false;
-  // This Stop is from the bound replacement session itself.
-  if (receipt.bootSession !== options.sessionId) return false;
-  return db.reconcilePmExitReplacement(status.episode,
-    "Current-session PM Stop from the receipt-bound replacement of this exact /exit attempt",
+  if (!receiptEvent || !exitReplacementReceiptBinds(receipt, boot, attempt, process)) return false;
+  return db.reconcilePmExitReplacement(attempt.episode,
+    "Current-session PM Stop from the live, receipt-bound, still-owning replacement of this exact /exit attempt",
     { receipt_event_id: receiptEvent.id, boot_event_id: boot!.id, launch_event_id: receipt.launchEventId,
-      attempt_stop_event_id: attempt.stopEventId, session_id: options.sessionId, replacement_process: process });
+      attempt_stop_event_id: attempt.stopEventId, session_id: options.sessionId, replacement_process: process,
+      attempt_submitted_at: attempt.submittedAt, assignment_epoch: attempt.assignmentEpoch });
 }
 
 export type PmStopMaintenance = "exit" | "exit_custody" | "clear";

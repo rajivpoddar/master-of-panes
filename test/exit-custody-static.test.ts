@@ -16,11 +16,15 @@ test("owner-changed or unrelated replacement is retained, not cycled", () => {
   assert.ok(observer.indexOf('if (!bound)') < observer.indexOf('db.markSlotExitCycled'));
   assert.ok(observer.includes('replacement_not_owned_by_restart'));
 });
+const exitAttempt = readFileSync(new URL("../src/devExitAttempt.ts", import.meta.url), "utf8");
 test("a saved PM handoff stays owned despite later UserPromptSubmit events (poll events during exit)", () => {
   const observer = relay.slice(relay.indexOf("async observeExitAttempts"), relay.indexOf("private scheduleExitConfirmation"));
-  assert.ok(observer.includes("const savedPmHandoff = slot === 0 && pin?.savedPmHandoff === true;"));
-  assert.ok(observer.includes("(savedPmHandoff || attempt.inputEventId ===") , "input equality applies only without a saved handoff");
-  assert.ok(observer.indexOf("savedPmHandoff") < observer.indexOf("if (!ownerMatches)"));
+  // The owner predicate is shared with the PM Stop backstop (CTO REVISE ts 1795800748.304029, item 2).
+  const owner = exitAttempt.slice(exitAttempt.indexOf("export function exitOwnerMatches"), exitAttempt.indexOf("export function pmContinuationSettled"));
+  assert.ok(owner.includes("const savedPmHandoff = slot === 0 && pin?.savedPmHandoff === true;"));
+  assert.ok(owner.includes("(savedPmHandoff || attempt.inputEventId ===") , "input equality applies only without a saved handoff");
+  assert.ok(owner.includes("attempt.assignmentEpoch === (row?.assignment_epoch ?? 0)"));
+  assert.ok(observer.indexOf("exitOwnerMatches(db, slot, attempt") < observer.indexOf("if (!ownerMatches)"));
 });
 test("failed cleanup preserves waiting inbound instead of joining its paste", () => {
   assert.ok(relay.includes('if (exactDraft === command && physicalRefusal() === null)'));

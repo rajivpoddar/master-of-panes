@@ -17,7 +17,7 @@ import { DEFAULT_DEV_SLOT_COUNT, isDecommissionedSlot, isValidDevSlot, isValidRu
 import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity } from "./paneIdentity.js";
 import { QUEUED_HINT, clearOwnedRefusedPasteComposer, composerOwnsOnlyPayload, composerText, INJECT_ENTER_DELAY_MS, isSlashCommand, resolveSlashCommandEnterDelayMs, slashComposerClearable, submitWithComposerCheck } from "./composer.js";
 import { withSlotSendLock } from "./slotSendLock.js";
-import { exitReplacementReceiptBinds, parseForegroundClaude, type DevExitAttempt } from "./devExitAttempt.js";
+import { exitOwnerMatches, exitReplacementReceiptBinds, parseForegroundClaude, type DevExitAttempt } from "./devExitAttempt.js";
 import type { PMClearFenceRefusal } from "./pmClearLatch.js";
 import type { PasteGuard } from "./pasteGuard.js";
 
@@ -2046,6 +2046,27 @@ export class TmuxRelay {
     } catch { return null; }
   }
 
+  /**
+   * Live authority to credit an exit replacement, side-effect free (CTO REVISE C0ALZJHGE49 thread 1795798240.220189,
+   * ts 1795800748.304029, item 2). The same checks observeExitAttempts applies before crediting a cycle: the attempt's
+   * pane, a DIFFERENT live foreground Claude in it, the attempt still owns its slot (assignment epoch, pin, retention,
+   * input) and the latest exit_replacement_bound receipt binds that LIVE process. Returns the live process or null.
+   */
+  async currentExitReplacementProcess(slot: number, attempt: DevExitAttempt, deadline = Date.now() + 2_000): Promise<string | null> {
+    const db = this.db;
+    if (!db) return null;
+    try {
+      const identity = await verifyPaneIdentity(slot, this.runShell);
+      if (!identity.ok || identity.snapshot.paneId !== attempt.paneId) return null;
+      const process = await this.exitProcessIdentity(slot, attempt.paneId, deadline);
+      if (!process || process === attempt.originalProcess) return null;
+      if (!exitOwnerMatches(db, slot, attempt, (row) => this.exitAssignment(row)).matches) return null;
+      const restart = db.getEvents(slot, 1, "exit_replacement_bound")[0];
+      return exitReplacementReceiptBinds(JSON.parse(restart?.payload ?? "null"),
+        db.getEvents(slot, 1, "SessionStart")[0], attempt, process) ? process : null;
+    } catch { return null; }
+  }
+
   /** Health observes only; initial and bounded retry dispatch belong to Stop. */
   async observeExitAttempts(): Promise<void> {
     const db = this.db;
@@ -2059,23 +2080,13 @@ export class TmuxRelay {
       const process = await this.exitProcessIdentity(slot, attempt.paneId);
       if (!db.getExitPending() || db.getExitStatus().episode !== status.episode
           || db.getExitAttempt(slot)?.submittedAt !== attempt.submittedAt) continue;
-      const pin = attempt.ownerPin as ExitOwnerPin | null;
-      let delayedReceiptRetention = false;
-      try {
-        const retained = JSON.parse(db.getConfig(`exit_retained_${slot}`) || "null");
-        delayedReceiptRetention = retained?.episode === attempt.episode && retained.reason === "replacement_not_owned_by_restart";
-      } catch { /* Other retention remains binding. */ }
       // A PM Stop that consumed its exit on a SAVED handoff stays owned despite new
       // input (exitOwnerRefusal and hooks.ts: "a saved handoff remains valid despite
       // new input"). Background-agent poll events keep firing UserPromptSubmit while
       // the old PM exits, so requiring the Stop-time input id here retained that
       // exit as exit_owner_superseded, no cycle credit, and no continuation
-      // (episode 00857b64, 2026-11-17).
-      const savedPmHandoff = slot === 0 && pin?.savedPmHandoff === true;
-      const ownerMatches = !!pin && (!db.isExitSlotRetained(slot) || delayedReceiptRetention)
-        && attempt.assignmentEpoch === (db.getSlot(slot)?.assignment_epoch ?? 0)
-        && (slot === 0 || (!!db.getSlot(slot) && this.exitAssignment(db.getSlot(slot)!) === pin.assignment))
-        && (savedPmHandoff || attempt.inputEventId === (db.getEvents(slot, 1, "UserPromptSubmit")[0]?.id ?? null));
+      // (episode 00857b64, 2026-11-17). The predicate lives in exitOwnerMatches, shared with the PM Stop backstop.
+      const { matches: ownerMatches, delayedReceiptRetention } = exitOwnerMatches(db, slot, attempt, (row) => this.exitAssignment(row));
       if (!ownerMatches) { db.retainExitSlot(slot, "exit_owner_superseded"); continue; }
       if (process && process !== attempt.originalProcess) {
         const restart = db.getEvents(slot, 1, "exit_replacement_bound")[0];

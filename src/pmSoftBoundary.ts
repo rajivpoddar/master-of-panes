@@ -252,7 +252,7 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
   beforeClearStop?: (sessionId: string, authority?: PMStopAuthority) => Promise<void>,
   stopPins?: PMStopAuthorityPins,
   /** ONE maintenance command per pinned Stop: "exit" | "exit_custody" hold the clear. */
-  selectStop?: (sessionId: string, workPin: number) => PmStopMaintenance): PMSoftBoundary {
+  selectStop?: (sessionId: string, workPin: number) => PmStopMaintenance | Promise<PmStopMaintenance>): PMSoftBoundary {
   const boundary = new PMSoftBoundary(db, () => pendingPMMaintenance(db), Date.now, () => relay.setPMBusy(true));
   relay.setPMMaintenanceGate(boundary);
   app.use("/hooks/slot/0", async (c, next) => {
@@ -279,7 +279,7 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
     // claim (CTO REVISE ts 1793760137.229639): new input during body parsing
     // must not strand a saved exit. Clear still needs the pinned claim, and one
     // command per Stop holds: exit/exit_custody always skip the clear below.
-    const maintenance: PmStopMaintenance = currentStop && selectStop ? selectStop(raw.session_id as string, entryWork) : "clear";
+    const maintenance: PmStopMaintenance = currentStop && selectStop ? await selectStop(raw.session_id as string, entryWork) : "clear";
     // Diagnostic capture is best effort and cannot interrupt the Stop path.
     let observedHandoff: string | null = null;
     try {

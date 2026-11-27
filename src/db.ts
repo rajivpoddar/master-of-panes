@@ -14,6 +14,7 @@ import type { EventLogEntry, MoPConfig, OpsJobRecord, OpsJobStatus, SlotState, S
 import { devSlots, PM_SLOT, runtimeIdentity } from "./slotConfig.js";
 import type { BeginDecision, BeginRequest, CustodyRow, CustodyState } from "./sendCustody.js";
 import { AlertReminderStore, ensureAlertReminderSchema } from "./alertReminders.js";
+import { pmContinuationSettled } from "./devExitAttempt.js";
 
 export interface SlotPredecessorContext {
   issue: number | null;
@@ -2912,6 +2913,12 @@ export class MoPDatabase {
       const status = this.getExitStatus();
       const attempt = this.getExitAttempt(0);
       if (!status.pending || !status.pm_only || status.with_devs || status.episode !== episode || !attempt) return false;
+      // Same-transaction recheck (CTO REVISE ts 1795800748.304029): exactly the UNKNOWN attempt that was probed, still
+      // owning slot 0's assignment epoch, with a settled continuation. Anything else keeps custody untouched.
+      if (attempt.phase !== "unknown" || attempt.blockedReason !== "replacement_not_owned_by_restart"
+          || (typeof evidence.attempt_submitted_at === "string" && attempt.submittedAt !== evidence.attempt_submitted_at)
+          || attempt.assignmentEpoch !== (this.getSlot(0)?.assignment_epoch ?? 0)
+          || !pmContinuationSettled(this, episode, status.continuation_delivery)) return false;
       const previousDelivery = status.continuation_delivery;
       const previous = { phase: attempt.phase, blockedReason: attempt.blockedReason };
       attempt.phase = "verified";

@@ -55,3 +55,52 @@ export function exitReplacementReceiptBinds(
     return false;
   }
 }
+
+type ExitOwnerDb = {
+  getConfig(key: string): string | null | undefined;
+  isExitSlotRetained(slot: number): boolean;
+  getSlot(slot: number): { assignment_epoch?: number | null } | null | undefined;
+  getEvents(slot: number, limit: number, type?: string): Array<{ id: number; payload: string | null }>;
+};
+
+/**
+ * The relay's live-owner predicate, side-effect free: the attempt still owns its slot. Same assignment epoch, owner
+ * pin present, not retained (except the delayed-receipt retention), same assignment for dev slots, and the Stop-time
+ * input unless the PM consumed its exit on a saved handoff. Shared by observeExitAttempts and the PM Stop backstop
+ * (CTO REVISE C0ALZJHGE49 thread 1795798240.220189, ts 1795800748.304029, item 2: "reuse relay.ts's current-process and
+ * ownership checks before crediting the cycle").
+ */
+export function exitOwnerMatches(db: ExitOwnerDb, slot: number, attempt: DevExitAttempt,
+  assignmentOf: (row: any) => string): { matches: boolean; delayedReceiptRetention: boolean } {
+  const pin = attempt.ownerPin as { assignment?: string; savedPmHandoff?: boolean } | null;
+  let delayedReceiptRetention = false;
+  try {
+    const retained = JSON.parse(db.getConfig(`exit_retained_${slot}`) || "null");
+    delayedReceiptRetention = retained?.episode === attempt.episode && retained.reason === "replacement_not_owned_by_restart";
+  } catch { /* Other retention remains binding. */ }
+  const savedPmHandoff = slot === 0 && pin?.savedPmHandoff === true;
+  const row = db.getSlot(slot);
+  const matches = !!pin && (!db.isExitSlotRetained(slot) || delayedReceiptRetention)
+    && attempt.assignmentEpoch === (row?.assignment_epoch ?? 0)
+    && (slot === 0 || (!!row && assignmentOf(row) === pin.assignment))
+    && (savedPmHandoff || attempt.inputEventId === (db.getEvents(slot, 1, "UserPromptSubmit")[0]?.id ?? null));
+  return { matches, delayedReceiptRetention };
+}
+
+/**
+ * A PM-only episode's continuation is settled (no send can still be in flight) only on authoritative delivery or an
+ * existing terminal disposition. "waiting" will still be sent by the health resume path, and "attempted" is written
+ * BEFORE the guarded send, so it counts only with this episode's delivered pm_restart_continuation receipt
+ * (CTO REVISE C0ALZJHGE49 ts 1795800748.304029, item 1).
+ */
+export function pmContinuationSettled(db: Pick<ExitOwnerDb, "getEvents">, episode: string | null,
+  delivery: string | null | undefined): boolean {
+  if (delivery === "delivered" || delivery === "exit_stalled" || delivery === "exit_refused" || !delivery) return true;
+  if (delivery !== "attempted" || !episode) return false;
+  return db.getEvents(0, 20, "pm_restart_continuation").some((row) => {
+    try {
+      const payload = JSON.parse(row.payload ?? "null");
+      return payload?.episode === episode && payload.delivery === "delivered";
+    } catch { return false; }
+  });
+}
