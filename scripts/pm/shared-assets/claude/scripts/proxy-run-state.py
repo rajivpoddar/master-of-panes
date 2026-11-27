@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import tempfile
 import sys
 import time
 import uuid
@@ -23,7 +24,7 @@ LEASE_TTL_MIN = 60
 QUEUE_SUPPRESS_MIN = 15
 # A relaunch must reproduce the launch; per-run identity, credentials and test-only plumbing never travel.
 ENV_KEEP = re.compile(r'^(?:PROXY_|[A-Z]+_PROXY_CAP$|LUNA_)')
-ENV_DROP = re.compile(r'(?i)token|secret|password|api.?key|credential|^PROXY_AGENT_(?:RUN_NAME|NAME|DRY_RUN|PM_OPS_CLI|RUN_STATE_DIR)$|^PROXY_RESUME_ORIGINAL$')
+ENV_DROP = re.compile(r'(?i)token|secret|password|api.?key|credential|^PROXY_AGENT_(?:RUN_NAME|NAME|DRY_RUN|PM_OPS_CLI|RUN_STATE_DIR)$|^PROXY_RESUME_ORIGINAL$|^PROXY_AGENT_STUB_')
 LANE_PS = re.compile(r'(?:^|\s)\S*/claude\s+-p\s+--name\s+([A-Za-z0-9._-]+)\s+--model\s+(\S+)')
 
 def name_ok(name):
@@ -196,10 +197,69 @@ def upsert(name, data, suppress_until, replace=False):
                    '--action', 'Monitor proxy run and act on its result', '--suppress-until', suppress_until,
                    *extra, '--evidence-json', json.dumps(data)])
 
+def capacity_wait(spec, pools, base, ledger_cli, slack_cli):
+    """Persist custody before a bounded, de-duplicated override request."""
+    name, typ = spec['name'], spec['type']
+    refs = [(key, spec[key]) for key in ('issue', 'pr') if spec.get(key)]
+    kind, target = next(((key, ref) for key, ref in refs if key == 'pr'), refs[0] if refs else ('proxy', name))
+    target_type = 'github_' + kind if refs else 'proxy'
+    target_label = ', '.join(f'{key.upper()} #{ref}' for key, ref in refs) or 'issue/PR not specified'
+    action = 'cd ' + shlex.quote(spec['cwd']) + ' && ' + spec['cmd']
+    evidence = {'lane': name, 'type': typ, 'pools_tried': pools, 'state': 'QUEUED_AWAITING_OVERRIDE'}
+    args = ['obligation-upsert', '--kind', 'agent_launch_queued', '--horizon', 'hourly',
+            '--target-type', target_type, '--target-id', target, *ref_args(spec), '--owner', 'pm', '--dedupe-group', name,
+            '--title', f'Launch queued: {name} ({typ})', '--action', action,
+            '--blocker', 'All permitted proxy routes unavailable; no eligible PM subagent slot',
+            '--next-review-at', in_minutes(15), '--evidence-json', json.dumps(evidence), '--print-id']
+    result = subprocess.run([sys.executable, str(ledger_cli), *args], capture_output=True, text=True, timeout=20)
+    obligation = result.stdout.strip()
+    if result.returncode or not re.fullmatch(r'[0-9]+', obligation):
+        raise ValueError('agent_launch_queued_upsert_failed')
+    message = (f'Proxy launch queued: {name} ({typ}), {target_label}.\n'
+               f'Proxy pools tried (live/cap): {pools or "none"}. No eligible PM subagent slot.\n'
+               f'To approve a relaunch, reply rajiv-override {name}. PM relaunches with '
+               'PROXY_AGENT_CAP_OVERRIDE=rajiv:<timestamp of your reply>. Existing hard pool limits still apply.')
+    dm = 'unconfirmed'
+    try:
+        base.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with state_lock(base):
+            atomic(base / 'queued-obligation-id', obligation)
+            stamp = base / 'override-request-at'
+            if stamp.exists() and time.time() - float(stamp.read_text()) < 1800:
+                dm = 'deduped'
+            else:
+                # Claim before sending: Slack can accept the request even if its response is lost.
+                atomic(stamp, str(time.time()))
+                with tempfile.TemporaryFile(mode='w+', encoding='utf-8') as brief:
+                    brief.write(message)
+                    brief.seek(0)
+                    result = subprocess.run(['/bin/bash', str(slack_cli), '-c', 'D0AMF0XE6TS', '-f'],
+                                            stdin=brief, capture_output=True, text=True, timeout=25)
+                dm = 'sent' if result.returncode == 0 and re.search(r'^OK ts=[0-9]+\.[0-9]+ channel=D0AMF0XE6TS$', result.stdout, re.M) else 'unconfirmed'
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass  # The durable queue is already owned; never claim a delivered DM without a receipt.
+    print(f'QUEUED_AWAITING_OVERRIDE lane={name} obligation={obligation} dm={dm}')
+    return obligation
+
+
+def spec_from_brief(a):
+    raw_brief = Path(a.brief)
+    try:
+        text = raw_brief.read_text(errors='replace')
+        brief_path = str(raw_brief.resolve())
+    except OSError:
+        text, brief_path = '', a.brief
+    spec = launch_spec(a.name, a.type, brief_path, a.orig_arg)
+    spec.update(brief_refs(text, a.name))
+    return spec
+
+
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('cmd', choices=['acquire', 'resume', 'queue', 'start', 'running', 'finish', 'abandon', 'disable-ernie', 'quota'])
+    p.add_argument('cmd', choices=['acquire', 'resume', 'queue', 'start', 'running', 'finish', 'abandon', 'disable-ernie', 'quota', 'capacity-wait'])
     p.add_argument('--name', default='')
+    p.add_argument('--pools', default='')
+    p.add_argument('--dry-run', action='store_true')
     p.add_argument('--token', default='')
     p.add_argument('--type', default='')
     p.add_argument('--brief', default='')
@@ -219,6 +279,7 @@ def main():
     p.add_argument('--orig-arg', action='append', default=[])
     # abandon: the launcher refused this launch because free space on / was below the start threshold (reason=disk_low).
     p.add_argument('--disk-low', default='0')
+    p.add_argument('--in-process', default='0')
     p.add_argument('--wait-s', default='0')
     p.add_argument('--pm-role', default='0')
     # Escalation lineage (Rajiv D0AMF0XE6TS ts 1794641763.847759): role + rung + inherited lane clock per run.
@@ -278,6 +339,15 @@ def main():
         atomic(path, json.dumps(data) + '\n')
         return
     base = slot(a.name)
+    if a.cmd == 'capacity-wait':
+        if a.dry_run:
+            print(f'QUEUED_AWAITING_OVERRIDE lane={a.name} obligation=preview dm=mocked pools={a.pools}')
+            return
+        require_lock(base, a.token)
+        spec = read_json(base / 'active' / 'launch.json') or spec_from_brief(a)
+        spec['type'] = a.type  # Report the resolved type while preserving the caller's exact argv.
+        capacity_wait(spec, ' '.join(dict.fromkeys(a.pools.split())), base, CLI, Path.home() / '.claude/scripts/slack-send.sh')
+        return
     if a.cmd == 'acquire':
         base.mkdir(parents=True, exist_ok=True, mode=0o700)
         (base / 'active').mkdir(mode=0o700)
@@ -307,18 +377,18 @@ def main():
             data.update(state='running', running_at=now_iso(), pid=pid)
             atomic(base / 'manifest.json', json.dumps(data) + '\n')
             upsert(a.name, data, data.get('suppress_until') or in_minutes(LEASE_TTL_MIN))
+            try:
+                queued_id = (base / 'queued-obligation-id').read_text().strip()
+            except OSError:
+                queued_id = ''
+            if queued_id.isdigit() and ledger(['obligation-resolve', '--kind', 'agent_launch_queued', '--id', queued_id,
+                                               '--reason', f'Launcher confirmed running proxy {a.name} (pid={pid})']):
+                atomic(base / 'queued-obligation-id', '')
         return
     require_lock(base, a.token)
     if a.cmd == 'queue':
         # First ledger write of a launch, before model selection: a refusal (rc 75) therefore always has a row to close and a spec to re-queue.
-        raw_brief = Path(a.brief)
-        try:
-            text = raw_brief.read_text(errors='replace')
-            brief_path = str(raw_brief.resolve())
-        except OSError:
-            text, brief_path = '', a.brief
-        spec = launch_spec(a.name, a.type, brief_path, a.orig_arg)
-        spec.update(brief_refs(text, a.name))
+        spec = spec_from_brief(a)
         spec['queued_at'] = now_iso()
         atomic(base / 'active' / 'launch.json', json.dumps(spec) + '\n')
         data = {'name': a.name, 'type': a.type, 'role': a.type, 'brief': brief_path, 'state': 'queued', 'queued_at': spec['queued_at'], 'token': a.token}
@@ -332,13 +402,15 @@ def main():
         owned = data.get('token') == a.token
         if owned or spec:
             now = now_iso()
-            refused = a.rc == '75'
+            queued = a.rc == '74'
+            in_process = a.rc == '75' and a.in_process == '1'
+            refused = a.rc in ('74', '75')
             if not owned:
                 data = {'name': a.name, 'type': spec.get('type', ''), 'role': spec.get('type', ''), 'brief': spec.get('brief', ''),
                         'token': a.token, 'queued_at': spec.get('queued_at', now)}
                 for key in ('issue', 'pr'):
                     if spec.get(key): data[key] = spec[key]
-            data.update(rc='75' if refused else 'UNAVAILABLE', reason='refused' if refused else 'launch_failed',
+            data.update(rc=a.rc if refused else 'UNAVAILABLE', reason='queued_awaiting_override' if queued else 'in_process_available' if in_process else 'refused' if refused else 'launch_failed',
                         state='refused' if refused else 'failed', exit_rc=a.rc, finished_at=now)
             if owned:
                 atomic(base / 'manifest.json', json.dumps(data) + '\n')
@@ -349,7 +421,11 @@ def main():
             why = ('launch refused rc=75: disk_low (free space on / below the start threshold; nothing deleted; '
                    'free space, then relaunch - see launcher stderr)') if low else \
                   'launch refused rc=75 (pool cap, burn gate or no usable model; see launcher stderr)'
-            if refused and (relaunch_row(a.name, spec, data, why, low=low) or relaunch_row(a.name, spec, data, why, low=low)):  # one retry: the row is the only record of the refusal
+            if queued or in_process:
+                ledger(['obligation-resolve', '--kind', 'proxy_run', '--target-type', 'proxy', '--target-id', a.name, *ref_args(data),
+                        '--reason', 'Queued as agent_launch_queued; awaiting override' if queued else 'IN_PROCESS_AVAILABLE; PM owns next launch',
+                        '--external-state', json.dumps({'state': 'refused', 'rc': a.rc, 'reason': data['reason']})])
+            elif refused and (relaunch_row(a.name, spec, data, why, low=low) or relaunch_row(a.name, spec, data, why, low=low)):  # one retry: the row is the only record of the refusal
                 ledger(['obligation-resolve', '--kind', 'proxy_run', '--target-type', 'proxy', '--target-id', a.name, *ref_args(data),
                         '--reason', 'refused rc=75: relaunch queued as proxy_relaunch CAPACITY_WAIT' + (' (disk_low)' if low else ''),
                         '--external-state', json.dumps({'state': 'refused', 'rc': '75', **({'reason': 'disk_low'} if low else {})})])
@@ -419,7 +495,9 @@ def main():
             now = now_iso()
             terminal = a.reason in ('done', 'blocked', 'verdict', 'result')
             # rc 75 = a continuation was refused for capacity (run.sh capacity-stop): the lane is resumable, not done.
-            refused = a.rc == '75' and not terminal
+            queued = a.rc == '74'
+            in_process = a.rc == '75' and a.in_process == '1'
+            refused = a.rc in ('74', '75') and not terminal
             state = 'refused' if refused else ('done' if terminal else 'failed')
             data.update(rc=a.rc, reason=a.reason, result=a.result, finished_at=now, state=state)
             if a.result_status: data['result_status'] = a.result_status

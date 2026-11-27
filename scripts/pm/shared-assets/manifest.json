@@ -792,7 +792,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-ops",
-      "sha256": "1e8060017515160a0b09a34cf4d7d53a88d7a646a809e24cbf94c97135a321ae",
+      "sha256": "4e378b1d829385c51a8548dc2ca702e06f920c22cede5d2abb45a9cfef08c521",
       "source_path": "claude/scripts/pm-ops-legacy.py"
     },
     {
@@ -981,7 +981,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "1b849b2a1d3fb736b24609d5208919f6296ceba68f9a9137c7b27924abf405f7",
+      "sha256": "37447379b506b7aa2419cffb8a995812d718631a63ac16019f62d7dabe31b1f3",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -1053,7 +1053,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "72195e40d899002e243922659b6968f803e160883594b8269ee22f8cb071f2c0",
+      "sha256": "890c2134d3452a78d4c9c9aa914808934fbbb175c289880b01c219d06bb9b961",
       "source_path": "claude/scripts/proxy-run-state.py"
     },
     {

@@ -820,9 +820,10 @@ def upsert_obligation(args: argparse.Namespace) -> int | None:
           AND COALESCE(target_id,'')=COALESCE(?,'')
           AND COALESCE(pr,-1)=COALESCE(?,-1)
           AND COALESCE(issue,-1)=COALESCE(?,-1)
+          AND (kind != 'agent_launch_queued' OR COALESCE(dedupe_group,'')=COALESCE(?,''))
         ORDER BY id DESC LIMIT 1
         """,
-        (kind, target_type, target_id, pr, issue),
+        (kind, target_type, target_id, pr, issue, getattr(args, "dedupe_group", None)),
     ).fetchone()
     if row:
         if evidence_supplied:

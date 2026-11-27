@@ -2,17 +2,6 @@
 # EDITING RULE: never edit this file in place while launchers run (bash reads scripts by byte offset, so a resumed launcher runs garbage, e.g. "notification: command not found" on 2026-11-14); write a temp file and mv it over (new inode).
 # proxy-agent.sh — model-selectable PM agent runner. Runs a PM agent definition out of process through CLIProxyAPI (127.0.0.1:8317),
 
-# Rajiv C0ALZJHGE49 thread 1794296562.075779 ts 1795505555.029549: when proxy pools refuse, say if the PM in-process cap has room.
-pa_inprocess_hint() {
-  local cap live
-  cap=$(sed -n 's/^PM_SUBAGENT_CAP=\([0-9][0-9]*\).*/\1/p' "$HOME/.claude/state/proxy-caps.env" 2>/dev/null | tail -1)
-  [ -n "$cap" ] || return 0
-  live=$(python3 -c 'import json,os;p=os.path.expanduser("~/.claude/state/pm-subagents.json");d=json.load(open(p)) if os.path.exists(p) else {};a=d.get("agents",[]);print(sum(1 for x in a if isinstance(x,dict) and x.get("status") not in ("done","stopped","failed","killed")))' 2>/dev/null || echo 0)
-  if [ "${live:-0}" -lt "$cap" ]; then
-    printf 'proxy-agent: IN_PROCESS_AVAILABLE live=%s cap=%s -> launch this brief in-process via the Agent tool (Skill launch-agent step 4)\n' "$live" "$cap" >&2
-  fi
-}
-
 # while the PM session stays on direct Claude. Default model: auto (S129 quota selector; luna is the GPT fallback). Legacy name luna-agent.sh is a symlink.
 # Rajiv DM D0AMF0XE6TS thread 1794087326.732679: "keep pm on direct claude" ... "go".
 # Rajiv DM ts 1794102299.043149: "set the correct context window sizes in the wrapper ... make the model configureable".
@@ -25,7 +14,7 @@ pa_inprocess_hint() {
 #   <prompt-file> complete one-shot brief (native named-peer steering remains available)
 #   --model M     auto: three levels, first usable id wins (type -> level in proxy_agent_type_level, unlisted = MID; Rajiv C0ALZJHGE49 thread 1795351517.305319): TOP grok-4.7 > sarvam-kimi-k3 (gated until Sarvam enables it) > claude-opus-5-5 > gpt-6.2-sol; MID OpenCode (deepseek, glm, hy4; rotating start; NO ornith, 24 Nov) > Sarvam (glm, deepseek, 105b, gemma4; cap SARVAM_PROXY_CAP=4; rotating start) > claude-sonnet-5-5 > gpt-6.1-terra; LOW (light lanes only) ornith > gpt-6-luna > claude-haiku-5-5
 #                 aliases: luna/haiku LOW, terra/sonnet MID, opus TOP; sol = exact gpt-6.2-sol (S149, no tier picker); fable, astra exact
-#                 Escalate a stalled run with --rung N or --model; a full level refuses rc 75 and never falls up to TOP; raw model ids pass through unchanged.
+#                 Escalate a stalled run with --rung N or --model; a full level never falls up to TOP; raw model ids are preferred unless strict.
 #                 or any raw CLIProxyAPI model id (unknown ids get a 200k window + stderr warning)
 #   --rung N      auto only, 1-3: rung 1 = the type's level, each higher rung one level up, capped at TOP (hd-builder 1-3, hd-proof-qa 1-2 keep their escalation rungs; Rajiv D0AMF0XE6TS thread 1794624936.567599, ts 1794639918.387399)
 #   pm-hotfix / pm-proof-qa are compat types: resolved to hd-planner|hd-builder (MODE: PLAN first line -> planner) / hd-proof-qa before selection. hd-investigator = stage 0, diagnose-only, TOP level, never auto-escalated.
@@ -192,7 +181,7 @@ if [[ "${PROXY_AGENT_DRY_RUN:-}" != 1 ]]; then
   export PROXY_AGENT_RUN_TOKEN="$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
   python3 -I "$STATE_HELPER" acquire --name "$PROXY_AGENT_RUN_NAME" --token "$PROXY_AGENT_RUN_TOKEN" || exit 2
   RUN_LOCK_PARENT=1
-  trap 'pa_exit_rc=$?; if [[ "${RUN_LOCK_PARENT:-0}" == 1 ]]; then python3 -I "$STATE_HELPER" abandon --name "$PROXY_AGENT_RUN_NAME" --token "$PROXY_AGENT_RUN_TOKEN" --rc "$pa_exit_rc" --disk-low "${PA_DISK_LOW:-0}" || true; fi; exit "$pa_exit_rc"' EXIT
+  trap 'pa_exit_rc=$?; if [[ "${RUN_LOCK_PARENT:-0}" == 1 ]]; then python3 -I "$STATE_HELPER" abandon --name "$PROXY_AGENT_RUN_NAME" --token "$PROXY_AGENT_RUN_TOKEN" --rc "$pa_exit_rc" --disk-low "${PA_DISK_LOW:-0}" --in-process "${PA_IN_PROCESS_OFFERED:-0}" || true; fi; exit "$pa_exit_rc"' EXIT
   if [[ -n "$RESUME_NAME" ]]; then
     RESUME_ASSIGNMENTS="$(python3 -I "$STATE_HELPER" resume --name "$PROXY_AGENT_RUN_NAME" --token "$PROXY_AGENT_RUN_TOKEN")" || exit 2
     eval "$RESUME_ASSIGNMENTS"
@@ -219,13 +208,12 @@ if [[ "${PROXY_AGENT_DRY_RUN:-}" != 1 ]]; then
     echo 'PROXY_AGENT_WARN reason=disk_free_unavailable' >&2
   fi
 fi
-# P0 launches no longer bypass pool caps or burn gates (Rajiv C0ALZJHGE49 thread 1795437841.011459, ts 1795439359.022079: "drop the P0 override rule.
+# P0 launches do not bypass hard pool caps (Rajiv C0ALZJHGE49 thread 1795437841.011459, ts 1795439359.022079: "drop the P0 override rule.
 # preempt the lowest priority agent and use that instead."). PROXY_AGENT_CAP_OVERRIDE=P0:<issue> is now only an IDENTITY marker: read once here,
-# then removed from the environment, so every cap, burn-gate, DeepSeek and total-cap check below sees no override (the queue step above already stored it
+# then removed from the environment; only the Codex burn check reads this identity (the queue step above already stored it
 # in the relaunch spec, so a re-queued P0 is still a P0). rajiv:<slack ts> overrides are untouched. A P0 that finds its pool at cap preempts the
-# lowest-priority live lane of THAT pool (proxy_agent_p0_preempt) and takes its slot; with nothing preemptable it is refused rc 75 and queued as a
-# proxy_relaunch CAPACITY_WAIT row, never moved to another pool or tier, so it cannot land on a capped or forbidden model such as Sol.
-PA_P0_REF=""; PA_P0_WAIT=""; PA_P0_ARMED=0
+# lowest-priority live lane of THAT pool when preemption is enabled; otherwise the picker tries the rest of its eligible tier.
+PA_P0_REF=""; PA_P0_ARMED=0
 if [[ "${PROXY_AGENT_CAP_OVERRIDE:-}" =~ ^P0:[0-9]+$ ]]; then PA_P0_REF="$PROXY_AGENT_CAP_OVERRIDE"; unset PROXY_AGENT_CAP_OVERRIDE; fi
 # The generic Claude agent is PM-role only for the explicit heartbeat brief.
 ROLE_BRIEF="${PROXY_RESUME_ORIGINAL:-$PROMPT_FILE}"
@@ -1654,7 +1642,7 @@ if [[ -r "$HOME/.claude/state/proxy-caps.env" ]]; then
   while IFS== read -r _k _v; do
     case "$_k" in
       PROXY_AGENT_TOTAL_CAP|PROXY_AGENT_CLAUDE_CAP|PM_SUBAGENT_CAP|CODEX_PROXY_CAP|CLAUDE_PROXY_CAP|GROK_PROXY_CAP|OPENCODE_PROXY_CAP|HY4_PROXY_CAP|SARVAM_PROXY_CAP|SPARK_PROXY_CAP|ULTRA_PROXY_CAP|INKLING_PROXY_CAP|DEEPSEEK_DIRECT_PROXY_CAP) [[ -z "${!_k:-}" && "$_v" =~ ^[0-9]+$ ]] && printf -v "$_k" %s "$_v";;
-      PROXY_BURN_GATE) [[ -z "${!_k:-}" && ( "$_v" == enforce || "$_v" == shadow ) ]] && printf -v "$_k" %s "$_v";;
+      PROXY_BURN_GATE|CODEX_BURN_MODE) [[ -z "${!_k:-}" ]] && printf -v "$_k" %s "$_v";;
     esac
   done < "$HOME/.claude/state/proxy-caps.env"
 fi
@@ -1874,17 +1862,34 @@ proxy_agent_tier_models() {
   # Inkling (local Spark, vLLM --max-num-seqs 2; Rajiv C0ALZJHGE49 thread 1795597777.761599, ts 1795741969.632649): kept only for FENCED
   # (PROXY_AGENT_SANDBOX=1) light-work lanes: LOW types (triage, cleanup, heartbeat/digest) and read-only investigators. Unfenced lanes stay
   # GPT/Claude only (Rajiv ts 1795072640.767149) until Rajiv approves Inkling there. The judgment guard in pick_tier still drops it for its own types.
-  _ink_ok=0
-  if [[ "${PROXY_AGENT_SANDBOX:-1}" != 0 ]]; then
-    if [[ "$(proxy_agent_type_level "${TYPE:-}")" == LOW ]]; then _ink_ok=1; fi
-    case "${TYPE:-}" in customer-artifact-investigator|e2e-failure-investigator|docx-artifact-forensics|issue-contract-auditor) _ink_ok=1;; esac
-  fi
-  if [[ "$_ink_ok" != 1 ]]; then
+  if ! proxy_agent_inkling_eligible; then
     _kept=""; for _m in $models; do [[ "$_m" == inkling-2-mini ]] || _kept="${_kept:+$_kept }$_m"; done
     models="$_kept"
   fi
   printf '%s\n' "$models"
 }
+# Single eligibility predicate for both tier and raw Inkling selections.
+proxy_agent_inkling_eligible() {
+  [[ "${PROXY_AGENT_SANDBOX:-1}" == 1 ]] || return 1
+  proxy_agent_is_judgment_lane && return 1
+  [[ "$(proxy_agent_type_level "$TYPE")" == LOW ]] && return 0
+  case "$TYPE" in docx-artifact-forensics|issue-contract-auditor) return 0;; *) return 1;; esac
+}
+
+proxy_agent_unfenced_eligible() {
+  [[ "${PROXY_AGENT_SANDBOX:-1}" != 0 ]] && return 0
+  case "$1" in
+    gpt-*|claude-*|ultra/claude-*) return 0;;
+    hy4-flash-free) case "$TYPE" in hd-builder|hd-proof-qa) return 0;; esac;;
+  esac
+  return 1
+}
+
+proxy_agent_codex_p0_only() {
+  [[ "$1" == gpt-* && "${CODEX_BURN_MODE:-}" == p0-only ]] || return 1
+  [[ -z "${PA_P0_REF:-}" && ! "${PROXY_AGENT_CAP_OVERRIDE:-}" =~ ^rajiv:[0-9]+\.[0-9]+$ ]]
+}
+
 # Emergency Muse gate (CTO REVISE 2026-11-17, C0ALZJHGE49 thread 1794931098.013929, ts 1794932145.795929): Muse is emergency-only
 # across EVERY route, not merely last within one rung.
 # 0 when route $1 is KNOWN unusable right now: refused by the burn gate (capped roles, enforce mode), at its own pool cap, or in a
@@ -2014,9 +2019,7 @@ proxy_agent_sarvam_record() {
 # those aliases are exported to the child, and an OpenCode id there would run uncounted by OPENCODE_PROXY_CAP (the live count sees
 # only the child's primary --model), so nested picks stay on the existing approved Claude/Grok/Codex routes and never use the pool.
 proxy_agent_pick_tier() {
-  local tier="$1" nested="${2:-}" id skipped="" last="" models rc claude_live emergency_ok=1 gate _m _kept="" _blk=1 _unf_ok=1 _unf_refusal=""
-  claude_live=0
-  if proxy_agent_is_capped "$TYPE"; then claude_live="$(proxy_agent_live_count claude)"; fi
+  local tier="$1" nested="${2:-}" id skipped="" last="" models rc emergency_ok=1 gate _m _kept="" _blk=1 _unf_refusal=""
   models="$(proxy_agent_tier_models "$tier")" || return 1
   if [[ "$nested" == nested ]]; then
     # ultra/* never rides a nested alias either (25 Nov): the cap counter sees primary `claude -p --model ultra/...` processes only, so a nested child on the Ultra credential would burn it uncounted.
@@ -2050,15 +2053,8 @@ proxy_agent_pick_tier() {
     # models"): PROXY_AGENT_SANDBOX=0 walks only GPT/Claude ids (nested aliases too: they run in the same unfenced child). 26 Nov 21:00-21:47Z four unfenced lanes
     # fell through to grok-4.7 and a triage lane to Sarvam. First in the loop, before `last` is set, so an ineligible id is never the fallback pick either.
     # Eligible: gpt-*, claude-*, ultra/claude-*, and the exact hy4-flash-free id for hd-builder/hd-proof-qa only (free window, ts 1795104956.054309 / 1795106112.425109).
-    _unf_ok=1
-    if [[ "${PROXY_AGENT_SANDBOX:-1}" == 0 ]]; then
-      case "$id" in
-        gpt-*|claude-*|ultra/claude-*) ;;
-        hy4-flash-free) case "${TYPE:-}" in hd-builder|hd-proof-qa) ;; *) _unf_ok=0;; esac;;
-        *) _unf_ok=0;;
-      esac
-    fi
-    if [[ "$_unf_ok" == 0 ]]; then
+    if [[ "$nested" != nested && " ${PA_FALLTHROUGH_SKIP:-} " == *" $id "* ]]; then continue; fi
+    if ! proxy_agent_unfenced_eligible "$id"; then
       skipped="${skipped:+$skipped,}$id:unfenced_ineligible"
       [[ "$nested" == nested ]] || printf 'proxy-agent: unfenced_ineligible skip model=%s (PROXY_AGENT_SANDBOX=0: GPT/Claude only)\n' "$id" >&2
       continue
@@ -2069,11 +2065,8 @@ proxy_agent_pick_tier() {
       printf 'proxy-agent: REFUSED free-model guard model=%s type=%s (free/trial ids are unconditionally ineligible; trying the next tier model)\n' "$id" "${TYPE:-}" >&2
       continue
     fi
-    # Grok cap 0 = pool off, like the OpenCode pool (proxy_agent_pool_blocked): Grok now heads TOP (Rajiv ts 1795355545.905379), and the cap exemption of roles such as
-    # pm-admission-reviewer and growth would otherwise send them to a Grok pool the dial has switched off (GROK_PROXY_CAP=0). Runs before `last` is set: never the fallback pick either.
-    if [[ "$id" == grok-4.7 && "${GROK_PROXY_CAP:-}" =~ ^0+$ ]]; then
-      skipped="${skipped:+$skipped,}$id:pool_cap"
-      printf 'proxy-agent: pool_cap skip model=%s (GROK_PROXY_CAP=0, pool off)\n' "$id" >&2
+    if proxy_agent_codex_p0_only "$id"; then
+      skipped="${skipped:+$skipped,}$id:codex_p0_only"
       continue
     fi
     # Kimi availability gate (see proxy_agent_sarvam_kimi_gated): before `last` is set, so a not-enabled Kimi is never the fallback pick, and it
@@ -2130,30 +2123,18 @@ proxy_agent_pick_tier() {
     else
       last="$id"
     fi
-    if proxy_agent_is_capped "$TYPE" && [[ "$id" == claude-* && "${claude_live:-0}" -ge "$PROXY_AGENT_CLAUDE_CAP" ]]; then
-      # ENFORCED (Rajiv C0ALZJHGE49 thread 1795437841.011459, ts 1795439210.427769 "reduce the calude proxy cap"; was telemetry-only).
-      printf 'proxy-agent: claude_cap skip model=%s (%s live >= %s)\n' "$id" "$claude_live" "$PROXY_AGENT_CLAUDE_CAP" >&2
-      skipped="${skipped:+$skipped,}$id:claude_cap"
-      continue
-    fi
-    # Burn decision runs BEFORE the usability probe: a refused pool never sends a provider request.
+    # Burn policy is checked before the usability probe.
     if proxy_agent_burn_refused "$id"; then
       skipped="${skipped:+$skipped,}$id:burn_refused"
       continue
     fi
-    # Per-pool concurrency. A Claude deny skips only Claude ids; Grok and Codex keep their own caps.
-    # Exempt roles (and a P0 override) are telemetry-only: never skipped here. pm-triage-agent is not exempt.
     _blk=1
-    if [[ "$nested" == nested ]]; then proxy_agent_pool_blocked "$id" || _blk=0; else PA_P0_ARMED=1 proxy_agent_pool_blocked "$id" || _blk=0; fi
+    if [[ "$nested" == nested ]]; then proxy_agent_pool_blocked "$id" || _blk=0
+    else PA_RECORD_POOL=1 PA_P0_ARMED=1 proxy_agent_pool_blocked "$id" || _blk=0; fi
     if [[ "$_blk" == 1 ]]; then
       skipped="${skipped:+$skipped,}$id:pool_cap"
+      [[ "$nested" == nested ]] || PA_CAPACITY_SEEN=1
       printf 'proxy-agent: pool_cap skip model=%s\n' "$id" >&2
-      if [[ -n "${PA_P0_WAIT:-}" ]]; then
-        printf 'proxy-agent: REFUSED P0 queued: the %s pool is at cap and no lower-priority lane could be preempted (CAPACITY_WAIT; no bypass, no other pool or tier)\n' "$PA_P0_WAIT" >&2
-        pa_inprocess_hint
-        PICK_MODEL=""
-        return 75
-      fi
       continue
     fi
     if proxy_agent_sub_usable "$id"; then
@@ -2178,12 +2159,11 @@ proxy_agent_pick_tier() {
   done
   # Unfenced walk with nothing eligible free: one explicit refusal the PM queues (rc 75), never a Grok/Sarvam/OpenCode fallback.
   [[ "$nested" == nested || "${PROXY_AGENT_SANDBOX:-1}" != 0 ]] || _unf_refusal="proxy-agent: REFUSED unfenced_model_ineligible tier=$tier type=${TYPE:-} (PROXY_AGENT_SANDBOX=0 allows only GPT/Claude, plus exact hy4-flash-free for hd-builder/hd-proof-qa; none free: $skipped)"
-  if proxy_agent_burn_enforced; then
-    # Fail closed for capped roles: no unchecked fallback is ever exported.
+  if proxy_agent_burn_enforced || [[ "$nested" != nested && "${PA_CAPACITY_SEEN:-0}" == 1 ]]; then
+    # Never use an unchecked fallback after we encountered a cap.
     PICK_MODEL=""
     [[ -z "${_unf_refusal:-}" ]] || printf '%s\n' "$_unf_refusal" >&2
     printf 'proxy-agent: REFUSED no usable tier model (%s)\n' "$skipped" >&2
-    pa_inprocess_hint
     return 75
   fi
   # Cap enforcement on the fallback path (MoP proxy cap repair 2026-11-19): the best-effort fallback of a non-enforced role is never a way
@@ -2226,7 +2206,7 @@ proxy_agent_burn_refused() {
   if proxy_agent_is_sarvam_id "$1"; then return 1; fi
   # proxy-burn-shadow.py resolves the pool from the EXACT model id (model_pool), so a reasoning-suffixed id (`gpt-6.2-sol(xhigh)`) was pool=unknown and
   # refused (coordinator report 2026-11-20). The router bills the base model: ask the gate about the router-equivalent identity.
-  python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$(proxy_agent_router_identity "$1")" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >&2 && return 1
+  python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$(proxy_agent_router_identity "$1")" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-${PA_P0_REF:-}}" >&2 && return 1
   return 0
 }
 
@@ -2294,6 +2274,7 @@ PY
 # Grok and Codex stay fail-open on an unreadable count, and every role exemption stays.
 proxy_agent_pool_blocked() {
   local id pool cap live
+  PA_LAST_POOL=""
   id="$(proxy_agent_router_identity "$1")"
   case "$id" in
     claude-*) pool=claude; cap="${CLAUDE_PROXY_CAP:-${PROXY_AGENT_CLAUDE_CAP:-5}}";;
@@ -2312,12 +2293,25 @@ proxy_agent_pool_blocked() {
     inkling-2-mini) pool=inkling; cap="${INKLING_PROXY_CAP:-2}";;  # cap 2 = vLLM --max-num-seqs 2 (Rajiv C0ALZJHGE49 thread 1795597777.761599, ts 1795741969.632649); dial pins it (floor = ceiling = 2)
     *) return 1;;
   esac
+  if [[ "$pool" == claude ]] && declare -F proxy_agent_is_capped >/dev/null && proxy_agent_is_capped "$TYPE" && [[ "$cap" =~ ^[0-9]+$ && "${PROXY_AGENT_CLAUDE_CAP:-5}" =~ ^[0-9]+$ && "${PROXY_AGENT_CLAUDE_CAP:-5}" -lt "$cap" ]]; then
+    cap="${PROXY_AGENT_CLAUDE_CAP:-5}"
+  fi
   # The Sarvam pool, like OpenCode, has no role exemption: paid credits with no meter, so the cap applies to cap-exempt roles and a P0 override too.
   if [[ "$pool" != opencode && "$pool" != hy4 && "$pool" != sarvam && "$pool" != ultra && "$pool" != inkling ]] && proxy_agent_cap_exempt "$TYPE"; then return 1; fi  # ultra: hard cap, no role exemption (25 Nov: cap 4 while the burn rate is measured)
   case "$cap" in ''|*[!0-9]*) return 1;; esac
   # OpenCode / Sarvam cap 0 means the pool is off: blocked without counting, so an unreadable process list cannot let a launch through.
-  if [[ ( "$pool" == opencode || "$pool" == hy4 || "$pool" == sarvam || "$pool" == ultra || "$pool" == inkling ) && "$cap" =~ ^0+$ ]]; then return 0; fi
-  if ! live="$(proxy_agent_pool_live "$pool")"; then
+  local off=0
+  if [[ "$cap" =~ ^0+$ ]]; then off=1; fi
+  live="$(proxy_agent_pool_live "$pool")" || live=unknown
+  [[ "$live" =~ ^[0-9]+$ ]] || live=unknown
+  PA_LAST_POOL="$pool"
+  if [[ "${PA_RECORD_POOL:-0}" == 1 ]]; then
+    # Record the counts that actually made the decision. No nested alias probes enter the receipt.
+    PA_POOL_TRIED="${PA_POOL_TRIED:+$PA_POOL_TRIED }$pool=$live/$cap"
+    printf 'proxy-agent: pool_checked model=%s pool=%s live=%s cap=%s\n' "$id" "$pool" "$live" "$cap" >&2
+  fi
+  [[ "$off" == 0 ]] || return 0
+  if [[ "$live" == unknown ]]; then
     printf 'proxy-agent: pool_cap UNAVAILABLE pool=%s\n' "$pool" >&2
     if [[ "$pool" == claude || "$pool" == ultra ]]; then printf 'proxy-agent: pool_cap fail-closed pool=%s (live count unreadable)\n' "$pool" >&2; return 0; fi
     if [[ "$pool" == opencode || "$pool" == hy4 || "$pool" == sarvam || "$pool" == spark || "$pool" == inkling ]]; then return 0; fi
@@ -2342,14 +2336,14 @@ proxy_agent_is_p0_launch() {
 # --pool-full stopped the lowest-priority live lane there (ties: newest start; never a P0, a lane mid-push or box lease, or a lane in its last ~5 minutes),
 # pushed its clean unpushed commits non-force, recorded its proxy_relaunch CAPACITY_WAIT row and logged PREEMPTED to proxy-cap-overrides.log. A dry run only
 # plans. Everything else (off switch, helper missing/failed, nothing preemptable, victim still alive, pool still full after the stop) returns 1 and sets
-# PA_P0_WAIT so the picker refuses rc 75 (CAPACITY_WAIT) instead of falling to another pool or tier.
+# a capacity refusal and lets the picker try other eligible pools in the same tier.
 proxy_agent_p0_preempt() {
   local pool="$1" id="$2" cap="$3" helper="${PROXY_AGENT_PREEMPT_HELPER:-$HOME/.claude/scripts/proxy-preempt.py}" rc=0 live="" dry=()
   proxy_agent_is_p0_launch || return 1
   # Default OFF until the stop path fences new lease/external-effect acquisition (CTO C0ALZJHGE49 thread 1795441441.525659, ts 1795441848.817099).
   if [[ "${PROXY_AGENT_PREEMPT:-0}" == 0 || ! -r "$helper" ]]; then
     printf 'proxy-agent: P0 at %s pool cap and preemption is unavailable (PROXY_AGENT_PREEMPT=%s helper=%s): queued CAPACITY_WAIT\n' "$pool" "${PROXY_AGENT_PREEMPT:-0}" "$helper" >&2
-    PA_P0_WAIT="$pool"; return 1
+    return 1
   fi
   [[ "${PROXY_AGENT_DRY_RUN:-}" != 1 ]] || dry=(--dry-run)
   python3 -I "$helper" --launch-name "${PROXY_AGENT_NAME:-proxy-${TYPE:-agent}-$$}" --model "$id" --pool-full "$pool" --override "${PA_P0_REF:-}" \
@@ -2359,13 +2353,13 @@ proxy_agent_p0_preempt() {
       live="$(proxy_agent_pool_live "$pool")" || live=""
       if ! [[ "$live" =~ ^[0-9]+$ && "$live" -lt "$cap" ]]; then
         printf 'proxy-agent: P0 preempted a lane but the %s pool is still at cap (live=%s cap=%s): queued CAPACITY_WAIT\n' "$pool" "${live:-unknown}" "$cap" >&2
-        PA_P0_WAIT="$pool"; return 1
+        return 1
       fi
     fi
     return 0
   fi
-  printf 'proxy-agent: P0 at %s pool cap, nothing preemptable (helper rc=%s): queued CAPACITY_WAIT, not moved to another pool or tier\n' "$pool" "$rc" >&2
-  PA_P0_WAIT="$pool"; return 1
+  printf 'proxy-agent: P0 at %s pool cap, nothing preemptable (helper rc=%s): queued CAPACITY_WAIT, trying remaining eligible pools in the same tier\n' "$pool" "$rc" >&2
+  return 1
 }
 # PA_P0_ARMED=1 is set only for the PRIMARY pick and the guards on a raw --model (`PA_P0_ARMED=1 proxy_agent_pool_blocked <id>`): only they may
 # preempt for a P0. Nested alias picks and availability probes call proxy_agent_pool_blocked unarmed and never do.
@@ -2376,90 +2370,45 @@ proxy_agent_p0_preempt() {
 # still apply, the OpenCode pool cap does not (see proxy_agent_pool_blocked). An exemption is never emergency
 # permission for Muse. Returns 75 on refusal, 0 otherwise.
 proxy_agent_primary_pool_guard() {
-  local _guard_id _guard_window _guard_max
-  read -r _guard_id _guard_window _guard_max < <(resolve_model "$MODEL")
-  # Free-model guard FIRST, on the router-equivalent identity of the resolved primary (the exact string that becomes --model): a decorated
-  # `hy4-flash-free(high)` / `muse-spark-1.3-contributor[1m]` is not an exact OpenCode id, so the early return below used to let it through.
-  # A raw `--model <restricted>` (or its alias) and a --resume of one have no tier to fall back within.
-  if proxy_agent_free_guard_refuses "$_guard_id"; then
-    printf 'proxy-agent: REFUSED free-model guard primary %s identity=%s type=%s (free/trial ids are unconditionally ineligible; name a vetted model)\n' "$_guard_id" "$(proxy_agent_router_identity "$_guard_id")" "${TYPE:-}" >&2
+  local model id
+  read -r model _ _ < <(resolve_model "$MODEL")
+  id="$(proxy_agent_router_identity "$model")"
+  if proxy_agent_free_guard_refuses "$model"; then
+    printf 'proxy-agent: REFUSED free-model guard primary %s identity=%s type=%s\n' "$model" "$id" "$TYPE" >&2
     return 75
   fi
-  if proxy_agent_is_unresolved_auto "$_guard_id"; then
-    printf 'proxy-agent: REFUSED unresolved automatic selection primary %s identity=auto type=%s (a decorated auto lets the router pick any model; use literal auto for the tier path or name a model)\n' "$_guard_id" "${TYPE:-}" >&2
+  if proxy_agent_is_unresolved_auto "$model"; then
+    printf 'proxy-agent: REFUSED unresolved automatic selection primary %s\n' "$model" >&2
     return 75
   fi
-  case "$_guard_id" in
-    gpt-*)
-      if [[ -e "$HOME/.claude/state/proxy-no-codex" ]]; then
-        printf 'proxy-agent: REFUSED primary %s (proxy-no-codex)\n' "$_guard_id" >&2
-        return 75
-      fi
-      if PA_P0_ARMED=1 proxy_agent_pool_blocked "$_guard_id"; then
-        printf 'proxy-agent: REFUSED primary %s (codex pool_cap)\n' "$_guard_id" >&2
-        return 75
-      fi
-      return 0;;
-  esac
-  # Cap enforcement on every primary path (MoP proxy cap repair 2026-11-19). A raw `--model claude-*` / `--model grok` (and a --resume of
-  # one) skips proxy_agent_pick_tier, and only the Codex and OpenCode pools were re-checked here, so an explicit Claude or Grok primary
-  # launched past CLAUDE_PROXY_CAP / GROK_PROXY_CAP (even 0) while the same role on `--model auto` was skipped as pool_cap. Same
-  # pool_blocked decision as the picker (role exemptions and a valid P0 override still apply), on the router-equivalent identity so a
-  # decorated or upper-case id is the same admission. A tier-picked primary was already admitted by that decision, so this only
-  # re-confirms it.
-  case "$(proxy_agent_router_identity "$_guard_id")" in
-    claude-*)
-      if PA_P0_ARMED=1 proxy_agent_pool_blocked "$_guard_id"; then
-        printf 'proxy-agent: REFUSED primary %s (claude pool_cap)\n' "$_guard_id" >&2
-        return 75
-      fi
-      return 0;;
-    ultra/claude-*)
-      if PA_P0_ARMED=1 proxy_agent_pool_blocked "$_guard_id"; then
-        printf 'proxy-agent: REFUSED primary %s (ultra pool_cap)\n' "$_guard_id" >&2
-        return 75
-      fi
-      return 0;;
-    # Direct DeepSeek is admitted by deepseek-direct-gate.py only (the admission block after JSONL= below: scope, stop, budget, cap). A P0 never preempts a bench lane for room.
-    deepseek-direct/*) return 0;;
-    grok-4.7|grok)
-      if PA_P0_ARMED=1 proxy_agent_pool_blocked "$_guard_id"; then
-        printf 'proxy-agent: REFUSED primary %s (grok pool_cap)\n' "$_guard_id" >&2
-        return 75
-      fi
-      return 0;;
-  esac
-  # Raw `--model sarvam-*` (and a --resume of one) skips the tier picker: re-check the Sarvam cap, and Kimi's availability gate, on the resolved primary.
-  if proxy_agent_is_sarvam_id "$_guard_id"; then
-    if PA_P0_ARMED=1 proxy_agent_pool_blocked "$_guard_id"; then
-      printf 'proxy-agent: REFUSED primary %s (sarvam pool_cap)\n' "$_guard_id" >&2
-      return 75
-    fi
-    if [[ "$(proxy_agent_router_identity "$_guard_id")" == sarvam-kimi-k3 ]] && proxy_agent_sarvam_kimi_gated; then
-      printf 'proxy-agent: REFUSED primary %s (not_enabled: Sarvam has not enabled Kimi K3, or SARVAM_KIMI_ENABLED=0)\n' "$_guard_id" >&2
-      return 75
-    fi
-    return 0
+  # The explicitly approved, bench-only DeepSeek path has a separate admission boundary below.
+  if proxy_agent_is_deepseek_direct_id "$id"; then return 0; fi
+  if ! proxy_agent_unfenced_eligible "$id"; then
+    printf 'PROXY_AGENT_FAILED reason=unfenced_model_ineligible model=%s type=%s\n' "$model" "$TYPE" >&2
+    return 2
   fi
-  if [[ "$_guard_id" == inkling-2-mini ]]; then
-    _ink_rc=0; proxy_agent_inkling_served || _ink_rc=$?
-    if [[ "$_ink_rc" != 0 ]]; then
-      printf 'proxy-agent: REFUSED primary %s (inkling health %s: relay /v1/models does not list it)\n' "$_guard_id" "$([[ "$_ink_rc" == 2 ]] && printf model_not_served || printf host_down)" >&2
-      return 75
-    fi
-    if proxy_agent_pool_blocked "$_guard_id"; then
-      printf 'proxy-agent: REFUSED primary %s (inkling pool_cap cap=%s)\n' "$_guard_id" "${INKLING_PROXY_CAP:-2}" >&2
-      return 75
-    fi
-    return 0
+  if [[ "$id" == inkling-2-mini ]] && { [[ "$model" != "$id" ]] || ! proxy_agent_inkling_eligible; }; then
+    printf 'PROXY_AGENT_FAILED reason=inkling_requires_fenced_light_lane model=%s type=%s\n' "$model" "$TYPE" >&2
+    return 2
   fi
-  proxy_agent_is_opencode_id "$_guard_id" || return 0
-  if PA_P0_ARMED=1 proxy_agent_pool_blocked "$_guard_id"; then
-    printf 'proxy-agent: REFUSED primary %s (opencode pool_cap)\n' "$_guard_id" >&2
+  if [[ "$id" == gpt-* && -e "$HOME/.claude/state/proxy-no-codex" ]] || proxy_agent_codex_p0_only "$id"; then
+    printf 'proxy-agent: REFUSED primary %s (codex disabled by policy)\n' "$model" >&2
     return 75
   fi
-  if proxy_agent_is_emergency_muse "$_guard_id" && ! proxy_agent_emergency_open; then
-    printf 'proxy-agent: REFUSED primary %s (emergency_gate blocker=%s)\n' "$_guard_id" "${PA_EMERGENCY_BLOCKER:-unknown}" >&2
+  if PA_RECORD_POOL=1 PA_P0_ARMED=1 proxy_agent_pool_blocked "$model"; then
+    printf 'proxy-agent: REFUSED primary %s (%s pool_cap)\n' "$model" "${PA_LAST_POOL:-unknown}" >&2
+    return 77
+  fi
+  if [[ "$id" == inkling-2-mini ]] && ! proxy_agent_inkling_served; then
+    printf 'proxy-agent: REFUSED primary %s (inkling relay not serving model)\n' "$model" >&2
+    return 75
+  fi
+  if [[ "$id" == sarvam-kimi-k3 ]] && proxy_agent_sarvam_kimi_gated; then
+    printf 'proxy-agent: REFUSED primary %s (not_enabled)\n' "$model" >&2
+    return 75
+  fi
+  if proxy_agent_is_emergency_muse "$id" && ! proxy_agent_emergency_open; then
+    printf 'proxy-agent: REFUSED primary %s (emergency_gate blocker=%s)\n' "$model" "${PA_EMERGENCY_BLOCKER:-unknown}" >&2
     return 75
   fi
   return 0
@@ -2485,7 +2434,7 @@ proxy_agent_primary_burn_check() {
   case "$_burn_model" in ultra/claude-*) return 0;; esac
   # Direct DeepSeek (25 Nov): outside the burn dial; proxy-burn-shadow.py has no pool for it (it would answer pool=unknown and refuse rc 75 in enforce mode).
   case "$_burn_model" in deepseek-direct/*) return 0;; esac
-  python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$_burn_model" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-}" >&2 || _burn_rc=$?
+  python3 -I "$(dirname "$0")/proxy-burn-shadow.py" "$_burn_model" "$TYPE" "${PROXY_AGENT_CAP_OVERRIDE:-${PA_P0_REF:-}}" >&2 || _burn_rc=$?
   if [[ "$_burn_rc" -ne 0 ]]; then
     printf 'proxy-burn: mode=%s decision=would_refuse rc=%s\n' "$PROXY_BURN_GATE" "$_burn_rc" >&2
     if [[ "$PROXY_BURN_GATE" == enforce ]] && proxy_agent_is_capped "$TYPE"; then return 75; fi
@@ -2515,20 +2464,6 @@ proxy_agent_select() {
   local requested="$MODEL" tier="RAW" rung="${RUNG:-1}" max_rung=0 base_level="" idx=1
   local -a levels=(LOW MID TOP)
   case "$TYPE" in hd-builder) max_rung=3;; hd-proof-qa) max_rung=2;; esac
-  # OpenCode-first pin downgrade (Rajiv C0ALZJHGE49 thread 1795401861.605899, ts 1795402350.568009: "why is the opencode pool still underused?
-  # fix th proxy agent script inplace."). Most routine launches carried an exact claude-sonnet-5-5 pin (tier=RAW), which skipped the MID
-  # picker and so the OpenCode pool. A routine Sonnet pin now resolves as the MID tier (OpenCode first, Sonnet still in the list).
-  # Kept on the pin: judgment/P0 lanes, hd-proof-qa (needs image input; glm-5.3/Sarvam reject images), EVERY unfenced lane
-  # (PROXY_AGENT_SANDBOX=0, builders included: launch-agent unfenced = GPT/Claude only, plus the hy4-flash-free builder/prover exception)
-  # and PROXY_AGENT_PIN_STRICT=1. 24 Nov fence ruling (Rajiv D0AMF0XE6TS thread 1795469138.551439, ts 1795483655.065659: "lets just keep it
-  # only for light work"): an explicit exact Claude pin on an unfenced lane is honored, never downgraded; before it needed PIN_STRICT=1.
-  if [[ "$requested" == claude-sonnet-5-5 && "${PROXY_AGENT_PIN_STRICT:-0}" != 1 && "$TYPE" != hd-proof-qa ]] && ! proxy_agent_is_judgment_lane \
-     && [[ "${PROXY_AGENT_SANDBOX:-1}" != 0 ]]; then
-    printf 'proxy-agent: pin claude-sonnet-5-5 -> MID tier (OpenCode first; PROXY_AGENT_PIN_STRICT=1 keeps the pin)\n' >&2
-    requested=sonnet
-  elif [[ "$requested" == claude-sonnet-5-5 && "${PROXY_AGENT_SANDBOX:-1}" == 0 ]]; then
-    printf 'proxy-agent: pin claude-sonnet-5-5 kept (unfenced lane, PROXY_AGENT_SANDBOX=0: exact Claude pin honored, no MID downgrade)\n' >&2
-  fi
   case "$requested" in
     auto)
       # The type's level (proxy_agent_type_level; unlisted = MID). Rung 1 stays on it; each higher rung (--rung N, the S131 escalation lever) moves one level up, capped at TOP.
@@ -2558,19 +2493,85 @@ proxy_agent_select() {
   fi
   # Exact sol on a conveyor role is that role's top rung, so auto-escalation still reports top_rung instead of rung_unknown.
   if [[ "$requested" == sol && "$max_rung" -gt 0 ]]; then SELECT_RUNG="$max_rung"; fi
-  if [[ "$tier" != RAW ]]; then
-    proxy_agent_pick_tier "$tier" || return 75
-    MODEL="$PICK_MODEL"; SELECT_REASON="$PICK_REASON"
-  fi
-  # OpenCode pool cap and Muse emergency gate on the resolved primary (covers RAW primaries too), before any alias usability POST.
-  proxy_agent_primary_pool_guard || return 75
+  local guard_rc=0 tried_id picked_reason
+  PA_CAPACITY_SEEN=0; PA_POOL_TRIED=""; PA_FALLTHROUGH_SKIP=""; PA_LAST_POOL=""
+  while :; do
+    if [[ "$tier" != RAW ]]; then
+      proxy_agent_pick_tier "$tier" || return 77
+      MODEL="$PICK_MODEL"; picked_reason="$PICK_REASON"
+      SELECT_REASON="${PA_FALLTHROUGH_SKIP:+pool_fallthrough:}$picked_reason"
+    fi
+    guard_rc=0
+    proxy_agent_primary_pool_guard || guard_rc=$?
+    [[ "$guard_rc" != 0 ]] || break
+    [[ "$guard_rc" == 77 ]] || return "$guard_rc"
+    PA_CAPACITY_SEEN=1
+    if [[ -n "$RESUME_NAME" || ( "$MODEL_EXPLICIT" == 1 && "$requested" != auto && "${PROXY_AGENT_PIN_STRICT:-0}" == 1 ) ]]; then
+      return 77
+    fi
+    read -r tried_id _ _ < <(resolve_model "$MODEL")
+    PA_FALLTHROUGH_SKIP="$PA_FALLTHROUGH_SKIP $(proxy_agent_router_identity "$tried_id")"
+    if [[ "$tier" == RAW ]]; then
+      tier="$(proxy_agent_type_level "$TYPE")"; SELECT_TIER="$tier"
+      if [[ "$max_rung" != 0 ]]; then SELECT_RUNG=1; [[ "$tier" != TOP ]] || SELECT_RUNG="$max_rung"; fi
+    fi
+    printf 'proxy-agent: POOL_FALLTHROUGH model=%s tier=%s\n' "$tried_id" "$tier" >&2
+  done
   # Primary burn decision first (covers RAW primaries too): a refused primary returns before any alias usability POST.
   proxy_agent_primary_burn_check || return 75
+  if [[ "$MODEL" == inkling-2-mini ]]; then
+    HAIKU_MODEL="$MODEL"; SONNET_MODEL="$MODEL"; OPUS_MODEL="$MODEL"
+    return 0
+  fi
   # Nested aliases get the same burn gate. A refused alias leaves PICK_MODEL empty; the export block below fails it closed.
   # They never use the OpenCode pool (uncounted by its cap): "nested" keeps them on the existing Claude/Grok/Codex routes.
   proxy_agent_pick_tier LOW nested || true; HAIKU_MODEL="$PICK_MODEL"
   proxy_agent_pick_tier MID nested || true; SONNET_MODEL="$PICK_MODEL"
   proxy_agent_pick_tier TOP nested || true; OPUS_MODEL="$PICK_MODEL"
+}
+
+# Rajiv D0AMF0XE6TS ts 1795748164.173209: after exhausting the eligible tier, offer PM capacity or queue an override request.
+proxy_agent_no_capacity() {
+  local name="${PROXY_AGENT_NAME:-proxy-$TYPE-$$}" cap="${PM_SUBAGENT_CAP:-0}" live="" arg rc=0
+  [[ "$cap" =~ ^[0-9]+$ ]] || cap=0
+  local -a args=()
+  # QA, deletion/cleanup and resume must not move to an in-process session.
+  local proxy_only=0
+  case "$TYPE" in hd-proof-qa|*cleanup*|*delet*|*prun*|*retention*) proxy_only=1;; esac
+  if [[ -n "$RESUME_NAME" ]] || [[ "${PROXY_AGENT_PIN_STRICT:-0}" == 1 && "$MODEL_EXPLICIT" == 1 ]]; then proxy_only=1; fi
+  if [[ -r "$ROLE_BRIEF" ]] && grep -qiE '(^[[:space:]]*MODE:[[:space:]]*(cleanup|deletion|prune|retention)\b|(delete|trash|prune|clean up) (files|directories|worktrees|scratch|caches|artifacts))' "$ROLE_BRIEF"; then
+    proxy_only=1
+  fi
+  if [[ "$proxy_only" == 0 && "$cap" -gt 0 ]]; then
+    live="$(python3 -I - "$HOME/.claude/state/pm-subagents.json" <<'PYCOUNT'
+import json, pathlib, sys
+try:
+    state = json.loads(pathlib.Path(sys.argv[1]).read_text())
+except FileNotFoundError:
+    state = {"agents": []}
+except (OSError, ValueError):
+    sys.exit(1)
+if not isinstance(state, dict) or not isinstance(state.get("agents"), list):
+    sys.exit(1)
+print(sum(1 for a in state["agents"] if isinstance(a, dict) and a.get("status") == "running" and a.get("capExempt") is not True))
+PYCOUNT
+)" || live=""
+    if [[ "$live" =~ ^[0-9]+$ && "$live" -lt "$cap" ]]; then
+      PA_IN_PROCESS_OFFERED=1
+      printf 'proxy-agent: IN_PROCESS_AVAILABLE live=%s cap=%s -> launch this brief in-process via the Agent tool (Skill launch-agent step 4)\n' "$live" "$cap" >&2
+      return 75
+    fi
+  fi
+  for arg in ${PA_ORIG_ARGV[@]+"${PA_ORIG_ARGV[@]}"}; do args+=("--orig-arg=$arg"); done
+  if [[ "${PROXY_AGENT_DRY_RUN:-}" == 1 ]]; then args+=(--dry-run); fi
+  python3 -I "$(dirname "$0")/proxy-run-state.py" capacity-wait --name "$name" --token "${PROXY_AGENT_RUN_TOKEN:-}" --type "$TYPE" \
+    --brief "$ROLE_BRIEF" --pools "$PA_POOL_TRIED" ${args[@]+"${args[@]}"} >&2 || rc=$?
+  if [[ "$rc" != 0 ]]; then
+    # Older CAPACITY_WAIT ledger path remains available via the EXIT trap.
+    printf 'proxy-agent: QUEUE_FAILED lane=%s helper_rc=%s; retaining CAPACITY_WAIT fallback\n' "$name" "$rc" >&2
+    return 75
+  fi
+  return 74
 }
 
 # Model table: alias | CLIProxyAPI model id | context window | max output tokens.
@@ -2730,7 +2731,14 @@ proxy_agent_fence_policy() {
 proxy_agent_fence_policy || exit $?
 # Selection can preempt an incumbent for a P0. Refuse known pressure before that side effect.
 proxy_agent_memory_gate || exit $?
-proxy_agent_select || exit 75  # includes the primary burn check (proxy_agent_primary_burn_check), before alias probes
+pa_select_rc=0
+proxy_agent_select || pa_select_rc=$?
+if [[ "$pa_select_rc" == 77 ]]; then
+  pa_capacity_rc=0
+  proxy_agent_no_capacity || pa_capacity_rc=$?
+  exit "$pa_capacity_rc"
+fi
+[[ "$pa_select_rc" == 0 ]] || exit "$pa_select_rc"
 # Direct DeepSeek emergency gate, on the CANONICAL router identity and BEFORE the dry-run return (CTO REVISE of fbdfbdc, C0ALZJHGE49
 # thread 1795038046.056679, ts 1795038184.764339). The earlier gate matched the raw $MODEL after the dry-run exit, so a supported suffix
 # (`deepseek-flash-4.1(high)`, `[1m]`), other case or padding skipped it while CLIProxyAPI still routed to the same direct, balance-metered
@@ -3118,22 +3126,6 @@ if proxy_agent_is_capped "$TYPE"; then
   _live_total="$(proxy_agent_live_count total)"
   if [[ "${_live_total:-999}" -ge "$PROXY_AGENT_TOTAL_CAP" ]]; then
     printf 'proxy-agent: telemetry total_cap (%s live >= %s).\n' "$_live_total" "$PROXY_AGENT_TOTAL_CAP" >&2
-  fi
-  if [[ "$MODEL_ID" == claude-* ]]; then
-    _live_claude="$(proxy_agent_live_count claude)"
-    if [[ "${_live_claude:-999}" -ge "$PROXY_AGENT_CLAUDE_CAP" ]]; then
-      # ENFORCED for an explicit claude --model (Rajiv ts 1795439210.427769): refuse rc 75 so the launcher queues CAPACITY_WAIT.
-      printf 'PROXY_AGENT_REFUSED reason=claude_cap model=%s (%s live >= %s)\n' "$MODEL_ID" "$_live_claude" "$PROXY_AGENT_CLAUDE_CAP" >&2
-      exit 75
-    fi
-  fi
-  if [[ "$MODEL_ID" == ultra/claude-* ]]; then
-    # Same enforcement for the ULTRA route against its own cap (default 4). cap 0 = route off; an unreadable count (999) refuses.
-    _live_ultra="$(proxy_agent_live_count ultra)"
-    if [[ "${_live_ultra:-999}" -ge "${ULTRA_PROXY_CAP:-4}" ]]; then
-      printf 'PROXY_AGENT_REFUSED reason=ultra_cap model=%s (%s live >= %s)\n' "$MODEL_ID" "$_live_ultra" "${ULTRA_PROXY_CAP:-4}" >&2
-      exit 75
-    fi
   fi
   # Direct DeepSeek is not counted here: its admission (scope, stop, budget, cap) is deepseek-direct-gate.py, called once before the dry-run return above.
 fi
