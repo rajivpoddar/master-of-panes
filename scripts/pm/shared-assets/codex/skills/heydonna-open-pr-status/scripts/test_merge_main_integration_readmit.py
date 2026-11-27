@@ -6,6 +6,10 @@ S167 admin path when (a) an earlier head had exact-head CI success and executed
 green E2E, (b) the delta is exactly a main merge (tree == merge-tree(parents)),
 and (c) a trusted PR comment carries a green remote-box receipt for the full
 current head. GitHub is stubbed; (b) runs real git in a throwaway temp repo.
+
+CTO REVISE (C0ALZJHGE49 thread 1795798240.220189, ts 1795798363.328589): absent CI
+never turns a red or pending current-head E2E into S167-ready, and a receipt with
+e2e_specs=none needs the canonical main classifier's exact-head no-area result.
 """
 
 import importlib.util
@@ -64,6 +68,8 @@ class MergeOnlyReadmit(unittest.TestCase):
         self.hunk_head = git(repo, "rev-parse", "HEAD")
         self.green_heads = {self.green}
         self.comments = []
+        self.current_e2e_refusal = None  # None: no E2E run at the current head
+        self.selector = None  # canonical main classifier result for the current head
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -81,6 +87,8 @@ class MergeOnlyReadmit(unittest.TestCase):
 
         def workflow_proof(pr_arg, workflow, names):
             sha = pr_arg["head"]["sha"]
+            if workflow == "e2e.yml" and sha == head and self.current_e2e_refusal:
+                raise merge.Refusal(self.current_e2e_refusal)
             if sha in self.green_heads:
                 return {"head": sha, "run": 7, "conclusion": "success", "workflow": workflow}
             raise merge.Refusal(f"WORKFLOW_MISSING workflow={workflow}")
@@ -110,8 +118,14 @@ class MergeOnlyReadmit(unittest.TestCase):
                 mock.patch.object(merge, "control_plane_classifier_exemption", lambda p: None), \
                 mock.patch.object(merge, "workflow_proof", workflow_proof), \
                 mock.patch.object(merge, "api", api), \
-                mock.patch.object(merge, "command", command):
+                mock.patch.object(merge, "command", command), \
+                mock.patch.object(merge, "workflow_requirements", self.workflow_requirements):
             return merge.merge(NUMBER, head, apply=apply)
+
+    def workflow_requirements(self, number, sha):
+        if self.selector is None:
+            raise AssertionError("classifier consulted without e2e_specs=none")
+        return self.selector
 
     def refused(self, head, prefix):
         with self.assertRaises(merge.Refusal) as caught:
@@ -150,6 +164,30 @@ class MergeOnlyReadmit(unittest.TestCase):
         self.refused(self.head, "S173_BOX_RECEIPT_NOT_GREEN")
         self.receipt(self.head, e2e_specs="failed")
         self.refused(self.head, "S173_BOX_RECEIPT_NOT_GREEN")
+
+    def test_refuses_red_or_pending_current_head_e2e_even_with_green_receipt(self):
+        self.receipt(self.head)
+        # workflow_proof selects an in-progress run as substantive and refuses it NOT_GREEN, so
+        # pending never reads as WORKFLOW_MISSING; verifier reds refuse VERIFIER_NOT_GREEN.
+        for refusal in ("WORKFLOW_NOT_GREEN workflow=e2e.yml run=9",
+                        "WORKFLOW_NOT_GREEN workflow=e2e.yml run=10",
+                        "VERIFIER_NOT_GREEN workflow=e2e.yml run=11"):
+            self.current_e2e_refusal = refusal
+            self.refused(self.head, "S173_CURRENT_HEAD_E2E_NOT_GREEN")
+
+    def test_refuses_e2e_specs_none_without_verified_selector_no_area(self):
+        self.receipt(self.head, e2e_specs="none")
+        for selector in ({"head": self.head, "ci_required": True, "e2e_required": True},
+                         {"head": self.green, "ci_required": True, "e2e_required": False}):
+            self.selector = selector
+            self.refused(self.head, "S173_E2E_NONE_UNVERIFIED")
+
+    def test_accepts_e2e_specs_none_with_exact_head_selector_no_area(self):
+        self.receipt(self.head, e2e_specs="none")
+        self.selector = {"head": self.head, "ci_required": True, "e2e_required": False}
+        result = self.run_merge(self.head)
+        self.assertEqual(result["status"], "READY_TO_MERGE")
+        self.assertEqual(result["workflows"]["e2e.yml"]["box_receipt"]["e2e_selector"], self.selector)
 
     def test_other_ci_refusals_are_unchanged(self):
         self.receipt(self.head)

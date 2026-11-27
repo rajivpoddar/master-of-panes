@@ -2184,12 +2184,34 @@ def s173_box_receipt(pr, head):
         red.append("e2e_specs")
     if red:
         raise Refusal(f"S173_BOX_RECEIPT_NOT_GREEN head={head} fields={','.join(red)}")
+    if found.get("e2e_specs") == "none":
+        # CTO REVISE C0ALZJHGE49 ts 1795798363.328589: "none" is accepted only when the canonical
+        # main classifier verifies that this exact head selects no E2E area.
+        selector = workflow_requirements(pr["number"], head)
+        if not (isinstance(selector, dict) and selector.get("head") == head
+                and selector.get("e2e_required") is False):
+            raise Refusal(f"S173_E2E_NONE_UNVERIFIED head={head}")
+        found["e2e_selector"] = selector
     return found
+
+
+def s173_current_head_e2e(pr):
+    """Existing current-head E2E is respected: absent is allowed, any red/pending/ambiguous run refuses."""
+    head = pr["head"]["sha"]
+    try:
+        return workflow_proof(pr, "e2e.yml", WORKFLOWS["e2e.yml"])
+    except Refusal as exc:
+        if str(exc).startswith("WORKFLOW_MISSING"):
+            return None
+        raise Refusal(f"S173_CURRENT_HEAD_E2E_NOT_GREEN head={head} cause={exc}") from exc
 
 
 def merge_only_readmit_proof(pr):
     """S173 proof for a head reached from an exact-head dual-green head only through clean main merges."""
     head = pr["head"]["sha"]
+    # CTO REVISE C0ALZJHGE49 ts 1795798363.328589: absent CI never makes a red or pending
+    # current-head E2E S167-ready.
+    current_e2e = s173_current_head_e2e(pr)
     main_sha = api("git/ref/heads/main")["object"]["sha"]
     local_git("fetch", "--no-tags", "--quiet", "origin", head, main_sha)
     integrations = []
@@ -2204,7 +2226,7 @@ def merge_only_readmit_proof(pr):
             receipt = s173_box_receipt(pr, head)
             return {"head": head, "merge_only_readmit": True, "green_head": green,
                     "main_integrations": integrations, "box_receipt": receipt,
-                    "merge_path": "S167_admin"}
+                    "current_head_e2e": current_e2e, "merge_path": "S167_admin"}
         commit = previous
     raise Refusal(f"S173_NO_EARLIER_DUAL_GREEN_HEAD head={head}")
 
