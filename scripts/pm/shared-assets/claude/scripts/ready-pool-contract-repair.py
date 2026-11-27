@@ -303,10 +303,15 @@ def body_hash_matches(body: str, expected: str) -> bool:
 
 
 def live_issue_body(issue: int) -> str:
-    proc = run([GH, "issue", "view", str(issue), "--repo", REPO, "--json", "body", "--jq", ".body"], timeout=GH_CALL_TIMEOUT)
+    proc = run([GH, "issue", "view", str(issue), "--repo", REPO, "--json", "body"], timeout=GH_CALL_TIMEOUT)
     if proc.returncode != 0:
         raise RepairError(f"gh issue view #{issue} failed: {proc.stderr.strip()}")
-    return proc.stdout.rstrip("\n")
+    return json.loads(proc.stdout).get("body") or ""
+
+
+def check_append_only_icl(old: str, new: str) -> None:
+    if old and (not new.startswith(old) or "## Issue Contract Ledger" not in new[len(old):]):
+        raise RepairError("body_edit_refused: only an appended Issue Contract Ledger is permitted")
 
 
 def strip_ready_pool(body: str) -> str:
@@ -432,12 +437,14 @@ def audit_one(issue: int, source: Path, run_id: str, timeout: int) -> tuple[Path
 
 
 def apply_proposed_body(issue: int, result: dict[str, Any]) -> None:
-    if not body_hash_matches(live_issue_body(issue), result["expected_body_sha256"]):
+    old = live_issue_body(issue)
+    if sha256_text(old) != result["expected_body_sha256"]:
         raise RepairError("stale_issue_body_before_apply")
+    proposal = Path(result["proposed_body_file"]).read_text(encoding="utf-8")
+    check_append_only_icl(old, proposal)
     proc = run([GH, "issue", "edit", str(issue), "--repo", REPO, "--body-file", result["proposed_body_file"]], timeout=120)
     if proc.returncode != 0:
         raise RepairError(f"gh issue edit failed: {proc.stderr.strip()}")
-    proposal = Path(result["proposed_body_file"]).read_text(encoding="utf-8").rstrip("\n")
     if live_issue_body(issue) != proposal:
         raise RepairError("live body verification failed after edit")
 
@@ -1364,12 +1371,14 @@ def run_deterministic(source: Path, data: dict[str, Any], issue_filter: set[int]
                 path.write_text(res["body"], encoding="utf-8")
                 if ledger_errors(path.read_text(encoding="utf-8")):
                     summary["failed"].append({"issue": n, "error": "validator rejected final body"}); continue
-                if not body_hash_matches(live_issue_body(n), sha256_text(issue.get("body") or "")):
+                old = issue.get("body") or ""
+                if live_issue_body(n) != old:
                     summary["failed"].append({"issue": n, "error": "stale_issue_body_before_apply"}); continue
+                check_append_only_icl(old, res["body"])
                 proc = run([GH, "issue", "edit", str(n), "--repo", REPO, "--body-file", str(path)], timeout=120)
                 if proc.returncode != 0:
                     summary["failed"].append({"issue": n, "error": proc.stderr.strip()[:200]}); continue
-                if live_issue_body(n) != res["body"].rstrip("\n"):
+                if live_issue_body(n) != res["body"]:
                     summary["failed"].append({"issue": n, "error": "live_body_verification_failed"}); continue
                 for label in res["add_label"]:
                     proc = run([GH, "issue", "edit", str(n), "--repo", REPO, "--add-label", label], timeout=120)

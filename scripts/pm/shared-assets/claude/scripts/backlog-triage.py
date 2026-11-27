@@ -1639,21 +1639,7 @@ def ensure_ready_pool_metadata(issue: int, row: dict[str, Any]) -> dict[str, Any
     if live_meta and not repair_reasons:
         return {"changed": False, "ready_pool": live_meta}
 
-    body = live.get("body") or ""
-    new_body = replace_ready_pool_block(body, ready_pool_defaults_block(row))
-    tmp = OUT_DIR / f"pm-backlog-promoter-ready-pool-{issue}.md"
-    tmp.write_text(new_body, encoding="utf-8")
-    run([GH, "issue", "edit", str(issue), "--repo", REPO, "--body-file", str(tmp)])
-
-    refreshed = gh_issue_view(issue)
-    refreshed_meta = ready_pool_metadata(refreshed)
-    missing_after = missing_ready_pool_dispatch_fields(refreshed_meta)
-    if missing_after:
-        raise RuntimeError("ready_pool_metadata_repair_failed:" + ",".join(missing_after))
-    refreshed_priority = clean_meta_value(refreshed_meta.get("priority")).upper()
-    if expected_priority in PRIORITY_RANK and refreshed_priority != expected_priority:
-        raise RuntimeError(f"ready_pool_priority_repair_failed:expected={expected_priority}:actual={refreshed_priority}")
-    return {"changed": True, "ready_pool": refreshed_meta, "body_file": str(tmp), "repair_reasons": repair_reasons}
+    raise RuntimeError("ready_pool_body_rewrite_refused: only append-only ICL repairs may edit issue bodies")
 
 
 def read_ready_pool_repair_proposals(path: str) -> dict[int, dict[str, Any]]:
@@ -1743,80 +1729,7 @@ def repair_todo_ready_pool_issue(
             actual_body_sha256=old_sha,
         )
 
-    # A metadata-only repair must preserve the existing dependency/proof contract.
-    for key in ("blockers", "gate", "wake_condition"):
-        if clean_meta_value(current_meta.get(key)):
-            metadata[key] = current_meta[key]
-    block = ready_pool_defaults_block(metadata)
-    extra = {key: value for key, value in current_meta.items() if key not in REQUIRED_READY_POOL_FIELDS}
-    if extra:
-        block = block.replace("\n-->", "\n" + "\n".join(f"{key}: {value}" for key,value in extra.items()) + "\n-->")
-    new_body = replace_ready_pool_block(old_body, block)
-    errors = issue_contract_ledger_errors(new_body, require_qa_proof=True)
-    if errors:
-        return promotion_failure(issue, "invalid_repaired_contract", errors=errors)
-    tmp = OUT_DIR / f"pm-ready-pool-repair-{number}.md"
-    fresh = gh_issue_view(number)
-    if issue_body_sha256(fresh.get("body") or "") != old_sha or labels(fresh) != names:
-        return promotion_failure(issue, "stale_issue_before_repair")
-    if number in open_pr_issue_numbers():
-        return promotion_failure(issue, "already_owned_by_open_pr")
-    tmp.write_text(new_body, encoding="utf-8")
-    try:
-        run([GH, "issue", "edit", str(number), "--repo", REPO, "--body-file", str(tmp)])
-        priority_labels_to_remove = sorted(
-            label
-            for label in names
-            if label.lower() in DEPRECATED_PRIORITY_ALIASES
-            or (label in PRIORITY_RANK and label != metadata["priority"])
-        )
-        label_cmd = [GH, "issue", "edit", str(number), "--repo", REPO]
-        if metadata["priority"] not in names:
-            label_cmd.extend(["--add-label", metadata["priority"]])
-        if priority_labels_to_remove:
-            label_cmd.extend(["--remove-label", ",".join(priority_labels_to_remove)])
-        if len(label_cmd) > 6:
-            run(label_cmd)
-        refreshed = gh_issue_view(number)
-    except subprocess.CalledProcessError as exc:
-        return promotion_failure(
-            issue,
-            "gh_repair_failed",
-            returncode=exc.returncode,
-            stdout=exc.stdout,
-            stderr=exc.stderr,
-        )
-
-    refreshed_names = labels(refreshed)
-    refreshed_status = sorted(name for name in refreshed_names if name.startswith(STATUS_PREFIX))
-    refreshed_meta = ready_pool_metadata(refreshed)
-    missing_after = missing_ready_pool_dispatch_fields(refreshed_meta)
-    priority_after = canonical_priority_labels(refreshed_names)
-    membership = dispatch_readiness_reasons(refreshed, open_nums, allow_backlog=False, allow_dependencies=True)
-    if refreshed_status != ["status:todo"] or missing_after or priority_after != [metadata["priority"]] or membership or (refreshed.get("body") or "").rstrip("\n") != new_body.rstrip("\n"):
-        return promotion_failure(
-            issue,
-            "repair_verification_failed",
-            status_labels=refreshed_status,
-            missing_ready_pool_fields=missing_after,
-            priority_labels=priority_after,
-            live_ready_pool=refreshed_meta,
-            membership_reasons=membership,
-        )
-
-    # The verified GitHub contract is the queue entry; no obligation mirror.
-    return {
-        "ok": True,
-        "changed": True,
-        "issue": number,
-        "reason": "repaired",
-        "missing_before": current_missing,
-        "body_sha256_before": old_sha,
-        "body_sha256_after": issue_body_sha256(refreshed.get("body") or ""),
-        "live_labels": sorted(refreshed_names),
-        "live_ready_pool": refreshed_meta,
-        "review_proof": clean_meta_value(proposal.get("review_proof")),
-    }
+    return promotion_failure(issue, "ready_pool_body_rewrite_refused")
 
 
 def write_ready_pool_repair_manifest(

@@ -26,6 +26,14 @@ Excluded: already on a slot (status:in-progress or slot:N), pm-blocked:*
 pm-nonclaimable:tracking, umbrella, and Ready Pool claimable_slot_type values
 that are not slot work.
 
+Parked work (2026-11-27 fix, pm-ops-tooling): an issue is also excluded, from the pick and
+from the PRIORITY_INVERSION check, when an OPEN park obligation (`PARK_KINDS`, e.g. merge_hold)
+in the live pm-ops ledger binds it, directly (issue/pr column or github_issue/github_pr target)
+or through the open PR that closes it. An open obligation means its wake condition is unmet;
+resolving the obligation releases the issue. Parked issues are listed under `parked` with the
+obligation id; `--check` of one returns PARKED (exit 5). The ledger is read-only; if it cannot
+be read the selector fails closed (UNAVAILABLE, exit 4, no pick), never "zero parked".
+
 Dependency-blocked candidates of all priorities are listed in the pool. Their
 referenced PR must be merged, or a referenced issue must have exactly one
 authoritatively linked implementation PR that is merged. Issue closure, deploy
@@ -51,8 +59,8 @@ Usage:
   ready_pool_select.py --check 11462   # validate a PM pick before mop-assign-slot
 
 Exit codes: 0 ok/pick, 1 no pick, 3 PRIORITY_INVERSION,
-4 not_eligible/dependency open/LOOKUP_FAILED/LOOKUP_TIMEOUT, 5 other gate,
-6 PR_CAP. GitHub lookups use bounded timeouts and up to two retries on timeout.
+4 not_eligible/dependency open/LOOKUP_FAILED/LOOKUP_TIMEOUT/UNAVAILABLE, 5 other gate
+(incl. PARKED), 6 PR_CAP. GitHub lookups use bounded timeouts and up to two retries on timeout.
 """
 
 from __future__ import annotations
@@ -291,6 +299,97 @@ def non_slot_owners() -> tuple[dict[str, set[int]], dict[int, set[str]]]:
     except (OSError, sqlite3.Error, ValueError, TypeError, AttributeError):
         pass  # A missing ledger cannot certify ownership.
     return live, obligations
+
+
+# Parked work: an OPEN obligation of these kinds means "not claimable until its wake condition
+# is met". cto_hold/pm_hold/parking_review are deliberately not parks (routing/decision notes).
+PM_OPS_DB = Path.home() / ".claude/projects/-Users-rajiv-Downloads-projects-heydonna-app/state/pm-ops.db"
+PARK_KINDS = frozenset({"merge_hold", "pr_merge_hold", "pr_hold", "pr_park", "pr_parked", "parked_pr_wake",
+                        "issue_hold", "issue_parked", "parked_issue", "parked_issue_wait", "parked_rework", "parked"})
+
+
+class ParkLedgerUnavailable(Exception):
+    """The pm-ops ledger could not be read, so park state is unknown: fail closed."""
+
+
+def read_park_obligations(db_path: Path | None = None) -> list[dict[str, Any]]:
+    """Open park obligations, read-only. Any read problem raises ParkLedgerUnavailable so a
+    crash can never look like zero parked items (no assignment without park state)."""
+    path = Path(db_path or PM_OPS_DB)
+    conn = None
+    try:
+        if not path.is_file():
+            raise FileNotFoundError("ledger missing")
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)
+        rows = conn.execute(
+            "SELECT id, kind, target_type, target_id, pr, issue, title FROM obligations "
+            f"WHERE status='open' AND kind IN ({','.join('?' * len(PARK_KINDS))}) ORDER BY id",
+            sorted(PARK_KINDS)).fetchall()
+    except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
+        raise ParkLedgerUnavailable(f"{type(exc).__name__}: pm-ops obligations unreadable") from None
+    finally:
+        if conn is not None:
+            conn.close()
+    return [dict(zip(("id", "kind", "target_type", "target_id", "pr", "issue", "title"), row)) for row in rows]
+
+
+def _int_or_none(value: Any) -> int | None:
+    return int(value) if value is not None and str(value).strip().isdigit() else None
+
+
+def park_index(obligations: list[dict[str, Any]], prs: list[dict[str, Any]]) -> dict[int, list[dict[str, Any]]]:
+    """Pure: issue number -> open park obligations binding it, directly or via its closing PR."""
+    closes: dict[int, set[int]] = {}
+    for pr in prs:
+        pr_number = _int_or_none(pr.get("number"))
+        if pr_number is None:
+            continue
+        for ref in pr.get("closingIssuesReferences") or []:
+            number = _int_or_none(ref.get("number") if isinstance(ref, dict) else ref)
+            if number is not None:
+                closes.setdefault(pr_number, set()).add(number)
+        for match in re.finditer(r"(?im)^\s*(?:closes?|fix(?:es)?|resolves?)\s+#(\d+)\b", pr.get("body") or ""):
+            closes.setdefault(pr_number, set()).add(int(match.group(1)))
+    index: dict[int, list[dict[str, Any]]] = {}
+    for ob in obligations:
+        target_type = str(ob.get("target_type") or "").lower()
+        target = _int_or_none(ob.get("target_id"))
+        issues = {n for n in (_int_or_none(ob.get("issue")),
+                              target if target_type in ("github_issue", "issue") else None) if n is not None}
+        pr_numbers = {n for n in (_int_or_none(ob.get("pr")),
+                                  target if target_type in ("github_pr", "pr") else None) if n is not None}
+        for pr_number in pr_numbers:
+            issues |= closes.get(pr_number, set())
+        entry = {"obligation_id": ob["id"], "kind": ob["kind"], "pr": min(pr_numbers) if pr_numbers else None,
+                 "title": (ob.get("title") or "")[:100]}
+        for number in issues:
+            index.setdefault(number, []).append(entry)
+    return index
+
+
+def drop_parked(issues: list[dict[str, Any]], extra: list[dict[str, Any]],
+                parked: dict[int, list[dict[str, Any]]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Parked issues are neither picks nor inversion blockers (they are listed via parked_candidates)."""
+    return ([i for i in issues if int(i["number"]) not in parked],
+            [r for r in extra if int(r["issue"]) not in parked])
+
+
+def parked_candidates(issues: list[dict[str, Any]], parked: dict[int, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """Pure: pool issues withheld only because an open park obligation binds them."""
+    out = []
+    for issue in issues:
+        number = int(issue["number"])
+        obligations = parked.get(number)
+        cls = classify(issue) if obligations else None
+        if not cls:
+            continue
+        c = candidate(issue, cls)
+        out.append({"issue": number, "class": cls, "priority": c["priority"], "priority_rank": c["priority_rank"],
+                    "created_at": c["created_at"], "title": c["title"], "pr": c.get("pr"),
+                    "wake_condition": c["wake_condition"], "obligations": obligations,
+                    "obligation_ids": [o["obligation_id"] for o in obligations],
+                    "reason": "open park obligation: wake condition unmet, not claimable work"})
+    return sorted(out, key=sort_key)
 
 
 def verified_non_slot_owner(issue: dict[str, Any]) -> bool:
@@ -2130,11 +2229,20 @@ def selftest() -> int:
     return 0
 
 
-CHECK_EXIT = {"ok": 0, "PRIORITY_INVERSION": 3, "DEPENDENCY_OPEN": 4, "GATED": 5, "PR_CAP": 6}
+CHECK_EXIT = {"ok": 0, "PRIORITY_INVERSION": 3, "DEPENDENCY_OPEN": 4, "UNAVAILABLE": 4, "GATED": 5,
+              "PARKED": 5, "PR_CAP": 6}
 
 
-def check_decision(args, issues, extra, ranked, gated, rework_only, open_pr_count, cache) -> dict[str, Any]:
+def check_decision(args, issues, extra, ranked, gated, rework_only, open_pr_count, cache,
+                   parked: dict[int, list[dict[str, Any]]] | None = None) -> dict[str, Any]:
     """The --check verdict over an evaluated population (shared by full and fast paths)."""
+    obligations = (parked or {}).get(args.check)
+    if obligations:
+        first = obligations[0]
+        return {"status": "PARKED", "issue": args.check, "parked": obligations,
+                "obligation_ids": [o["obligation_id"] for o in obligations],
+                "reason": f"PARKED: open {first['kind']} obligation {first['obligation_id']}; "
+                          "wake condition unmet, not claimable work"}
     # Preserve the existing gated P0 response even at the cap.
     all_gated = gated_p0_candidates(issues, cache=cache, offline=args.no_dependency_check)
     requested_gated = next((c for c in all_gated if c["issue"] == args.check), None)
@@ -2151,8 +2259,11 @@ def check_decision(args, issues, extra, ranked, gated, rework_only, open_pr_coun
     return res
 
 
-def evaluate_check(args, issues, extra, prs, cache) -> dict[str, Any]:
-    """main()'s --check pipeline over a given issue population, unchanged."""
+def evaluate_check(args, issues, extra, prs, cache,
+                   parked: dict[int, list[dict[str, Any]]] | None = None) -> dict[str, Any]:
+    """main()'s --check pipeline over a given issue population, unchanged except parked work."""
+    if parked is None:
+        parked = park_index(read_park_obligations(), prs)  # raises ParkLedgerUnavailable: fail closed
     if not args.no_dependency_check:
         prefetch_dependencies(issues, cache)
         prefetch_native(native_candidates(issues, extra), cache)
@@ -2161,9 +2272,10 @@ def evaluate_check(args, issues, extra, prs, cache) -> dict[str, Any]:
     owned, _ = owned_issues(prs)
     eligible_issues = [i for i in issues if classify(i) != "new_issue" or int(i["number"]) not in owned]
     eligible_extra = [r for r in extra if r.get("class", "rework") != "new_issue" or int(r["issue"]) not in owned]
+    eligible_issues, eligible_extra = drop_parked(eligible_issues, eligible_extra, parked)
     ranked = rank_candidates(eligible_issues, eligible_extra, rework_only, cache, args.no_dependency_check)
     gated = gated_p0_candidates(eligible_issues, rework_only, cache, args.no_dependency_check)
-    res = check_decision(args, issues, extra, ranked, gated, rework_only, open_pr_count, cache)
+    res = check_decision(args, issues, extra, ranked, gated, rework_only, open_pr_count, cache, parked)
     res["_rework_only"] = rework_only
     return res
 
@@ -2232,7 +2344,7 @@ def _fresh_snapshot() -> list | None:
     return None
 
 
-def fast_check(args) -> dict[str, Any]:
+def fast_check(args, obligations: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """--check N without loading every issue body.
 
     The checked issue's dependency blockers and merged-PR association are always
@@ -2242,6 +2354,8 @@ def fast_check(args) -> dict[str, Any]:
     and the scan stops at the first eligible better candidate.
     """
     cache: dict = {_FRESH: {int(args.check)}}
+    if obligations is None:
+        obligations = read_park_obligations()  # raises ParkLedgerUnavailable: fail closed
     extra = []
     if args.selection_class and args.selection_class != "new_issue":
         extra.append({"issue": args.check, "class": args.selection_class, "pr": args.pr})
@@ -2259,13 +2373,14 @@ def fast_check(args) -> dict[str, Any]:
                               "refusing a stale assignment check"}
         node = graphql_nodes([args.check], candidate_details=True).get(args.check)
         prs = pr_fut.result()
+        parked = park_index(obligations, prs)
         if node is None:
             return {"status": "LOOKUP_FAILED", "issue": args.check, "reason": "issue lookup failed"}
         if "mergedAt" in node:
             return {"status": "not_eligible", "issue": args.check,
                     "reason": "issue is not an eligible Ready Pool/rework candidate"}
         picked = candidate_node(node)
-        res = evaluate_check(args, [picked], extra, prs, cache)
+        res = evaluate_check(args, [picked], extra, prs, cache, parked)
         rework_only = res.pop("_rework_only")
         if res["status"] != "ok":
             return res
@@ -2274,8 +2389,12 @@ def fast_check(args) -> dict[str, Any]:
     pick_key = (pick["priority_rank"], CLASS_RANK.get(pick["class"], 9))
     labelled = []
     unlabelled = []
+    skipped_parked = []
     for light in light_rows:
         if int(light["number"]) == args.check or classify(light, light=True) is None:
+            continue
+        if int(light["number"]) in parked:  # parked work never blocks a pick
+            skipped_parked.append(int(light["number"]))
             continue
         labels = _labels(light)
         ranks = [PRIORITY_RANK[name] for name in labels if name in PRIORITY_RANK]
@@ -2328,7 +2447,7 @@ def fast_check(args) -> dict[str, Any]:
         evaluated += len(chunk_events)
         if not chunk:
             continue
-        verdict = evaluate_check(args, [picked, *chunk], extra, prs, cache)
+        verdict = evaluate_check(args, [picked, *chunk], extra, prs, cache, parked)
         verdict.pop("_rework_only", None)
         if verdict["status"] != "ok":
             verdict["fast_path"] = {"higher_candidates": eligible_higher, "evaluated": evaluated}
@@ -2337,6 +2456,9 @@ def fast_check(args) -> dict[str, Any]:
         res["priority_reason"] = (f"priority_reason: {pick['priority']} {pick['class']} #{pick['issue']} taken because "
                                   f"no ready P0/P1 candidate exists ({eligible_higher} higher-priority candidates checked)")
     res["fast_path"] = {"higher_candidates": eligible_higher, "evaluated": evaluated}
+    if skipped_parked:
+        res["parked"] = [{"issue": n, "obligation_ids": [o["obligation_id"] for o in parked[n]]}
+                         for n in sorted(skipped_parked)]
     return res
 
 
@@ -2358,8 +2480,15 @@ def main(argv: list[str] | None = None) -> int:
         return selftest()
     if args.selection_class and args.check is None:
         raise ValueError("selection-class requires --check")
+    try:  # Park state first: unreadable ledger = UNAVAILABLE, never "nothing parked".
+        obligations = read_park_obligations()
+    except ParkLedgerUnavailable as exc:
+        print(json.dumps({"status": "UNAVAILABLE", "issue": args.check, "pick": None,
+                          "reason": f"UNAVAILABLE: {exc}; refusing to select or assign without park state"},
+                         sort_keys=True))
+        return CHECK_EXIT["UNAVAILABLE"]
     if args.check is not None and not args.issues_json and not args.extra_json:
-        res = fast_check(args)
+        res = fast_check(args, obligations)
         if gh_budget.stale_info():
             res.setdefault("stale", True)
             res.setdefault("stale_reason", gh_budget.stale_info())
@@ -2394,9 +2523,11 @@ def main(argv: list[str] | None = None) -> int:
     mark_unowned_open_pr_rework(issues, prs)
     rework_only, open_pr_count = rework_mode(args, prs)
     owned, uncertain = owned_issues(prs)
+    parked = park_index(obligations, prs)
     # Existing PRs own new work, not rework/repro on that same PR.
     eligible_issues = [i for i in issues if classify(i) != "new_issue" or int(i["number"]) not in owned]
     eligible_extra = [r for r in extra if r.get("class", "rework") != "new_issue" or int(r["issue"]) not in owned]
+    eligible_issues, eligible_extra = drop_parked(eligible_issues, eligible_extra, parked)
     # GraphQL for dependency hell overlaps the contract scan inside rank. The fetch
     # walks every gated issue; contract rejects are dropped before the report.
     hell_pool = None
@@ -2441,10 +2572,11 @@ def main(argv: list[str] | None = None) -> int:
     gated_p0 = [c for c in gated if c["priority_rank"] == 0]
 
     if args.check is not None:
-        res = check_decision(args, issues, extra, ranked, gated, rework_only, open_pr_count, cache)
+        res = check_decision(args, issues, extra, ranked, gated, rework_only, open_pr_count, cache, parked)
         print(json.dumps(res, sort_keys=True))
         return CHECK_EXIT.get(res["status"], 4)
 
+    parked_rows = parked_candidates(issues, parked)
     dependency_hell, dependency_hotspots, hell_meta = [], [], {"skipped": "offline"}
     if not args.no_dependency_check:
         started = datetime.now(timezone.utc)
@@ -2474,6 +2606,8 @@ def main(argv: list[str] | None = None) -> int:
         "pick": pick,
         "priority_reason": priority_reason(pick, ranked) if pick else "",
         "eligible_count": len(ranked),
+        "parked_count": len(parked_rows),
+        "parked": parked_rows,
         "contract_defect_count": len(contract_defects),
         "contract_defects": contract_defects,
         "ranked": ranked[: args.limit],

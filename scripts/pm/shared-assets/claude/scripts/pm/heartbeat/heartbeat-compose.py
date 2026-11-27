@@ -1898,7 +1898,7 @@ def mac_box_stats() -> dict:
          lambda text: parse_mac_receipts(text, datetime.now(timezone.utc))),
         ('top/uptime', ['ssh', '-i', str(Path.home() / '.ssh/id_ed25519_mac_runner'),
                         '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=8',
-                        'runner@192.168.68.114', 'uptime; top -l 1 -n 0'], parse_mac_load),
+                        'runner@192.168.68.108', 'uptime; top -l 1 -n 0'], parse_mac_load),
     )
     parts = []
     for name, command, parse in sources:
