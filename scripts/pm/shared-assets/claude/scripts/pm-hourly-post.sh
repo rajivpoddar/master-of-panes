@@ -105,6 +105,9 @@ head -1 /tmp/heartbeat-1h-post.txt | grep -Eq '^(<@[A-Z0-9]+> *)?\*Hourly' || { 
 # line with the counts and this private file path: no ledger owners, titles or required actions. MoP no longer injects an hourly-processing
 # prompt into the PM pane (Rajiv D0AMF0XE6TS thread 1795794483.299309, ts 1795794743.693179), so this Alerts line is the hand-off of the
 # batch path and row count; this script only records the report post. Fail-open (rule 50): any problem posts the report without the line.
+# CTO REVISE C0ALZJHGE49 thread 1795798240.220189, ts 1795798363.328589: the line ends with one parseable token, routine_batch_file=<the
+# same-bucket $CLAIM/routine-batch.json>, so the hourly skill takes the path from this post. The processing lane records its acceptance on
+# the parent's existing MoP receipt row: POST 127.0.0.1:3100/hourly-batch-accept {"ts": <this parent ts>, "bucket": <$BUCKET>}.
 RB_TOTAL=""; RB_ROWS=""; RB_IDS=""; RB_FAST=""
 _RB_HOOK="${PM_STOP_DRAIN_HOOK:-/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks/pm-ops-sync-stop-validator.sh}"
 IFS= read -r -d '' _RB_PY <<'PY' || true
@@ -115,7 +118,7 @@ rows, ids = d.get('rows') or [], d.get('ids') or []
 total, fast = int(d.get('hourly_runnable') or 0), int(d.get('fast_runnable') or 0)
 if total:
     with open(report, 'a', encoding='utf-8') as handle:
-        handle.write("\n*Routine batch*: %d runnable routine row(s); %d FAST row(s) stay on the Stop drain. The hourly processing lane reads %s.\n" % (total, fast, src))
+        handle.write("\n*Routine batch*: %d runnable routine row(s); %d FAST row(s) stay on the Stop drain. routine_batch_file=%s\n" % (total, fast, src))
 print('%d %d %d %d' % (total, len(rows), len(ids), fast))
 PY
 if bash "$_RB_HOOK" --hourly-batch "$CLAIM/routine-batch.json" </dev/null > "$CLAIM/routine-batch.export" 2>&1 \
@@ -225,7 +228,7 @@ if [ "$CHART_READY" = 1 ]; then
     fi
   fi
 fi
-# Posting does not establish lane acceptance; the processing lane records its own receipt.
+# Posting does not establish lane acceptance; the processing lane records it on the parent's receipt row via /hourly-batch-accept.
 if [ "${RB_TOTAL:-0}" -gt 0 ] 2>/dev/null; then
   printf 'outcome=REPORT_POSTED ts=%s parent_ts=%s bucket=%s hourly_runnable=%s fast_open=%s lane_acceptance=unconfirmed\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TS" "$BUCKET" "$RB_TOTAL" "$RB_FAST" > "$CLAIM/routine-batch.posted" 2>/dev/null || true

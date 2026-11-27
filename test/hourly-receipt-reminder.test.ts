@@ -1,9 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import * as reminder from "../src/hourlyReceiptReminder.js";
-import { handoffHourlyReceipt, tickHourlyReminders } from "../src/hourlyReceiptReminder.js";
+import { acceptHourlyBatch, handoffHourlyReceipt, tickHourlyReminders } from "../src/hourlyReceiptReminder.js";
 import type { MoPDatabase } from "../src/db.js";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 function fixture() {
@@ -61,5 +62,43 @@ describe("hourly processing is not injected into the PM pane", () => {
     assert.equal((reminder as Record<string, unknown>).hourlyProcessingPrompt, undefined);
     const server = readFileSync(join(import.meta.dirname, "../src/server.ts"), "utf8");
     assert.doesNotMatch(server, /cadence-hourly-processing|tickHourlyProcessing/);
+  });
+});
+
+// CTO REVISE C0ALZJHGE49 thread 1795798240.220189, ts 1795798363.328589: lane acceptance on the parent's existing receipt row.
+describe("hourly routine batch acceptance", () => {
+  const ts = "1795797917.395029", bucket = "2026-11-27:22", now = Number(ts) * 1000;
+  function setup(batch: unknown = { hourly_runnable: 15, fast_runnable: 74, rows: [] }) {
+    const f = fixture(), root = mkdtempSync(join(tmpdir(), "rb-"));
+    mkdirSync(join(root, bucket));
+    if (batch !== undefined) writeFileSync(join(root, bucket, "routine-batch.json"), JSON.stringify(batch));
+    handoffHourlyReceipt(f.db, ts, `OK ts=${ts} channel=C0ALZJHGE49`, now, bucket);
+    return { ...f, root };
+  }
+  it("records acceptance once on the bucket owner's row and is idempotent", () => {
+    const f = setup();
+    const first = acceptHourlyBatch(f.db, ts, bucket, now + 60_000, f.root);
+    assert.equal(first.ok, true);
+    const row = f.state()[0];
+    assert.equal(row.processing.state, "accepted");
+    assert.equal(row.processing.accepted_at, now + 60_000);
+    assert.deepEqual(row.processing.batch, { bucket, file: join(f.root, bucket, "routine-batch.json"), hourly_runnable: 15, fast_open: 74 });
+    const again = acceptHourlyBatch(f.db, ts, bucket, now + 120_000, f.root);
+    assert.equal(again.ok && again.already, true);
+    assert.equal(f.state()[0].processing.accepted_at, now + 60_000);
+  });
+  it("refuses an unbound parent, a foreign bucket, a missing batch, a settled row and an expired parent", () => {
+    const f = setup();
+    assert.deepEqual(acceptHourlyBatch(f.db, "1795797917.000001", bucket, now, f.root), { ok: false, reason: "no_parent" });
+    assert.deepEqual(acceptHourlyBatch(f.db, ts, "2026-11-27:21", now, f.root), { ok: false, reason: "not_batch_owner" });
+    assert.deepEqual(acceptHourlyBatch(f.db, ts, "../x", now, f.root), { ok: false, reason: "invalid_args" });
+    assert.deepEqual(acceptHourlyBatch(f.db, ts, bucket, now + 3 * 3600_000 + 1, f.root), { ok: false, reason: "expired" });
+    const empty = setup(undefined);
+    assert.deepEqual(acceptHourlyBatch(empty.db, ts, bucket, now, empty.root), { ok: false, reason: "batch_unreadable" });
+    assert.equal(empty.state()[0].processing.state, "pending");
+    const settled = setup();
+    const rows = settled.state(); rows[0].processing = { state: "delivered" };
+    settled.db.setConfig("hourly_receipt_reminders_v1", JSON.stringify(rows));
+    assert.deepEqual(acceptHourlyBatch(settled.db, ts, bucket, now, settled.root), { ok: false, reason: "already_settled" });
   });
 });

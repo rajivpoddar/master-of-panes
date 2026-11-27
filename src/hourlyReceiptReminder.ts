@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -13,8 +14,10 @@ type Scheduler = (file: string, args: string[], options: { timeout: number }) =>
  * injects the hourly-processing prompt into the PM pane; the routine batch path and row count ride on the HeyDonna Alerts hourly post instead. */
 export type RoutineBatch = { bucket: string; file: string; hourly_runnable: number; fast_open: number };
 type Processing = {
-  state: "pending" | "claimed" | "delivered" | "queued" | "unknown" | "refused" | "expired";
+  state: "pending" | "claimed" | "delivered" | "queued" | "unknown" | "refused" | "expired" | "accepted";
   claimed_at?: number;
+  /** When the hourly processing lane accepted this parent's routine batch (`accepted` only). */
+  accepted_at?: number;
   receipt?: PMSubmitResult;
   /** Lane ACCEPTANCE of the batch: set with the lane receipt above, never by the report post. */
   batch?: RoutineBatch;
@@ -22,6 +25,7 @@ type Processing = {
 /** `ts`/`receipt` = the REPORT POST (Slack parent). `processing.state`/`processing.receipt` = the LANE ACCEPTANCE. They are separate outcomes. */
 type Row = { ts: string; due: number; state: "pending" | "claimed" | "scheduled" | "unknown"; scheduled_id?: string; receipt?: string; processing?: Processing; batch_bucket?: string };
 const BUCKET_RE = /^\d{4}-\d{2}-\d{2}:\d{2}$/;
+const BATCH_ROOT = join(homedir(), ".claude/hourly-heartbeat-posts");
 function load(db: MoPDatabase): Row[] {
   const value = db.getConfig(KEY);
   if (!value) return [];
@@ -46,6 +50,46 @@ export function handoffHourlyReceipt(db: MoPDatabase, ts: string, receipt: strin
     save(db, rows);
   }
   return true;
+}
+
+export type BatchAcceptance =
+  | { ok: true; already: boolean; ts: string; batch: RoutineBatch; accepted_at: number }
+  | { ok: false; reason: "invalid_args" | "no_parent" | "not_batch_owner" | "expired" | "batch_unreadable" | "already_settled" };
+
+/** Lane ACCEPTANCE of a parent's routine batch, recorded on that parent's existing receipt row (`processing`).
+ * CTO REVISE C0ALZJHGE49 thread 1795798240.220189, ts 1795798363.328589: "Update that consumer to take the same-bucket path from the
+ * Alerts post and show one genuine lane acceptance on its existing receipt." MoP never injects the work (Rajiv ts 1795794743.693179);
+ * the hourly processing lane calls this after it has read the batch file named in the Alerts post. It binds to the exact parent ts,
+ * the bucket that parent owns, and that bucket's private file. It is written once; a repeat with the same binding is idempotent.
+ */
+export function acceptHourlyBatch(db: MoPDatabase, ts: unknown, bucket: unknown, now = Date.now(), batchRoot = BATCH_ROOT): BatchAcceptance {
+  if (typeof ts !== "string" || !/^\d{10}\.\d{6}$/.test(ts) || typeof bucket !== "string" || !BUCKET_RE.test(bucket)) {
+    return { ok: false, reason: "invalid_args" };
+  }
+  const rows = load(db);
+  const row = rows.find(item => item.ts === ts);
+  if (!row) return { ok: false, reason: "no_parent" };
+  if (row.batch_bucket !== bucket) return { ok: false, reason: "not_batch_owner" };
+  const file = join(batchRoot, bucket, "routine-batch.json");
+  const prior = row.processing;
+  if (prior?.state === "accepted" && prior.batch && prior.accepted_at) {
+    return prior.batch.bucket === bucket && prior.batch.file === file
+      ? { ok: true, already: true, ts, batch: prior.batch, accepted_at: prior.accepted_at }
+      : { ok: false, reason: "already_settled" };
+  }
+  if (prior && prior.state !== "pending") return { ok: false, reason: "already_settled" };
+  if (now - Number(ts) * 1000 > 3 * 3600_000) return { ok: false, reason: "expired" };
+  let batch: RoutineBatch;
+  try {
+    const data = JSON.parse(readFileSync(file, "utf8")) as { hourly_runnable?: unknown; fast_runnable?: unknown };
+    const runnable = Number(data.hourly_runnable);
+    if (!Number.isInteger(runnable) || runnable < 1) return { ok: false, reason: "batch_unreadable" };
+    const fast = Number(data.fast_runnable);
+    batch = { bucket, file, hourly_runnable: runnable, fast_open: Number.isInteger(fast) && fast > 0 ? fast : 0 };
+  } catch { return { ok: false, reason: "batch_unreadable" }; }
+  row.processing = { state: "accepted", accepted_at: now, batch };
+  save(db, rows);
+  return { ok: true, already: false, ts, batch, accepted_at: now };
 }
 
 /** Schedule immediately after a durable claim; ambiguous outcomes are never retried. */

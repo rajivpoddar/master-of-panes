@@ -48,7 +48,7 @@ import { serve } from "@hono/node-server";
 import { z } from "zod";
 import { MoPDatabase } from "./db.js";
 import { evaluateLaneEvents, readLaneEvents } from "./laneEvents.js";
-import { handoffHourlyReceipt, tickHourlyReminders } from "./hourlyReceiptReminder.js";
+import { acceptHourlyBatch, handoffHourlyReceipt, tickHourlyReminders } from "./hourlyReceiptReminder.js";
 import { assignmentIdentityPatchFields, registerAssignmentRoute } from "./assignmentRoute.js";
 import {
   evaluateRespawnTurnPersistence,
@@ -1416,6 +1416,17 @@ app.post("/hourly-receipt", async (c) => {
     void hourlyReminderTick();
     return c.json({ ok: true });
   } catch { return c.json({ error: "hourly receipt unavailable" }, 503); }
+});
+
+// Lane acceptance of the routine batch on the parent's existing receipt row (CTO REVISE ts 1795798363.328589).
+// Body: { ts: <Alerts hourly parent ts>, bucket: <YYYY-MM-DD:HH from the Alerts post's routine_batch_file path> }.
+app.post("/hourly-batch-accept", async (c) => {
+  try {
+    const body = await c.req.json() as { ts?: unknown; bucket?: unknown };
+    const result = acceptHourlyBatch(db, body.ts, body.bucket);
+    if (result.ok && !result.already) db.logEvent(0, "hourly_batch_accepted", null, null, { ts: result.ts, batch: result.batch });
+    return c.json(result, result.ok ? 200 : 409);
+  } catch { return c.json({ ok: false, reason: "unavailable" }, 503); }
 });
 
 app.get("/pm-cadence/status", (c) => {
