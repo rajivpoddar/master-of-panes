@@ -354,14 +354,21 @@ def owner_buffer() -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+def body_flags(parts: list[str]) -> tuple[list[str], list[str]]:
+    inline = values(parts, {"--body", "-b"})
+    files = values(parts, {"--body-file", "-F"})
+    inline.extend(t[2:] for t in parts if t.startswith("-b") and len(t) > 2 and t[2] != "=")
+    files.extend(t[2:] for t in parts if t.startswith("-F") and len(t) > 2 and t[2] != "=")
+    return inline, files
+
+
 def body_arg(parts: list[str]) -> str | None:
-    inline = values(parts, {"--body"})
+    inline, files = body_flags(parts)
     if inline:
         body = inline[-1]
         if "$(" in body or "<<" in body:
             return "__ICL_COMPLEX_BODY_UNSUPPORTED__"
         return body
-    files = values(parts, {"--body-file"})
     if not files:
         return None
     path = files[-1]
@@ -372,10 +379,77 @@ def body_arg(parts: list[str]) -> str | None:
             return owner_buffer()
         return "__ICL_STDIN_UNSUPPORTED__"
     try:
-        with open(os.path.expanduser(path), encoding="utf-8") as handle:
+        with open(os.path.expanduser(path), encoding="utf-8", newline="") as handle:
             return handle.read()
-    except OSError:
+    except (OSError, UnicodeError):
         return "__ICL_BODY_FILE_UNREADABLE__"
+
+
+def header_span(body: str) -> tuple[int, int] | None:
+    """Find one unambiguous, standalone Ready Pool comment (not a fenced example)."""
+    openings = list(re.finditer(r"<!--\s*ready-pool\b", body, re.I))
+    if not openings:
+        return None
+    opening = openings[0].start()
+    block = re.compile(r"^<!--[ \t]*ready-pool:[ \t]*\r?\n(.*?)^-->(?=\r?$)", re.I | re.M | re.S)
+    header = block.match(body, opening)
+    prefix = body[:opening]
+    if (len(openings) != 1 or not header or "<!--" in header[1] or "-->" in header[1]
+            or prefix.rfind("<!--") > prefix.rfind("-->")):
+        raise ValueError("ready_pool_header_unparseable")
+    fence = ""
+    for line in prefix.splitlines():
+        mark = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if not mark:
+            continue
+        if not fence:
+            fence = mark[1]
+        elif mark[1].startswith(fence) and not mark[2].strip():
+            fence = ""
+    if fence:
+        raise ValueError("ready_pool_header_unparseable")
+    keys: set[str] = set()
+    for line in header[1].splitlines():
+        field = re.fullmatch(r"([A-Za-z_][\w-]*):.*", line)
+        if field:
+            key = field[1].lower().replace("-", "_")
+            if key in keys:
+                raise ValueError("ready_pool_header_unparseable")
+            keys.add(key)
+        elif line.strip() and not (keys and line.startswith((" ", "\t"))):
+            raise ValueError("ready_pool_header_unparseable")
+    if not keys:
+        raise ValueError("ready_pool_header_unparseable")
+    return header.span()
+
+
+def check_header_only_edit(old: str, new: str) -> None:
+    # Never normalize Markdown or compare stripped bodies: whitespace is content.
+    before, after = header_span(old), header_span(new)
+    if old == new:
+        return
+    if after is not None:
+        start, end = after
+        if before is not None:
+            if old[:before[0]] == new[:start] and old[before[1]:] == new[end:]:
+                return
+        else:
+            # Insertion may introduce blank lines to isolate a new comment, but
+            # dropping that span and its new separators must recover every byte.
+            left, right = new[:start], new[end:]
+            for left_sep in ("", "\n", "\n\n", "\r\n", "\r\n\r\n"):
+                for right_sep in ("", "\n", "\n\n", "\r\n", "\r\n\r\n"):
+                    if left.endswith(left_sep) and right.startswith(right_sep):
+                        if left[:len(left) - len(left_sep)] + right[len(right_sep):] == old:
+                            return
+    raise ValueError("ready_pool_edit_changes_existing_issue_text")
+
+
+def label_hygiene_edit(parts: list[str]) -> bool:
+    names = labels_arg(parts, {"--add-label", "--remove-label"})
+    return (any(name.startswith(("status:", "sub:")) for name in names)
+            or os.environ.get("PROXY_AGENT_NAME", "").startswith("proxy-routine-")
+            or os.environ.get("PROXY_AGENT_TYPE") in {"pm-triage-agent", "pm-backlog-promoter"})
 
 
 def validate(body: str) -> dict[str, object]:
@@ -456,6 +530,7 @@ def main() -> int:
         return 0
 
     for parts in relevant:
+        guarded = False
         if parts[:3] == ["gh", "issue", "create"]:
             body = body_arg(parts) or ""
             target = (values(parts, {"--title"}) or ["(new issue)"])[-1]
@@ -476,18 +551,36 @@ def main() -> int:
                 emit(literal, "issue_number_must_be_literal")
                 return 0
             target = literal
+            guarded = label_hygiene_edit(parts)
+            inline, files = body_flags(parts)
+            if guarded and (inline or len(files) > 1 or (files and
+                    (not os.path.isabs(files[0]) or re.search(r"[$`*?\[\n]", files[0])))):
+                emit(target, "label_hygiene_requires_one_literal_absolute_body_file")
+                return 0
             new_body = body_arg(parts)
             live = live_issue(target)
             if live is None:
-                emit(target, "could_not_verify_live_issue")
+                emit(target, "label_hygiene_skip_issue_unavailable" if guarded else "could_not_verify_live_issue")
                 return 0
-            body = new_body if new_body is not None else str(live.get("body") or "")
+            old = live.get("body")
+            if guarded:
+                if not isinstance(old, str):
+                    emit(target, "ready_pool_header_unparseable")
+                    return 0
+                try:
+                    check_header_only_edit(old, old if new_body is None else new_body)
+                except ValueError as exc:
+                    emit(target, str(exc))
+                    return 0
+            body = new_body if new_body is not None else str(old or "")
         else:
             continue
 
         result = validate(body)
         if not result.get("ok"):
             errors = result.get("errors", [])
+            if guarded:
+                errors = ["label_hygiene_skip_invalid_ledger", *errors]
             emit(target, *(str(error) for error in errors))
             return 0
     return 0

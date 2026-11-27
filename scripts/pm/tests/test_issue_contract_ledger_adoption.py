@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import stat
 import subprocess
 from pathlib import Path
@@ -29,9 +30,10 @@ VARIABLE = "gh issue edit $ISSUE --repo Scribie/heydonna-app --body-file /tmp/bo
 QUOTED_TEMPLATE = 'gh issue edit "7925" --repo Scribie/heydonna-app --body-file {body}'
 
 
-def shims(tmp: Path, *, validator_ok: bool):
+def shims(tmp: Path, *, validator_ok: bool, live_body: str = "plain body"):
     gh = tmp / "gh"
-    gh.write_text('#!/usr/bin/env bash\nprintf \'%s\' \'{"body":"plain body","labels":[]}\'\n', encoding="utf-8")
+    payload = shlex.quote(json.dumps({"body": live_body, "labels": []}))
+    gh.write_text(f"#!/usr/bin/env bash\nprintf '%s\\n' {payload}\n", encoding="utf-8")
     gh.chmod(gh.stat().st_mode | stat.S_IXUSR)
     val = tmp / "validator.py"
     val.write_text("import json,sys\nprint(json.dumps({'ok': %s, 'errors': [] if %s else ['missing_contract_ledger']}))\n"
@@ -137,6 +139,67 @@ def test_both_wrappers_preserve_ordinary_issue_validation(tmp_path, operation, v
     for wrapper in (HOME_WRAPPER, APP_WRAPPER):
         out = run(wrapper, PARSER, val, gh, tmp_path, command)
         assert blocked(out) == (not validator_ok), out
+
+
+READY_HEADER = "<!-- ready-pool:\r\npriority: P1\r\nwork_type: bug\r\n-->"
+LEDGER = (
+    "## Issue Contract Ledger\n"
+    "- **Positive AC:** Reload shows the saved speaker name.\n"
+    "- **Negative AC:** Other files retain their speaker names.\n"
+    "- **Forbidden implementation:** Do not change the workspace speaker directory.\n"
+    "- **Determinism:** The saved speaker name is deterministic.\n"
+    "- **Required proof:** Unit test the saved-speaker lookup.\n"
+)
+REAL_ISSUE = (
+    "<!-- qa-proof-schema: 1 -->\n\n"
+    "## Problem\nThe saved transcript shows an outdated speaker name.  \n\n"
+    "## Acceptance criteria\n1. AC-1: Reload shows the corrected name ‘Speaker 2’.\n"
+    "   - Surface: nonvisual\n   - QA reachability: deterministic\n   - Required proof: unit\n\n"
+    "## Out of scope\nDo not rename labels on other transcripts.\n\n"
+    + LEDGER + "\n"
+).replace("\n", "\r\n")
+RULE_54_STUB = "## Problem\nMissing status: label, violating rule 54.\n\n" + LEDGER
+
+
+@pytest.mark.parametrize("old,new", [
+    (REAL_ISSUE, READY_HEADER + "\r\n\r\n" + REAL_ISSUE),
+    (REAL_ISSUE + READY_HEADER + "\r\n", REAL_ISSUE + READY_HEADER.replace("P1", "P2") + "\r\n"),
+    (RULE_54_STUB, READY_HEADER + "\r\n\r\n" + RULE_54_STUB),
+])
+def test_label_writer_accepts_only_header_changes_without_rewriting_issue(tmp_path, old, new):
+    gh, _ = shims(tmp_path, validator_ok=True, live_body=old)
+    path = tmp_path / "ready-pool.md"
+    path.write_bytes(new.encode("utf-8"))
+    command = QUOTED_TEMPLATE.format(body=path) + " --add-label status:backlog"
+    for wrapper in (HOME_WRAPPER, APP_WRAPPER):
+        assert not blocked(run(wrapper, PARSER, str(VALIDATOR), gh, tmp_path, command))
+
+
+@pytest.mark.parametrize("old,new,reason", [
+    (REAL_ISSUE, RULE_54_STUB, "ready_pool_edit_changes_existing_issue_text"),
+    (REAL_ISSUE, READY_HEADER + "\r\n\r\n" + REAL_ISSUE.rstrip(), "ready_pool_edit_changes_existing_issue_text"),
+    (REAL_ISSUE + "<!-- ready-pool:\npriority: P1\n", REAL_ISSUE + READY_HEADER, "ready_pool_header_unparseable"),
+    (REAL_ISSUE, REAL_ISSUE + "```md\n" + READY_HEADER + "\n```", "ready_pool_header_unparseable"),
+])
+def test_label_writer_skips_and_reports_invalid_changes(tmp_path, old, new, reason):
+    gh, val = shims(tmp_path, validator_ok=True, live_body=old)
+    path = tmp_path / "candidate.md"
+    path.write_bytes(new.encode("utf-8"))
+    command = QUOTED_TEMPLATE.format(body=path) + " --add-label status:backlog"
+    for wrapper in (HOME_WRAPPER, APP_WRAPPER):
+        out = run(wrapper, PARSER, val, gh, tmp_path, command)
+        assert blocked(out) and reason in out["message"] and "SKIP #7925" in out["message"], out
+
+
+def test_routine_lane_cannot_replace_body_by_dropping_the_label_flag(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROXY_AGENT_NAME", "proxy-routine-synthetic")
+    gh, val = shims(tmp_path, validator_ok=True, live_body=REAL_ISSUE)
+    path = tmp_path / "stub.md"
+    path.write_text(RULE_54_STUB, encoding="utf-8")
+    command = f'gh issue edit 7925 --repo Scribie/heydonna-app -F {path}'
+    for wrapper in (HOME_WRAPPER, APP_WRAPPER):
+        out = run(wrapper, PARSER, val, gh, tmp_path, command)
+        assert blocked(out) and "ready_pool_edit_changes_existing_issue_text" in out["message"], out
 
 
 def run_raw(wrapper: Path, env_extra: dict, payload: str):

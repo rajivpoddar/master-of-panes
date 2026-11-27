@@ -93,6 +93,12 @@ fi
 [ "$(printf '%s' "$PY_OUT" | jq -r '.block // false')" = true ] || exit 0
 TARGET=$(printf '%s' "$PY_OUT" | jq -r '.target // "unknown"')
 ERRORS=$(printf '%s' "$PY_OUT" | jq -r '.errors | join(",")')
+case "$ERRORS" in
+  label_hygiene_*|ready_pool_*)
+    jq -n --arg message "SKIP #${TARGET} label hygiene (${ERRORS}): no issue was mutated. Report this issue and reason; do not replace its body to repair labels or metadata." '{decision:"block",message:$message}'
+    exit 0
+    ;;
+esac
 if printf '%s' "$ERRORS" | grep -q 'internal_control_plane_issue_forbidden'; then
   # Rajiv directive 2026-08-12: a blocked internal control-plane issue must
   # not be silently dropped. Preserve the draft and create a high hourly

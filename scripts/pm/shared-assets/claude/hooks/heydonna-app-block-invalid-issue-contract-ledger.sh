@@ -77,7 +77,7 @@ fi
 
 set +e
 PY_OUT=$(
-  CMD_TEXT="$CMD" VALIDATOR="$VALIDATOR" GH_BIN="$GH_BIN" \
+  CMD_TEXT="$CMD" HOOK_CWD="$CWD" VALIDATOR="$VALIDATOR" GH_BIN="$GH_BIN" \
     python3 "$PARSER" 2>/dev/null
 )
 PARSER_RC=$?
@@ -91,6 +91,12 @@ fi
 
 TARGET=$(printf '%s' "$PY_OUT" | jq -r '.target // "unknown"')
 ERRORS=$(printf '%s' "$PY_OUT" | jq -r '.errors | join(",")')
+case "$ERRORS" in
+  label_hygiene_*|ready_pool_*)
+    jq -n --arg message "SKIP #${TARGET} label hygiene (${ERRORS}): no issue was mutated. Report this issue and reason; do not replace its body to repair labels or metadata." '{decision:"block",message:$message}'
+    exit 0
+    ;;
+esac
 
 # The parser's existing control-plane classifier is the authority. Do not
 # duplicate its result into a PM obligation and do not require product ICL
