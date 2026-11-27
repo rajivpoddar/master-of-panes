@@ -2908,12 +2908,10 @@ TOOLS="$(awk 'NR==1&&/^---$/{fm=1;next} fm==1&&/^---$/{exit} fm==1&&/^tools:/{su
 
 # CLIProxyAPI env, scoped to this child process only. Never echo the key.
 # shellcheck disable=SC1091
-if [[ "$MODEL_ID" != inkling-2-mini ]]; then
-  [[ -r "$HOME/.config/cliproxyapi/client.env" ]] || { printf 'PROXY_AGENT_FAILED reason=client_env_unavailable\n' >&2; exit 2; }
-  source "$HOME/.config/cliproxyapi/client.env" || { printf 'PROXY_AGENT_FAILED reason=client_env_invalid\n' >&2; exit 2; }
-  export ANTHROPIC_BASE_URL="${CLIPROXY_BASE_URL:-http://127.0.0.1:8317}"
-  export ANTHROPIC_AUTH_TOKEN="$CLIPROXY_API_KEY"
-fi
+[[ -r "$HOME/.config/cliproxyapi/client.env" ]] || { printf 'PROXY_AGENT_FAILED reason=client_env_unavailable\n' >&2; exit 2; }
+source "$HOME/.config/cliproxyapi/client.env" || { printf 'PROXY_AGENT_FAILED reason=client_env_invalid\n' >&2; exit 2; }
+export ANTHROPIC_BASE_URL="${CLIPROXY_BASE_URL:-http://127.0.0.1:8317}"
+export ANTHROPIC_AUTH_TOKEN="$CLIPROXY_API_KEY"
 unset ANTHROPIC_API_KEY
 # S129: nested models come from the pre-launch selector (or the static fallback when --model is explicit).
 # An empty alias (burn-refused for a capped role) exports a sentinel that is not a model id, so a nested call fails at the
@@ -2942,28 +2940,7 @@ if [[ "$MODEL_ID" == inkling-2-mini ]]; then
   export ANTHROPIC_AUTH_TOKEN=local-only
   export ANTHROPIC_DEFAULT_HAIKU_MODEL=inkling-2-mini ANTHROPIC_DEFAULT_SONNET_MODEL=inkling-2-mini ANTHROPIC_DEFAULT_OPUS_MODEL=inkling-2-mini
   export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 DISABLE_AUTOUPDATER=1
-  export CLAUDE_CODE_AUTO_COMPACT_WINDOW=90000 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 CLAUDE_CODE_DISABLE_BUNDLED_SKILLS=1
-  unset CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD
-fi
-# Conservative local context estimate: count UTF-8 bytes for variable text,
-# reserve 32K for the bounded tool schemas, template framing and allowed skills,
-# then keep the full output allowance. No provider call on an oversize brief.
-proxy_agent_inkling_budget() {
-  local budget="$1" output="$2" input_bytes
-  shift 2
-  input_bytes="$(python3 -I -c 'from pathlib import Path; import sys; print(sum(Path(p).stat().st_size for p in sys.argv[1:]))' "$@")" || {
-    printf 'PROXY_AGENT_FAILED reason=inkling_prompt_unreadable\n' >&2; return 2;
-  }
-  local estimate=$((input_bytes + 32768))
-  if (( estimate + output >= budget )); then
-    printf 'PROXY_AGENT_REFUSED reason=inkling_context_budget estimated_input=%s output_reserve=%s max_model_len=%s; shorten the brief or choose another eligible model\n' \
-      "$estimate" "$output" "$budget" >&2
-    return 2
-  fi
-  printf 'INKLING_CONTEXT_OK estimated_input=%s output_reserve=%s max_model_len=%s\n' "$estimate" "$output" "$budget" >&2
-}
-if [[ "$MODEL_ID" == inkling-2-mini ]]; then
-  proxy_agent_inkling_budget "$WINDOW" "$MAX_OUT" "$AGENT_FILE" "$PROMPT_FILE" || exit $?
+  export CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000
 fi
 # -p mode kills background subagents 10m after the last turn; proxy runs own their own bg work (13056 bisect lost 11-08).
 export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-0}"
@@ -2980,7 +2957,7 @@ if [[ "${PROXY_AGENT_NAME:-}" == *heartbeat* || "${PROXY_AGENT_NAME:-}" == *hour
 # No PM-admission grant here (CTO REVISE of 707e4c1, C0ALZJHGE49 thread 1795038046.056679, ts 1795038184.764339): a brief's first line is
 # lane-authored text, so it cannot lift the read-only lane's CI admission deny. Read-only helpers stay denied pm-admit-ci.sh; admission runs
 # through the existing trusted owner (the PM pane or its in-process agent), never a read-only proxy lane.
-HELPER_READONLY="$_HELPER_READONLY" PROXY_AGENT_TYPE_FOR_SANDBOX="$TYPE" PROXY_AGENT_SETTINGS_MODEL="$MODEL_ID" PROXY_AGENT_INKLING_PROJECT_SETTINGS="$([[ "$PM_ROLE" == 1 ]] || printf '%s' "$CWD/.claude/settings.json")" PROXY_AGENT_SANDBOX="${PROXY_AGENT_SANDBOX:-1}" python3 - "/Users/rajiv/Downloads/projects/heydonna-app/.claude/settings.json" "$SAFETY_SETTINGS" <<'PY'
+HELPER_READONLY="$_HELPER_READONLY" PROXY_AGENT_TYPE_FOR_SANDBOX="$TYPE" PROXY_AGENT_SANDBOX="${PROXY_AGENT_SANDBOX:-1}" python3 - "/Users/rajiv/Downloads/projects/heydonna-app/.claude/settings.json" "$SAFETY_SETTINGS" <<'PY'
 import json, sys
 src, out = sys.argv[1], sys.argv[2]
 want = ("block-cto-mention-without-ladder", "block-invalid-backlog-issue-create",
@@ -3115,23 +3092,6 @@ _ops_lane = (os.environ.get("PROXY_AGENT_TYPE_FOR_SANDBOX", "") in ("mop-main-re
 # patterns, so the always-on fence broke ordinary lanes (mm14039b) and the 21:06 heartbeat. Cleanup/deletion lanes MUST
 # launch with PROXY_AGENT_SANDBOX=1 (launch-agent rule).
 _fence_on = (os.environ.get("PROXY_AGENT_SANDBOX", "1") != "0") and not _ops_lane  # default-ON again per Rajiv "sandbox now" (D0AMF0XE6TS ts 1795016785.315309)
-if os.environ.get("PROXY_AGENT_SETTINGS_MODEL") == "inkling-2-mini":
-    # The isolated config drops user settings; carry over their actual pre-tool
-    # safety hooks and denies, not their prompt, plugins, MCP or input hooks.
-    for path in (os.path.expanduser("~/.claude/settings.json"), os.environ.get("PROXY_AGENT_INKLING_PROJECT_SETTINGS")):
-        if not path:
-            continue
-        try:
-            with open(path) as fh:
-                original = json.load(fh)
-        except FileNotFoundError:
-            continue
-        for group in original.get("hooks", {}).get("PreToolUse", []):
-            if group not in keep:
-                keep.append(group)
-        deny.extend(original.get("permissions", {}).get("deny", []))
-    _fence_on = True
-    excluded_commands = []
 json.dump({"hooks": {"PreToolUse": keep},
            "permissions": {"deny": deny},
            "sandbox": {
@@ -3189,15 +3149,14 @@ about: it does not apply here. You may write any path the brief needs (including
 use the network, run ssh (remote boxes, dgx-spark) and start the Codex review companion. A real permission error is reported with
 the exact command and EPERM text; never assume a block without trying."
 fi
-if [[ "$MODEL_ID" != inkling-2-mini && -n "$TOOLS" && "$TOOLS" != "*" && "$TOOLS" != "All tools" ]]; then
+if [[ -n "$TOOLS" && "$TOOLS" != "*" && "$TOOLS" != "All tools" ]]; then
   ARGS+=(--allowedTools "$TOOLS")
 fi
 # PM-only skills: PM-type proxies load them through a plugin (skills dir symlinked to heydonna-app/.claude/skills),
 # NOT through the project setting source, which would also load the PM project hooks (rule 50). Dev types get no plugin.
 PM_SKILLS_PLUGIN_DIR="/Users/rajiv/.claude/pm-skills-plugin"
 if [[ "$PM_ROLE" == "1" ]]; then
-  if [[ "$MODEL_ID" == inkling-2-mini ]]; then :
-  elif [[ -d "$PM_SKILLS_PLUGIN_DIR/skills" ]]; then
+  if [[ -d "$PM_SKILLS_PLUGIN_DIR/skills" ]]; then
     ARGS+=(--plugin-dir "$PM_SKILLS_PLUGIN_DIR")
   else
     echo "PROXY_AGENT_WARN reason=pm_skills_plugin_missing dir=$PM_SKILLS_PLUGIN_DIR" >&2
@@ -3253,31 +3212,6 @@ proxy_agent_memory_gate || exit $?
 
 # Persist a private runner, not credentials in tmux's command line/global env.
 JOB_DIR="$(mktemp -d "${TMPDIR:-/tmp}/proxy-agent-job.XXXXXX")"
-if [[ "$MODEL_ID" == inkling-2-mini ]]; then
-  INKLING_CONFIG="$JOB_DIR/claude-config"
-  INKLING_TOOLS="$(python3 -I -c 'import re, sys; want=set(re.split(r"[,\s]+", sys.argv[1])); base=("Read","Grep","Glob","Bash","Write","Edit","Skill"); print(",".join(t for t in base if t in want) or "Read,Grep,Glob")' "$TOOLS")"
-  mkdir -m 700 "$INKLING_CONFIG" "$INKLING_CONFIG/skills"
-  python3 -I - "$INKLING_CONFIG" "$SAFETY_SETTINGS" "$HOME/.claude/skills" "$CWD/.claude/skills" <<'PYINK'
-import json, pathlib, sys
-config, settings, *skill_roots = map(pathlib.Path, sys.argv[1:])
-(config / ".claude.json").write_text('{"hasCompletedOnboarding":true,"mcpServers":{}}')
-overrides = json.loads(settings.read_text()).get("skillOverrides")
-if isinstance(overrides, dict) and overrides:
-    for root in skill_roots:
-        if not root.is_dir():
-            continue
-        for skill in root.iterdir():
-            target = config / "skills" / skill.name
-            if not target.is_symlink() and overrides.get(skill.name) in (None, "on") and (skill / "SKILL.md").is_file():
-                target.symlink_to(skill.resolve(strict=True), target_is_directory=True)
-PYINK
-  # Explicit tool definitions, not merely autoapproval: --allowedTools alone
-  # leaves unused tools in every request. No project/user instructions, plugins
-  # or MCP servers; user source is only this new per-lane config's skills.
-  ARGS=(-p --name "${PROXY_AGENT_NAME:-proxy-$TYPE-$STAMP}" --model "$LAUNCH_MODEL" --max-turns "$MAX_TURNS" --output-format stream-json --verbose
-        --dangerously-skip-permissions --setting-sources user --settings "$SAFETY_SETTINGS"
-        --strict-mcp-config --mcp-config '{"mcpServers":{}}' --tools "$INKLING_TOOLS" --allowedTools "$INKLING_TOOLS" --system-prompt "$BODY")
-fi
 CHANNEL="proxy-agent-$$-$STAMP"
 NAME="${PROXY_AGENT_NAME:-proxy-$TYPE-$STAMP}"
 CLAUDE_BIN="$(command -v claude)"
@@ -3420,11 +3354,6 @@ RESULT_CONTRACT
   fi
   # Per-issue handoff (Rajiv D0AMF0XE6TS thread 1795441948.588769, ts 1795443398.969229): append the issue's HANDOFF file plus the boot-restate/handoff contract to the brief at run time. proxy-handoff.py is fail-open (always rc 0).
   printf 'python3 -I %q inject --brief %q --type %q --name %q >> %q 2>> %q || true\n' "$HOME/.claude/scripts/proxy-handoff.py" "${PROXY_RESUME_ORIGINAL:-$PROMPT_FILE}" "$TYPE" "$NAME" "$JOB_DIR/prompt0.md" "$LOG"
-  if [[ "$MODEL_ID" == inkling-2-mini ]]; then
-    printf 'export CLAUDE_CONFIG_DIR=%q\n' "$INKLING_CONFIG"
-    declare -f proxy_agent_inkling_budget
-    printf 'proxy_agent_inkling_budget %q %q %q %q 2> >(tee -a %q >&2) || exit $?\n' "$WINDOW" "$MAX_OUT" "$AGENT_FILE" "$JOB_DIR/prompt0.md" "$LOG"
-  fi
   printf 'pa_claude_429=0; pa_retry=0\n'
   if proxy_agent_uses_claude_account "$MODEL_ID"; then
     PA_MODEL="$(proxy_agent_router_identity "$MODEL_ID")"
@@ -3496,10 +3425,6 @@ RESULT_CONTRACT
   printf '    OPENCODE_PROXY_CAP="$(proxy_agent_resolve_opencode_cap "${OPENCODE_PROXY_CAP:-}")"\n'
   printf '    if proxy_agent_pool_blocked "$MODEL_ID"; then printf "[%%s] PROXY_AGENT_CONTINUE_REFUSED model=%%s cap=%%s reason=opencode_pool_cap capacity-stop\\n" "$(date -u +%%FT%%TZ)" "$MODEL_ID" "$OPENCODE_PROXY_CAP" >> %q; printf "PROXY_AGENT_CAPACITY_STOP rc=75 model=%%s cap=%%s reason=opencode_pool_cap\\n" "$MODEL_ID" "$OPENCODE_PROXY_CAP" >&2; rc=75; exit 75; fi\n' "$LOG"
   printf '  fi\n'
-  if [[ "$MODEL_ID" == inkling-2-mini ]]; then
-    printf '  INKLING_PROXY_CAP=%q\n' "${INKLING_PROXY_CAP:-2}"
-    printf '  if proxy_agent_pool_blocked "$MODEL_ID"; then printf "PROXY_AGENT_CAPACITY_STOP rc=75 model=%%s reason=inkling_pool_cap\\n" "$MODEL_ID" >&2; exit 75; fi\n'
-  fi
   # Same re-check for the Sarvam pool: a continuation is a new admission against SARVAM_PROXY_CAP (explicit launcher env wins, else the caps file, else 4).
   # Kimi's availability gate is not re-applied: a lane that already holds a Kimi session keeps it; the gate only decides new picks.
   printf '  if proxy_agent_is_sarvam_id "$MODEL_ID"; then\n'
