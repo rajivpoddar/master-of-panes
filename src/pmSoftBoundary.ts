@@ -317,8 +317,7 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
         const pending = db.hasPendingClear(0);
         const latchAt = pending ? db.getConfig("pm_clear_requested_at") : null;
         const state = pending ? db.getConfig("pm_clear_delivery_state") : null;
-        const requestedAt = clearStop ? latchAt : observedHandoff || latchAt;
-        if (requestedAt) {
+        if (observedHandoff || latchAt) {
           const authorityCurrent = pinnedStop && (!stopPins || (authority != null && stopPins.isCurrent(authority)));
           const reason = !authorityCurrent ? "stale_authority"
             : maintenance === "exit_custody" ? "exit_custody"
@@ -329,7 +328,9 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
             : pending && state === "sending" ? "writer_in_flight"
             : pending && state === "uncertain" ? "delivery_uncertain"
             : "clear_not_armed";
-          db.logEvent(0, "pm_clear_stop_decision", "Stop", null, {
+          const latchReason = ["guarded_send_handoff", "awaiting_ack", "writer_in_flight", "delivery_uncertain"].includes(reason);
+          const requestedAt = latchReason ? latchAt : observedHandoff || latchAt;
+          if (requestedAt) db.logEvent(0, "pm_clear_stop_decision", "Stop", null, {
             requested_at: requestedAt, decision: clearStop ? "handoff" : "defer", reason,
           });
         }

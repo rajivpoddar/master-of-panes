@@ -792,3 +792,25 @@ test("coexisting deferred latch is attributed to its own timestamp", async () =>
     assert.equal(h.db.getConfig(PM_HANDOFF_REQUESTED_AT_KEY), clear.requestedAt);
   } finally { h.close(); }
 });
+
+
+for (const [state, reason] of [["awaiting_ack", "awaiting_ack"], ["sending", "writer_in_flight"], ["uncertain", "delivery_uncertain"]] as const) {
+  test(`consumed handoff attributes retained ${state} latch to its own timestamp`, async () => {
+    const h = harness();
+    try {
+      await boot(h);
+      const clear = await requestPmHandoffClear(h.db, { source: "op", sessionId: "pm", nowMs: Date.now() - 30_000, automatic: false, ops: h.clearOps });
+      assert.equal(clear.kind, "awaiting_handoff");
+      const latchAt = new Date(Date.now() - 90_000).toISOString();
+      assert.notEqual(latchAt, clear.requestedAt);
+      h.db.setPendingClear(0); h.db.setConfig("pm_clear_requested_at", latchAt);
+      h.db.setConfig("pm_clear_delivery_state", state);
+      h.saveAll();
+      await h.hook("Stop"); await h.settle();
+      assert.equal(h.db.getConfig(PM_HANDOFF_REQUESTED_AT_KEY), "");
+      assert.equal(h.clears(), 0); assert.equal(h.enters(), 0);
+      const log = JSON.parse(h.db.getEvents(0, 1, "pm_clear_stop_decision")[0]!.payload);
+      assert.deepEqual(log, { requested_at: latchAt, decision: "defer", reason });
+    } finally { h.close(); }
+  });
+}
