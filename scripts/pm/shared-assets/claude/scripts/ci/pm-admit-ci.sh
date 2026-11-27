@@ -25,6 +25,21 @@
 # outcome is exactly "the changed-CI-input list is non-empty", treats that as an overlap-class reason (MERGE_REASON=ci_input_changed) and does the usual non-force
 # update-branch (pinned to the pre-merge head). Every other outcome (guard passes, any other refusal, unreadable read, timeout, conflict handling) is unchanged:
 # a skip with no write. Admission stays the fail-closed gate. `--merge-only <PR> --dry-run` prints the decision and exits before update-branch.
+# Audit fixes (PM brief 2026-11-27; Rajiv OK C0ALZJHGE49 thread 1795754821.658339, ts 1795761962.862319 "ok"; PM audit ts 1795761629.894139; rule 62 wins over the CI-input guard):
+#  1. verdict_gate: a red on an admitted head needs a ci-verdict PR comment (<!-- ci-verdict: {...} -->) bound to that head. None -> REFUSE ci_verdict_required, "classify first" (exit 11).
+#     Classified flaky/infra/inherited-main/out-of-diff -> the S171 admin-ask packet is printed and nothing is re-admitted (exit 12). Logic: pm-admit-verdict.py gate.
+#     Rework 2026-11-27 (CTO REVISE, thread 1795754821.658339 ts 1795766409.314279): the gate reads the latest SUBSTANTIVE pull_request run per workflow (label-wrapper gate-only runs are
+#     ignored) and accepts only ci-failure-investigation producer-shape verdicts bound to head + run id + CURRENT attempt (no head-only fallback, no earlier-attempt carry).
+#  2. Trusted CI inputs are only what ci.yml and e2e.yml execute for a PR run (pm-admit-ci-inputs.py): those two workflows, their reusable workflows/actions and the scripts/ci
+#     entrypoints they invoke. perf.yml, deploy-*.yml and scripts/ci/tests/** no longer count, so a stale merge ref whose main delta touches none of them is WAIVED
+#     (MERGE_REF_RULE stale_merge_ref_waived:no_overlap), with no main merge. LANES MUST use `--merge-only <PR>` for main integration: it applies the rule 62 overlap check and
+#     prints `MAIN_MERGE_REASON: decision=<skip|merge> reason=<...>` for every outcome. Never `gh pr update-branch`, never a hand merge of main.
+#  3. Round breaker: when it trips and the latest red is classified flaky/infra/inherited-main/out-of-diff, the S171 admin-ask packet is printed instead of asking for an override
+#     (exit 10). One-pair override (rework 2026-11-27, REVISE #2 ts 1795769102.876159): a CTO/Rajiv override funds exactly ONE admission pair at exactly ONE head. A grant names the
+#     PR and head it was first issued at and can NEVER fund a different head (automatic carry-forward to a descendant head is PAUSED: no carry at all). It stays available when a
+#     preflight refuses before admission; it is claimed ATOMICALLY (O_EXCL file keyed by the grant id, see consume_cap_override) immediately before the first label mutation, so of
+#     two concurrent callers exactly one issues the pair and the other refuses; the consumption is recorded in pm-admit-skip.log. Legacy `admission-cap-override=` lines never fund.
+# New exit codes: 11 ci_verdict_required (classify first), 12 admin-ask packet (S171); 10 now also carries the packet for a classified-flaky red.
 set -euo pipefail
 CHECK_12B_ONLY=0; MERGE_ONLY=0
 case "${1:-}" in
@@ -124,10 +139,112 @@ gate_12b() {
   python3 -I "$SCRIPT_DIR/../pm-ops.py" record --source pm-admit-ci --event 12b_gate_override --actor PM --target-type github_pr --target-id "$PR" --pr "$PR" --head-sha "$head" --payload-json "$payload" >/dev/null || return 3
 }
 
+# Admission audit/verdict tooling (PM brief 2026-11-27; Rajiv OK C0ALZJHGE49 thread 1795754821.658339, ts 1795761962.862319 "ok", PM audit ts 1795761629.894139).
+# Fix 1 verdict_gate: a head that was admitted and is red is NOT re-admitted. Its latest ci-verdict PR comment (<!-- ci-verdict: {...} -->) decides: no comment -> "classify first"
+#   (exit 11); flaky/infra/inherited-main/out-of-diff -> the S171 admin-ask packet (exit 12), never a re-admission. The newest verdict comment is the way out (a PR-caused class proceeds).
+# Fix 3 admission_cap_gate: when the round breaker trips and the latest red is classified flaky/infra/inherited-main/out-of-diff it prints that same packet instead of asking for an
+#   override. (The earlier carry of an override to a merge-only descendant head is PAUSED, REVISE #2: a grant funds only the head it names.)
+# All classification and git proof lives in pm-admit-verdict.py (read-only gh GETs and git reads); this script only maps its exit codes. No Slack, no DB write, no label write.
+# One-pair override ledger (rework 2026-11-27, CTO REVISE ts 1795766409.314279). One audit line per event in pm-admit-skip.log:
+#   "<ts> PR=<n> head=<sha> admission-cap-override-<kind>=<ov> [inherited-from=<sha>]"
+#   granted   an explicit PM_ADMIT_CAP_OVERRIDE was applied at the cap (gate time; says nothing about use)
+#   carried   LEGACY only (carry-forward is PAUSED, nothing writes it any more): a historical record never funds another head
+#   consumed  written once, right after the atomic claim and BEFORE the ci-head label add, so it also covers an admission whose outcome turns uncertain; a failed write refuses (exit 7)
+# Head scope: a grant is bound to the PR + head of its FIRST granted|carried record (cap_grant_binding). It can never fund a different head, so an override recorded for head X refuses at
+# head Y, and a PR head that moves between the gate and the label add refuses at the claim.
+# Atomic claim (REVISE #2): the check above (cap_override_spent) is only an early courtesy. The authority is the O_EXCL claim file "$OVR_CLAIMS/<ov with ':' as '_'>" (macOS has no flock;
+# `set -C` opens with O_EXCL, so exactly one creator wins) taken immediately before the first label mutation. The claim file holds "pr=<n> head=<sha>". The claim is released only when
+# nothing was admitted and the consumed audit line could not be written. Legacy `admission-cap-override=<ov>` lines (no kind) are not proof of use. DRY writes nothing.
+OVR_LOG="$HOME/.claude/logs/pm-admit-skip.log"
+OVR_CLAIMS="$HOME/.claude/logs/pm-admit-cap-claims"
+OVR_RE='^[^ ]+ PR=([0-9]+) head=([0-9a-f]{40}) admission-cap-override-(granted|carried|consumed)=((cto|rajiv):[0-9]{10}\.[0-9]{6})( |$)'
+CAP_OVERRIDE_USED=""   # set by admission_cap_gate when an override funds THIS admission; claimed at the first label mutation
+CAP_OVERRIDE_HEAD=""   # the head that grant names (H0 at gate time); the claim refuses when the live head differs
+CAP_CLAIMED=0          # 1 once this process holds the claim (the claim is taken once, before the first label mutation)
+cap_claim_path() { printf '%s/%s' "$OVR_CLAIMS" "${1//:/_}"; }   # <ov> already matched ^(cto|rajiv):[0-9]{10}\.[0-9]{6}$, so the name is [a-z0-9_.] only
+cap_override_spent() {  # <ov>: an atomic claim file exists for that grant id, or this PR has a consumed record for it
+  local ov="$1" line
+  [ ! -e "$(cap_claim_path "$ov")" ] || return 0
+  [ -r "$OVR_LOG" ] || return 1
+  while IFS= read -r line; do
+    [[ "$line" =~ $OVR_RE ]] || continue
+    if [ "${BASH_REMATCH[1]}" = "$PR" ] && [ "${BASH_REMATCH[3]}" = consumed ] && [ "${BASH_REMATCH[4]}" = "$ov" ]; then return 0; fi
+  done < <(tail -n 5000 "$OVR_LOG")
+  return 1
+}
+# <ov>: the PR + head the grant was FIRST issued at (earliest granted|carried record of that id in the ledger, any PR). Sets GRANT_PR/GRANT_HEAD; returns 1 when none is recorded.
+GRANT_PR=""; GRANT_HEAD=""
+cap_grant_binding() {
+  local ov="$1" line
+  GRANT_PR=""; GRANT_HEAD=""
+  [ -r "$OVR_LOG" ] || return 1
+  while IFS= read -r line; do
+    [[ "$line" =~ $OVR_RE ]] || continue
+    [ "${BASH_REMATCH[3]}" != consumed ] || continue
+    [ "${BASH_REMATCH[4]}" = "$ov" ] || continue
+    GRANT_PR="${BASH_REMATCH[1]}"; GRANT_HEAD="${BASH_REMATCH[2]}"
+    return 0
+  done < <(tail -n 5000 "$OVR_LOG")
+  return 1
+}
+# Automatic carry-forward is PAUSED (REVISE #2): no grant ever moves to another head. The only thing left is a grant recorded at THIS head (PR + head both bound) that was never claimed:
+# an earlier preflight refused before admission, so it still funds exactly one admission pair here. Only the NEWEST grant record of this PR is considered; when it is spent or bound
+# elsewhere nothing falls through to an older one. No git read, no helper call, no ledger write.
+cap_inherited_override() {
+  local line ov=""
+  [ -r "$OVR_LOG" ] || return 1
+  while IFS= read -r line; do
+    [[ "$line" =~ $OVR_RE ]] || continue
+    [ "${BASH_REMATCH[1]}" = "$PR" ] || continue
+    [ "${BASH_REMATCH[3]}" != consumed ] || continue
+    ov="${BASH_REMATCH[4]}"
+    break
+  done < <(tail -n 5000 "$OVR_LOG" | awk '{l[NR]=$0} END{for(i=NR;i>=1;i--) print l[i]}')
+  [ -n "$ov" ] || return 1
+  if cap_override_spent "$ov"; then return 1; fi
+  cap_grant_binding "$ov" || return 1
+  [ "$GRANT_PR" = "$PR" ] && [ "$GRANT_HEAD" = "$H0" ] || return 1   # bound to another head: never funds this one
+  CAP_OVERRIDE_USED="$ov"; CAP_OVERRIDE_HEAD="$H0"
+  echo "ADMISSION_CAP_OVERRIDE: $ov pr=$PR already recorded at this head and unused (an earlier preflight refused before admission); it still funds exactly one admission pair"
+  return 0
+}
+# Claim the funding override ONCE, immediately before the first label mutation (fail closed). Atomic: of two concurrent callers presenting the same grant exactly one creates the claim
+# file; the other refuses and mutates no label. Idempotent within a process (called before the same-head re-arm and again before the add).
+cap_override_head_check() {   # no mutation: the PR head moved after the gate, and a grant names its head and can never fund another one
+  [ -n "$CAP_OVERRIDE_USED" ] || return 0
+  [ "$CAP_OVERRIDE_HEAD" = "$HEAD" ] && return 0
+  echo "REFUSE: ADMISSION_ROUND_BREAKER #$PR; override $CAP_OVERRIDE_USED names head $CAP_OVERRIDE_HEAD and cannot fund head $HEAD (a grant never funds a different head); a new CTO/Rajiv override is required; nothing admitted"
+  exit 10
+}
+consume_cap_override() {
+  [ -n "$CAP_OVERRIDE_USED" ] || return 0
+  [ "$CAP_CLAIMED" = 0 ] || return 0
+  local claim
+  cap_override_head_check
+  if [ "$DRY" = 0 ]; then
+    claim=$(cap_claim_path "$CAP_OVERRIDE_USED")
+    mkdir -p "$OVR_CLAIMS" 2>/dev/null || { echo 'REFUSE: admission_cap_override_audit_unavailable'; exit 7; }
+    if ! ( set -C; printf 'pr=%s head=%s at=%s\n' "$PR" "$HEAD" "$(date -u +%FT%TZ)" > "$claim" ) 2>/dev/null; then
+      if [ -e "$claim" ]; then   # somebody else holds the claim: the race loser, or an already spent grant
+        echo "REFUSE: ADMISSION_ROUND_BREAKER #$PR; override $CAP_OVERRIDE_USED is already claimed by another admission (one override funds exactly one admission pair); a new CTO/Rajiv override is required; nothing admitted"
+        exit 10
+      fi
+      echo 'REFUSE: admission_cap_override_audit_unavailable'; exit 7   # the claim could not be created at all (unwritable claims dir)
+    fi
+    if ! printf '%s PR=%s head=%s admission-cap-override-consumed=%s\n' "$(date -u +%FT%TZ)" "$PR" "$HEAD" "$CAP_OVERRIDE_USED" >> "$OVR_LOG"; then
+      rm -f -- "$claim"   # exact claim file this process just created; nothing was admitted, so an audit-sink failure must not burn the approval
+      echo 'REFUSE: admission_cap_override_audit_unavailable'; exit 7
+    fi
+  fi
+  CAP_CLAIMED=1
+  echo "ADMISSION_CAP_OVERRIDE_CONSUMED: $CAP_OVERRIDE_USED pr=$PR head=$HEAD; this override funded one admission pair and is spent"
+  return 0
+}
+
 # Each exact ci-head label addition is one round, including re-admissions on the same head.
 # Apply this before the 12b gate, only in admission mode. A CTO/Rajiv override lifts a known cap, not unreadable history.
 admission_cap_gate() {
-  local out rc=0 ov="${PM_ADMIT_CAP_OVERRIDE:-}"
+  local out rc=0 ov="${PM_ADMIT_CAP_OVERRIDE:-}" vout vrc=0
   if [ -n "$ov" ] && [[ ! "$ov" =~ ^(cto|rajiv):[0-9]{10}\.[0-9]{6}$ ]]; then
     echo 'REFUSE: PM_ADMIT_CAP_OVERRIDE must look like cto:<slack ts> (or rajiv:<slack ts>), e.g. cto:1795324706.834969'; exit 64
   fi
@@ -137,17 +254,57 @@ admission_cap_gate() {
     0) return 0 ;;
     10)
       if [ -n "$ov" ]; then
-        if [ "$DRY" = 0 ] && ! printf '%s PR=%s head=%s admission-cap-override=%s\n' "$(date -u +%FT%TZ)" "$PR" "$H0" "$ov" >> "$HOME/.claude/logs/pm-admit-skip.log"; then
-          echo 'REFUSE: admission_cap_override_audit_unavailable'; exit 7
+        if cap_override_spent "$ov"; then
+          echo "REFUSE: ADMISSION_ROUND_BREAKER #$PR; override $ov was already consumed by an earlier admission (one override funds exactly one admission pair); a new CTO/Rajiv override is required; nothing admitted"
+          exit 10
         fi
-        echo "ADMISSION_CAP_OVERRIDE: $ov pr=$PR; cap reached, re-admission authorized by the override"
+        # Head scope: a grant already recorded for another PR/head can never fund this head (carry-forward is paused).
+        if cap_grant_binding "$ov" && { [ "$GRANT_PR" != "$PR" ] || [ "$GRANT_HEAD" != "$H0" ]; }; then
+          echo "REFUSE: ADMISSION_ROUND_BREAKER #$PR; override $ov names PR #$GRANT_PR head $GRANT_HEAD and cannot fund head $H0 (a grant never funds a different head); a new CTO/Rajiv override is required; nothing admitted"
+          exit 10
+        fi
+        if [ "$DRY" = 0 ]; then
+          if ! printf '%s PR=%s head=%s admission-cap-override-granted=%s\n' "$(date -u +%FT%TZ)" "$PR" "$H0" "$ov" >> "$OVR_LOG"; then
+            echo 'REFUSE: admission_cap_override_audit_unavailable'; exit 7
+          fi
+          # Two first-time presenters at different heads: the EARLIEST ledger record (O_APPEND order) names the head; the later one refuses.
+          if cap_grant_binding "$ov" && { [ "$GRANT_PR" != "$PR" ] || [ "$GRANT_HEAD" != "$H0" ]; }; then
+            echo "REFUSE: ADMISSION_ROUND_BREAKER #$PR; override $ov was first granted for PR #$GRANT_PR head $GRANT_HEAD and cannot fund head $H0 (a grant never funds a different head); a new CTO/Rajiv override is required; nothing admitted"
+            exit 10
+          fi
+        fi
+        CAP_OVERRIDE_USED="$ov"; CAP_OVERRIDE_HEAD="$H0"
+        echo "ADMISSION_CAP_OVERRIDE: $ov pr=$PR; cap reached, re-admission authorized by the override for exactly one admission pair"
         return 0
       fi
+      if cap_inherited_override; then return 0; fi
+      vout=$(python3 -I "$SCRIPT_DIR/pm-admit-verdict.py" gate --repo "$REPO" --pr "$PR" --head "$H0" --scope latest) || vrc=$?
       echo "REFUSE: ADMISSION_ROUND_BREAKER #$PR; nothing admitted"
+      if [ "$vrc" = 21 ]; then
+        # The latest red is classified flaky/infra/inherited-main/out-of-diff: an admin-merge case (S171), not a re-admission. No override is requested.
+        echo "The latest red on #$PR is classified flaky/infra/inherited-main/out-of-diff, so this is an admin-merge decision for the CTO, not a re-admission and not an override."
+        printf '%s\n' "$vout"
+        exit 10
+      fi
+      [ -z "$vout" ] || printf '%s\n' "$vout"   # proceed (PR-caused/unknown class), classify-first or UNAVAILABLE: say why no packet was printed
       echo "Decision required (choose one for #$PR at $H0): S157 admin-merge ask for out-of-diff/flake/infra only with executed-green E2E at this head; fix a PR-caused failure; or slice/freeze."
       echo 'Re-admission requires an audited override: PM_ADMIT_CAP_OVERRIDE=cto:<slack ts> (or rajiv:<slack ts>).'
       exit 10 ;;
     *) api_fail admission_cap ;;
+  esac
+}
+
+# Fix 1 (see above): admission mode only, runs after the cap gate and before the 12b gate. No bypass flag and a cap override does not skip it; a newer ci-verdict comment is the way out.
+verdict_gate() {
+  local out rc=0
+  out=$(python3 -I "$SCRIPT_DIR/pm-admit-verdict.py" gate --repo "$REPO" --pr "$PR" --head "$H0" --scope head) || rc=$?
+  [ -z "$out" ] || printf '%s\n' "$out"
+  case "$rc" in
+    0) return 0 ;;
+    20) exit 11 ;;   # red on an admitted head with no ci-verdict comment: classify first (the REFUSE line is the helper's)
+    21) exit 12 ;;   # classified flaky/infra/inherited-main/out-of-diff: the helper printed the S171 admin-ask packet; nothing is re-admitted
+    11) echo 'REFUSE: github_api_error ci_verdict'; exit 7 ;;   # UNAVAILABLE (read failed/timed out/odd shape), never a guess
+    *) api_fail ci_verdict ;;
   esac
 }
 
@@ -157,7 +314,7 @@ if [ "$MERGE_ONLY" = 0 ]; then
 fi
 PRSTATE=$(gh_get pr_state ok gh pr view "$PR" --repo "$REPO" --json state --jq .state) || api_fail pr_state
 [ "$PRSTATE" = OPEN ] || { echo "REFUSE: PR #$PR is $PRSTATE, not OPEN; nothing admitted"; exit 8; }
-if [ "$MERGE_ONLY" = 0 ] && [ "$CHECK_12B_ONLY" = 0 ]; then admission_cap_gate; fi
+if [ "$MERGE_ONLY" = 0 ] && [ "$CHECK_12B_ONLY" = 0 ]; then admission_cap_gate; verdict_gate; fi
 if [ "$MERGE_ONLY" = 0 ]; then
   gate_12b "$H0" || exit "$?"
   [ "$CHECK_12B_ONLY" = 0 ] || exit 0
@@ -399,8 +556,9 @@ plan_main_merge() {
 # main} is still ADMITTED when ALL hold, else it REFUSEs with the overlap list: (a) the PR is not CONFLICTING; (b) the PR's changed files (merge-base..head, taken
 # against BOTH the overlap-checked main and M, unioned) do not overlap the files main changed since M (M..overlap-checked main); (c) one parent is exactly the
 # reviewed head and the other, M, is a verified ancestor of the overlap-checked main; (d) main changed none of the trusted shared CI inputs that decide WHAT
-# runs (the .github tree, the scripts a pull_request workflow executes, the selector/classifier rules and E2E selection config beside them, and EVERY file a
-# workflow reads out of a git revision from any directory, e.g. scripts/ci/unit-shards/durations.json read from WORKFLOW_SHA) since M,
+# runs for a PR (NARROWED 2026-11-27, Rajiv ts 1795761962.862319: ONLY ci.yml and e2e.yml, the reusable workflows/actions they use, the scripts/ci entrypoints they
+# invoke, the selector/classifier rules and E2E selection config beside them, and EVERY file those workflows read out of a git revision, e.g.
+# scripts/ci/unit-shards/durations.json read from WORKFLOW_SHA; perf.yml, deploy-*.yml and scripts/ci/tests/** are NOT inputs) since M,
 # because a changed selector means the PR's CI ran the OLD selection even when no PR file overlaps (CTO REVISE of MoP 9518bf9d, same thread, ts 1795586027.634509;
 # e.g. 73499dfb..6ee67558 changed scripts/ci/change_scope.py; CTO REVISE #2 of MoP 494a207e, ts 1795587520.404159: a durations-only change must refuse too). The
 # inputs are DISCOVERED by pm-admit-ci-inputs.py from the workflows' own references at M and at main (rule 60: no hand-kept list). An unreadable discovery, or a
@@ -554,6 +712,10 @@ ci_input_probe() {
 if [ "$MERGE_ONLY" = 1 ]; then
   read_pr_head
   plan_main_merge
+  # One machine-readable decision line for every outcome (rule 62: merge main only on conflict or overlap; lanes go through this overlap check, never merge main by hand).
+  # reason= is conflict | overlap | ci_input_changed (main changed a trusted CI input, see the stale-ref guard) | no_conflict_no_overlap (skip). files= is the overlap count
+  # (the changed CI input count for ci_input_changed). The existing MAIN_MERGE: lines below are unchanged.
+  merge_reason_line() { echo "MAIN_MERGE_REASON: decision=$1 reason=$MERGE_REASON rule=62 head=$HEAD main=$MAIN_SHA files=$MERGE_FILES"; }
   if [ "$MERGE_REASON" = no_conflict_no_overlap ]; then
     if ci_input_probe; then
       # A changed trusted CI input is an overlap-class reason: the PR's lagging test merge ran the older selection, GitHub will not rebuild it, and only a
@@ -562,10 +724,12 @@ if [ "$MERGE_ONLY" = 1 ]; then
       MERGE_FILES="${CI_PROBE_LINE#STALE_REF_PROBE ci_inputs_changed n=}"; MERGE_FILES="${MERGE_FILES%% *}"
       MERGE_REASON=ci_input_changed
     else
+      merge_reason_line skip
       echo "MAIN_MERGE: skipped head=$HEAD reason=$MERGE_REASON"
       exit 0
     fi
   fi
+  merge_reason_line merge
 
   PRE_MERGE_HEAD="$HEAD"
   PR_BASE=$(gh_get pr_base ok gh pr view "$PR" --repo "$REPO" --json baseRefName --jq .baseRefName) || api_fail pr_base
@@ -695,9 +859,12 @@ $labels"
 }
 mirror_priority || echo "WARN priority: lookup or normalization failed for PR #$PR; continuing admission"
 printf '%s' "$HEAD" | grep -Eq "$SHA_RE" || api_fail pr_head_invalid
+cap_override_head_check   # before ANY ci-head label mutation: a moved head refuses without touching the labels
 L="ci-head:$HEAD"
 gh label create "$L" --repo "$REPO" --color 0E8A16 >/dev/null 2>&1 || true
 LJ=$(gh_get pr_labels labels_json gh pr view "$PR" --repo "$REPO" --json labels) || api_fail pr_labels
+# A head with no ci-head label of its own cannot be "already admitted": claim the grant now, so a race loser also never strips another head's label.
+printf '%s' "$LJ" | jq -e --arg l "$L" '.labels[].name|select(.==$l)' >/dev/null 2>&1 || consume_cap_override
 for old in $(printf '%s' "$LJ" | jq -r '.labels[].name|select(startswith("ci-head:"))'); do
   [ "$old" != "$L" ] && gh_do remove_old_ci_head gh pr edit "$PR" --repo "$REPO" --remove-label "$old"
 done
@@ -712,9 +879,11 @@ if printf '%s' "$LJ" | jq -e --arg l "$L" '.labels[].name|select(.==$l)' >/dev/n
     echo "ALREADY_ADMITTED #$PR at $HEAD (runs in flight: $INFLIGHT); no new runs started"
     exit 0
   fi
+  consume_cap_override   # claim BEFORE the re-arm removes the label, so a race loser never strips the winner's label
   gh_do rearm_same_ci_head gh pr edit "$PR" --repo "$REPO" --remove-label "$L"
   echo "REARM: removed same-head label $L so the re-add starts fresh CI/E2E runs"
 fi
+consume_cap_override
 gh_do add_ci_head_label gh pr edit "$PR" --repo "$REPO" --add-label "$L" --add-label pm-state:qa-passed-awaiting-ci
 overlap_finish
 echo "ADMITTED #$PR at $HEAD"

@@ -76,7 +76,8 @@ RANK = {'P0': 0, 'P1': 1, 'P2': 2, 'P3': 3}  # same order as ready_pool_select.P
 # Pool -> (env vars in precedence order, default). The defaults are proxy-agent.sh's `${VAR:-default}` fallbacks.
 POOL_CAPS = {'claude': (('CLAUDE_PROXY_CAP', 'PROXY_AGENT_CLAUDE_CAP'), 5), 'codex': (('CODEX_PROXY_CAP',), 8),
              'grok': (('GROK_PROXY_CAP',), 8), 'opencode': (('OPENCODE_PROXY_CAP',), 2), 'hy4': (('HY4_PROXY_CAP',), 3), 'sarvam': (('SARVAM_PROXY_CAP',), 4),
-             'spark': (('SPARK_PROXY_CAP', 'QWEN_PROXY_CAP'), 6), 'inkling': (('INKLING_PROXY_CAP',), 8)}
+             'spark': (('SPARK_PROXY_CAP', 'QWEN_PROXY_CAP'), 6), 'inkling': (('INKLING_PROXY_CAP',), 2),  # inkling 2 = vLLM --max-num-seqs 2, as proxy-agent.sh
+             'ultra': (('ULTRA_PROXY_CAP',), 4)}  # dev@scribie ULTRA route (`ultra/claude-*`), own pool and cap, as proxy-agent.sh proxy_agent_pool_blocked
 CAPS_ENV_KEYS = {k for names, _ in POOL_CAPS.values() for k in names}
 
 # The same lane-process shape proxy_agent_pool_live and proxy-cap-count.py match.
@@ -104,6 +105,8 @@ def pool_of(model):
     m = re.split(r'[(\[]', str(model).lower(), maxsplit=1)[0].strip()
     if m.startswith('claude-'):
         return 'claude'
+    if m.startswith('ultra/claude-'):
+        return 'ultra'
     if m.startswith('gpt-'):
         return 'codex'
     if m.startswith('grok'):

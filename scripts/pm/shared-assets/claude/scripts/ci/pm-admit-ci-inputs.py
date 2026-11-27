@@ -7,11 +7,17 @@ when main's changes since M did not touch anything that decides WHAT CI runs for
 to the shared selector (e.g. scripts/ci/change_scope.py, 73499dfb..6ee67558) leaves the old test
 merge running the old selection, even when none of the PR's own files overlap.
 
-The set is DISCOVERED from the repository (rule 60: no hand-kept file list), at both commits:
-  1. everything under .github/ (workflows and composite actions);
-  2. every repo script a pull_request-triggered workflow executes (directly, or through a local
-     composite action or reusable workflow it uses): a script file reached as `<interpreter>
-     [flags] path` or `./path`, or a bare path to an executable file at the start of a command;
+PM brief 2026-11-27 (Rajiv OK C0ALZJHGE49 thread 1795754821.658339, ts 1795761962.862319; rule 62 wins over the CI-input
+guard): the set is restricted to what ci.yml and e2e.yml ACTUALLY EXECUTE for a PR run. perf.yml, deploy-*.yml and every other
+workflow, and everything under scripts/ci/tests/, no longer count: a main move that touches only those leaves the PR's
+test-merge selection unchanged, so it is not an input change and needs no main merge.
+
+The set is DISCOVERED from the repository (rule 60: no hand-kept file list beyond the two PR-run workflow names), at both commits:
+  1. the PR-run workflows .github/workflows/ci.yml and .github/workflows/e2e.yml, plus every local composite action or
+     reusable workflow they use (the `uses: ./.github/...` closure); no other .github file;
+  2. every repo script those workflows execute (directly, or through a local
+     composite action or reusable workflow they use): a script file reached as `<interpreter>
+     [flags] path` or `./path`, or a bare path to an executable file at the start of a command (scripts/ci/tests/** excluded);
   3. every file those workflows name that sits in the same directory as such a script (selector
      rules and the E2E selection config passed as arguments);
   4. to a fixpoint, the same-directory siblings that an input names by file name or imports by
@@ -35,8 +41,10 @@ The set is DISCOVERED from the repository (rule 60: no hand-kept file list), at 
      glob or an env expression); an operand is a bare variable that is not known to be a revision
      (it may hold `REV:PATH`); an operand is a command substitution; `cat-file --batch` takes its
      objects from stdin; the git read sits inside `eval` or `sh -c`; or the path is not a file or
-     directory at that commit. A read that cannot leave `.github/` needs no resolution (every
-     `.github` file is already an input).
+     directory at that commit. A read whose literal path prefix is under `.github/` but whose tail has
+     no literal value is NOT unresolved: every `.github` file that starts with that literal prefix
+     is an input (a conservative superset; only the files under .github/ are reachable, and only the
+     ones it can name matter). Paths under scripts/ci/tests/ are dropped from the result.
      Not recognized, by definition: files a workflow reads from the PR's own checkout, a command
      name held in a variable, and git commands other than show, cat-file, archive and ls-tree.
 Discovery runs at BOTH commits, so a file added or removed by the change is still caught.
@@ -102,8 +110,12 @@ ENV_ITEM_RE = re.compile(r"([ \t]+)([A-Za-z_]\w*):[ \t]*(.*?)[ \t]*$")
 STEPS_RE = re.compile(r"(?m)^([ \t]*)steps:[ \t]*$")
 TOKEN_RE = re.compile(r"(?<![\w./@-])" + WORKSPACE + r"((?:\./)?" + PATH_CH + r"+(?:/" + PATH_CH + r"+)+)")
 USES_RE = re.compile(r"(?m)^[ \t]*(?:-[ \t]+)?uses:[ \t]*['\"]?\./(\.github/[A-Za-z0-9_@./-]+?)['\"]?[ \t]*(?:#.*)?$")
-PR_TRIGGER_RE = re.compile(r"\bpull_request(?:_target)?\b")
 IMPORT_RE = re.compile(r"(?m)^[ \t]*(?:from[ \t]+\.?(\w+)|import[ \t]+([^\n#]+))")
+# The workflows a pull_request run executes for HeyDonna (PM brief 2026-11-27): the two PR gates. Other workflows (perf, deploy-*,
+# nightly, release) never decide what CI selects or runs for a PR, so a change to them is not a CI-input change.
+PR_RUN_WORKFLOWS = (".github/workflows/ci.yml", ".github/workflows/e2e.yml")
+# Test files for the CI scripts verify them; they are not part of what a PR run selects or executes.
+TEST_PATH_RE = re.compile(r"^scripts/ci/tests/")
 
 
 def git(repo, *args, data=None):
@@ -146,12 +158,9 @@ def _norm(token):
 
 
 def pr_scope(github, wf_text):
-    """The .github files that run for a pull request: PR-triggered workflows plus every local action or reusable workflow they use."""
-    scope = {
-        p for p in github
-        if p.startswith(".github/workflows/") and p.endswith((".yml", ".yaml"))
-        and PR_TRIGGER_RE.search(re.split(r"(?m)^jobs:", wf_text[p], maxsplit=1)[0])
-    }
+    """The .github files that run for a pull request: the PR-run workflows (ci.yml, e2e.yml) plus every local action or reusable
+    workflow they use. Other workflows (perf.yml, deploy-*.yml, ...) are out of scope even when they have a pull_request trigger."""
+    scope = {p for p in PR_RUN_WORKFLOWS if p in github}
     stack = sorted(scope)
     while stack:
         for ref in USES_RE.findall(wf_text[stack.pop()]):
@@ -461,7 +470,10 @@ def trusted_reads(wf, body, tree):
 
     def path_read(shown, resolved):
         if MARK in resolved:
-            if not _norm(resolved[:resolved.index(MARK)]).startswith(".github/"):
+            prefix = _norm(resolved[:resolved.index(MARK)])
+            if prefix.startswith(".github/"):  # can only read .github files: every one that starts with the literal prefix is an input
+                paths.update(t for t in tree if t.startswith(prefix))
+            else:
                 problems.append(f"{wf}: '{shown}' has a variable or expression with no literal value in its path")
             return
         v = _norm(resolved).rstrip("/")
@@ -481,8 +493,12 @@ def trusted_reads(wf, body, tree):
             colon = operand.find(":")
             if colon >= 0:
                 path_read(shown, operand[colon + 1:])
-            elif MARK in operand and not is_revision(operand) and not _norm(operand[:operand.index(MARK)]).startswith(".github/"):
-                problems.append(f"{wf}: '{shown}' is a variable with no literal value; it may hold a REV:PATH")
+            elif MARK in operand and not is_revision(operand):
+                prefix = _norm(operand[:operand.index(MARK)])
+                if prefix.startswith(".github/"):
+                    paths.update(t for t in tree if t.startswith(prefix))
+                else:
+                    problems.append(f"{wf}: '{shown}' is a variable with no literal value; it may hold a REV:PATH")
 
     def pathspec_read(shown, template, pos):
         if template is None:
@@ -549,14 +565,14 @@ def discover(repo, rev):
                 t = _norm(m.group(2))
                 if t in tree and tree[t][1] == "100755":
                     executed.add(t)
-    executed = {t for t in executed if not t.startswith(".github/")}
+    executed = {t for t in executed if not t.startswith(".github/") and not TEST_PATH_RE.match(t)}
     homes = {posixpath.dirname(p) for p in executed}
-    inputs = set(github) | executed
+    inputs = set(scope_paths) | executed
     # files a PR workflow names (any position) that live beside an executed script: selector rules and E2E selection config
     for body in scoped:
         for m in TOKEN_RE.finditer(body):
             t = _norm(m.group(1))
-            if t in tree and posixpath.dirname(t) in homes:
+            if t in tree and posixpath.dirname(t) in homes and not TEST_PATH_RE.match(t):
                 inputs.add(t)
 
     by_dir = {}
@@ -576,14 +592,14 @@ def discover(repo, rev):
                 modules.add(frm)
                 modules.update(re.findall(r"\w+", imp))
             for sib in by_dir.get(posixpath.dirname(src), []):
-                if sib in inputs:
+                if sib in inputs or TEST_PATH_RE.match(sib):
                     continue
                 name = posixpath.basename(sib)
                 if name in words or (name.endswith(".py") and name[:-3] in modules):
                     inputs.add(sib)
                     found.append(sib)
         level = sorted(found)
-    return inputs | trusted, problems
+    return {p for p in inputs | trusted if not TEST_PATH_RE.match(p)}, problems
 
 
 def main():

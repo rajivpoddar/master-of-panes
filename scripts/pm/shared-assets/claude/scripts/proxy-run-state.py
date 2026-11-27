@@ -147,6 +147,54 @@ def launch_spec(name, typ, brief, argv):
     return {'name': name, 'type': typ, 'brief': brief, 'argv': list(argv), 'env': env, 'model_args': model_args(argv),
             'cwd': os.getcwd(), 'cmd': 'env ' + ' '.join(words)}
 
+# Launch queue fields (Rajiv D0AMF0XE6TS thread 1795760160.752879): every queued row carries priority + type + exact command so
+# proxy-queue-drain.py can order and relaunch it. Priority = brief `PRIORITY:` header, then the issue/PR P0..P3 labels, else P2 (never guessed higher).
+PRIO_BRIEF = re.compile(r'^\s*priority\s*:\s*(P[0-3])\b', re.I | re.M)
+FLAG_BRIEF = re.compile(r'^\s*rajiv[_-]?flag\s*:\s*(?:1|yes|true|y)\b', re.I | re.M)
+QUEUE_REPO = 'Scribie/heydonna-app'
+DEFAULT_PRIORITY = 'P2'
+
+def brief_head(path, limit=4096):
+    try:
+        with open(path, 'rb') as fh:
+            return fh.read(limit).decode('utf-8', 'replace')
+    except (OSError, TypeError, ValueError):
+        return ''
+
+def label_priority(spec):
+    """Lowest P0..P3 label on the spec's PR/issue (gh, bounded, fail-open), else None. PROXY_AGENT_PRIORITY_LOOKUP=0 skips the lookup."""
+    if os.environ.get('PROXY_AGENT_PRIORITY_LOOKUP', '1') == '0':
+        return None
+    best = None
+    for kind in ('pr', 'issue'):
+        number = str(spec.get(kind) or '')
+        if not number.isdigit():
+            continue
+        try:
+            done = subprocess.run(['gh', kind, 'view', number, '--repo', QUEUE_REPO, '--json', 'labels'], stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, text=True, timeout=8)
+            if done.returncode:
+                continue
+            for label in json.loads(done.stdout).get('labels', []):
+                m = re.fullmatch(r'P([0-3])', str(label.get('name', '')))
+                if m:
+                    best = int(m.group(1)) if best is None else min(best, int(m.group(1)))
+        except (OSError, subprocess.SubprocessError, ValueError, AttributeError, TypeError):
+            continue
+    return None if best is None else 'P%d' % best
+
+def queue_fields(spec):
+    """{priority, priority_source, rajiv_flag} for a queued row. Never raises; unknown priority is P2."""
+    head = brief_head(spec.get('brief') or '')
+    m = PRIO_BRIEF.search(head)
+    if m:
+        prio, source = m.group(1).upper(), 'brief'
+    else:
+        found = label_priority(spec)
+        prio, source = (found, 'label') if found else (DEFAULT_PRIORITY, 'default')
+    flag = os.environ.get('PROXY_AGENT_RAJIV_FLAG', '') not in ('', '0') or bool(FLAG_BRIEF.search(head))
+    return {'priority': prio, 'priority_source': source, 'rajiv_flag': flag}
+
 def lane_pid(name):
     """Pid of the live `claude -p --name <name>` child (the same process shape the cap counters match), else None."""
     try:
@@ -183,6 +231,7 @@ def relaunch_row(name, spec, data, why, cmd='', low=''):
     if low: relaunch['reason'] = 'disk_low'
     evidence = {'relaunch': relaunch, 'refused_at': data.get('finished_at') or now_iso(), 'refused_rc': data.get('exit_rc') or data.get('rc') or '',
                 'reason': why, 'model': data.get('model') or ''}
+    evidence.update(queue_fields({**spec, **{k: data[k] for k in ('issue', 'pr') if data.get(k)}, 'brief': relaunch['brief']}))
     if low: evidence['disk_low'] = True
     return ledger(['obligation-upsert', '--kind', 'proxy_relaunch', '--severity', 'high', '--target-type', 'proxy', '--target-id', name,
                    '--owner', 'pm', '--horizon', 'hourly', '--title', 'Relaunch refused proxy ' + name,
@@ -205,7 +254,8 @@ def capacity_wait(spec, pools, base, ledger_cli, slack_cli):
     target_type = 'github_' + kind if refs else 'proxy'
     target_label = ', '.join(f'{key.upper()} #{ref}' for key, ref in refs) or 'issue/PR not specified'
     action = 'cd ' + shlex.quote(spec['cwd']) + ' && ' + spec['cmd']
-    evidence = {'lane': name, 'type': typ, 'pools_tried': pools, 'state': 'QUEUED_AWAITING_OVERRIDE'}
+    fields = queue_fields(spec)
+    evidence = {'lane': name, 'type': typ, 'pools_tried': pools, 'state': 'QUEUED_AWAITING_OVERRIDE', 'brief': spec.get('brief') or '', **fields}
     args = ['obligation-upsert', '--kind', 'agent_launch_queued', '--horizon', 'hourly',
             '--target-type', target_type, '--target-id', target, *ref_args(spec), '--owner', 'pm', '--dedupe-group', name,
             '--title', f'Launch queued: {name} ({typ})', '--action', action,
@@ -219,13 +269,16 @@ def capacity_wait(spec, pools, base, ledger_cli, slack_cli):
                f'Proxy pools tried (live/cap): {pools or "none"}. No eligible PM subagent slot.\n'
                f'To approve a relaunch, reply rajiv-override {name}. PM relaunches with '
                'PROXY_AGENT_CAP_OVERRIDE=rajiv:<timestamp of your reply>. Existing hard pool limits still apply.')
+    # Only a P0 row or a row carrying a rajiv-flag may DM Rajiv; everything else queues silently for proxy-queue-drain.py.
     dm = 'unconfirmed'
     try:
         base.mkdir(parents=True, exist_ok=True, mode=0o700)
         with state_lock(base):
             atomic(base / 'queued-obligation-id', obligation)
             stamp = base / 'override-request-at'
-            if stamp.exists() and time.time() - float(stamp.read_text()) < 1800:
+            if fields['priority'] != 'P0' and not fields['rajiv_flag']:
+                dm = 'silent'
+            elif stamp.exists() and time.time() - float(stamp.read_text()) < 1800:
                 dm = 'deduped'
             else:
                 # Claim before sending: Slack can accept the request even if its response is lost.

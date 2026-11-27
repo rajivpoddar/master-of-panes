@@ -761,7 +761,7 @@ model = os.environ.get("PROXY_AGENT_CLAUDE_PROBE_MODEL", "")
 # Both local Spark aliases must be probe-able: without it an id that is not in this list returns "fail" and is
 # recorded as probe_failed, so the lane is cooled and falls through to a PAID model even though the Spark is healthy and the
 # gate above already proved the checkpoint is served. /v1/messages through CLIProxyAPI answers it 200 (verified 22 Nov).
-if model not in ("claude-opus-5-5-high", "claude-sonnet-5-5-high", "gemini-4-argon-high", "gemini-3.8-flash-high", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-high", "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "grok-4.7", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-sol(xhigh)", "gpt-6-astra", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-fable-5-2", "ultra/claude-opus-5-5", "ultra/claude-sonnet-5-5", "ultra/claude-haiku-5-5", "deepseek-direct/deepseek-flash", "deepseek-direct/deepseek-v4-pro", "hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor", "inkling-2-mini", "ornith-1.5-35b-a3b", "qwen3.8-flash-next", "sarvam-glm-5.3", "sarvam-deepseek-v4.1-flash", "sarvam-105b", "sarvam-gemma4", "sarvam-kimi-k3"):
+if model not in ("claude-opus-5-5-high", "claude-sonnet-5-5-high", "gemini-4-argon-high", "gemini-3.8-flash-high", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-high", "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "grok-4.7", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-sol(xhigh)", "gpt-6.2-sol(high)", "gpt-6-astra", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-fable-5-2", "ultra/claude-opus-5-5", "ultra/claude-sonnet-5-5", "ultra/claude-haiku-5-5", "deepseek-direct/deepseek-flash", "deepseek-direct/deepseek-v4-pro", "hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor", "inkling-2-mini", "ornith-1.5-35b-a3b", "qwen3.8-flash-next", "sarvam-glm-5.3", "sarvam-deepseek-v4.1-flash", "sarvam-105b", "sarvam-gemma4", "sarvam-kimi-k3"):
     finish("fail", 0)
 
 state_dir = os.environ.get("PROXY_AGENT_STATE_DIR") or os.path.expanduser("~/.cache/proxy-agent")
@@ -1841,7 +1841,7 @@ proxy_agent_type_level() {
 proxy_agent_tier_models() {
   local models _m _kept=""
   case "$1" in
-    LOW) models="ornith-1.5-35b-a3b sarvam-glm-5.3 sarvam-deepseek-v4.1-flash sarvam-105b sarvam-gemma4 gpt-6-luna claude-haiku-5-5 inkling-2-mini";;  # inkling-2-mini: local Spark, fenced light work only (strip below; Rajiv ts 1795741969.632649);  # muse (OpenCode Go) dropped until the 30 Nov weekly reset (Rajiv ts 1795515247.892709);  # Sarvam = light work only (Rajiv C0ALZJHGE49 ts 1795420232.692599: "sarvam looks to be quite useless if we max out the monthly in 2d. maybe we should use it only for light work.")  # Spark (free) stays first for LOW: OpenCode monthly burn 0.35 vs 0.10 %/h budget (23 Nov 08:30)
+    LOW) models="inkling-2-mini ornith-1.5-35b-a3b sarvam-glm-5.3 sarvam-deepseek-v4.1-flash sarvam-105b sarvam-gemma4 gpt-6-luna claude-haiku-5-5";;  # inkling-2-mini FIRST for light lanes (Rajiv D0AMF0XE6TS thread 1795763208.280539, ts 1795767932.789039); re-enabled 14:18 IST after proxy-tool-inkfix (--strict-mcp-config) proved multi-turn lanes; earns heavier stages only at >=70% over >=20 lanes
     MID) models="hy4-flash-free claude-sonnet-5-5 ultra/claude-sonnet-5-5 inkling-2-mini gpt-6.1-terra";;  # OpenCode Go weekly 62% at 1.87 vs 0.28 %/h budget: paid OpenCode ids (glm, deepseek, muse) out of MID until the Mon 30 Nov 05:30 IST reset (Rajiv D0AMF0XE6TS thread 1795513877.716279, ts 1795515247.892709 "ok"); was: glm-5.3 deepseek-v4.1-flash hy4-flash-free claude-sonnet-5-5 gpt-6.1-terra muse-spark-1.3-contributor;  # Sarvam moved to LOW only (Rajiv ts 1795420232.692599); ornith LOW only (Rajiv ts 1795484559.513619, 24 Nov)
     TOP) models="claude-opus-5-5 ultra/claude-opus-5-5 claude-fable-5-2 gpt-6.2-sol sarvam-kimi-k3 grok-4.7 muse-spark-1.3-contributor";;  # Rajiv D0AMF0XE6TS thread 1795485653.099709, ts 1795486375.339929 (24 Nov): value-per-$ order, Opus (77x) first, Grok (11-13x) last
     *) return 1;;
@@ -2663,15 +2663,23 @@ resolve_model() {
   esac
 }
 
-# Reasoning effort for gpt-6.2-sol (Rajiv C0ALZJHGE49 thread 1794677380.515009, ts 1795158067.051479: "put 6.2 sol xhigh agents on it").
-# Mechanism = the router's own: CLIProxyAPI strips a `model(level)` suffix, validates the level against the model's supported set and resolves the provider
-# from the base id (probed 2026-11-20: `gpt-6.2-sol(xhigh)` 200, `gpt-6.2-sol(bogus)` 400 "valid levels: low, medium, high, xhigh, max"). The suffix is added ONLY where
-# the launcher emits --model (primary ARGS, which the continuation reuses) and the nested Haiku/Sonnet/Opus exports. Selection, tier lists, pool caps, cooldown records,
-# the burn gate, run state and notices all keep the canonical id. An id that already carries a suffix is the caller's explicit choice and is left alone.
-PROXY_AGENT_SOL_EFFORT="xhigh"
+# Reasoning effort for proxy lanes. Rajiv D0AMF0XE6TS thread 1795763208.280539, ts 1795770020.421749: "set all proxy agents to use high effort". This supersedes
+# the gpt-6.2-sol xhigh pin (Rajiv C0ALZJHGE49 thread 1794677380.515009, ts 1795158067.051479: "put 6.2 sol xhigh agents on it"): every lane that has a reasoning knob runs at "high".
+# Mechanism for non-Claude ids = the router's own: CLIProxyAPI strips a `model(level)` suffix, validates the level against the model's supported set and resolves the
+# provider from the base id (probed 2026-11-27, each `<id>(high)` answered 200 with text through the router: gpt-6-luna, gpt-6.1-terra, gpt-6.1-sol, gpt-6.2-sol, gpt-6-astra,
+# grok-4.7, deepseek-v4.1-flash, glm-5.3, ernie-flash, hy4-flash-free, sarvam-105b, sarvam-glm-5.3, sarvam-deepseek-v4.1-flash, sarvam-gemma4; `gpt-6.2-sol(bogus)` 400
+# "valid levels: low, medium, high, xhigh, max"). Claude lanes use Claude Code's own `--effort high` instead (see the ARGS block). NOT changed, no usable knob:
+# ornith/qwen (backend 404 on a suffix; MAX_THINKING_TOKENS=2048 stays), inkling-2-mini (native LAN relay, not the router), muse-spark (never launched), sarvam-kimi-k3 (org not enabled),
+# deepseek / deepseek-flash-4.1 / deepseek-direct/* (gated or metered, level list not live-proven). The suffix is added ONLY where the launcher emits --model (primary ARGS,
+# which the continuation reuses) and the nested Haiku/Sonnet/Opus exports. Selection, tier lists, pool caps, cooldown records, the burn gate, run state and notices all keep
+# the canonical id (proxy_agent_router_identity cuts the suffix). An id that already carries a suffix is the caller's explicit choice and is left alone.
+PROXY_AGENT_SOL_EFFORT="high"
+PROXY_AGENT_EFFORT="high"
 proxy_agent_launch_model_id() {
   case "$1" in
     gpt-6.2-sol) printf 'gpt-6.2-sol(%s)\n' "$PROXY_AGENT_SOL_EFFORT";;
+    gpt-6-luna|gpt-6.1-terra|gpt-6.1-sol|gpt-6-astra|grok-4.7|deepseek-v4.1-flash|glm-5.3|ernie-flash|hy4-flash-free|sarvam-105b|sarvam-glm-5.3|sarvam-deepseek-v4.1-flash|sarvam-gemma4)
+      printf '%s(%s)\n' "$1" "$PROXY_AGENT_EFFORT";;
     *) printf '%s\n' "$1";;
   esac
 }
@@ -3155,6 +3163,18 @@ the exact command and EPERM text; never assume a block without trying."
 fi
 if [[ -n "$TOOLS" && "$TOOLS" != "*" && "$TOOLS" != "All tools" ]]; then
   ARGS+=(--allowedTools "$TOOLS")
+fi
+# Claude lanes (team pool and ultra/*) run at high effort through Claude Code's own flag (Rajiv ts 1795770020.421749). It sets output_config.effort and overrides user
+# modelSettings/effortLevel. It sits after --model, so proxy-cap-count.py and the pool-live regex (`claude -p --name <n> --model <m>`) still match. The continuation replays ARGS.
+case "$MODEL_ID" in
+  claude-*|ultra/claude-*) ARGS+=(--effort "$PROXY_AGENT_EFFORT");;
+esac
+# Inkling lanes load NO MCP servers (27 Nov, proxy-tool-inkfix; Rajiv ts 1795767932.789039 approval). inkling-2-mini is an unrecognized model id, so
+# Claude Code cannot defer MCP tool schemas behind tool search and inlines every connected server's tools on the request after the server connects:
+# the sprinto MCP added 454 tools (~942 KB, ~300k tokens) on request 2, past the 262144 window (vLLM 400 "maximum context length", then Claude Code's
+# synthetic "Prompt is too long"). Inkling lanes are light work (cleanup, triage, read-only investigation) and never need MCP tools.
+if [[ "$MODEL_ID" == inkling-2-mini ]]; then
+  ARGS+=(--strict-mcp-config)
 fi
 # PM-only skills: PM-type proxies load them through a plugin (skills dir symlinked to heydonna-app/.claude/skills),
 # NOT through the project setting source, which would also load the PM project hooks (rule 50). Dev types get no plugin.

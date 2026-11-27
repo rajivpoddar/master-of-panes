@@ -88,4 +88,10 @@ if [[ -n "${PROXY_AGENT_RUN_TOKEN:-}" && -n "${PROXY_AGENT_RUN_NAME:-}" ]]; then
     --result-status "$RESULT_STATUS" --result-json "$RESULT_JSON" --head "$RESULT_HEAD" \
     || printf 'PROXY_AGENT_WARN reason=run_state_finish_failed\n' >&2
 fi
+# Launch queue (Rajiv D0AMF0XE6TS thread 1795760160.752879): every proxy stop frees capacity, so drain the queue. Runs after `finish`, detached,
+# never blocks or fails the stop (rule 50: fail open); the drainer scrubs this lane's run identity from the env it hands to a relaunch.
+if [[ "${PROXY_QUEUE_DRAIN:-1}" != 0 && -f "$HOME/.claude/scripts/proxy-queue-drain.py" ]]; then
+  ( nohup python3 -I "$HOME/.claude/scripts/proxy-queue-drain.py" drain --trigger stop --name "${PROXY_AGENT_RUN_NAME:-$name}" \
+      > /dev/null 2>&1 < /dev/null & ) 2>/dev/null || true
+fi
 exit 0

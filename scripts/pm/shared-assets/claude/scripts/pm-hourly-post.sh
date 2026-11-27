@@ -33,6 +33,12 @@ if [ "${1:-}" = "--no-post" ]; then
   echo "CHART_PREVIEW_FAILED"
   exit 1
 fi
+# Launch queue (Rajiv D0AMF0XE6TS thread 1795760160.752879: "the queue should be drained on proxy stops as well" [and hourly]): one detached,
+# fail-open drain per hourly run. It posts nothing to Slack, does not read or write the bucket claim, and a held lock or any error is
+# swallowed (rule 50), so it can never delay or fail the report. Idempotent: the drainer's lock + per-row cooldown absorb a repeat run.
+if [ "${PROXY_QUEUE_DRAIN:-1}" != 0 ] && [ -f "$HOME/.claude/scripts/proxy-queue-drain.py" ]; then
+  ( nohup python3 -I "$HOME/.claude/scripts/proxy-queue-drain.py" drain --trigger hourly > /dev/null 2>&1 < /dev/null & ) 2>/dev/null || true
+fi
 BUCKET=$(date +%Y-%m-%d:%H)
 echo "$BUCKET" > /tmp/heartbeat-1h-bucket
 CLAIM="$HOME/.claude/hourly-heartbeat-posts/$BUCKET"

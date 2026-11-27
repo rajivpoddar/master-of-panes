@@ -3,6 +3,7 @@
 # Stubs gh and git on PATH; never touches GitHub. Pass --merge-only for the focused S166 case.
 set -u
 SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/pm-admit-ci.sh"
+SCRIPT_DIR_VERDICT="$(dirname "$SCRIPT")/pm-admit-verdict.py"
 SHA=0123456789abcdef0123456789abcdef01234567
 export STUB_BASE_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 export STUB_MAIN_SHA=cccccccccccccccccccccccccccccccccccccccc
@@ -13,6 +14,7 @@ export STUB_LAG_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa      # the older ma
 export STUB_LAGBASE_SHA=7777777777777777777777777777777777777777  # merge-base of that older main and the PR head
 PASS=0; FAIL=0
 T=$(mktemp -d "${TMPDIR:-/tmp}/pm-admit-test.XXXXXX")
+T=$(cd "$T" && pwd)   # normalize: a TMPDIR ending in "/" (macOS) leaves "//" in $T, and the python3 stub's PATH-strip of its own dir (for the real-helper cases) then never matched
 
 mkstubs() {
   mkdir -p "$T/bin"
@@ -20,7 +22,7 @@ mkstubs() {
 #!/usr/bin/env bash
 printf 'git %s\n' "$*" >> "$STUB_LOG"
 case "$*" in
-  *'fetch -q --no-tags origin +refs/heads/main:'*) exit 0 ;;
+  *'fetch -q --no-tags origin +refs/heads/main:'*) [ -z "${FETCH_FAIL:-}" ] ;;   # FETCH_FAIL=1: the inherited-override fetch fails (no inheritance)
   *'fetch -q --no-tags origin refs/pull/'*) [ -f "$STUB_DIR/updated" ] ;;
   *'rev-parse --verify origin/main^{commit}') printf '%s\n' "$STUB_MAIN_SHA" ;;   # the main that passes the overlap check; the stale-ref guard binds to it
   *'merge-base --is-ancestor '*)
@@ -66,7 +68,10 @@ case "$args" in
     if [ -n "${CAP_COMMENTS_JSON:-}" ]; then printf '%s\n' "$CAP_COMMENTS_JSON"
     elif [ "${GATE_MODE:-same}" = none ]; then printf '[[]]\n'; else
       prefix=''; [ "${GATE_MODE:-same}" != heading ] || prefix='## '
-      printf '[[{"body":"%sPM 12b: %s at %s"}]]\n' "$prefix" "${VERDICT:-PASS}" "${REVIEW_SHA:-$STUB_SHA}"; fi ;;
+      printf '[[{"user":{"login":"%s"},"body":"%sPM 12b: %s at %s"}]]\n' "${GH_LOGIN:-pm-agent-bot}" "$prefix" "${VERDICT:-PASS}" "${REVIEW_SHA:-$STUB_SHA}"; fi ;;
+  "api user"*)   # the account every PM agent posts as: the single trusted login for 12b receipts AND ci-verdict comments (GH_LOGIN=fail: unreadable)
+    [ "${GH_LOGIN:-pm-agent-bot}" = fail ] && { echo "HTTP 401" >&2; exit 1; }
+    printf '%s\n' "${GH_LOGIN:-pm-agent-bot}" ;;
   "api repos/"*"/issues/"*"/events"*)
     [ "${CAP_EVENTS_MODE:-ok}" = fail ] && { echo "HTTP 502" >&2; exit 1; }
     printf '%s\n' "${CAP_EVENTS_JSON:-[[]]}" ;;
@@ -74,7 +79,12 @@ case "$args" in
     sha=${args#*head_sha=}; sha=${sha%%&*}
     cat "${CAP_FIX:-/nonexistent}/runs.$sha" 2>/dev/null || printf '[{"workflow_runs":[]}]\n' ;;
   "api repos/"*"/actions/runs/"*"/jobs"*)
-    printf '[{"jobs":[{"name":"typescript","conclusion":"failure","started_at":"2026-11-20T10:00:00Z","completed_at":"2026-11-20T10:20:00Z"}]}]\n' ;;
+    # A run is a label-wrapper gate-only run when its id is in CAP_WRAPPER_RUNS (space separated): its jobs carry the "Require exemption or exact-head real CI success" step.
+    rid=${args#*/actions/runs/}; rid=${rid%%/*}
+    case " ${CAP_WRAPPER_RUNS:-} " in
+      *" $rid "*) printf '[{"jobs":[{"name":"gate","conclusion":"%s","started_at":"2026-11-20T10:00:00Z","completed_at":"2026-11-20T10:01:00Z","steps":[{"name":"Require exemption or exact-head real CI success","conclusion":"%s"}]}]}]\n' "${CAP_WRAPPER_STEP:-failure}" "${CAP_WRAPPER_STEP:-failure}" ;;   # CAP_WRAPPER_STEP=success: a newer GREEN wrapper
+      *) printf '[{"jobs":[{"name":"typescript","conclusion":"failure","started_at":"2026-11-20T10:00:00Z","completed_at":"2026-11-20T10:20:00Z","steps":[{"name":"Confirm current paid CI success","conclusion":"failure"}]}]}]\n' ;;
+    esac ;;
   # Stale test-merge guard: ONE deadline-bounded read pass, bound to the main that passed the overlap check (STUB_MAIN_SHA). Default = fresh merge ref.
   # STALE_MODE: stale | unreadable | unreadable_main | unreadable_parents | unreadable_confirm_pr | unreadable_confirm_main | no_merge_sha |
   #             parents_mismatch | closed | head_moved | main_moved | main_moved_confirm | pr_changed_confirm | hung | hung_parents | late |
@@ -138,8 +148,18 @@ case "$args" in
     else emit "$MODE_HM" "$HM_VALUE" hm; fi ;;
   "pr view"*"--json headRefOid"*) emit "$MODE_HEAD" "$STUB_SHA" head ;;
   "pr view"*"--json labels,closingIssuesReferences"*) printf '{"labels":[{"name":"P2"}],"closingIssuesReferences":[]}\n' ;;
-  "pr view"*"--json labels"*) emit "$MODE_LABELS" "$LABELS_JSON" labels ;;
-  "pr edit"*|"label create"*) [ "${MODE_WRITE:-ok}" = fail ] && exit 1; exit 0 ;;
+  "pr view"*"--json labels"*)
+    # Race barrier (BARRIER_DIR + BARRIER_N): the first labels read of each caller drops a marker and waits (bounded) until BARRIER_N callers have reached it, so every caller has passed
+    # every gate before ANY of them claims the grant; the claim at the label boundary is then the only thing that can separate them.
+    if [ -n "${BARRIER_DIR:-}" ] && [ ! -e "$BARRIER_DIR/m.$(basename "$STUB_DIR")" ]; then
+      : > "$BARRIER_DIR/m.$(basename "$STUB_DIR")"
+      for _ in $(seq 1 300); do [ "$(ls "$BARRIER_DIR" | grep -c '^m\.')" -ge "${BARRIER_N:-2}" ] && break; /bin/sleep 0.1; done
+    fi
+    emit "$MODE_LABELS" "$LABELS_JSON" labels ;;
+  "pr edit"*|"label create"*)
+    # Ordering probe: how many override-consumed records the audit log already held when the ci-head label add (the admission) was issued.
+    case "$args" in *"--add-label ci-head:"*) grep -c 'admission-cap-override-consumed=' "$HOME/.claude/logs/pm-admit-skip.log" > "$STUB_DIR/consumed_at_label_add" 2>/dev/null || echo 0 > "$STUB_DIR/consumed_at_label_add" ;; esac
+    [ "${MODE_WRITE:-ok}" = fail ] && exit 1; exit 0 ;;
   *) exit 1 ;;     # includes any "pr close" / "pr reopen": the script must never call them (it is also logged above, and asserted absent)
 esac
 EOF
@@ -148,7 +168,17 @@ EOF
 #!/usr/bin/env bash
 if [[ "$*" = *pm-ops.py* ]]; then
   printf 'pm-ops %s\n' "$*" >> "$STUB_LOG"
+  # LOCK_LOG_AT_PMOPS=1: the audit ledger turns read-only right after the 12b-override audit, so only the later override-consumed write can fail.
+  [ "${LOCK_LOG_AT_PMOPS:-}" = 1 ] && chmod 444 "$HOME/.claude/logs/pm-admit-skip.log"
   exit 0
+fi
+if [[ "$*" = *pm-admit-verdict.py*" descendant "* ]]; then   # inherited-override check: DESC_MODE=yes|no|unavailable stubs the helper's answer (its logic has its own test file); anything else runs the real helper
+  printf 'verdict-descendant %s\n' "$*" >> "$STUB_LOG"
+  case "${DESC_MODE:-real}" in
+    yes) echo 'override_inherit: yes merge-only descendant: 3 PR file(s) byte-identical'; exit 0 ;;
+    no) echo 'override_inherit: no a PR file differs between the two heads'; exit 1 ;;
+    unavailable) echo 'ci_verdict: UNAVAILABLE reason=git rev-list rc=128'; exit 11 ;;
+  esac
 fi
 if [[ "$*" = *pm-admit-ci-inputs.py* ]]; then   # the trusted-CI-input helper: changed inputs come from LAG_CI_INPUTS_CHANGED ('%b'), LAG_CI_INPUTS_FAIL=1 is an unreadable discovery
   printf 'ci-inputs %s\n' "$*" >> "$STUB_LOG"
@@ -210,6 +240,12 @@ for fixture in no_overlap overlap; do
     check 'merge-only/overlap: performed with merged head' '[ "$RC" = 0 ] && grep -qx "MAIN_MERGE: performed head=$STUB_MERGED_SHA reason=overlap files=1" <<<"$OUT"'
     check 'merge-only/overlap: one update-branch pinned to original head' '[ "$(grep -c update-branch "$STUB_LOG")" = 1 ] && grep -q "update-branch -f expected_head_sha=$SHA$" "$STUB_LOG"'
   fi
+  # Fix 2 (Rajiv ts 1795761962.862319): every merge-only outcome prints one MAIN_MERGE_REASON line (rule 62 decision + reason) BEFORE the legacy MAIN_MERGE: line.
+  if [ "$fixture" = no_overlap ]; then
+    check 'merge-only/no overlap: MAIN_MERGE_REASON decision=skip reason=no_conflict_no_overlap, rule 62, bound to head and main, printed before MAIN_MERGE: skipped' 'grep -qx "MAIN_MERGE_REASON: decision=skip reason=no_conflict_no_overlap rule=62 head=$SHA main=$STUB_MAIN_SHA files=0" <<<"$OUT" && [ "$(grep -n "^MAIN_MERGE_REASON" <<<"$OUT" | head -1 | cut -d: -f1)" -lt "$(grep -n "^MAIN_MERGE: " <<<"$OUT" | head -1 | cut -d: -f1)" ]'
+  else
+    check 'merge-only/overlap: MAIN_MERGE_REASON decision=merge reason=overlap files=1, printed before MAIN_MERGE: performed' 'grep -qx "MAIN_MERGE_REASON: decision=merge reason=overlap rule=62 head=$SHA main=$STUB_MAIN_SHA files=1" <<<"$OUT" && [ "$(grep -c "^MAIN_MERGE_REASON" <<<"$OUT")" = 1 ] && [ "$(grep -n "^MAIN_MERGE_REASON" <<<"$OUT" | head -1 | cut -d: -f1)" -lt "$(grep -n "^MAIN_MERGE: " <<<"$OUT" | head -1 | cut -d: -f1)" ]'
+  fi
   # The merge-only stale-ref probe (CI-input deadlock fix) adds read-only guard reads: pulls/N, git/ref/heads/main and the test merge's commit.
   check "merge-only/$fixture: no 12b, labels or CI/E2E dispatch" '! grep "^gh " "$STUB_LOG" | grep -qvE "^gh (pr view .*--json (state|headRefOid,mergeable|baseRefName) |api -X PUT .*/update-branch |api repos/[^ ]*/(pulls/[0-9]+|git/ref/heads/main|commits/[0-9a-f]{40}) )" && ! grep -qE "12B_GATE|ADMITTED" <<<"$OUT"'
 done
@@ -246,17 +282,20 @@ check 'mo_ci_changed: the probe line names the count, the older main parent, the
 check 'mo_ci_changed: exactly one update-branch, non-force, pinned to the original head, after every guard read' '[ "$(grep -c update-branch "$STUB_LOG")" = 1 ] && grep -q "^gh api -X PUT repos/.*/pulls/11173/update-branch -f expected_head_sha=$SHA$" "$STUB_LOG" && [ "$(grep -n "git/ref/heads/main" "$STUB_LOG" | tail -1 | cut -d: -f1)" -lt "$(grep -n update-branch "$STUB_LOG" | head -1 | cut -d: -f1)" ]'
 check 'mo_ci_changed: the helper ran once, read-only, bound to the older parent and the overlap-checked main' '[ "$(grep -c "^ci-inputs " "$STUB_LOG")" = 1 ] && grep -q "^ci-inputs -I .*pm-admit-ci-inputs.py --repo .* --base $STUB_LAG_SHA --main $STUB_MAIN_SHA" "$STUB_LOG"'
 check 'mo_ci_changed: the probe wrote nothing else: no label/PR/branch write, no skip-log audit line, no waiver or admission output, no refusal' '! grep -qE "$CI_WRITES" "$STUB_LOG" && [ "$(skiplog_lines)" = "$SKIPLOG_N" ] && ! grep -qE "12B_GATE|ADMITTED|MERGE_REF_RULE|MERGE_REF_VERIFIED|REFUSE" <<<"$OUT"'
+check 'mo_ci_changed: exactly one MAIN_MERGE_REASON, decision=merge reason=ci_input_changed files=2 (the CI input count), after the probe line and before MAIN_MERGE: performed' '[ "$(grep -c "^MAIN_MERGE_REASON" <<<"$OUT")" = 1 ] && grep -qx "MAIN_MERGE_REASON: decision=merge reason=ci_input_changed rule=62 head=$SHA main=$STUB_MAIN_SHA files=2" <<<"$OUT" && [ "$(grep -n "^STALE_REF_PROBE" <<<"$OUT" | cut -d: -f1)" -lt "$(grep -n "^MAIN_MERGE_REASON" <<<"$OUT" | cut -d: -f1)" ] && [ "$(grep -n "^MAIN_MERGE_REASON" <<<"$OUT" | cut -d: -f1)" -lt "$(grep -n "^MAIN_MERGE: performed" <<<"$OUT" | cut -d: -f1)" ]'
 
 echo 'case: --merge-only, lagging test merge but no changed trusted CI input (and no overlap): skipped, nothing written'
 SKIPLOG_N=$(skiplog_lines)
 UPDATE_OK=1 LAG_CI_INPUTS_CHANGED='' run_mo mo_ci_unchanged
 assert_mo_skipped mo_ci_unchanged
 check 'mo_ci_unchanged: the guard did consult the helper once (the skip is a decision, not a shortcut), and the lagging waiver left no audit line' '[ "$(grep -c "^ci-inputs " "$STUB_LOG")" = 1 ]'
+check 'mo_ci_unchanged: MAIN_MERGE_REASON decision=skip (rule 62: no conflict, no overlap, no changed CI input), never decision=merge' 'grep -qx "MAIN_MERGE_REASON: decision=skip reason=no_conflict_no_overlap rule=62 head=$SHA main=$STUB_MAIN_SHA files=0" <<<"$OUT" && ! grep -q "decision=merge" <<<"$OUT"'
 
 echo 'case: --merge-only, conflict with main: still the non-force update-branch (conflict is a merge reason; the CI-input probe is not consulted)'
 HM_VALUE="$SHA CONFLICTING" S166_CASE=conflict GATE_MODE=none UPDATE_OK=1 run_script mo_conflict --merge-only 11173
 check 'mo_conflict: performed at the merged head with reason conflict' '[ "$RC" = 0 ] && grep -qx "MAIN_MERGE: performed head=$STUB_MERGED_SHA reason=conflict files=0" <<<"$OUT"'
 check 'mo_conflict: one update-branch pinned to the original head; no stale-ref guard read, no helper call' '[ "$(grep -c update-branch "$STUB_LOG")" = 1 ] && grep -q "update-branch -f expected_head_sha=$SHA$" "$STUB_LOG" && ! grep -q "^ci-inputs " "$STUB_LOG" && ! grep -q "git/ref/heads/main" "$STUB_LOG"'
+check 'mo_conflict: MAIN_MERGE_REASON decision=merge reason=conflict' 'grep -qx "MAIN_MERGE_REASON: decision=merge reason=conflict rule=62 head=$SHA main=$STUB_MAIN_SHA files=0" <<<"$OUT"'
 HM_VALUE="$SHA CONFLICTING" S166_CASE=conflict GATE_MODE=none run_script mo_conflict_rejected --merge-only 11173
 check 'mo_conflict_rejected: GitHub refuses the update -> REFUSE conflict, route to slot (exit 2), one update-branch attempt, no helper call' '[ "$RC" = 2 ] && grep -qx "REFUSE: conflict with main; route to slot" <<<"$OUT" && [ "$(grep -c update-branch "$STUB_LOG")" = 1 ] && ! grep -q "^ci-inputs " "$STUB_LOG"'
 
@@ -285,6 +324,7 @@ echo 'case: --merge-only --dry-run previews the decision and never calls update-
 SKIPLOG_N=$(skiplog_lines)
 UPDATE_OK=1 LAG_CI_INPUTS_CHANGED="$CI_TWO" run_mo mo_dry_ci --dry-run
 check 'mo_dry_ci: would attempt update-branch for ci_input_changed (2 inputs) at the current head and main, exit 0, nothing changed' '[ "$RC" = 0 ] && grep -qx "MAIN_MERGE: dry-run would attempt update-branch head=$SHA reason=ci_input_changed files=2 main=$STUB_MAIN_SHA (nothing was changed)" <<<"$OUT" && grep -q "^STALE_REF_PROBE ci_inputs_changed n=2 " <<<"$OUT"'
+check 'mo_dry_ci: the dry run prints the same MAIN_MERGE_REASON (decision=merge reason=ci_input_changed files=2) before the dry-run line' 'grep -qx "MAIN_MERGE_REASON: decision=merge reason=ci_input_changed rule=62 head=$SHA main=$STUB_MAIN_SHA files=2" <<<"$OUT" && [ "$(grep -n "^MAIN_MERGE_REASON" <<<"$OUT" | cut -d: -f1)" -lt "$(grep -n "^MAIN_MERGE: dry-run" <<<"$OUT" | cut -d: -f1)" ]'
 check 'mo_dry_ci: no update-branch, no PR/label/branch write, no skip-log audit line, no fetch of the PR head after a merge' '! grep -q update-branch "$STUB_LOG" && ! grep -qE "$CI_WRITES" "$STUB_LOG" && [ "$(skiplog_lines)" = "$SKIPLOG_N" ] && ! grep -q "fetch -q --no-tags origin refs/pull/" "$STUB_LOG"'
 UPDATE_OK=1 LAG_CI_INPUTS_CHANGED='' run_mo mo_dry_unchanged --dry-run
 assert_mo_skipped mo_dry_unchanged
@@ -392,11 +432,14 @@ cap_events() { # <head>... -> one exact ci-head label event per head, oldest fir
   for s in "$@"; do i=$((i+1)); out="$out$sep{\"id\":$i,\"event\":\"labeled\",\"created_at\":\"2026-11-20T1$i:00:00Z\",\"label\":{\"name\":\"ci-head:$s\"}}"; sep=,; done
   printf '%s]]' "$out"
 }
-cap_red() { # <head> <run id>: one real (30 min) red ci.yml pull_request run at that head
-  printf '[{"workflow_runs":[{"id":%s,"head_sha":"%s","event":"pull_request","path":".github/workflows/ci.yml","name":"CI","conclusion":"failure","run_attempt":1,"run_started_at":"2026-11-20T10:00:00Z","updated_at":"2026-11-20T10:30:00Z","pull_requests":[]}]}]\n' "$2" "$1" > "$CAP_FIX/runs.$1"
+cap_red() { # <head> <run id> [attempt=1]: one real (30 min) red ci.yml pull_request run at that head
+  printf '[{"workflow_runs":[{"id":%s,"head_sha":"%s","event":"pull_request","path":".github/workflows/ci.yml","name":"CI","conclusion":"failure","run_attempt":%s,"run_started_at":"2026-11-20T10:00:00Z","updated_at":"2026-11-20T10:30:00Z","pull_requests":[]}]}]\n' "$2" "$1" "${3:-1}" > "$CAP_FIX/runs.$1"
 }
-cap_verdict() { # <head> <run id> <classification> -> one ci-failure-investigation verdict comment object
-  printf '{"id":%s,"created_at":"2026-11-20T12:00:00Z","body":"## CI failure investigation verdict\\n<!-- ci-failure-investigation:run=%s attempt=1 head=%s -->\\n<!-- ci-verdict: {\\"classification\\":\\"%s\\",\\"run_id\\":%s} -->"}' "$2" "$2" "$1" "$3" "$2"
+cap_red_pair() { # <head> <real run id> <wrapper run id> <wrapper conclusion>: a substantive red ci.yml run AND a higher-id label-wrapper run with the IDENTICAL start time (the #14950 shape)
+  printf '[{"workflow_runs":[{"id":%s,"head_sha":"%s","event":"pull_request","path":".github/workflows/ci.yml","name":"CI","conclusion":"failure","run_attempt":1,"run_started_at":"2026-11-20T10:00:00Z","updated_at":"2026-11-20T10:30:00Z","pull_requests":[]},{"id":%s,"head_sha":"%s","event":"pull_request","path":".github/workflows/ci.yml","name":"CI","conclusion":"%s","run_attempt":1,"run_started_at":"2026-11-20T10:00:00Z","updated_at":"2026-11-20T10:01:00Z","pull_requests":[]}]}]\n' "$2" "$1" "$3" "$1" "$4" > "$CAP_FIX/runs.$1"
+}
+cap_verdict() { # <head> <run id> <classification> [attempt=1] -> one PRODUCER-SHAPE ci-failure-investigation verdict (marker is the FIRST line; verdict JSON names run_id AND the full head)
+  printf '{"id":%s,"user":{"login":"%s"},"created_at":"2026-11-20T12:00:00Z","body":"<!-- ci-failure-investigation:run=%s attempt=%s head=%s -->\\n## CI failure investigation verdict\\n<!-- ci-verdict: {\\"classification\\":\\"%s\\",\\"run_id\\":%s,\\"head\\":\\"%s\\"} -->"}' "$2" "${VERDICT_AUTHOR:-pm-agent-bot}" "$2" "${4:-1}" "$1" "$3" "$2" "$1"
 }
 cap_red $CH1 101; cap_red $CH2 102
 GATE_MODE=none; export GATE_MODE
@@ -409,29 +452,93 @@ for prior in 0 1; do
   CAP_EVENTS_JSON=$(cap_events "$CH1")
 done
 
-echo "case: breaker - two flake-only rounds refuse the third before the 12b gate"
-CAP_EVENTS_JSON=$(cap_events $CH1 $CH2)
-CAP_COMMENTS_JSON="[[$(cap_verdict $CH1 101 FLAKY),$(cap_verdict $CH2 102 FLAKY)]]"; export CAP_COMMENTS_JSON
+cap_verdict_full() { # <head> <run id> <classification> <failing tests> <follow-up> <evidence> -> a verdict with the S171 packet fields
+  printf '{"id":%s,"user":{"login":"%s"},"created_at":"2026-11-20T12:00:00Z","html_url":"https://github.example/c/%s","body":"<!-- ci-failure-investigation:run=%s attempt=1 head=%s -->\\n<!-- ci-verdict: {\\"classification\\":\\"%s\\",\\"run_id\\":%s,\\"head\\":\\"%s\\",\\"failing_tests\\":\\"%s\\",\\"follow_up\\":\\"%s\\",\\"evidence\\":\\"%s\\"} -->"}' "$2" "${VERDICT_AUTHOR:-pm-agent-bot}" "$2" "$2" "$1" "$3" "$2" "$1" "$4" "$5" "$6"
+}
+
+# Fix 3 (Rajiv ts 1795761962.862319; CTO REVISE ts 1795766409.314279): when the breaker trips and the LIVE head's latest SUBSTANTIVE red is flaky/infra/inherited-main/
+# out-of-diff, print the S171 admin-ask packet bound to the LIVE head (exit 10 still, nothing admitted) instead of asking for an override. Earlier heads inform diagnosis
+# only and never carry the packet. Fixture: round 1 was admitted at $CH1, round 2 at the live head $SHA (red run 102), so the cap is spent.
+echo "case: breaker - two flake-only rounds: the third is the S171 admin-ask packet for the LIVE head, not an override request"
+CAP_EVENTS_JSON=$(cap_events $CH1 $SHA); export CAP_EVENTS_JSON
+cap_red $CH1 101; cap_red $SHA 102
+CAP_COMMENTS_JSON="[[$(cap_verdict $CH1 101 FLAKY),$(cap_verdict $SHA 102 FLAKY)]]"; export CAP_COMMENTS_JSON
 run_case cap_hit
 check 'cap_hit: exit 10 and two spent rounds' '[ "$RC" = 10 ] && grep -qx "ADMISSION_ROUND_BREAKER: cap_reached pr=11173 rounds=2 cap=2" <<<"$OUT"'
-check 'cap_hit: refusal and a single decision prompt, with executed-green E2E required for S157' 'grep -qx "REFUSE: ADMISSION_ROUND_BREAKER #11173; nothing admitted" <<<"$OUT" && [ "$(grep -c "^Decision required" <<<"$OUT")" = 1 ] && grep -q "S157 admin-merge ask for out-of-diff/flake/infra only with executed-green E2E.*fix a PR-caused failure; or slice/freeze" <<<"$OUT"'
-check 'cap_hit: no verdict, runs, 12b or admission writes' '! grep -qE "/comments|actions/runs|pr edit|label create|update-branch|workflow run" "$STUB_LOG" && ! grep -q ADMITTED <<<"$OUT"'
+check 'cap_hit: refusal, the packet bound to the LIVE head, and the CTO admin-merge framing' 'grep -qx "REFUSE: ADMISSION_ROUND_BREAKER #11173; nothing admitted" <<<"$OUT" && grep -qx "ADMIN_ASK_PACKET (S171/S157) #11173 head=$SHA" <<<"$OUT" && grep -q "admin-merge decision for the CTO, not a re-admission and not an override" <<<"$OUT"'
+check 'cap_hit: no override or Decision-required prompt' '! grep -qE "^Decision required|Re-admission requires|PM_ADMIT_CAP_OVERRIDE=" <<<"$OUT"'
+check 'cap_hit: reads history and verdicts but admits, labels and dispatches nothing' 'grep -q "/comments" "$STUB_LOG" && ! grep -qE "pr edit|label create|update-branch|workflow run|add-label" "$STUB_LOG" && ! grep -q ADMITTED <<<"$OUT"'
+check 'cap_hit: the packet names the live head run id@attempt, class, and marks missing fields UNAVAILABLE rather than inventing them; the earlier head run is not used' 'grep -q "^  run [^ ]*:102@1 conclusion=failure class=flaky" <<<"$OUT" && grep -q "^  failing_tests: UNAVAILABLE" <<<"$OUT" && grep -q "^  follow_up_issue: UNAVAILABLE" <<<"$OUT" && ! grep -q ":101@" <<<"$OUT"'
+
+echo "case: breaker - the packet carries the verdict failing tests, follow-up issue and evidence"
+CAP_COMMENTS_JSON="[[$(cap_verdict $CH1 101 flaky),$(cap_verdict_full $SHA 102 infra 'tests/a.test.ts > saves' '#15001' 'runner lost network mid-job')]]"; export CAP_COMMENTS_JSON
+run_case cap_hit_full
+check 'cap_hit_full: packet has evidence, failing tests, follow-up and the S167 next step' '[ "$RC" = 10 ] && grep -q "^    evidence: runner lost network mid-job" <<<"$OUT" && grep -qx "  failing_tests: tests/a.test.ts > saves" <<<"$OUT" && grep -qx "  follow_up_issue: #15001" <<<"$OUT" && grep -q "class=infra" <<<"$OUT" && grep -q "verdict comment: https://github.example/c/102" <<<"$OUT" && grep -q "enforce_admins off -> gh pr merge --squash --admin --match-head-commit" <<<"$OUT"'
+
+for cls in flake inherited-main out-of-diff; do
+  CAP_COMMENTS_JSON="[[$(cap_verdict $CH1 101 flaky),$(cap_verdict $SHA 102 "$cls")]]"; export CAP_COMMENTS_JSON
+  run_case "cap_hit_$cls"
+  check "cap_hit_$cls: a $cls red is the packet, exit 10, no override ask" '[ "$RC" = 10 ] && grep -q "^ADMIN_ASK_PACKET (S171/S157)" <<<"$OUT" && ! grep -qE "^Decision required|Re-admission requires" <<<"$OUT"'
+done
+
+echo "case: breaker - the #14950 shape at the cap: a higher-id label-wrapper red with the same start time never replaces the substantive red or its verdict"
+cap_red_pair $SHA 102 103 failure
+CAP_WRAPPER_RUNS=103; export CAP_WRAPPER_RUNS
+CAP_COMMENTS_JSON="[[$(cap_verdict $SHA 102 flaky)]]"; export CAP_COMMENTS_JSON
+run_case cap_hit_wrapper
+check 'cap_hit_wrapper: the substantive run 102 is selected with its existing verdict (the packet), the wrapper 103 is ignored and never asked to be classified' '[ "$RC" = 10 ] && grep -q "^ADMIN_ASK_PACKET (S171/S157)" <<<"$OUT" && grep -q "^  run [^ ]*:102@1 conclusion=failure class=flaky" <<<"$OUT" && ! grep -q ":103@" <<<"$OUT" && ! grep -q "^REFUSE: ci_verdict_required" <<<"$OUT"'
+unset CAP_WRAPPER_RUNS
+cap_red $SHA 102
+
+echo "case: breaker - a verdict from an earlier attempt does not govern a later attempt's failure (classify first, never the packet)"
+cap_red $SHA 102 2
+CAP_COMMENTS_JSON="[[$(cap_verdict $SHA 102 flaky 1)]]"; export CAP_COMMENTS_JSON
+run_case cap_hit_stale_attempt
+check 'cap_hit_stale_attempt: classify first for run 102 attempt 2, the attempt-1 verdict is not used, no packet' '[ "$RC" = 10 ] && grep -q "^REFUSE: ci_verdict_required #11173 head=$SHA red run(s) [^ ]*:102@2 " <<<"$OUT" && grep -q "classify first" <<<"$OUT" && ! grep -q "^ADMIN_ASK_PACKET" <<<"$OUT"'
+cap_red $SHA 102
+
+echo "case: breaker - a PR-caused red, no verdict, or an unreadable verdict keeps the override ask (never the packet)"
+CAP_COMMENTS_JSON="[[$(cap_verdict $CH1 101 flaky),$(cap_verdict $SHA 102 pr-caused)]]"; export CAP_COMMENTS_JSON
+run_case cap_hit_prcaused
+check 'cap_hit_prcaused: Decision required + override ask, no packet' '[ "$RC" = 10 ] && [ "$(grep -c "^Decision required" <<<"$OUT")" = 1 ] && grep -q "Re-admission requires an audited override: PM_ADMIT_CAP_OVERRIDE=cto:<slack ts>" <<<"$OUT" && grep -q "S157 admin-merge ask for out-of-diff/flake/infra only with executed-green E2E.*fix a PR-caused failure; or slice/freeze" <<<"$OUT" && ! grep -q "^ADMIN_ASK_PACKET" <<<"$OUT" && grep -q "class=pr-caused" <<<"$OUT"'
+CAP_COMMENTS_JSON="[[$(cap_verdict $CH1 101 flaky)]]"; export CAP_COMMENTS_JSON
+run_case cap_hit_noverdict
+check 'cap_hit_noverdict: the live head red has no verdict -> classify first, then the override ask, no packet' '[ "$RC" = 10 ] && grep -q "^REFUSE: ci_verdict_required #11173 head=$SHA " <<<"$OUT" && grep -q "classify first" <<<"$OUT" && grep -q "Re-admission requires an audited override" <<<"$OUT" && ! grep -q "^ADMIN_ASK_PACKET" <<<"$OUT"'
+CAP_COMMENTS_JSON='this is not json'; export CAP_COMMENTS_JSON
+run_case cap_hit_unreadable
+check 'cap_hit_unreadable: unreadable verdicts are UNAVAILABLE with a reason, never a classification' '[ "$RC" = 10 ] && grep -q "^ci_verdict: UNAVAILABLE reason=" <<<"$OUT" && grep -q "Re-admission requires an audited override" <<<"$OUT" && ! grep -q "^ADMIN_ASK_PACKET" <<<"$OUT"'
+
+echo "case: breaker - the live head has no red substantive run; an EARLIER head's flaky red is diagnosis only (no packet, override ask kept)"
+CAP_EVENTS_JSON=$(cap_events $CH1 $CH2); export CAP_EVENTS_JSON
+CAP_COMMENTS_JSON="[[$(cap_verdict $CH1 101 flaky),$(cap_verdict $CH2 102 FLAKY)]]"; export CAP_COMMENTS_JSON
+run_case cap_hit_histonly
+check 'cap_hit_histonly: exit 10, an informational historical line for the earlier head, NO packet bound to it, the override ask is kept' '[ "$RC" = 10 ] && grep -qx "ADMISSION_ROUND_BREAKER: cap_reached pr=11173 rounds=2 cap=2" <<<"$OUT" && grep -q "^ci_verdict: info historical head=$CH2 red run(s) [^ ]*:102@1 (diagnosis only" <<<"$OUT" && ! grep -q "^ADMIN_ASK_PACKET" <<<"$OUT" && grep -q "Re-admission requires an audited override" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT"'
 unset CAP_COMMENTS_JSON
+printf '[{"workflow_runs":[]}]\n' > "$CAP_FIX/runs.$SHA"   # the live head has no CI run again for the override cases below (events: CH1 + CH2 only)
 
 echo "case: cap - a CTO-approved override re-admits and is audited; a dry run is not"
 PM_ADMIT_CAP_OVERRIDE=$OVR; export PM_ADMIT_CAP_OVERRIDE
 run_case cap_override --no-12b-gate --reason 'cap test'
 check 'cap_override: override line, admitted' '[ "$RC" = 0 ] && grep -q "^ADMISSION_CAP_OVERRIDE: $OVR pr=11173" <<<"$OUT" && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT"'
-check 'cap_override: audited with the head and approval' 'grep -q "PR=11173 head=$SHA admission-cap-override=$OVR" "$T/home/.claude/logs/pm-admit-skip.log"'
+check 'cap_override: granted at gate time AND consumed once before the label add, both bound to the head and approval' 'grep -q "PR=11173 head=$SHA admission-cap-override-granted=$OVR" "$T/home/.claude/logs/pm-admit-skip.log" && [ "$(grep -c "PR=11173 head=$SHA admission-cap-override-consumed=$OVR\$" "$T/home/.claude/logs/pm-admit-skip.log")" = 1 ] && grep -q "^ADMISSION_CAP_OVERRIDE_CONSUMED: $OVR pr=11173 head=$SHA" <<<"$OUT"'
+check 'cap_override: the consumed record already existed when the ci-head label add was issued (consumed before admission, not after)' '[ "$(cat "$T/cap_override/consumed_at_label_add")" = 1 ]'
+check 'cap_override: one override line pair only, no legacy un-kinded line' '! grep -qE "admission-cap-override=" "$T/home/.claude/logs/pm-admit-skip.log"'
 AUDITED=$(grep -c admission-cap-override "$T/home/.claude/logs/pm-admit-skip.log")
 PM_ADMIT_CAP_OVERRIDE=rajiv:1795676115.108879 run_case cap_override_dry --dry-run --no-12b-gate --reason 'cap test'
-check 'cap_override --dry-run: Rajiv override allowed, no admission or audit write' '[ "$RC" = 0 ] && grep -q "^ADMISSION_CAP_OVERRIDE: rajiv:" <<<"$OUT" && grep -q "nothing admitted" <<<"$OUT" && [ "$(grep -c admission-cap-override "$T/home/.claude/logs/pm-admit-skip.log")" = "$AUDITED" ]'
+check 'cap_override --dry-run: Rajiv override allowed, no admission or audit write (no granted, no consumed)' '[ "$RC" = 0 ] && grep -q "^ADMISSION_CAP_OVERRIDE: rajiv:" <<<"$OUT" && grep -q "nothing admitted" <<<"$OUT" && [ "$(grep -c admission-cap-override "$T/home/.claude/logs/pm-admit-skip.log")" = "$AUDITED" ] && ! grep -q "rajiv:1795676115.108879" "$T/home/.claude/logs/pm-admit-skip.log"'
 : > "$STUB_LOG"
 OUT=$(PATH="$T/bin:$PATH" HOME="$T/no-audit-home" bash "$SCRIPT" 11173 2>&1); RC=$?
 check 'cap_override: missing audit sink refuses before any writes' '[ "$RC" = 7 ] && grep -qx "REFUSE: admission_cap_override_audit_unavailable" <<<"$OUT" && ! grep -qE "pr edit|label create" "$STUB_LOG"'
 PM_ADMIT_CAP_OVERRIDE=yes; export PM_ADMIT_CAP_OVERRIDE
 run_case cap_override_bad --no-12b-gate --reason 'cap test'
 check 'cap_override_bad: a malformed override is refused (64) with no writes' '[ "$RC" = 64 ] && grep -q "must look like cto:<slack ts>" <<<"$OUT" && ! grep -qE "pr edit|label create" "$STUB_LOG"'
+
+echo "case: one pair - an override id that was already consumed on this PR is refused when re-presented (a new CTO/Rajiv override is required)"
+SKIPN=$(wc -l < "$T/home/.claude/logs/pm-admit-skip.log" | tr -d ' ')
+PM_ADMIT_CAP_OVERRIDE=$OVR run_case cap_override_reuse --no-12b-gate --reason 'cap test'
+check 'cap_override_reuse: exit 10, REFUSE names the spent override, nothing admitted, no label write, no new audit line' '[ "$RC" = 10 ] && grep -q "^REFUSE: ADMISSION_ROUND_BREAKER #11173; override $OVR was already consumed by an earlier admission (one override funds exactly one admission pair)" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && ! grep -qE "pr edit|label create|add-label" "$STUB_LOG" && [ "$(wc -l < "$T/home/.claude/logs/pm-admit-skip.log" | tr -d " ")" = "$SKIPN" ]'
+PM_ADMIT_CAP_OVERRIDE=cto:1795766409.314279 run_case cap_override_fresh --no-12b-gate --reason 'cap test'
+check 'cap_override_fresh: a DIFFERENT (new) approval id is accepted at the same cap and funds exactly one more pair' '[ "$RC" = 0 ] && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT" && grep -q "admission-cap-override-granted=cto:1795766409.314279" "$T/home/.claude/logs/pm-admit-skip.log" && [ "$(grep -c "admission-cap-override-consumed=cto:1795766409.314279" "$T/home/.claude/logs/pm-admit-skip.log")" = 1 ]'
 unset PM_ADMIT_CAP_OVERRIDE
 
 echo "case: cap - an unreadable record is UNAVAILABLE and fails closed, never a guess"
@@ -454,6 +561,291 @@ check 'cap: --merge-only does not read the cap' '[ "$RC" = 0 ] && ! grep -q "/ev
 GATE_MODE=same VERDICT=PASS REVIEW_SHA=${SHA:0:7}; export GATE_MODE VERDICT REVIEW_SHA
 OUT=$(PATH="$T/bin:$PATH" HOME="$T/home" bash "$SCRIPT" --check-12b-only 11173 2>&1); RC=$?
 check 'cap: --check-12b-only does not read the cap' '[ "$RC" = 0 ] && ! grep -q "/events" "$STUB_LOG" && ! grep -q ADMISSION_ROUND_BREAKER <<<"$OUT"'
+unset CAP_EVENTS_JSON
+
+# ---- Fix 1 (Rajiv ts 1795761962.862319): admission REFUSES to re-admit a head whose latest ci-verdict comment classifies its red as flaky/infra/inherited-main/out-of-diff ----
+# It prints the S171 admin-ask packet (exit 12) instead; a red on an admitted head with NO ci-verdict comment refuses "classify first" (exit 11). The verdict gate runs after the
+# round breaker, in admission mode only. The only way out is a newer verdict comment: --force-ci, a cap override and --dry-run do not bypass it.
+cap_verdict_at() { # <head> <run id> <classification> <comment id> <created_at>: like cap_verdict with an explicit id and time, so a newer verdict can supersede an older one
+  printf '{"id":%s,"user":{"login":"%s"},"created_at":"%s","body":"<!-- ci-failure-investigation:run=%s attempt=1 head=%s -->\\n<!-- ci-verdict: {\\"classification\\":\\"%s\\",\\"run_id\\":%s,\\"head\\":\\"%s\\"} -->"}' "$4" "${VERDICT_AUTHOR:-pm-agent-bot}" "$5" "$2" "$1" "$3" "$2" "$1"
+}
+VG_ARGS=(--no-12b-gate --reason 'verdict gate')
+GATE_MODE=none; export GATE_MODE
+CAP_EVENTS_JSON=$(cap_events $SHA); export CAP_EVENTS_JSON   # $SHA was admitted once (1 round, under the cap): re-admitting it is what the verdict gate judges
+cap_red $SHA 201
+assert_vg_nothing_admitted() { # name: the gate refused before any admission write
+  check "$1: nothing admitted, no label, PR or branch write" '! grep -q ADMITTED <<<"$OUT" && ! grep -qE "$CI_WRITES|pr edit|label create|add-label|update-branch" "$STUB_LOG"'
+}
+
+echo "case: verdict gate - a red on an admitted head with NO ci-verdict comment: classify first (exit 11), nothing admitted"
+unset CAP_COMMENTS_JSON
+run_case vg_none "${VG_ARGS[@]}"
+check 'vg_none: exit 11 with REFUSE ci_verdict_required naming the head and the red run, and the classify-first instruction' '[ "$RC" = 11 ] && grep -q "^REFUSE: ci_verdict_required #11173 head=$SHA red run(s) [^ ]*:201@1 have no ci-verdict comment bound to this head + run id + attempt posted by the trusted PM account in the ci-failure-investigation producer shape; classify first" <<<"$OUT"'
+assert_vg_nothing_admitted vg_none
+check 'vg_none: the breaker ran first and was under the cap (the refusal is the verdict gate, not the cap)' 'grep -qx "ADMISSION_ROUND_BREAKER: ok pr=11173 rounds=1 cap=2" <<<"$OUT" && ! grep -q "ADMISSION_ROUND_BREAKER #" <<<"$OUT"'
+
+echo "case: verdict gate - the latest verdict says flaky/infra/inherited-main/out-of-diff: the S171 admin-ask packet (exit 12), never a re-admission"
+for cls in flaky flake infra inherited-main out-of-diff; do
+  CAP_COMMENTS_JSON="[[$(cap_verdict $SHA 201 "$cls")]]"; export CAP_COMMENTS_JSON
+  run_case "vg_$cls" "${VG_ARGS[@]}"
+  check "vg_$cls: exit 12, the packet for the head with the run, class=$cls and the S167 next step" '[ "$RC" = 12 ] && grep -q "^ADMIN_ASK_PACKET (S171/S157) #11173 head=$SHA" <<<"$OUT" && grep -q "^  run [^ ]*:201@1 conclusion=failure class=$cls" <<<"$OUT" && grep -q "enforce_admins off -> gh pr merge --squash --admin --match-head-commit <head>" <<<"$OUT" && ! grep -q "^REFUSE: ci_verdict_required" <<<"$OUT"'
+  assert_vg_nothing_admitted "vg_$cls"
+done
+CAP_COMMENTS_JSON="[[$(cap_verdict_full $SHA 201 infra 'tests/a.test.ts > saves' '#15001' 'runner lost network')]]"; export CAP_COMMENTS_JSON
+run_case vg_full "${VG_ARGS[@]}"
+check 'vg_full: the packet carries the run id, the failing tests, the follow-up issue, the evidence and the verdict comment link (S171 fields)' '[ "$RC" = 12 ] && grep -qx "  failing_tests: tests/a.test.ts > saves" <<<"$OUT" && grep -qx "  follow_up_issue: #15001" <<<"$OUT" && grep -q "^    evidence: runner lost network" <<<"$OUT" && grep -q "verdict comment: https://github.example/c/201" <<<"$OUT"'
+CAP_COMMENTS_JSON="[[$(cap_verdict $SHA 201 flaky)]]"; export CAP_COMMENTS_JSON
+run_case vg_unavailable_fields "${VG_ARGS[@]}"
+check 'vg_unavailable_fields: a verdict with no failing tests / follow-up marks them UNAVAILABLE with a reason, never invented' 'grep -q "^  failing_tests: UNAVAILABLE" <<<"$OUT" && grep -q "^  follow_up_issue: UNAVAILABLE" <<<"$OUT"'
+
+echo "case: verdict gate - a PR-caused verdict proceeds; a newer verdict supersedes an older flaky one (the way out); a verdict for another run does not cover this red"
+CAP_COMMENTS_JSON="[[$(cap_verdict $SHA 201 pr-caused)]]"; export CAP_COMMENTS_JSON
+run_case vg_prcaused "${VG_ARGS[@]}"
+check 'vg_prcaused: proceeds and ADMITTED (the red is the PR own fault, fixing and re-admitting is the normal path)' '[ "$RC" = 0 ] && grep -q "^ci_verdict: proceed pr=11173 head=$SHA .*class=pr-caused" <<<"$OUT" && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT"'
+CAP_COMMENTS_JSON="[[$(cap_verdict_at $SHA 201 flaky 3001 2026-11-20T12:00:00Z),$(cap_verdict_at $SHA 201 pr-caused 3002 2026-11-20T13:00:00Z)]]"; export CAP_COMMENTS_JSON
+run_case vg_newer_prcaused "${VG_ARGS[@]}"
+check 'vg_newer_prcaused: the NEWEST verdict decides: flaky then pr-caused proceeds' '[ "$RC" = 0 ] && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT" && ! grep -q "^ADMIN_ASK_PACKET" <<<"$OUT"'
+CAP_COMMENTS_JSON="[[$(cap_verdict_at $SHA 201 pr-caused 3001 2026-11-20T12:00:00Z),$(cap_verdict_at $SHA 201 flaky 3002 2026-11-20T13:00:00Z)]]"; export CAP_COMMENTS_JSON
+run_case vg_newer_flaky "${VG_ARGS[@]}"
+check 'vg_newer_flaky: the NEWEST verdict decides: pr-caused then flaky is the packet' '[ "$RC" = 12 ] && grep -q "^ADMIN_ASK_PACKET (S171/S157) #11173 head=$SHA" <<<"$OUT"'
+assert_vg_nothing_admitted vg_newer_flaky
+CAP_COMMENTS_JSON="[[$(cap_verdict $SHA 999 flaky)]]"; export CAP_COMMENTS_JSON
+run_case vg_other_run "${VG_ARGS[@]}"
+check 'vg_other_run: a verdict that names a different run does not cover this red: classify first, never the packet' '[ "$RC" = 11 ] && grep -q "^REFUSE: ci_verdict_required #11173" <<<"$OUT" && ! grep -q "^ADMIN_ASK_PACKET" <<<"$OUT"'
+
+echo "case: verdict gate - no red run at the head (green or none) and a first admission of a head are never gated"
+CAP_COMMENTS_JSON="[[$(cap_verdict $SHA 201 flaky)]]"; export CAP_COMMENTS_JSON
+printf '[{"workflow_runs":[]}]\n' > "$CAP_FIX/runs.$SHA"
+run_case vg_no_runs "${VG_ARGS[@]}"
+check 'vg_no_runs: no run at the head -> proceeds and ADMITTED even with an old flaky verdict on file' '[ "$RC" = 0 ] && grep -q "^ci_verdict: proceed pr=11173 head=$SHA scope=head" <<<"$OUT" && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT"'
+cap_red $SHA 201
+CAP_EVENTS_JSON='[[]]'; export CAP_EVENTS_JSON
+run_case vg_first_admission "${VG_ARGS[@]}"
+check 'vg_first_admission: a head that was never admitted is not judged by the verdict gate (rounds=0) and ADMITTED' '[ "$RC" = 0 ] && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT" && ! grep -q "^ADMIN_ASK_PACKET\|ci_verdict_required" <<<"$OUT"'
+CAP_EVENTS_JSON=$(cap_events $SHA); export CAP_EVENTS_JSON
+
+echo "case: verdict gate - an unreadable verdict history is UNAVAILABLE and fails closed (exit 7), never a guess"
+CAP_COMMENTS_JSON='this is not json'; export CAP_COMMENTS_JSON
+run_case vg_unreadable "${VG_ARGS[@]}"
+check 'vg_unreadable: ci_verdict UNAVAILABLE with a reason, REFUSE github_api_error ci_verdict, exit 7' '[ "$RC" = 7 ] && grep -q "^ci_verdict: UNAVAILABLE reason=" <<<"$OUT" && grep -qx "REFUSE: github_api_error ci_verdict" <<<"$OUT"'
+assert_vg_nothing_admitted vg_unreadable
+
+echo "case: verdict gate - no bypass: --dry-run and --force-ci still see the packet; a cap override lifts only the cap"
+CAP_COMMENTS_JSON="[[$(cap_verdict $SHA 201 flaky)]]"; export CAP_COMMENTS_JSON
+run_case vg_dry --dry-run "${VG_ARGS[@]}"
+check 'vg_dry: --dry-run reports the packet (exit 12), nothing admitted' '[ "$RC" = 12 ] && grep -q "^ADMIN_ASK_PACKET (S171/S157) #11173" <<<"$OUT"'
+run_case vg_force_ci --force-ci 'verdict gate test' "${VG_ARGS[@]}"
+check 'vg_force_ci: --force-ci overrides only the scope gate, so the packet still stops it (exit 12)' '[ "$RC" = 12 ] && grep -q "^ADMIN_ASK_PACKET (S171/S157) #11173" <<<"$OUT"'
+assert_vg_nothing_admitted vg_force_ci
+cp -p "$T/home/.claude/logs/pm-admit-skip.log" "$T/skiplog.vg.save"
+CAP_EVENTS_JSON=$(cap_events $CH1 $SHA); export CAP_EVENTS_JSON   # 2 rounds = the cap is reached, so the override is what lifts it
+OVR_VG=cto:1795700000.000001   # a fresh approval: $OVR was spent by the cap_override cases above and a spent override id is refused
+PM_ADMIT_CAP_OVERRIDE=$OVR_VG run_case vg_cap_override "${VG_ARGS[@]}"
+check 'vg_cap_override: the cap override lifts the cap (granted audit line), but the verdict gate still refuses with the packet (exit 12)' '[ "$RC" = 12 ] && grep -q "^ADMISSION_CAP_OVERRIDE: $OVR_VG pr=11173" <<<"$OUT" && grep -q "^ADMIN_ASK_PACKET (S171/S157) #11173 head=$SHA" <<<"$OUT" && grep -q "admission-cap-override-granted=$OVR_VG" "$T/home/.claude/logs/pm-admit-skip.log"'
+assert_vg_nothing_admitted vg_cap_override
+check 'vg_cap_override: the packet refusal came BEFORE admission, so the override was granted but NOT consumed (it stays available for the next admission)' '! grep -q "admission-cap-override-consumed=$OVR_VG" "$T/home/.claude/logs/pm-admit-skip.log" && ! grep -q "ADMISSION_CAP_OVERRIDE_CONSUMED" <<<"$OUT"'
+cp -p "$T/skiplog.vg.save" "$T/home/.claude/logs/pm-admit-skip.log"
+CAP_EVENTS_JSON=$(cap_events $SHA); export CAP_EVENTS_JSON
+
+echo "case: verdict gate - --merge-only and --check-12b-only never run it (no run or verdict read)"
+S166_CASE=no_overlap run_script vg_merge_only --merge-only 11173
+check 'vg_merge_only: no workflow-run read, no ci_verdict or packet output' '! grep -q "head_sha=" "$STUB_LOG" && ! grep -qE "ci_verdict|ADMIN_ASK_PACKET" <<<"$OUT"'
+: > "$STUB_LOG"
+OUT=$(PATH="$T/bin:$PATH" HOME="$T/home" bash "$SCRIPT" --check-12b-only 11173 2>&1); RC=$?
+check 'vg_check_only: --check-12b-only does not read runs or verdicts (whatever the 12b stub decides)' '! grep -q "head_sha=" "$STUB_LOG" && ! grep -qE "ci_verdict|ADMIN_ASK_PACKET" <<<"$OUT"'
+unset CAP_COMMENTS_JSON
+
+# ---- Run selection + verdict binding (CTO REVISE ts 1795766409.314279): the latest SUBSTANTIVE run per workflow, bound to exact head + run id + CURRENT attempt ----
+# (a) the #14950 shape: a gate-only label wrapper with the same start time and a HIGHER id than the real red must never be the run that is classified; (b) a verdict from an earlier
+# attempt must not govern a later attempt's failure. The selection and binding logic has its own test file; these cases pin the wiring through pm-admit-ci.sh.
+echo "case: selection - a newer-id label-wrapper red is ignored; the real red run is classified and its existing verdict is used (the #14950 shape)"
+GATE_MODE=none; export GATE_MODE
+CAP_EVENTS_JSON=$(cap_events $SHA); export CAP_EVENTS_JSON   # $SHA admitted once: the verdict gate judges it
+cap_red_pair $SHA 301 302 failure
+CAP_WRAPPER_RUNS=302; export CAP_WRAPPER_RUNS
+CAP_COMMENTS_JSON="[[$(cap_verdict $SHA 301 flaky)]]"; export CAP_COMMENTS_JSON
+run_case sel_wrapper_red "${VG_ARGS[@]}"
+check 'sel_wrapper_red: the packet is for the REAL red run 301 with ITS verdict (not "classify first" for wrapper 302), nothing admitted' '[ "$RC" = 12 ] && grep -q "^ADMIN_ASK_PACKET (S171/S157) #11173 head=$SHA" <<<"$OUT" && grep -q "^  run [^ ]*:301@1 conclusion=failure class=flaky" <<<"$OUT" && ! grep -q ":302@" <<<"$OUT" && ! grep -q "ci_verdict_required" <<<"$OUT"'
+assert_vg_nothing_admitted sel_wrapper_red
+check 'sel_wrapper_red: the wrapper was inspected through its jobs (the discriminator), so it is the step list, not the run id, that excluded it' 'grep -q "actions/runs/302/jobs" "$STUB_LOG" && grep -q "actions/runs/301/jobs" "$STUB_LOG"'
+CAP_COMMENTS_JSON="[[$(cap_verdict $SHA 301 pr-caused)]]"; export CAP_COMMENTS_JSON
+run_case sel_wrapper_prcaused "${VG_ARGS[@]}"
+check 'sel_wrapper_prcaused: the real red carries a PR-caused verdict -> proceeds and ADMITTED (the wrapper never forces a re-classification)' '[ "$RC" = 0 ] && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT" && ! grep -q "ci_verdict_required" <<<"$OUT"'
+
+echo "case: selection - a newer GREEN wrapper must not hide a substantive red; a verdict on the wrapper id does not cover the real red"
+cap_red_pair $SHA 301 302 success
+CAP_WRAPPER_STEP=success; export CAP_WRAPPER_STEP
+CAP_COMMENTS_JSON='[[]]'; export CAP_COMMENTS_JSON
+run_case sel_green_wrapper "${VG_ARGS[@]}"
+check 'sel_green_wrapper: the substantive red 301 is still the run to classify (exit 11, names :301@1), the green wrapper hides nothing' '[ "$RC" = 11 ] && grep -q "^REFUSE: ci_verdict_required #11173 head=$SHA red run(s) [^ ]*:301@1 " <<<"$OUT" && ! grep -q ":302@" <<<"$OUT"'
+assert_vg_nothing_admitted sel_green_wrapper
+CAP_COMMENTS_JSON="[[$(cap_verdict $SHA 302 flaky)]]"; export CAP_COMMENTS_JSON
+run_case sel_verdict_on_wrapper "${VG_ARGS[@]}"
+check 'sel_verdict_on_wrapper: a flaky verdict filed against the WRAPPER run id does not cover the real red (classify first, never the packet)' '[ "$RC" = 11 ] && grep -q "^REFUSE: ci_verdict_required #11173" <<<"$OUT" && ! grep -q "^ADMIN_ASK_PACKET" <<<"$OUT"'
+unset CAP_WRAPPER_RUNS CAP_WRAPPER_STEP
+
+echo "case: binding - a verdict for an EARLIER attempt does not govern a later attempt's failure; the current attempt's verdict does"
+cap_red $SHA 401 2
+CAP_COMMENTS_JSON="[[$(cap_verdict $SHA 401 flaky 1)]]"; export CAP_COMMENTS_JSON
+run_case bind_stale_attempt "${VG_ARGS[@]}"
+check 'bind_stale_attempt: run 401 attempt 2 vs a verdict bound to attempt 1 -> classify first (exit 11, names :401@2), never the packet' '[ "$RC" = 11 ] && grep -q "^REFUSE: ci_verdict_required #11173 head=$SHA red run(s) [^ ]*:401@2 " <<<"$OUT" && ! grep -q "^ADMIN_ASK_PACKET" <<<"$OUT"'
+assert_vg_nothing_admitted bind_stale_attempt
+CAP_COMMENTS_JSON="[[$(cap_verdict $SHA 401 flaky 2)]]"; export CAP_COMMENTS_JSON
+run_case bind_current_attempt "${VG_ARGS[@]}"
+check 'bind_current_attempt: a verdict bound to attempt 2 covers it: the packet names :401@2' '[ "$RC" = 12 ] && grep -q "^  run [^ ]*:401@2 conclusion=failure class=flaky" <<<"$OUT"'
+CAP_COMMENTS_JSON='[[{"id":9001,"user":{"login":"pm-agent-bot"},"created_at":"2026-11-20T12:00:00Z","body":"## CI failure investigation verdict\n<!-- ci-verdict: {\"classification\":\"flaky\",\"run_id\":401} -->"}]]'; export CAP_COMMENTS_JSON
+run_case bind_no_producer_shape "${VG_ARGS[@]}"
+check 'bind_no_producer_shape: a head-less, marker-less comment (heading only) is not the producer shape: no head-only fallback, classify first' '[ "$RC" = 11 ] && grep -q "^REFUSE: ci_verdict_required #11173" <<<"$OUT" && ! grep -q "^ADMIN_ASK_PACKET" <<<"$OUT"'
+cap_red $SHA 201
+unset CAP_COMMENTS_JSON
+
+# ---- One-pair override ledger + atomic claim (CTO REVISE #2 ts 1795769102.876159; ledger design ts 1795766409.314279) ----
+# An override funds exactly ONE admission pair AT THE HEAD IT NAMES. pm-admit-skip.log kinds: granted (gate time), carried (LEGACY, read-only: nothing writes it; automatic carry-forward is PAUSED),
+# consumed (written once, right after the atomic claim and BEFORE the ci-head label add). The authority against a race is the O_EXCL claim file per grant id (pm-admit-cap-claims/<id>).
+echo "case: one-pair override - no carry-forward: a grant recorded for an earlier head never funds a different head; only an unused grant AT this head does"
+GATE_MODE=none; export GATE_MODE
+CAP_EVENTS_JSON=$(cap_events $CH1 $CH2); export CAP_EVENTS_JSON
+SKIPLOG="$T/home/.claude/logs/pm-admit-skip.log"
+CLAIMS="$T/home/.claude/logs/pm-admit-cap-claims"
+cp -p "$SKIPLOG" "$T/skiplog.inh.save"
+CBASE=0
+claims_reset() { CBASE=$(find "$CLAIMS" -type f 2>/dev/null | wc -l | tr -d ' '); }   # claim files outlive earlier cases: count only those a case adds
+set_skiplog() { printf '%s\n' "$@" > "$SKIPLOG"; chmod 644 "$SKIPLOG"; claims_reset; }
+ov() { printf 'cto:1795770%03d.000001' "$1"; }   # a distinct grant id per case (a claim file outlives its case)
+gl() { printf '2026-11-27T01:00:00Z PR=%s head=%s admission-cap-override-granted=%s' "$1" "$2" "$3"; }
+n_ledger() { grep -c "admission-cap-override-$1=" "$SKIPLOG"; }   # records of one kind, any approval
+n_claims() { echo $(( $(find "$CLAIMS" -type f 2>/dev/null | wc -l) - CBASE )); }
+no_admission_write() { ! grep -qE -- "--add-label ci-head:|--remove-label" "$STUB_LOG"; }
+
+OVR_A=$(ov 1)
+set_skiplog "$(gl 11173 $CH1 "$OVR_A")"
+DESC_MODE=yes run_case inh_no_carry "${VG_ARGS[@]}"
+check 'inh_no_carry: an unused grant recorded for an EARLIER head is not carried: normal refusal and override ask, exit 10, nothing admitted' '[ "$RC" = 10 ] && grep -q "^Decision required" <<<"$OUT" && grep -q "Re-admission requires an audited override" <<<"$OUT" && ! grep -q "carried from" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT"'
+check 'inh_no_carry: no descendant helper call, no git fetch for a carry, no ledger line, no claim, no label write' '! grep -q "^verdict-descendant " "$STUB_LOG" && [ "$(wc -l < "$SKIPLOG" | tr -d " ")" = 1 ] && [ "$(n_claims)" = 0 ] && no_admission_write'
+
+OVR_B=$(ov 2)
+set_skiplog "$(gl 11173 $SHA "$OVR_B")"
+DESC_MODE=yes run_case inh_same_head "${VG_ARGS[@]}"
+check 'inh_same_head: a grant recorded for THIS PR and head that was never claimed (an earlier preflight refused) funds the admission: exit 0, ADMITTED, says it is unused and funds one pair' '[ "$RC" = 0 ] && grep -q "^ADMISSION_CAP_OVERRIDE: $OVR_B pr=11173 already recorded at this head and unused" <<<"$OUT" && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT" && ! grep -q "^verdict-descendant " "$STUB_LOG"'
+check 'inh_same_head: consumed exactly once at the admitted head, the consumed record existed when the ci-head label add was issued, one claim file holds pr and head' '[ "$(grep -c "PR=11173 head=$SHA admission-cap-override-consumed=$OVR_B\$" "$SKIPLOG")" = 1 ] && [ "$(cat "$T/inh_same_head/consumed_at_label_add")" = 1 ] && [ "$(n_claims)" = 1 ] && grep -q "^pr=11173 head=$SHA at=" "$CLAIMS/${OVR_B//:/_}" && grep -q "^ADMISSION_CAP_OVERRIDE_CONSUMED: $OVR_B pr=11173 head=$SHA; this override funded one admission pair and is spent" <<<"$OUT"'
+check 'inh_same_head: no legacy un-kinded line and no carried line; one granted, one consumed' '[ "$(n_ledger carried)" = 0 ] && [ "$(n_ledger granted)" = 1 ] && [ "$(n_ledger consumed)" = 1 ] && ! grep -q "admission-cap-override=" "$SKIPLOG"'
+
+echo "case: one-pair override - once claimed/consumed the grant is spent (same head, explicit re-presentation or a newer grant that is itself spent)"
+LEDGER_AFTER=$(wc -l < "$SKIPLOG" | tr -d ' ')
+DESC_MODE=yes run_case inh_spent "${VG_ARGS[@]}"
+check 'inh_spent: the next admission at the cap is the normal refusal, nothing admitted, no new ledger line' '[ "$RC" = 10 ] && grep -q "^Decision required" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && [ "$(wc -l < "$SKIPLOG" | tr -d " ")" = "$LEDGER_AFTER" ] && no_admission_write'
+PM_ADMIT_CAP_OVERRIDE=$OVR_B run_case inh_spent_explicit "${VG_ARGS[@]}"
+check 'inh_spent_explicit: re-presenting the spent override is refused and names it as already consumed (exit 10)' '[ "$RC" = 10 ] && grep -q "^REFUSE: ADMISSION_ROUND_BREAKER #11173; override $OVR_B was already consumed" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && no_admission_write'
+OVR_C=$(ov 3)
+set_skiplog "$(gl 11173 $SHA "$OVR_C")" "2026-11-27T01:05:00Z PR=11173 head=$SHA admission-cap-override-consumed=$OVR_C"
+DESC_MODE=yes run_case inh_consumed_at_grant_head "${VG_ARGS[@]}"
+check 'inh_consumed_at_grant_head: granted then consumed at this head -> spent: exit 10, no new line' '[ "$RC" = 10 ] && ! grep -q "carried from" <<<"$OUT" && [ "$(wc -l < "$SKIPLOG" | tr -d " ")" = 2 ] && no_admission_write'
+OVR_D=$(ov 4); OVR_D2=$(ov 5)
+set_skiplog "$(gl 11173 $SHA "$OVR_D")" "$(gl 11173 $SHA "$OVR_D2")" "2026-11-27T01:05:00Z PR=11173 head=$SHA admission-cap-override-consumed=$OVR_D2"
+DESC_MODE=yes run_case inh_no_fallthrough "${VG_ARGS[@]}"
+check 'inh_no_fallthrough: only the NEWEST grant is considered; when it is spent an older unused grant is not resurrected: exit 10, nothing admitted' '[ "$RC" = 10 ] && ! grep -q "carried from" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && no_admission_write'
+OVR_E=$(ov 6)
+set_skiplog "$(gl 11173 $CH1 "$OVR_E")" "2026-11-27T01:02:00Z PR=11173 head=$CH2 admission-cap-override-carried=$OVR_E inherited-from=$CH1"
+DESC_MODE=yes run_case inh_legacy_carried "${VG_ARGS[@]}"
+check 'inh_legacy_carried: a historical carried record is bound to its own head, never funds this head, and nothing writes a new one: exit 10, ledger unchanged' '[ "$RC" = 10 ] && ! grep -q "^verdict-descendant " "$STUB_LOG" && ! grep -q ADMITTED <<<"$OUT" && [ "$(wc -l < "$SKIPLOG" | tr -d " ")" = 2 ] && no_admission_write'
+
+echo "case: one-pair override - head scope: a grant names its head and can never fund a different head or PR (explicit override, no ledger line and no claim written)"
+OVR_F=$(ov 7)
+set_skiplog "$(gl 11173 $CH1 "$OVR_F")"
+PM_ADMIT_CAP_OVERRIDE=$OVR_F run_case head_other "${VG_ARGS[@]}"
+check 'head_other: a head-only grant for CH1 presented at head SHA refuses: exit 10, REFUSE names the grant head and the presented head, nothing admitted' '[ "$RC" = 10 ] && grep -q "^REFUSE: ADMISSION_ROUND_BREAKER #11173; override $OVR_F names PR #11173 head $CH1 and cannot fund head $SHA (a grant never funds a different head)" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT"'
+check 'head_other: no granted/consumed line appended, no claim file, no ci-head label write' '[ "$(wc -l < "$SKIPLOG" | tr -d " ")" = 1 ] && [ "$(n_claims)" = 0 ] && no_admission_write'
+OVR_G=$(ov 8)
+set_skiplog "$(gl 99999 $SHA "$OVR_G")"
+PM_ADMIT_CAP_OVERRIDE=$OVR_G run_case head_other_pr "${VG_ARGS[@]}"
+check 'head_other_pr: a grant recorded for another PR is refused even at the same head sha: exit 10, nothing admitted, no claim, no new line' '[ "$RC" = 10 ] && grep -q "names PR #99999 head $SHA and cannot fund" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && [ "$(wc -l < "$SKIPLOG" | tr -d " ")" = 1 ] && [ "$(n_claims)" = 0 ] && no_admission_write'
+OVR_H=$(ov 9)
+set_skiplog "$(gl 11173 $SHA "$OVR_H")"
+HM_VALUE="$CH2 MERGEABLE" PM_ADMIT_CAP_OVERRIDE=$OVR_H run_case head_moved "${VG_ARGS[@]}"
+check 'head_moved: the PR head moves after the gate (grant names SHA, live head CH2): nothing is admitted, no claim, no consumed record, no ci-head label write (an earlier guard may refuse first; the claim-boundary refusal itself is proven next)' '[ "$RC" -ne 0 ] && ! grep -q ADMITTED <<<"$OUT" && [ "$(n_claims)" = 0 ] && [ "$(n_ledger consumed)" = 0 ] && no_admission_write'
+# The claim-boundary head check, run on the script's own function text: a grant naming SHA never funds CH2, and exits 10 before any label or claim write.
+HC_FN=$(awk '/^cap_override_head_check\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$SCRIPT")
+HC_OUT=$(PR=11173 CAP_OVERRIDE_USED=$OVR_H CAP_OVERRIDE_HEAD=$SHA HEAD=$CH2 bash -c "$HC_FN; cap_override_head_check; echo not-refused" 2>&1); HC_RC=$?
+check 'head_moved: cap_override_head_check refuses (exit 10) when the live head differs from the head the grant names, naming both heads' '[ "$HC_RC" = 10 ] && grep -q "override $OVR_H names head $SHA and cannot fund head $CH2" <<<"$HC_OUT" && ! grep -q not-refused <<<"$HC_OUT"'
+HC_OUT=$(PR=11173 CAP_OVERRIDE_USED=$OVR_H CAP_OVERRIDE_HEAD=$SHA HEAD=$SHA bash -c "$HC_FN; cap_override_head_check; echo not-refused" 2>&1); HC_RC=$?
+check 'head_moved: the same check passes when the live head is the head the grant names' '[ "$HC_RC" = 0 ] && grep -q not-refused <<<"$HC_OUT"'
+
+echo "case: one-pair override - ledger lines that are not a well-formed grant for THIS PR are ignored (other PR, malformed approval, legacy un-kinded line)"
+OVR_I=$(ov 10)
+set_skiplog "2026-11-27T01:00:00Z PR=99999 head=$SHA admission-cap-override-granted=$OVR_I"
+DESC_MODE=yes run_case inh_other_pr "${VG_ARGS[@]}"
+check 'inh_other_pr: a grant recorded for another PR is ignored: exit 10, nothing admitted' '[ "$RC" = 10 ] && ! grep -q "carried from" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && no_admission_write'
+set_skiplog "2026-11-27T01:00:00Z PR=11173 head=$SHA admission-cap-override-granted=yes" "2026-11-27T01:00:00Z PR=11173 head=$SHA no-12b-gate reason=something"
+DESC_MODE=yes run_case inh_malformed "${VG_ARGS[@]}"
+check 'inh_malformed: a malformed approval and a non-override audit line are ignored: exit 10, nothing admitted' '[ "$RC" = 10 ] && ! grep -q ADMITTED <<<"$OUT" && no_admission_write'
+set_skiplog "2026-11-27T01:00:00Z PR=11173 head=$SHA admission-cap-override=$(ov 11)"
+DESC_MODE=yes run_case inh_legacy "${VG_ARGS[@]}"
+check 'inh_legacy: a legacy un-kinded admission-cap-override= line is not a grant (no proof of non-use): exit 10, nothing admitted' '[ "$RC" = 10 ] && ! grep -q "carried from" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && no_admission_write'
+
+echo "case: one-pair override - a refused preflight keeps the override: an explicit override refused by the verdict gate funds the later admission, and is consumed only then"
+CAP_EVENTS_JSON=$(cap_events $CH1 $SHA); export CAP_EVENTS_JSON   # the cap is reached and $SHA was admitted once, so the verdict gate judges it
+OVR_RP=$(ov 12)
+claims_reset; : > "$SKIPLOG"
+CAP_COMMENTS_JSON="[[$(cap_verdict $SHA 201 flaky)]]"; export CAP_COMMENTS_JSON
+PM_ADMIT_CAP_OVERRIDE=$OVR_RP run_case inh_refused_a "${VG_ARGS[@]}"
+check 'inh_refused_a: the explicit override lifted the cap but the verdict gate refused with the packet (exit 12): granted, NOT consumed, no claim, nothing admitted' '[ "$RC" = 12 ] && grep -q "admission-cap-override-granted=$OVR_RP" "$SKIPLOG" && [ "$(n_ledger consumed)" = 0 ] && [ "$(n_claims)" = 0 ] && ! grep -q ADMITTED <<<"$OUT"'
+CAP_COMMENTS_JSON="[[$(cap_verdict $SHA 201 pr-caused)]]"; export CAP_COMMENTS_JSON
+DESC_MODE=no run_case inh_refused_b "${VG_ARGS[@]}"
+check 'inh_refused_b: with the packet cleared and NO env override, the unused grant at this head funds the admission (no helper call, no second grant or carried line), consumed once before the label add' '[ "$RC" = 0 ] && grep -q "^ADMISSION_CAP_OVERRIDE: $OVR_RP pr=11173 already recorded at this head and unused" <<<"$OUT" && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT" && ! grep -q "^verdict-descendant " "$STUB_LOG" && [ "$(n_ledger granted)" = 1 ] && [ "$(n_ledger carried)" = 0 ] && [ "$(grep -c "PR=11173 head=$SHA admission-cap-override-consumed=$OVR_RP\$" "$SKIPLOG")" = 1 ] && [ "$(cat "$T/inh_refused_b/consumed_at_label_add")" = 1 ]'
+DESC_MODE=yes run_case inh_refused_c "${VG_ARGS[@]}"
+check 'inh_refused_c: after that admission the same override is spent: the next attempt at the cap is the normal refusal (exit 10)' '[ "$RC" = 10 ] && grep -q "^Decision required" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT"'
+PM_ADMIT_CAP_OVERRIDE=$OVR_RP run_case inh_refused_d "${VG_ARGS[@]}"
+check 'inh_refused_d: re-presenting the spent override explicitly is refused too (exit 10, REFUSE names it as already consumed)' '[ "$RC" = 10 ] && grep -q "^REFUSE: ADMISSION_ROUND_BREAKER #11173; override $OVR_RP was already consumed" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT"'
+unset CAP_COMMENTS_JSON
+
+echo "case: one-pair override - the env override is used as presented (older unused grant stays unused); --dry-run reports without writing a ledger line or claim"
+CAP_EVENTS_JSON=$(cap_events $CH1 $CH2); export CAP_EVENTS_JSON   # $SHA was never admitted: the verdict gate does not judge it
+OVR_J=$(ov 13)
+set_skiplog "$(gl 11173 $CH1 "$OVR_J")"
+DESC_MODE=yes PM_ADMIT_CAP_OVERRIDE=rajiv:1795761962.862319 run_case inh_env_wins "${VG_ARGS[@]}"
+check 'inh_env_wins: the explicit override is used and consumed, the older unused grant (other head) is not consumed' '[ "$RC" = 0 ] && grep -q "^ADMISSION_CAP_OVERRIDE: rajiv:1795761962.862319 pr=11173; cap reached" <<<"$OUT" && ! grep -q "^verdict-descendant " "$STUB_LOG" && grep -q "admission-cap-override-consumed=rajiv:1795761962.862319" "$SKIPLOG" && ! grep -q "admission-cap-override-consumed=$OVR_J" "$SKIPLOG"'
+OVR_K=$(ov 14)
+set_skiplog "$(gl 11173 $SHA "$OVR_K")"
+DESC_MODE=yes run_case inh_dry --dry-run "${VG_ARGS[@]}"
+check 'inh_dry: --dry-run with a same-head unused grant prints the override line, admits nothing and appends no consumed line and no claim' '[ "$RC" = 0 ] && grep -q "^ADMISSION_CAP_OVERRIDE: $OVR_K pr=11173 already recorded at this head and unused" <<<"$OUT" && grep -q "nothing admitted" <<<"$OUT" && [ "$(grep -c "admission-cap-override" "$SKIPLOG")" = 1 ] && [ "$(n_ledger consumed)" = 0 ] && [ "$(n_claims)" = 0 ] && ! grep -qE "pr edit|label create|add-label" "$STUB_LOG"'
+
+echo "case: one-pair override - an unwritable ledger or claim refuses (exit 7) before any admission write; never an unaudited grant or consumption"
+OVR_L=$(ov 15)
+claims_reset; : > "$SKIPLOG"; chmod 444 "$SKIPLOG"
+PM_ADMIT_CAP_OVERRIDE=$OVR_L run_case inh_audit_fail "${VG_ARGS[@]}"
+chmod 644 "$SKIPLOG"
+check 'inh_audit_fail: the granted line cannot be written: REFUSE admission_cap_override_audit_unavailable, exit 7, nothing admitted' '[ "$RC" = 7 ] && grep -qx "REFUSE: admission_cap_override_audit_unavailable" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && ! grep -qE "pr edit|label create|add-label" "$STUB_LOG"'
+CAP_COMMENTS_JSON="[[$(cap_verdict $SHA 201 pr-caused)]]"; export CAP_COMMENTS_JSON
+OVR_M=$(ov 16)
+set_skiplog "$(gl 11173 $SHA "$OVR_M")"
+LOCK_LOG_AT_PMOPS=1 run_case inh_consume_fail "${VG_ARGS[@]}"
+chmod 644 "$SKIPLOG"
+check 'inh_consume_fail: the consumed record cannot be written (grant at this head; ledger locked after the 12b-override audit): REFUSE admission_cap_override_audit_unavailable, exit 7, the ci-head label is NOT added, the claim is released so the approval is not burned' '[ "$RC" = 7 ] && grep -qx "REFUSE: admission_cap_override_audit_unavailable" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && [ "$(n_ledger consumed)" = 0 ] && [ ! -e "$CLAIMS/${OVR_M//:/_}" ] && ! grep -qE -- "--add-label" "$STUB_LOG"'   # label create only defines the label (admits nothing); the PR --add-label is the admission
+OVR_N=$(ov 17)
+set_skiplog "$(gl 11173 $SHA "$OVR_N")"
+MODE_WRITE=fail run_case inh_label_fail_burns "${VG_ARGS[@]}"
+check 'inh_label_fail_burns: the claim and consumed record are written BEFORE the label add, so a label write that fails still burns the override (also covers an uncertain outcome; documented one-pair policy)' '[ "$RC" -ne 0 ] && ! grep -q ADMITTED <<<"$OUT" && [ "$(n_ledger consumed)" = 1 ] && [ -e "$CLAIMS/${OVR_N//:/_}" ] && [ "$(cat "$T/inh_label_fail_burns/consumed_at_label_add")" = 1 ]'
+unset CAP_COMMENTS_JSON
+CAP_EVENTS_JSON=$(cap_events $CH1 $CH2); export CAP_EVENTS_JSON
+
+echo "case: ATOMIC CLAIM - two concurrent callers race the SAME grant: exactly one issues the admission pair, the other refuses and writes no label"
+OVR_R=$(ov 18)
+claims_reset; : > "$SKIPLOG"
+RACE_BARRIER="$T/race-barrier"; mkdir -p "$RACE_BARRIER"
+( BARRIER_DIR="$RACE_BARRIER" BARRIER_N=2 PM_ADMIT_CAP_OVERRIDE=$OVR_R run_case race_a "${VG_ARGS[@]}"; printf '%s' "$RC" > "$T/race_a.rc"; printf '%s\n' "$OUT" > "$T/race_a.out" ) &
+RACE_PID_A=$!
+( BARRIER_DIR="$RACE_BARRIER" BARRIER_N=2 PM_ADMIT_CAP_OVERRIDE=$OVR_R run_case race_b "${VG_ARGS[@]}"; printf '%s' "$RC" > "$T/race_b.rc"; printf '%s\n' "$OUT" > "$T/race_b.out" ) &
+RACE_PID_B=$!
+wait "$RACE_PID_A" "$RACE_PID_B"
+RA=$(cat "$T/race_a.rc"); RB=$(cat "$T/race_b.rc")
+OUT="$(cat "$T/race_a.out" "$T/race_b.out")"
+RACE_ADDS=$(cat "$T/race_a/gh.log" "$T/race_b/gh.log" | grep -c -- "--add-label ci-head:")
+check 'race: both callers reached the labels read together (the barrier held both past every gate), so only the claim separates them' '[ -e "$RACE_BARRIER/m.race_a" ] && [ -e "$RACE_BARRIER/m.race_b" ]'
+check 'race: exactly one caller exits 0 and the other exits 10' '{ [ "$RA" = 0 ] && [ "$RB" = 10 ]; } || { [ "$RA" = 10 ] && [ "$RB" = 0 ]; }'
+check 'race: exactly ONE admission pair was issued (one ADMITTED line, one ci-head label add across both callers)' '[ "$(grep -c "^ADMITTED #11173 at $SHA" <<<"$OUT")" = 1 ] && [ "$RACE_ADDS" = 1 ]'
+check 'race: the loser refuses with "already claimed by another admission" naming the grant and writes no ci-head label' '[ "$(grep -c "^REFUSE: ADMISSION_ROUND_BREAKER #11173; override $OVR_R is already claimed by another admission" <<<"$OUT")" = 1 ] && ! grep -q -- "--add-label ci-head:" "$T/race_$( [ "$RA" = 10 ] && echo a || echo b )/gh.log"'
+check 'race: one claim file for the grant (pr and head bound) and exactly one consumed record in the ledger' '[ "$(n_claims)" = 1 ] && grep -q "^pr=11173 head=$SHA at=" "$CLAIMS/${OVR_R//:/_}" && [ "$(n_ledger consumed)" = 1 ]'
+cp -p "$T/skiplog.inh.save" "$SKIPLOG"
 unset CAP_EVENTS_JSON
 
 # ---- Stale test-merge ref: ONE deadline-bounded read-only pass, fail closed (CTO REVISE #2 of b6d3f55c, C0ALZJHGE49 thread 1795543629.469469, ts 1795544911.112579) ----
@@ -709,6 +1101,76 @@ LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' L
 HM_VALUE="$SHA MERGEABLE"; export HM_VALUE
 check 'lag_conflicting: exit 2 with main integration required reason=conflict, no waiver receipt, nothing admitted' '[ "$RC" = 2 ] && grep -q "main integration required reason=conflict" <<<"$OUT" && ! grep -q "stale_merge_ref_waived" <<<"$OUT" && ! grep -q "^ADMITTED" <<<"$OUT"'
 check 'lag_conflicting: the stale-ref guard never ran (no merge-commit, ancestry or CI-input read) and nothing was written' '! grep -qE "^gh api repos/.*/commits/$STUB_FRESH_SHA|merge-base --is-ancestor $STUB_LAG_SHA|^ci-inputs " "$STUB_LOG" && ! grep -qE -- "--add-label|--remove-label|label create|pr edit|update-branch" "$STUB_LOG"'
+
+# ---- Fix 2 (Rajiv ts 1795761962.862319; rule 62 wins over the CI-input guard): trusted CI inputs = only what ci.yml/e2e.yml execute for a PR run ----
+# The REAL helper on a real temp git repo: ci.yml runs scripts/ci/pr-entry.sh; perf.yml, deploy-x.yml, scripts/perf/bench.sh, scripts/deploy/ship.sh and scripts/ci/tests/test-x.sh
+# exist but ci.yml/e2e.yml never execute them. A main delta that touches only those is waived (no overlap, no input change) and needs no main merge; a delta that touches
+# ci.yml or the entrypoint ci.yml invokes still refuses (and --merge-only merges); an overlap still refuses first.
+mk_pr_inputs_repo() { # <name>: sets REAL_REPO and REAL_BASE (the older main the lagging test merge was built on)
+  mk_real_repo "$1" 'bash scripts/ci/pr-entry.sh'
+  mkdir -p "$REAL_REPO/scripts/ci/tests" "$REAL_REPO/scripts/perf" "$REAL_REPO/scripts/deploy"
+  printf 'name: perf\non:\n  schedule:\n    - cron: "0 3 * * *"\njobs:\n  p:\n    runs-on: ubuntu-latest\n    steps:\n      - run: bash scripts/perf/bench.sh\n' > "$REAL_REPO/.github/workflows/perf.yml"
+  printf 'name: deploy\non:\n  push:\n    branches: [main]\njobs:\n  d:\n    runs-on: ubuntu-latest\n    steps:\n      - run: bash scripts/deploy/ship.sh\n' > "$REAL_REPO/.github/workflows/deploy-x.yml"
+  printf 'echo pr entry\n' > "$REAL_REPO/scripts/ci/pr-entry.sh"; printf 'echo bench\n' > "$REAL_REPO/scripts/perf/bench.sh"
+  printf 'echo ship\n' > "$REAL_REPO/scripts/deploy/ship.sh"; printf 'echo t\n' > "$REAL_REPO/scripts/ci/tests/test-x.sh"
+  REAL_BASE=$(real_commit 'add the entrypoint, perf, deploy and tests files')
+}
+real_main_change() { # <repo-relative file>...: touch each, commit as the newer main (sets REAL_MAIN)
+  local f; for f in "$@"; do mkdir -p "$(dirname "$REAL_REPO/$f")"; printf '# changed on main\n' >> "$REAL_REPO/$f"; done
+  REAL_MAIN=$(real_commit "main change: $*")
+}
+real_lag() { # <name> <main files as a printf %b list> [run args]: the guard with the real helper; PRF overrides the PR's own files
+  local name="$1" mf="$2"; shift 2
+  LAG_REAL_REPO="$REAL_REPO" LAG_REAL_BASE="$REAL_BASE" LAG_REAL_MAIN="$REAL_MAIN" LAG_ANCESTOR=yes LAG_PR_FILES="${PRF:-lib/pr.ts\\n}" LAG_PR_FILES_LAGBASE="${PRF:-lib/pr.ts\\n}" LAG_MAIN_FILES="$mf" \
+    run_lag "$name" --no-12b-gate --reason 'lagging ref test' "$@"
+}
+
+echo "case: CI-input guard (real helper) - a main delta that touches ONLY files ci.yml/e2e.yml never execute (perf.yml, deploy-*.yml, their scripts, scripts/ci/tests/**) is waived: no overlap, no input change, no main merge"
+for f in .github/workflows/perf.yml .github/workflows/deploy-x.yml scripts/perf/bench.sh scripts/deploy/ship.sh scripts/ci/tests/test-x.sh; do
+  tag=$(printf '%s' "$f" | tr -c 'a-zA-Z0-9\n' '_')
+  mk_pr_inputs_repo "waive$tag"; real_main_change "$f"
+  real_lag "lag_real_waive$tag" "$f\\n"
+  check "lag_real_waive$tag: a main change to $f is ADMITTED on the waiver (MERGE_REF_RULE stale_merge_ref_waived:no_overlap, overlap=0 ci_inputs_changed=0), the real helper ran once, no main merge" '[ "$RC" = 0 ] && grep -qx "ADMITTED #11173 at $SHA" <<<"$OUT" && grep -q "^MERGE_REF_RULE rule=stale_merge_ref_waived:no_overlap .* overlap=0 ci_inputs_changed=0$" <<<"$OUT" && [ "$(grep -c "^ci-inputs " "$STUB_LOG")" = 1 ] && ! grep -q update-branch "$STUB_LOG"'
+done
+
+echo "case: CI-input guard (real helper) - a main delta that touches ci.yml or the entrypoint ci.yml invokes still REFUSES, naming exactly that path"
+for f in .github/workflows/ci.yml scripts/ci/pr-entry.sh; do
+  tag=$(printf '%s' "$f" | tr -c 'a-zA-Z0-9\n' '_')
+  mk_pr_inputs_repo "refuse$tag"; real_main_change "$f"
+  real_lag "lag_real_refuse$tag" "$f\\n"
+  assert_stale_refused "lag_real_refuse$tag"
+  check "lag_real_refuse$tag: REFUSE names $f as the one changed trusted CI input; nothing admitted, no waiver receipt" 'grep -q "trusted CI input changed: main changed 1 shared CI input file(s) that decide what runs since that parent $STUB_LAG_SHA, so CI ran the older selection even though no PR file overlaps: $f\. Admission needs" <<<"$OUT" && ! grep -q "^ADMITTED" <<<"$OUT" && ! grep -q "stale_merge_ref_waived" <<<"$OUT"'
+done
+
+echo "case: CI-input guard (real helper) - a mixed delta (perf.yml + the entrypoint) refuses naming ONLY the entrypoint, never the unrelated workflow"
+mk_pr_inputs_repo mixed; real_main_change .github/workflows/perf.yml scripts/ci/pr-entry.sh
+real_lag lag_real_mixed '.github/workflows/perf.yml\nscripts/ci/pr-entry.sh\n'
+assert_stale_refused lag_real_mixed
+check 'lag_real_mixed: exactly 1 changed input (scripts/ci/pr-entry.sh), perf.yml is not in the REFUSE' 'grep -q "main changed 1 shared CI input file(s) .*: scripts/ci/pr-entry.sh\. Admission needs" <<<"$OUT" && ! grep -q "perf.yml" <<<"$OUT"'
+
+echo "case: CI-input guard (real helper) - the PR overlapping a main file still refuses first (rule 62 overlap), the helper is not consulted"
+mk_pr_inputs_repo overlap; real_main_change .github/workflows/perf.yml lib/other.ts
+PRF='lib/other.ts\n' real_lag lag_real_overlap '.github/workflows/perf.yml\nlib/other.ts\n'
+assert_stale_refused lag_real_overlap
+check 'lag_real_overlap: REFUSE is the overlap message naming lib/other.ts, and the helper never ran' 'grep -q "overlap: the PR changes 1 file(s)" <<<"$OUT" && grep -q "lib/other.ts" <<<"$OUT" && ! grep -q "^ci-inputs " "$STUB_LOG"'
+
+echo "case: --merge-only (real helper) - a perf.yml-only main delta is skipped (rule 62), a ci.yml change merges main (the lane path is --merge-only)"
+mk_pr_inputs_repo mo_perf; real_main_change .github/workflows/perf.yml
+SKIPLOG_N=$(skiplog_lines)
+LAG_REAL_REPO="$REAL_REPO" LAG_REAL_BASE="$REAL_BASE" LAG_REAL_MAIN="$REAL_MAIN" MO_MAIN_FILES='.github/workflows/perf.yml\n' run_mo mo_real_perf_only
+assert_mo_skipped mo_real_perf_only
+check 'mo_real_perf_only: the real helper ran once; the reason line is decision=skip, and the lagging waiver left no audit line' '[ "$(grep -c "^ci-inputs " "$STUB_LOG")" = 1 ] && grep -qx "MAIN_MERGE_REASON: decision=skip reason=no_conflict_no_overlap rule=62 head=$SHA main=$STUB_MAIN_SHA files=0" <<<"$OUT"'
+mk_pr_inputs_repo mo_ci; real_main_change .github/workflows/ci.yml
+SKIPLOG_N=$(skiplog_lines)
+UPDATE_OK=1 LAG_REAL_REPO="$REAL_REPO" LAG_REAL_BASE="$REAL_BASE" LAG_REAL_MAIN="$REAL_MAIN" MO_MAIN_FILES='.github/workflows/ci.yml\n' run_mo mo_real_ci_yml
+check 'mo_real_ci_yml: performed with reason ci_input_changed, the probe line names exactly .github/workflows/ci.yml, one update-branch pinned to the original head' '[ "$RC" = 0 ] && grep -qx "MAIN_MERGE: performed head=$STUB_MERGED_SHA reason=ci_input_changed files=1" <<<"$OUT" && grep -qx "STALE_REF_PROBE ci_inputs_changed n=1 main_parent=$STUB_LAG_SHA main=$STUB_MAIN_SHA files=.github/workflows/ci.yml" <<<"$OUT" && [ "$(grep -c update-branch "$STUB_LOG")" = 1 ] && grep -q "update-branch -f expected_head_sha=$SHA\$" "$STUB_LOG"'
+
+echo "case: static - Fix 1/3 are wired in admission mode only, after the round breaker; the lane rule and the merge reason line are documented"
+check 'pm-admit-ci.sh: admission_cap_gate then verdict_gate run only when neither --merge-only nor --check-12b-only is set' 'grep -qF "if [ \"\$MERGE_ONLY\" = 0 ] && [ \"\$CHECK_12B_ONLY\" = 0 ]; then admission_cap_gate; verdict_gate; fi" "$SCRIPT"'
+check 'pm-admit-ci.sh: verdict_gate maps the helper to exit 11 (classify first), exit 12 (S171 packet) and exit 7 (UNAVAILABLE), and has no bypass flag' 'b=$(awk "/^verdict_gate\(\) \{/{f=1} f{print} f&&/^\}/{exit}" "$SCRIPT"); grep -q "20) exit 11" <<<"$b" && grep -q "21) exit 12" <<<"$b" && grep -q "11) echo .REFUSE: github_api_error ci_verdict.; exit 7" <<<"$b" && ! grep -qE -- "--force-ci|--no-verdict|PM_ADMIT_VERDICT" <<<"$b"'
+check 'pm-admit-ci.sh: the header tells lanes to use --merge-only, and --merge-only prints the MAIN_MERGE_REASON line' 'grep -q "LANES MUST use .--merge-only <PR>. for main integration" "$SCRIPT" && grep -q "MAIN_MERGE_REASON: decision=" "$SCRIPT"'
+check 'pm-admit-ci.sh: the override ledger writes granted/consumed records only (carried is legacy-read), takes an O_EXCL claim per grant id before the first label mutation, binds a grant to its head, and no carry, descendant call or legacy un-kinded write remains' 'grep -q "admission-cap-override-granted=" "$SCRIPT" && grep -q "admission-cap-override-consumed=" "$SCRIPT" && ! grep -qE "admission-cap-override-carried=[\$]" "$SCRIPT" && grep -q "set -C" "$SCRIPT" && grep -q "pm-admit-cap-claims" "$SCRIPT" && grep -q "cap_override_head_check" "$SCRIPT" && ! grep -q "descendant" <(grep -v "^#" "$SCRIPT") && ! grep -qE "admission-cap-override=[\$]" "$SCRIPT"'
+check 'pm-admit-verdict.py is read-only: no gh write verbs, no Slack, no pm-ops or sqlite' '! grep -qE "(-X|--method)[ =]+(POST|PUT|PATCH|DELETE)|slack-send|sqlite3|pm-ops\.py|gh (pr|issue|label) (edit|close|create|comment)" "$SCRIPT_DIR_VERDICT"'
 
 echo "case: static - the waiver is wired into the guard and the receipt is named"
 guard_body() { awk '/^merge_ref_guard\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$SCRIPT"; }
