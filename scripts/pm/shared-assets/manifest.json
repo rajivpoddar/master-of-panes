@@ -472,6 +472,15 @@
       "source_path": "claude/scripts/ci/pm-admit-ci.sh"
     },
     {
+      "canonical_target": "/Users/rajiv/.claude/scripts/ci/pm-admit-verdict.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-ci-admission",
+      "sha256": "8b7473357c10287e2f0bc0ac460b9f50e8455e8d24eeabc12c01f2ac7a1dfd9e",
+      "source_path": "claude/scripts/ci/pm-admit-verdict.py"
+    },
+    {
       "canonical_target": "/Users/rajiv/Downloads/projects/heydonna-app/scripts/ci/required-ci-jobs.json",
       "dependencies": [],
       "dependency_status": "closed",
@@ -497,6 +506,15 @@
       "ownership_class": "shared-ci-admission",
       "sha256": "a541dd5bc1c4639dd4c283c6481a9e8ce91013b8006013a06ff6ab12c4abc225",
       "source_path": "claude/scripts/ci/tests/test_pm_admit_cap.py"
+    },
+    {
+      "canonical_target": "/Users/rajiv/.claude/scripts/ci/tests/test_pm_admit_verdict.py",
+      "dependencies": [],
+      "dependency_status": "closed",
+      "mode": 420,
+      "ownership_class": "shared-ci-admission",
+      "sha256": "d138a92f0807cde8d21bb7910762e6fd3f5440045e11ea7981bceec2642e45b2",
+      "source_path": "claude/scripts/ci/tests/test_pm_admit_verdict.py"
     },
     {
       "canonical_target": "/Users/rajiv/.claude/scripts/codex-companion-broker-freshness.py",
