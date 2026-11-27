@@ -205,7 +205,7 @@ function harness() {
   const exits = () => pasted.filter((p) => p === "/exit").length;
   const clears = () => pasted.filter((p) => p === "/clear").length;
   return {
-    db, files, exitOps, clearOps, rows, saveAll, relay, processor, hook, post, arm, status, exits, clears,
+    db, files, exitOps, clearOps, rows, saveAll, relay, processor, pins, hook, post, arm, status, exits, clears,
     pasted, enters: () => enters, escapes: () => escapes, ctrlU: () => ctrlU, holdHook, setBusy: (b: boolean) => { busy = b; },
     setQueuedBanner: (b: boolean) => { queuedBanner = b; }, setSwallowEnter: (b: boolean) => { swallowEnter = b; },
     setComposer: (text: string) => { composer = text; }, setOnPaste: (f: (() => void) | null) => { onPaste = f; }, setObserveBarrier: (b: (() => Promise<void>) | null) => { observeBarrier = b; },
@@ -677,7 +677,7 @@ test("clear intent survives exit custody and runs once after authoritative termi
     await h.hook("Stop"); await h.settle();
     assert.equal(h.clears(), 1); assert.equal(h.enters(), 1);
     log = JSON.parse(h.db.getEvents(0, 1, "pm_clear_stop_decision")[0]!.payload);
-    assert.deepEqual(log, { requested_at: clear.requestedAt, decision: "handoff", reason: "guarded_send_handoff" });
+    assert.deepEqual(log, { requested_at: h.db.getConfig("pm_clear_requested_at"), decision: "handoff", reason: "guarded_send_handoff" });
     await h.hook("Stop"); await h.settle();
     assert.equal(h.clears(), 1); assert.equal(h.enters(), 1);
     log = JSON.parse(h.db.getEvents(0, 1, "pm_clear_stop_decision")[0]!.payload);
@@ -700,6 +700,95 @@ test("missing handoff row and unsaved files defer without pane writes", async ()
     assert.equal(h.pasted.length, 0); assert.equal(h.enters(), 0);
     const log = JSON.parse(h.db.getEvents(0, 1, "pm_clear_stop_decision")[0]!.payload);
     assert.equal(log.reason, "handoff_not_ready");
+    assert.equal(h.db.getConfig(PM_HANDOFF_REQUESTED_AT_KEY), clear.requestedAt);
+  } finally { h.close(); }
+});
+
+
+test("diagnostic capture failure does not interrupt the selected exit pin or downstream hook", async () => {
+  const h = harness();
+  try {
+    await boot(h); await h.arm(); h.saveAll();
+    const episode = h.status().episode;
+    const originalGet = h.db.getConfig.bind(h.db); let faulted = false;
+    h.db.getConfig = ((key: string) => {
+      if (key === "pm_handoff_requested_at" && !faulted) { faulted = true; throw new Error("diagnostic read"); }
+      return originalGet(key);
+    }) as typeof h.db.getConfig;
+    let received: PmExitStopPin | undefined;
+    h.processor.process = async (_slot: number, _event: unknown, pin: PmExitStopPin) => { received = pin; return {}; };
+    const response = await h.hook("Stop");
+    assert.equal(response.status, 200); assert.equal(faulted, true);
+    assert.equal(received?.selectedEpisode, episode);
+  } finally { h.close(); }
+});
+
+for (const fault of ["capture", "diagnostic_latch", "diagnostic_authority", "diagnostic_log"] as const) {
+  test(`diagnostic ${fault} failure leaves the guarded clear writer and next hook intact`, async () => {
+    const h = harness();
+    try {
+      await boot(h);
+      h.db.setPendingClear(0);
+      h.db.setConfig("pm_clear_requested_at", new Date(Date.now() - 60_000).toISOString());
+      h.db.setConfig("pm_clear_delivery_state", "deferred_busy");
+      let faulted = false;
+      if (fault === "capture") {
+        const get = h.db.getConfig.bind(h.db);
+        h.db.getConfig = ((key: string) => {
+          if (key === "pm_handoff_requested_at" && !faulted) { faulted = true; throw new Error("diagnostic read"); }
+          return get(key);
+        }) as typeof h.db.getConfig;
+      } else if (fault === "diagnostic_latch") {
+        const get = h.db.getConfig.bind(h.db); let reads = 0;
+        h.db.getConfig = ((key: string) => {
+          if (key === "pm_clear_requested_at" && ++reads === 2) { faulted = true; throw new Error("diagnostic latch"); }
+          return get(key);
+        }) as typeof h.db.getConfig;
+      } else if (fault === "diagnostic_authority") {
+        const isCurrent = h.pins.isCurrent.bind(h.pins); let calls = 0;
+        h.pins.isCurrent = (authority) => {
+          calls++;
+          if (calls === 2) { faulted = true; throw new Error("diagnostic authority"); }
+          return isCurrent(authority);
+        };
+      } else {
+        const log = h.db.logEvent.bind(h.db);
+        h.db.logEvent = ((slot: number, type: string, ...args: any[]) => {
+          if (type === "pm_clear_stop_decision") { faulted = true; throw new Error("diagnostic log"); }
+          return (log as any)(slot, type, ...args);
+        }) as typeof h.db.logEvent;
+      }
+      let downstream = false;
+      const process = h.processor.process.bind(h.processor);
+      h.processor.process = async (...args: any[]) => { downstream = true; return process(...args); };
+      const response = await h.hook("Stop"); await h.settle();
+      assert.equal(faulted, true); assert.equal(response.status, 200); assert.equal(downstream, true);
+      assert.equal(h.clears(), 1); assert.equal(h.enters(), 1);
+    } finally { h.close(); }
+  });
+}
+
+test("coexisting deferred latch is attributed to its own timestamp", async () => {
+  const h = harness();
+  try {
+    await boot(h);
+    const clear = await requestPmHandoffClear(h.db, { source: "op", sessionId: "pm", nowMs: Date.now() - 30_000, automatic: false, ops: h.clearOps });
+    assert.equal(clear.kind, "awaiting_handoff");
+    const latchAt = new Date(Date.now() - 90_000).toISOString();
+    h.db.setPendingClear(0); h.db.setConfig("pm_clear_requested_at", latchAt);
+    h.db.setConfig("pm_clear_delivery_state", "deferred_busy");
+    h.db.setExitPending(true, false, true, "resume", false);
+    const episode = h.status().episode!;
+    h.db.setConfig(PM_EXIT_CONSUMED_EPISODE_KEY, episode);
+    await h.hook("Stop"); await h.settle();
+    assert.equal(h.clears(), 0); assert.equal(h.enters(), 0);
+    const deferred = JSON.parse(h.db.getEvents(0, 1, "pm_clear_stop_decision")[0]!.payload);
+    assert.deepEqual(deferred, { requested_at: clear.requestedAt, decision: "defer", reason: "exit_custody" });
+    h.db.completePMOnlyExitEpisode(episode, "fixture", "authoritative terminal evidence");
+    await h.hook("Stop"); await h.settle();
+    assert.equal(h.clears(), 1); assert.equal(h.enters(), 1);
+    const log = JSON.parse(h.db.getEvents(0, 1, "pm_clear_stop_decision")[0]!.payload);
+    assert.deepEqual(log, { requested_at: latchAt, decision: "handoff", reason: "guarded_send_handoff" });
     assert.equal(h.db.getConfig(PM_HANDOFF_REQUESTED_AT_KEY), clear.requestedAt);
   } finally { h.close(); }
 });

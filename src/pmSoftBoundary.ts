@@ -280,10 +280,11 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
     // must not strand a saved exit. Clear still needs the pinned claim, and one
     // command per Stop holds: exit/exit_custody always skip the clear below.
     const maintenance: PmStopMaintenance = currentStop && selectStop ? selectStop(raw.session_id as string, entryWork) : "clear";
-    // Capture only an active handoff or latch; older delivery fields alone are not a request.
-    const clearRequestedAt = raw.hook_event_name === "Stop"
-      ? db.getConfig("pm_handoff_requested_at") || (db.hasPendingClear(0) ? db.getConfig("pm_clear_requested_at") : null)
-      : null;
+    // Diagnostic capture is best effort and cannot interrupt the Stop path.
+    let observedHandoff: string | null = null;
+    try {
+      if (raw.hook_event_name === "Stop") observedHandoff = db.getConfig("pm_handoff_requested_at") || null;
+    } catch { /* Logging is never a maintenance gate. */ }
     if (raw.hook_event_name === "Stop") {
       const pin: PmExitStopPin = { work: entryWork, boot: entryBoot,
         selectedEpisode: currentStop && maintenance === "exit" ? db.getExitStatus().episode : null };
@@ -309,25 +310,31 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
     const clearStop = !!onClearStop && pinnedStop && maintenance === "clear"
       && (!stopPins || (authority != null && stopPins.isCurrent(authority)))
       && db.hasPendingClear(0) && db.getConfig("pm_clear_delivery_state") === "deferred_busy";
-    if (clearRequestedAt) {
-      const state = db.getConfig("pm_clear_delivery_state");
-      const authorityCurrent = pinnedStop && (!stopPins || (authority != null && stopPins.isCurrent(authority)));
-      const reason = !authorityCurrent ? "stale_authority"
-        : maintenance === "exit_custody" ? "exit_custody"
-        : maintenance === "exit" ? "exit_selected"
-        : clearStop ? "guarded_send_handoff"
-        : db.getConfig("pm_handoff_requested_at") === clearRequestedAt ? "handoff_not_ready"
-        : db.hasPendingClear(0) && state === "awaiting_ack" ? "awaiting_ack"
-        : db.hasPendingClear(0) && state === "sending" ? "writer_in_flight"
-        : db.hasPendingClear(0) && state === "uncertain" ? "delivery_uncertain"
-        : "clear_not_armed";
-      // Observability must never add a gate to the existing maintenance decision.
-      try {
-        db.logEvent(0, "pm_clear_stop_decision", "Stop", null, {
-          requested_at: clearRequestedAt, decision: clearStop ? "handoff" : "defer", reason,
-        });
-      } catch (error) { console.error(`[pm-clear] Stop decision log failed: ${String(error)}`); }
-    }
+    // Bind each reason to the request it describes. A selected writer owns
+    // the latch, even when a separate handoff is simultaneously pending.
+    try {
+      if (raw.hook_event_name === "Stop") {
+        const pending = db.hasPendingClear(0);
+        const latchAt = pending ? db.getConfig("pm_clear_requested_at") : null;
+        const state = pending ? db.getConfig("pm_clear_delivery_state") : null;
+        const requestedAt = clearStop ? latchAt : observedHandoff || latchAt;
+        if (requestedAt) {
+          const authorityCurrent = pinnedStop && (!stopPins || (authority != null && stopPins.isCurrent(authority)));
+          const reason = !authorityCurrent ? "stale_authority"
+            : maintenance === "exit_custody" ? "exit_custody"
+            : maintenance === "exit" ? "exit_selected"
+            : clearStop ? "guarded_send_handoff"
+            : observedHandoff && db.getConfig("pm_handoff_requested_at") === observedHandoff ? "handoff_not_ready"
+            : pending && state === "awaiting_ack" ? "awaiting_ack"
+            : pending && state === "sending" ? "writer_in_flight"
+            : pending && state === "uncertain" ? "delivery_uncertain"
+            : "clear_not_armed";
+          db.logEvent(0, "pm_clear_stop_decision", "Stop", null, {
+            requested_at: requestedAt, decision: clearStop ? "handoff" : "defer", reason,
+          });
+        }
+      }
+    } catch { /* Diagnostics never alter selection, writing, or next(). */ }
     if (clearStop) {
       // Start the guarded write from this Stop, not the notification debounce.
       // Do not hold the native hook response while the tmux writer settles.
