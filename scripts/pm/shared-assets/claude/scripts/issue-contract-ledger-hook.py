@@ -363,24 +363,233 @@ EDIT_VALUE_FLAGS = {
 EDIT_BOOL_FLAGS = {"--remove-milestone", "--remove-parent", "--remove-type"}
 
 
-def single_issue_body_edit(parts: list[str]) -> bool:
-    """After the literal issue number, accept only options and their values."""
-    args = iter(parts[4:])
-    for token in args:
-        option, sep, _ = token.partition("=")
-        if option in EDIT_BOOL_FLAGS:
+BODY_FLAGS = {"--body", "--body-file", "-b", "-F"}
+NON_BODY_VALUE_FLAGS = EDIT_VALUE_FLAGS - BODY_FLAGS
+# CTO REVISE of acc2caaa (C0ALZJHGE49 thread 1795753187.323529, ts 1795753582.188919):
+# the hook tokenizes with shlex, bash expands afterwards, so any expansion or control
+# character can change the argv gh receives after the check. A body write is admitted
+# only when the command text contains none of these, which makes shlex.split(command)
+# the exact argv gh receives.
+BODY_WRITE_FORBIDDEN = set("$`*?[{~;|&<>()\n\\")
+EDIT_SEPARATOR_RE = re.compile(r"\|\||&&|[;|()`\n]|(?<![<>])&(?!>)")
+INDIRECT_GH_RE = re.compile(r"(?<![A-Za-z0-9_.-])gh\s+(?:issue\s+edit|api)\b")
+INDIRECT_BODY_RE = re.compile(r"--body|--input|(?<!\S)-[bF]|\bbody\s*[=:]|\bupdateIssue\b")
+INTERPRETER_RE = re.compile(r"(?<![A-Za-z0-9_./-])(?:/\S*/)?(?:eval|sh|bash|zsh|dash|ksh|fish|source)(?=\s|$)")
+
+
+def raw_words(segment: str) -> list[str]:
+    """Split on unquoted whitespace, keeping quotes so expansion stays visible."""
+    words: list[str] = []
+    current = ""
+    quote = None
+    index = 0
+    while index < len(segment):
+        ch = segment[index]
+        if quote:
+            current += ch
+            if ch == "\\" and quote == '"' and index + 1 < len(segment):
+                current += segment[index + 1]
+                index += 2
+                continue
+            if ch == quote:
+                quote = None
+        elif ch in " \t\r":
+            if current:
+                words.append(current)
+                current = ""
+        else:
+            if ch in "'\"":
+                quote = ch
+            current += ch
+        index += 1
+    if current:
+        words.append(current)
+    return words
+
+
+def word_expansion(word: str) -> str:
+    """'none', 'quoted' ($ or ` only inside double quotes: stays one word) or 'unsafe'."""
+    quote = None
+    kind = "none"
+    index = 0
+    while index < len(word):
+        ch = word[index]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+        elif quote == '"':
+            if ch == '"':
+                quote = None
+            elif ch == "\\":
+                index += 1
+            elif ch in "$`":
+                kind = "quoted"
+        elif ch in "'\"":
+            quote = ch
+        elif ch in "$`*?[{~\\":
+            return "unsafe"
+        index += 1
+    return kind
+
+
+def segment_may_hide_body(segment: str) -> bool:
+    """True when expansion in this gh issue edit could add a body flag or a second issue.
+
+    A double-quoted expansion bound as the value of a known non-body value flag
+    (``--add-label "$L"`` or ``--add-label="$L"``) stays one value; anything else
+    (an unquoted or positional expansion, a glob, a tilde) can change argv.
+    """
+    words = raw_words(segment)
+    # words[3] (the issue) keeps its own issue_number_must_be_literal refusal.
+    for index, word in enumerate(words[4:], start=4):
+        kind = word_expansion(word)
+        if kind == "none":
             continue
-        if option in EDIT_VALUE_FLAGS:
-            if not sep and next(args, None) is None:
-                return False
+        if kind == "quoted":
+            previous = words[index - 1] if index > 4 else ""
+            if word_expansion(previous) == "none" and previous.strip("'\"") in NON_BODY_VALUE_FLAGS:
+                continue
+            prefix = re.split(r"['\"]", word, maxsplit=1)[0]
+            if prefix.endswith("=") and prefix[:-1] in NON_BODY_VALUE_FLAGS:
+                continue
+        return True
+    return False
+
+
+def literal_body_write_problem(command: str) -> str | None:
+    """Admit only `gh issue edit <N> --flag value ...`: one literal simple invocation."""
+    bad = sorted(BODY_WRITE_FORBIDDEN & set(command))
+    if bad:
+        shown = ", ".join("newline" if ch == "\n" else ch for ch in bad)
+        return f"shell metacharacters or expansion in the command ({shown})"
+    try:
+        argv = shlex.split(command, posix=True)
+    except ValueError:
+        return "command is not one parseable literal invocation"
+    if len(argv) < 4 or argv[1:3] != ["issue", "edit"] or argv[0] not in {"gh"} and not (
+        os.path.isabs(argv[0]) and os.path.basename(argv[0]) == "gh"
+    ):
+        return "command must start with gh issue edit (no env assignments, wrappers or aliases)"
+    if not argv[3].isdigit():
+        return "the issue must be one literal number right after gh issue edit"
+    body_flags_seen = 0
+    args = argv[4:]
+    index = 0
+    while index < len(args):
+        token = args[index]
+        option, sep, value = token.partition("=")
+        if option in EDIT_BOOL_FLAGS and not sep:
+            index += 1
             continue
-        if token[:2] in EDIT_VALUE_FLAGS and len(token) > 2:
-            # gh/pflag also accepts attached values, e.g. -Fbody.md.
+        if option in EDIT_VALUE_FLAGS and (sep or index + 1 < len(args)):
+            if not sep:
+                index += 1
+                value = args[index]
+            if option.startswith("-") and not option.startswith("--") and sep:
+                return f"attached short option {token!r}; use {option} <value>"
+            if not value or value.startswith("-"):
+                return f"option {option} has no literal value bound to it"
+            body_flags_seen += option in BODY_FLAGS
+            index += 1
             continue
-        # Positional argument, '--', or unknown option: never guess how
-        # many targets gh would mutate.
-        return False
-    return True
+        if token == "--":
+            return "'--' ends option parsing; refusing"
+        if token.startswith("-") and not token.startswith("--") and token[:2] in EDIT_VALUE_FLAGS:
+            return f"attached short option {token!r}; use {token[:2]} <value>"
+        if token.startswith("-"):
+            return f"unknown option {token!r}"
+        return f"extra positional {token!r}: exactly one literal issue number is allowed"
+    if body_flags_seen != 1:
+        return "exactly one --body or --body-file is allowed"
+    return None
+
+
+def api_issue_body_write(command: str) -> bool:
+    """gh api / graphql writes of an issue body (REST PATCH issues/N, updateIssue)."""
+    for shell_command in shell_commands(command):
+        parts = command_tokens(shell_command)
+        if len(parts) < 2 or parts[1] != "api":
+            continue
+        rendered = " ".join(parts)
+        if re.search(r"\bupdateIssue\b", rendered) and re.search(r"\bbody\b", rendered):
+            return True
+        body_field = re.search(
+            r"(?:^|\s)(?:-f|-F|--field|--raw-field)(?:=|\s+)body(?:=|\[|\s|$)|(?:^|\s)--input(?:=|\s|$)",
+            rendered,
+        )
+        if not body_field:
+            continue
+        if re.search(r"[$`]", rendered):
+            return True
+        for owner, repo in re.findall(
+            r"(?:^|\s)/?repos/([^/\s]+)/([^/\s]+)/issues/[^/\s?]+/?(?:\?\S*)?(?=\s|$)", rendered
+        ):
+            if "{" in owner or "{" in repo:
+                if current_repo().lower() in {HEYDONNA_REPO.lower(), ""}:
+                    return True
+            elif f"{owner}/{repo}".lower() == HEYDONNA_REPO.lower():
+                return True
+    return False
+
+
+def command_substitutions(command: str) -> list[str]:
+    """Bodies of $(...) and `...` spans; `$(cat <<EOF ...)` text payloads are data."""
+    spans: list[str] = []
+    index = 0
+    while index < len(command):
+        if command.startswith("$(", index):
+            depth, end = 1, index + 2
+            while end < len(command) and depth:
+                depth += {"(": 1, ")": -1}.get(command[end], 0)
+                end += 1
+            spans.append(command[index + 2 : end - 1 if not depth else end])
+            index += 2
+            continue
+        if command[index] == "`":
+            end = command.find("`", index + 1)
+            end = len(command) if end == -1 else end
+            spans.append(command[index + 1 : end])
+            index = end + 1
+            continue
+        index += 1
+    return [span for span in spans if not re.match(r"\s*cat\s+<<", span)]
+
+
+def body_write_refusal(normalized: str, code_only: str) -> tuple[str, str] | None:
+    """Refuse any issue-body write that is not one literal, single-target gh issue edit."""
+    if api_issue_body_write(normalized):
+        return ("raw GitHub API issue edit", "raw API issue body write; use one literal gh issue edit")
+    indirect_payloads = command_substitutions(normalized)
+    if INTERPRETER_RE.search(code_only):
+        indirect_payloads.append(normalized)
+    if any(INDIRECT_GH_RE.search(p) and INDIRECT_BODY_RE.search(p) for p in indirect_payloads):
+        return ("indirect issue edit", "gh issue edit/api run through a shell, eval or command substitution")
+    edit_matches = [m for m in MUTATION_RE.finditer(code_only) if m.group(1) == "edit"]
+    parsed_edits = [
+        parts
+        for shell_command in shell_commands(normalized)
+        if (parts := command_tokens(shell_command))[:3] == ["gh", "issue", "edit"]
+    ]
+    writes_body = False
+    if len(parsed_edits) > len(edit_matches):
+        # gh issue edit hidden from the command-word scan (quoted or escaped gh).
+        writes_body = any(any(body_flags(parts)) for parts in parsed_edits) or bool(
+            re.search(r"[$`]", normalized)
+        )
+    first_target = ""
+    for match in edit_matches:
+        separator = EDIT_SEPARATOR_RE.search(code_only, match.end())
+        segment = normalized[match.start() : separator.start() if separator else len(normalized)]
+        parts = tokens(segment)
+        first_target = first_target or (parts[3] if len(parts) > 3 else "")
+        if any(body_flags(parts)) or segment_may_hide_body(segment):
+            writes_body = True
+    if not writes_body:
+        return None
+    problem = literal_body_write_problem(normalized.strip())
+    if problem:
+        return (first_target.strip("'\"") or "unknown", problem)
+    return None
 
 
 def body_flags(parts: list[str]) -> tuple[list[str], list[str]]:
@@ -530,6 +739,10 @@ def live_issue(target: str) -> dict[str, object] | None:
 def main() -> int:
     normalized = COMMAND.replace("\\\n", " ")
     code_only = mask_data_spans(normalized)
+    refusal = body_write_refusal(normalized, code_only)
+    if refusal:
+        emit(refusal[0], "issue_body_write_refused", refusal[1])
+        return 0
     matches = list(MUTATION_RE.finditer(code_only))
     if not matches:
         if raw_issue_create_targets_heydonna(code_only):
@@ -582,9 +795,6 @@ def main() -> int:
             target = literal
             guarded = label_hygiene_edit(parts)
             inline, files = body_flags(parts)
-            if (inline or files) and not single_issue_body_edit(parts):
-                emit(target, "issue_body_edit_requires_one_verified_target")
-                return 0
             if guarded and (inline or len(files) > 1 or (files and
                     (not os.path.isabs(files[0]) or re.search(r"[$`*?\[\n]", files[0])))):
                 emit(target, "label_hygiene_requires_one_literal_absolute_body_file")

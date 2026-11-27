@@ -275,5 +275,41 @@ def test_rc0_empty_parser_output_still_allows(tmp_path) -> None:
         assert done.returncode == 0 and done.stdout.strip() == "", f"{wrapper.name}: genuine non-mutation must ALLOW"
 
 
+@pytest.mark.parametrize("template", [
+    "gh issue edit 7925 7930 --body-file {body}",                 # two targets
+    "gh issue edit $N --body-file {body}",                        # variable target
+    "gh issue edit 7925 $EXTRA --body-file {body}",               # $VAR may add a target or flag
+    "gh issue edit 7925 --body-file {body}*",                     # glob
+    'gh issue edit 7925 --body "$(cat {body})"',                  # command substitution
+    "gh issue edit 7925 --body-file {body}; echo done",           # chained ;
+    "gh issue edit 7925 --body-file {body} && echo done",         # chained &&
+    "gh issue edit 7925 --body-file - <<'EOF'\nbody\nEOF",        # here-doc body
+    "gh issue edit 7925 -F{body}",                                # attached short value
+    "FOO=1 gh issue edit 7925 --body-file {body}",                # env indirection
+    'bash -c "gh issue edit 7925 --body-file {body}"',            # interpreter indirection
+    "gh api -X PATCH repos/Scribie/heydonna-app/issues/7925 -f body=x",  # raw API body write
+    "gh issue edit 7925 $FLAGS",                                  # expansion may hide --body
+])
+def test_non_literal_issue_body_writes_are_refused(tmp_path, template):
+    """CTO REVISE of acc2caaa (ts 1795753582.188919): bind the checked argv to gh's argv."""
+    gh, val = shims(tmp_path, validator_ok=True, live_body=REAL_ISSUE)
+    command = template.format(body=body_file(tmp_path))
+    for wrapper in (HOME_WRAPPER, APP_WRAPPER):
+        out = run(wrapper, PARSER, val, gh, tmp_path, command)
+        assert blocked(out) and "issue body write refused" in out["message"], out
+
+
+@pytest.mark.parametrize("command", [
+    "gh issue edit 7925 --add-label status:todo",
+    "gh issue edit 7925 --add-label status:todo && gh issue view 7925",
+    'gh issue edit 7925 --add-label "$LABEL"',
+])
+def test_label_only_edits_are_not_body_writes(tmp_path, command):
+    gh, val = shims(tmp_path, validator_ok=True, live_body=REAL_ISSUE)
+    for wrapper in (HOME_WRAPPER, APP_WRAPPER):
+        out = run(wrapper, PARSER, val, gh, tmp_path, command)
+        assert "issue body write refused" not in out.get("message", ""), out
+
+
 if __name__ == "__main__":
     unittest.main()

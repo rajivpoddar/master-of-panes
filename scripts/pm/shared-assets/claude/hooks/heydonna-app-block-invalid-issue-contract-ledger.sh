@@ -96,6 +96,11 @@ case "$ERRORS" in
     jq -n --arg message "BLOCKED: an issue body edit must name exactly one literal issue number (first target: #${TARGET}); no issue was mutated." '{decision:"block",message:$message}'
     exit 0
     ;;
+  issue_body_write_refused*)
+    DETAIL=$(printf '%s' "$PY_OUT" | jq -r '.errors[1:] | join("; ")')
+    jq -n --arg message "BLOCKED: issue body write refused (${DETAIL}; target: ${TARGET}). An issue body write must be ONE literal command, gh issue edit <number> --body-file <path> [label options], that names exactly one literal issue number and binds every option value to its flag: no \$ \` * ? [ { ~ ; | & < > ( ), newline, here-doc, chain, env assignment, wrapper, eval/sh -c or gh api body write. No issue was mutated." '{decision:"block",message:$message}'
+    exit 0
+    ;;
   label_hygiene_*|ready_pool_*)
     jq -n --arg message "SKIP #${TARGET} label hygiene (${ERRORS}): no issue was mutated. Report this issue and reason; do not replace its body to repair labels or metadata." '{decision:"block",message:$message}'
     exit 0

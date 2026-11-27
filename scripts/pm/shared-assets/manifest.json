@@ -114,7 +114,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-contract-ledger",
-      "sha256": "5e97d5f2705848e07764c1500b02680ad4dd8f6cdf9ba014d2571b97c4f16de0",
+      "sha256": "44dfd56bd5c4c8c7d5896f529eb3d42b8f58b76db1c7b000947405bc7a0ee18e",
       "source_path": "claude/hooks/block-invalid-issue-contract-ledger.sh"
     },
     {
@@ -159,7 +159,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-contract-ledger",
-      "sha256": "d7f9598e053526f0785dccae56204eb5a6161272b3376888fe473c0faac0f028",
+      "sha256": "42b9c775d756a8ee6c0b6b095a980730f88e79780fa346af8812b03999951347",
       "source_path": "claude/hooks/heydonna-app-block-invalid-issue-contract-ledger.sh"
     },
     {
@@ -585,7 +585,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-issue-contract-ledger",
-      "sha256": "20a2f0c0ad6579f4fb14f521ea4171f4e04f9e636a50e0a8ae6ac37cc7bc6a09",
+      "sha256": "081475910c4f4a23ddd92d8ee0d58c696bb8ef244cc357af33832c783088629d",
       "source_path": "claude/scripts/issue-contract-ledger-hook.py"
     },
     {
