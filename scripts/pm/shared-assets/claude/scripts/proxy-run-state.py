@@ -391,8 +391,8 @@ def main():
         spec = spec_from_brief(a)
         spec['queued_at'] = now_iso()
         atomic(base / 'active' / 'launch.json', json.dumps(spec) + '\n')
-        data = {'name': a.name, 'type': a.type, 'role': a.type, 'brief': brief_path, 'state': 'queued', 'queued_at': spec['queued_at'], 'token': a.token}
-        data.update(brief_refs(text, a.name))
+        data = {key: spec[key] for key in ('name', 'type', 'brief', 'queued_at', 'issue', 'pr') if key in spec}
+        data.update(role=spec['type'], state='queued', token=a.token)
         upsert(a.name, data, in_minutes(QUEUE_SUPPRESS_MIN), replace=True)
         return
     if a.cmd == 'abandon':

@@ -2079,7 +2079,8 @@ proxy_agent_pick_tier() {
     # Local Spark health gate: /metrics carries the served model's quoted name without the credentials required by /v1/models.
     # During the Ornith alias transition vLLM reports only its first name, which may still be the legacy Qwen id.
     # Inkling: GET /v1/models must list inkling-2-mini; a miss is REFUSED (counted in skipped) and the next tier entry is tried.
-    if [[ "$id" == inkling-2-mini ]]; then
+    # Skip these early health probes for disabled pools; normal cap accounting still runs below.
+    if [[ "$id" == inkling-2-mini ]] && ! proxy_agent_pool_blocked "$id" off-only; then
       _ink_rc=0; proxy_agent_inkling_served || _ink_rc=$?
       if [[ "$_ink_rc" != 0 ]]; then
         _ink_why=host_down; [[ "$_ink_rc" == 2 ]] && _ink_why=model_not_served
@@ -2088,7 +2089,7 @@ proxy_agent_pick_tier() {
         continue
       fi
     fi
-    if [[ "$id" == ornith-1.5-35b-a3b || "$id" == qwen3.8-flash-next ]]; then
+    if [[ "$id" == ornith-1.5-35b-a3b || "$id" == qwen3.8-flash-next ]] && ! proxy_agent_pool_blocked "$id" off-only; then
       _spark_url="${QWEN_HEALTH_URL:-http://192.168.68.114:18120/metrics}"
       # ONE retry before declaring the host down: the LAN occasionally drops a single probe under load (measured 4/20 then 0/80 on the same
       # endpoint minutes apart), and a spurious host_down silently routes the lane to a PAID model, which is the exact cost this tier exists to
@@ -2296,21 +2297,24 @@ proxy_agent_pool_blocked() {
   if [[ "$pool" == claude ]] && declare -F proxy_agent_is_capped >/dev/null && proxy_agent_is_capped "$TYPE" && [[ "$cap" =~ ^[0-9]+$ && "${PROXY_AGENT_CLAUDE_CAP:-5}" =~ ^[0-9]+$ && "${PROXY_AGENT_CLAUDE_CAP:-5}" -lt "$cap" ]]; then
     cap="${PROXY_AGENT_CLAUDE_CAP:-5}"
   fi
-  # The Sarvam pool, like OpenCode, has no role exemption: paid credits with no meter, so the cap applies to cap-exempt roles and a P0 override too.
-  if [[ "$pool" != opencode && "$pool" != hy4 && "$pool" != sarvam && "$pool" != ultra && "$pool" != inkling ]] && proxy_agent_cap_exempt "$TYPE"; then return 1; fi  # ultra: hard cap, no role exemption (25 Nov: cap 4 while the burn rate is measured)
   case "$cap" in ''|*[!0-9]*) return 1;; esac
-  # OpenCode / Sarvam cap 0 means the pool is off: blocked without counting, so an unreadable process list cannot let a launch through.
-  local off=0
-  if [[ "$cap" =~ ^0+$ ]]; then off=1; fi
-  live="$(proxy_agent_pool_live "$pool")" || live=unknown
-  [[ "$live" =~ ^[0-9]+$ ]] || live=unknown
+  # Cap 0 switches the pool off for every role, without a count or a model probe.
+  if [[ "$cap" =~ ^0+$ ]]; then
+    live=off
+  else
+    [[ "${2:-}" != off-only ]] || return 1
+    # The Sarvam pool, like OpenCode, has no role exemption: paid credits with no meter, so the cap applies to cap-exempt roles and a P0 override too.
+    if [[ "$pool" != opencode && "$pool" != hy4 && "$pool" != sarvam && "$pool" != ultra && "$pool" != inkling ]] && proxy_agent_cap_exempt "$TYPE"; then return 1; fi  # ultra: hard cap, no role exemption (25 Nov: cap 4 while the burn rate is measured)
+    live="$(proxy_agent_pool_live "$pool")" || live=unknown
+    [[ "$live" =~ ^[0-9]+$ ]] || live=unknown
+  fi
   PA_LAST_POOL="$pool"
   if [[ "${PA_RECORD_POOL:-0}" == 1 ]]; then
-    # Record the counts that actually made the decision. No nested alias probes enter the receipt.
+    # Record the observed count or off switch that made the decision. No nested alias probes enter the receipt.
     PA_POOL_TRIED="${PA_POOL_TRIED:+$PA_POOL_TRIED }$pool=$live/$cap"
     printf 'proxy-agent: pool_checked model=%s pool=%s live=%s cap=%s\n' "$id" "$pool" "$live" "$cap" >&2
   fi
-  [[ "$off" == 0 ]] || return 0
+  [[ "$live" != off ]] || return 0
   if [[ "$live" == unknown ]]; then
     printf 'proxy-agent: pool_cap UNAVAILABLE pool=%s\n' "$pool" >&2
     if [[ "$pool" == claude || "$pool" == ultra ]]; then printf 'proxy-agent: pool_cap fail-closed pool=%s (live count unreadable)\n' "$pool" >&2; return 0; fi
