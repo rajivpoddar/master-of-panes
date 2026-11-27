@@ -11,7 +11,7 @@ Usage: mop <subcommand> [options]
   release --slot N [--reason R] | respawn --slot N [--no-continue] [--model M]
   clear --slot N|pm|all | dnd --slot N --on|--off
   clear-composer --slot N [--no-force]   (empty a stuck composer; C-u only, never Enter)
-  exit-pending --on|--off | exit-status | capture --slot N [--lines N]
+  exit-pending --on|--off [--dev-only] | exit-status | capture --slot N [--lines N]
   approve-plan --slot N [--option 2|4] [--comment T]
   ops-audit run|status|job|pause | pm-cadence status|run|pause
   reminder add --key K --thread TS --text T --every 30m|1h --until <ISO|+12h>
@@ -181,10 +181,11 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--on", action="store_true")
     g.add_argument("--off", action="store_true")
 
-    p = sub.add_parser("exit-pending", help="POST /exit-pending")
+    p = sub.add_parser("exit-pending", help="Arm the PM save-handoff restart; --dev-only explicitly cycles dev slots")
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--on", action="store_true")
     g.add_argument("--off", action="store_true")
+    p.add_argument("--dev-only", action="store_true", help="with --on, cycle only dev slots")
 
     sub.add_parser("exit-status", help="GET /exit-status")
 
@@ -290,7 +291,12 @@ def main(argv: list[str] | None = None) -> int:
         code, data = http_json("POST", f"{base}/slots/{args.slot}/dnd", {"dnd": bool(args.on)})
         return emit(data, 0 if code == 200 else 1)
     if cmd == "exit-pending":
-        code, data = http_json("POST", f"{base}/exit-pending", {"enabled": bool(args.on)})
+        if args.dev_only and not args.on:
+            return emit({"error": "--dev-only requires --on"}, 2)
+        payload = {"enabled": args.on}
+        if args.on:
+            payload["dev_only" if args.dev_only else "pm_only"] = True
+        code, data = http_json("POST", f"{base}/exit-pending", payload)
         return emit(data, 0 if code == 200 else 1)
     if cmd == "exit-status":
         code, data = http_json("GET", f"{base}/exit-status")

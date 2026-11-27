@@ -222,7 +222,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-pm-stop-group-runner",
-      "sha256": "4a19fd34e6eec5b9f556a2a71cbfb513d1400179749a75e68bd572d669ed07f7",
+      "sha256": "ef3a2b301c61e937e7711f0e7531c611eb89f3b00ce37dd52752364ae9b0dadd",
       "source_path": "claude/hooks/pm-stop-group-runner.py"
     },
     {
@@ -747,7 +747,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-mop-cli",
-      "sha256": "5e2fc08146c7f28f804284aa8a1a8eda448b4be1ffc4fa7b838e3a27e29648ad",
+      "sha256": "3657b8e701db3d5c7276b95f7c3e124991ba97afa7e91cb3b518432aca222ce3",
       "source_path": "claude/scripts/mop.py"
     },
     {

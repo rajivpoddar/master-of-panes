@@ -2800,6 +2800,41 @@ export class MoPDatabase {
     return this.getConfig("exit_pending") === "true";
   }
 
+  getPmExitStall(): { episode: string; reason: string; at: string; retry_episode: string | null } | null {
+    try { return JSON.parse(this.getConfig("pm_exit_stall") || "null"); } catch { return null; }
+  }
+
+  /** End the exact failed episode and claim its single replacement together, before any external effect. */
+  settleStuckPmExit(episode: string, reason: string, now: number) {
+    return this.db.transaction(() => {
+      const status = this.getExitStatus();
+      if (!status.pending || !status.pm_only || status.with_devs || status.episode !== episode
+          || status.continuation_delivery === "delivered") return null;
+      const alreadyRetried = this.getPmExitStall()?.retry_episode === episode;
+      let retry_episode: string | null = null;
+      if (alreadyRetried) {
+        // Keep the failed attempt and continuation visible; an RSS tick must not start another retry line.
+        this.setConfig("exit_pending", "false");
+        this.setConfig("exit_pending_continuation_delivery", "exit_stalled");
+      } else {
+        // An uncertain continuation is not transferable to the new episode.
+        const continuation = status.continuation_delivery === "attempted" ? undefined : status.continuation_prompt ?? undefined;
+        this.setExitPending(true, false, true, continuation, true);
+        retry_episode = this.getConfig("exit_pending_episode");
+      }
+      const terminal = { episode, reason, at: new Date(now).toISOString(), retry_episode };
+      this.setConfig("pm_exit_stall", JSON.stringify(terminal));
+      this.logEvent(0, "pm_exit_stalled", null, null, { ...terminal, attempt: status.attempts[0], delivery: status.continuation_delivery });
+      return terminal;
+    })();
+  }
+
+  /** Start the no-attempt clock only when the PM's obligation drain permits an actual Stop. */
+  recordPmExitStop(episode: string, now: number): void {
+    if (this.getConfig("pm_exit_allowed_stop")?.startsWith(`${episode}:`)) return;
+    this.setConfig("pm_exit_allowed_stop", `${episode}:${now}`);
+  }
+
   /**
    * `requireHandoff` (REST PM-only arming only): the /exit waits for the
    * pm_save_handoff `exit` variant, meaning both handoff files saved after this
@@ -2926,6 +2961,7 @@ export class MoPDatabase {
   getExitStatus(): { pending: boolean; episode: string | null; dev_only: boolean; pm_only: boolean; with_devs: boolean; continuation_prompt: string | null; continuation_delivery: string | null; stop_only: boolean; cycled: Record<number, boolean>;
     handoff_requested_at: string | null; handoff_obligation_id: string | null;
     handoff_episode: string | null; exit_terminal: Record<string, unknown> | null;
+    pm_exit_stall: ReturnType<MoPDatabase["getPmExitStall"]>;
     attempts: Record<number, import("./devExitAttempt.js").DevExitAttempt | null>; retained: Record<number, boolean> } {
     const pending = this.getExitPending();
     const cycled: Record<number, boolean> = {};
@@ -2943,6 +2979,7 @@ export class MoPDatabase {
       handoff_requested_at: this.getConfig("pm_exit_handoff_requested_at") || null,
       handoff_obligation_id: this.getConfig("pm_exit_handoff_obligation_id") || null,
       handoff_episode: this.getConfig("pm_exit_handoff_episode") || null,
+      pm_exit_stall: this.getPmExitStall(),
       exit_terminal: (() => { try { return JSON.parse(this.getConfig("pm_exit_terminal") || "null"); } catch { return null; } })() };
   }
 

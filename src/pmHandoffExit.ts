@@ -218,6 +218,55 @@ export function pmExitInCustody(db: Pick<MoPDatabase, "getConfig" | "getExitStat
   return !!consumed && status.pending && status.pm_only && status.episode === consumed;
 }
 
+const PM_EXIT_NO_ATTEMPT_MS = 5 * 60_000;
+
+/** A blocked attempt is not completion. A Stop denied by the obligation drain never starts the clock. */
+export function pmExitStallReason(db: Pick<MoPDatabase, "getConfig" | "getExitStatus">, now: number): string | null {
+  const status = db.getExitStatus();
+  if (!status.pending || !status.pm_only || status.with_devs || !status.episode
+      || status.continuation_delivery === "delivered") return null;
+  const attempt = status.attempts[0];
+  if (attempt) return attempt.phase === "verified" ? null : attempt.blockedReason ?? null;
+  const [episode, at] = (db.getConfig("pm_exit_allowed_stop") ?? "").split(":");
+  return episode === status.episode && Number(at) > 0 && now - Number(at) >= PM_EXIT_NO_ATTEMPT_MS
+    ? "no_pm_attempt_after_stop" : null;
+}
+
+/** Result for the installed PM Stop obligation drain, never for UserPromptSubmit or tools. */
+export function drainPmExitStop(
+  db: Db & Pick<MoPDatabase, "recordPmExitStop" | "latestSessionId">,
+  ops: HandoffObligationOps,
+  session: unknown,
+  handoffFresh: () => Promise<boolean>,
+  now = Date.now,
+  files = PM_HANDOFF_FILES,
+): { pending: boolean; block_obligation_id: string | null } {
+  const result = (pending: boolean, block_obligation_id: string | null = null) => ({ pending, block_obligation_id });
+  const status = db.getExitStatus();
+  if (!status.pending || !status.pm_only || !status.episode) return result(false);
+  if (typeof session !== "string" || !session || db.latestSessionId(0) !== session) return result(true);
+
+  const live = currentPmExitHandoff(db);
+  if (live) {
+    const row = ops.lookup(exitHandoffRequestKey(live.requestedAt));
+    const openId = row.status === "found" && row.open && row.requestedAt === live.requestedAt ? row.id : null;
+    const ready = pmExitHandoffReadiness(db, { ops, files }).kind === "ready";
+    if (!ready && openId) return result(true, openId);
+    if (ready && openId) {
+      // Canonical save evidence already permits Stop. Do not make it wait for the helper or writer.
+      void handoffFresh().then((fresh) => {
+        if (!fresh || currentPmExitHandoff(db)?.episode !== live.episode || !handoffFilesSaved(live.requestedMs, files)) return;
+        return ops.resolveById(openId, "HANDOFF_FRESH: both PM handoff files saved after this exit request");
+      }).catch(() => false);
+    }
+  }
+  const current = db.getExitStatus();
+  if (current.pending && current.pm_only && current.episode === status.episode && db.latestSessionId(0) === session) {
+    db.recordPmExitStop(status.episode, now());
+  }
+  return result(current.pending && current.pm_only);
+}
+
 export type PmStopMaintenance = "exit" | "exit_custody" | "clear";
 
 /**

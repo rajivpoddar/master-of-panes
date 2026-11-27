@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 from typing import Any
+from urllib.request import Request, urlopen
 
 
 DEFAULT_HOOK_ROOT = Path("/Users/rajiv/Downloads/projects/heydonna-app/.claude/hooks")
@@ -489,6 +490,22 @@ def debug_log(message: str) -> None:
         pass
 
 
+def pm_exit_stop(session_id: str) -> dict[str, Any] | None:
+    """Ask the exit owner about the exact handoff row; all other obligations stay queued."""
+    request = Request(
+        "http://127.0.0.1:3100/pm-exit-obligation-stop",
+        data=json.dumps({"session_id": session_id}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urlopen(request, timeout=0.5) as response:
+            result = json.loads(response.read(4096))
+    except (OSError, ValueError):
+        debug_log("pm_exit_stop status unavailable; ordinary Stop handling")
+        return None
+    return result if isinstance(result, dict) and result.get("pending") is True else None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -528,6 +545,18 @@ def main() -> int:
             len(payload.encode()) if isinstance(payload, str) else -1,
         )
     )
+
+    session_id = hook_input.get("session_id")
+    if args.group == "obligations" and isinstance(session_id, str) and session_id:
+        exit_stop = pm_exit_stop(session_id)
+        if exit_stop is not None:
+            obligation_id = exit_stop.get("block_obligation_id")
+            debug_log(f"pm_exit_stop pending; handoff_row={obligation_id}")
+            if isinstance(obligation_id, str) and obligation_id.isascii() and obligation_id.isdecimal():
+                reason = (f"[PM_OBLIGATION_DRAIN] #{obligation_id}: save both PM handoff notes "
+                          "for the pending restart, then end the turn.")
+                print(json.dumps({"decision": "block", "message": reason, "reason": reason}))
+            return 0
 
     bypass, age_seconds, started_at = long_turn_bypass(hook_input)
     if bypass and started_at is not None:

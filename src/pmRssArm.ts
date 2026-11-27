@@ -54,6 +54,10 @@ export function pmRssArmOwner(db: Db, probes: PmRssArmProbes): PmRssArmOwner | n
     }
     const terminal = readPmExitTerminal(db);
     if (terminal) return { kind: "exit_refused_terminal", episode: terminal.episode };
+    const status = db.getExitStatus();
+    if (status.continuation_delivery === "exit_stalled" && status.pm_exit_stall?.episode === status.episode) {
+      return { kind: "exit_stalled_terminal", episode: status.episode };
+    }
     if (db.hasPendingClear(0)) return { kind: "pm_clear_pending" };
     if (isPmHandoffPending(db)) return { kind: "pm_clear_handoff_requested" };
     const pending = probes.pendingMaintenance();

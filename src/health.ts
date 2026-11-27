@@ -37,6 +37,7 @@ import { pinFrom, pinDrift } from "./interruptBeforeClear.js";
 import { latestSessionStartEventId } from "./sessionStartClearWait.js";
 import { composerText } from "./composer.js";
 import { withSlotSendLock } from "./slotSendLock.js";
+import { pmExitStallReason } from "./pmHandoffExit.js";
 
 // ─── Restart Commands ──────────────────────────────────────
 // These are shell aliases defined in ~/.zshrc. Since tmux panes
@@ -327,6 +328,10 @@ export class ProcessHealthChecker {
   /** Single owner of a PM restart; concurrent triggers join it. */
   private pmRestartInFlight: Promise<{ success: boolean; reason: string }> | null = null;
   private pmResumeInFlight = false;
+  onPmExitStall?: (
+    terminal: NonNullable<ReturnType<MoPDatabase["getPmExitStall"]>>,
+    replacedHandoff: { requestedAt: string; obligationId: string | null } | null,
+  ) => void;
 
   constructor(
     private db: MoPDatabase,
@@ -1227,6 +1232,7 @@ export class ProcessHealthChecker {
   async checkAll(boot = false): Promise<void> {
     const now = Date.now();
     const pmOnly = boot || now - this.startTime < 30_000;
+    if (!pmOnly) this.reconcileStuckPmExit(now);
 
     for (const slot of RUNTIME_SLOT_NUMBERS) {
       // Keep the startup grace for dev slots, never for PM availability.
@@ -1376,6 +1382,19 @@ export class ProcessHealthChecker {
   }
 
   // ─── Exit Pending: process receipts only, never timer-driven /exit ───
+
+  private reconcileStuckPmExit(now: number): void {
+    if (this.pmRestartInFlight || this.pmResumeInFlight) return;
+    const reason = pmExitStallReason(this.db, now);
+    if (!reason) return;
+    const status = this.db.getExitStatus();
+    if (!status.episode || this.relay.hasPendingExitConfirmation(status.episode)) return;
+    if (status.continuation_delivery === "attempted" && this.continuationDeliveryRecorded(status.episode)) return;
+    const terminal = this.db.settleStuckPmExit(status.episode, reason, now);
+    if (terminal) this.onPmExitStall?.(terminal, status.handoff_requested_at ? {
+      requestedAt: status.handoff_requested_at, obligationId: status.handoff_obligation_id,
+    } : null);
+  }
 
   private async checkExitPending(): Promise<void> {
     await this.relay.observeExitAttempts();

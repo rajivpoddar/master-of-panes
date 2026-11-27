@@ -24,6 +24,7 @@ import {
   requestPmHandoffClear,
 } from "./pmHandoffClear.js";
 import {
+  drainPmExitStop,
   ensurePmExitHandoffObligation,
   PM_EXIT_HANDOFF_OBLIGATION_KEY,
   PM_EXIT_HANDOFF_REQUESTED_AT_KEY,
@@ -788,6 +789,25 @@ const pmHandoffOps = pmOpsHandoffObligationOps();
 /** Same pm_save_handoff kind and save detection; `exit` variant copy (save + TaskStop, no ACK). */
 const pmExitHandoffOps = pmOpsHandoffObligationOps(undefined, undefined, undefined, PM_HANDOFF_EXIT_VARIANT);
 processor.pmExitHandoffOps = pmExitHandoffOps;
+healthChecker.onPmExitStall = (terminal, previous) => {
+  if (previous) void resolveSupersededPmExitHandoff(pmExitHandoffOps, previous, "PM exit episode stalled").catch(() => false);
+  if (!terminal.retry_episode) return; // The retry's failure is terminal; no second alert/re-arm loop.
+  void ensurePmExitHandoffObligation(db, pmExitHandoffOps).catch(() => null);
+  const text = `PM restart ${terminal.episode.slice(0, 8)} stalled (${terminal.reason}). `
+    + `MoP armed one PM-only retry (${terminal.retry_episode.slice(0, 8)}); save the handoff and end the turn. `
+    + "No further automatic retry; check mop exit-status if it stalls again.";
+  // The durable episode transition claims this single post before starting the helper. No replay on a lost receipt.
+  execFile(join(homedir(), ".claude/scripts/slack-send.sh"), ["-c", "D0AMF0XE6TS", "-t", "1795746567.367609", text],
+    { timeout: 15_000 }, (error, stdout) => {
+      const ts = error ? null : /^OK ts=(\d+\.\d+) /m.exec(stdout)?.[1] ?? null;
+      db.logEvent(0, "pm_exit_stall_alert", null, null, { episode: terminal.episode, outcome: ts ? "posted" : "unconfirmed", ts });
+    });
+};
+
+function pmExitHandoffFresh(): Promise<boolean> {
+  return new Promise((done) => execFile("python3", [join(homedir(), ".claude/scripts/pm-handoff-fresh.py"), "--exit-code"],
+    { timeout: 1_000 }, (error, stdout) => done(!error && /^HANDOFF_FRESH\s/.test(stdout))));
+}
 
 /**
  * PM Stop: a saved handoff arms the existing Stop-fenced clear latch for THIS
@@ -1756,6 +1776,13 @@ app.post("/pm-launch-config", async (c) => {
 
 app.get("/exit-status", (c) => {
   return c.json(db.getExitStatus());
+});
+
+/** The PM obligations Stop hook uses this instead of running unrelated validators during a PM exit. */
+app.post("/pm-exit-obligation-stop", async (c) => {
+  const body: unknown = await c.req.json().catch(() => null);
+  const session = body && typeof body === "object" && "session_id" in body ? body.session_id : null;
+  return c.json(drainPmExitStop(db, pmExitHandoffOps, session, pmExitHandoffFresh));
 });
 
 /** Capture live pane output (REST parity for mop_capture_output).
