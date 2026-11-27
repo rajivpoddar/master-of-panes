@@ -2903,8 +2903,9 @@ export class MoPDatabase {
   /**
    * One transaction: credit the PM's verified replacement (attempt -> verified, cycle flag), then end the PM-only
    * episode WITHOUT writing a delivery receipt (the continuation marker is restored to what it was, never upgraded to
-   * `delivered`). Used only when a current-session native PM Stop from a boot newer than the /exit attempt proves the
-   * replacement pane is live and responsive (CTO C0ALZJHGE49 ts 1795795900.421179). Returns false if the episode moved.
+   * `delivered`). Used only by reconcilePmExitReplacementAtStop, after the latest exit_replacement_bound receipt binds
+   * the exact attempt, its launch, the current boot and the replacement process, and the Stop comes from that bound
+   * session (CTO REVISE C0ALZJHGE49 thread 1795798240.220189, ts 1795798363.328589). Returns false if the episode moved.
    */
   reconcilePmExitReplacement(episode: string, reason: string, evidence: Record<string, unknown>): boolean {
     return this.db.transaction((): boolean => {

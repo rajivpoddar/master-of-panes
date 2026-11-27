@@ -17,7 +17,7 @@ import { DEFAULT_DEV_SLOT_COUNT, isDecommissionedSlot, isValidDevSlot, isValidRu
 import { paneAddress, paneAddress as resolvePaneAddress, verifyPaneIdentity } from "./paneIdentity.js";
 import { QUEUED_HINT, clearOwnedRefusedPasteComposer, composerOwnsOnlyPayload, composerText, INJECT_ENTER_DELAY_MS, isSlashCommand, resolveSlashCommandEnterDelayMs, slashComposerClearable, submitWithComposerCheck } from "./composer.js";
 import { withSlotSendLock } from "./slotSendLock.js";
-import { parseForegroundClaude, type DevExitAttempt } from "./devExitAttempt.js";
+import { exitReplacementReceiptBinds, parseForegroundClaude, type DevExitAttempt } from "./devExitAttempt.js";
 import type { PMClearFenceRefusal } from "./pmClearLatch.js";
 import type { PasteGuard } from "./pasteGuard.js";
 
@@ -2081,18 +2081,8 @@ export class TmuxRelay {
         const restart = db.getEvents(slot, 1, "exit_replacement_bound")[0];
         let bound = false;
         try {
-          const receipt = JSON.parse(restart?.payload ?? "null");
-          const boot = db.getEvents(slot, 1, "SessionStart")[0];
-          const bootPayload = JSON.parse(boot?.payload ?? "null");
-          const replacement = JSON.parse(process);
-
-          bound = receipt?.episode === attempt.episode && receipt?.submittedAt === attempt.submittedAt
-            && receipt?.replacementProcess === process && receipt?.assignmentEpoch === attempt.assignmentEpoch
-            && Number.isInteger(receipt.launchEventId) && receipt.launchEventId > 0
-            && receipt.bootEventId > receipt.launchEventId && !!receipt.bootSession
-            && /^\d+:\d+$/.test(receipt.ownedProcess ?? "")
-            && boot?.id === receipt.bootEventId && bootPayload?.session_id === receipt.bootSession
-            && String(replacement[1]) === receipt.ownedProcess.split(":")[1];
+          bound = exitReplacementReceiptBinds(JSON.parse(restart?.payload ?? "null"),
+            db.getEvents(slot, 1, "SessionStart")[0], attempt, process);
         } catch { /* Unbound manual replacement never earns cycle credit. */ }
         if (!bound) {
           attempt.phase = "unknown";

@@ -29,6 +29,7 @@
  * PM Stops fall through to normal handling and the exit stays pending.
  */
 import type { MoPDatabase } from "./db.js";
+import { exitReplacementReceiptBinds } from "./devExitAttempt.js";
 import {
   handoffFilesSaved,
   PM_HANDOFF_FILES,
@@ -266,13 +267,17 @@ export function drainPmExitStop(
 
 /**
  * A PM /exit whose replacement MoP launched but could not bind (attempt `unknown` /
- * replacement_not_owned_by_restart, e.g. the PM restart path never writes
- * exit_replacement_bound) held exit custody forever, so every later PM Stop chose
- * exit_custody and a pending handoff clear never reached the guarded /clear writer
- * (request 45610, 2026-11-27; CTO C0ALZJHGE49 ts 1795795900.421179). A native Stop
- * of the CURRENT session from a boot newer than the attempt proves the replacement
- * pane is live and responsive: credit it and end the episode once, so this same
- * Stop can select the clear path. Never creates a clear request, never gates input.
+ * replacement_not_owned_by_restart) holds exit custody, so later PM Stops choose
+ * exit_custody (request 45610, 2026-11-27). This Stop backstop credits the
+ * replacement ONLY with proof-bound custody (CTO REVISE C0ALZJHGE49 thread
+ * 1795798240.220189, ts 1795798363.328589: "an UNKNOWN exit must NOT be credited as a
+ * verified cycle from a newer matching SessionStart/Stop alone ... reconcile only
+ * when the replacement session is bound to the exact exit attempt and its process"):
+ * the latest `exit_replacement_bound` receipt, written by the restart that MoP
+ * launched after this attempt's Stop, must bind the exact attempt, its launch, the
+ * current boot and an owned replacement process different from the original, and
+ * this Stop must come from that bound boot session. A newer UNBOUND boot keeps
+ * UNKNOWN. Never creates a clear request, never gates input.
  */
 export function reconcilePmExitReplacementAtStop(
   db: Pick<MoPDatabase, "getConfig" | "getExitStatus" | "getExitAttempt" | "getEvents" | "reconcilePmExitReplacement">,
@@ -286,14 +291,22 @@ export function reconcilePmExitReplacementAtStop(
   // An unsent continuation still belongs to the health resume path.
   if (status.continuation_delivery === "waiting" && status.continuation_prompt) return false;
   if (options.pendingConfirmation?.(status.episode)) return false;
+  const receiptEvent = db.getEvents(0, 1, "exit_replacement_bound")[0];
+  let receipt: any = null;
+  try { receipt = JSON.parse(receiptEvent?.payload ?? "null"); } catch { receipt = null; }
+  const process = typeof receipt?.replacementProcess === "string" ? receipt.replacementProcess : "";
   const boot = db.getEvents(0, 1, "SessionStart")[0];
-  let bootSession = "";
-  try { bootSession = String(JSON.parse(boot?.payload || "{}").session_id ?? ""); } catch { bootSession = ""; }
-  if (!boot || !options.sessionId || bootSession !== options.sessionId) return false;
-  if (!(typeof attempt.stopEventId === "number" && boot.id > attempt.stopEventId)) return false;
+  if (!receiptEvent || !process || process === attempt.originalProcess || !options.sessionId) return false;
+  // The receipt's launch must follow this attempt's own Stop: an older restart never binds a newer exit.
+  if (!(typeof attempt.stopEventId === "number" && Number.isInteger(receipt.launchEventId)
+      && receipt.launchEventId > attempt.stopEventId)) return false;
+  if (!exitReplacementReceiptBinds(receipt, boot, attempt, process)) return false;
+  // This Stop is from the bound replacement session itself.
+  if (receipt.bootSession !== options.sessionId) return false;
   return db.reconcilePmExitReplacement(status.episode,
-    "Current-session PM Stop from a boot after the /exit attempt: replacement pane is live and responsive",
-    { boot_event_id: boot.id, attempt_stop_event_id: attempt.stopEventId, session_id: options.sessionId });
+    "Current-session PM Stop from the receipt-bound replacement of this exact /exit attempt",
+    { receipt_event_id: receiptEvent.id, boot_event_id: boot!.id, launch_event_id: receipt.launchEventId,
+      attempt_stop_event_id: attempt.stopEventId, session_id: options.sessionId, replacement_process: process });
 }
 
 export type PmStopMaintenance = "exit" | "exit_custody" | "clear";

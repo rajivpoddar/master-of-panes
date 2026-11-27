@@ -854,7 +854,7 @@ export class ProcessHealthChecker {
       if (!shell) return fail("shell_prompt_not_observed_after_force_respawn");
     }
     this.unresponsiveStates.delete(0);
-    this.db.logEvent(0, "process_dead", null, null, {
+    const launchEventId = this.db.logEvent(0, "process_dead", null, null, {
       detected_at: new Date().toISOString(), pane_command: "shell_prompt", trigger, episode,
     });
 
@@ -875,6 +875,12 @@ export class ProcessHealthChecker {
     this.db.logEvent(0, "process_restarted", null, null, {
       command: launchCommand, restarted_at: new Date().toISOString(), trigger, model,
     });
+    // Planned /exit: bind the replacement MoP launched to this exact attempt. Detached and best effort; it never delays
+    // the continuation below or gates PM input.
+    if (trigger === "exit" && episode) {
+      void this.bindPMExitReplacement(paneId, episode, launchEventId)
+        .catch((err) => console.error("[health][pm-restart] exit replacement receipt failed:", err));
+    }
 
     // --continue already restored the session. Do not add a synthetic PM turn on recovery.
     if (recover) {
@@ -889,6 +895,51 @@ export class ProcessHealthChecker {
     if (outcome !== "delivered") return fail(`continuation_${outcome}`, true);
     void this.relay.drainPMQueue();
     return { success: true, launched: true, reason: "continuation delivered" };
+  }
+
+  /**
+   * The PM restart's `exit_replacement_bound` receipt, in the shape restartSlot writes for dev slots. Without it a PM
+   * /exit replacement stayed UNKNOWN (replacement_not_owned_by_restart) and held exit custody (request 45610), and the
+   * only way out was crediting a newer boot alone, which the CTO refused (C0ALZJHGE49 thread 1795798240.220189, ts
+   * 1795798363.328589: "Restore proof-bound exit custody"). The receipt binds the launch (the process_dead row logged
+   * before the launcher was typed), the single boot after it, the owned Claude child and its replacement identity, for
+   * the exact attempt and assignment epoch. Bounded poll; anything ambiguous writes no receipt and the attempt stays
+   * UNKNOWN. Never waits on idleness, never types, never gates input.
+   */
+  private async bindPMExitReplacement(paneId: string, episode: string, launchEventId: number): Promise<void> {
+    const bootsAfterLaunch = () => this.db.getEvents(0, 50, "SessionStart").filter(e => e.id > launchEventId).sort((a, b) => a.id - b.id);
+    const deadline = Date.now() + this.AGENT_BOOT_TIMEOUT_MS;
+    let boots = bootsAfterLaunch();
+    while (boots.length === 0 && Date.now() < deadline) {
+      await this.sleepMs(Math.min(this.AGENT_BOOT_POLL_MS, deadline - Date.now()));
+      boots = bootsAfterLaunch();
+    }
+    const unbound = (reason: string) => {
+      this.db.logEvent(0, "pm_exit_replacement_unbound", null, null, { episode, launchEventId, reason });
+    };
+    const boot = boots[0];
+    let payload: any = null;
+    try { payload = JSON.parse(boot?.payload ?? "null"); } catch { /* UNKNOWN */ }
+    if (boots.length !== 1 || !payload?.session_id || payload.cwd !== SLOT_CWDS[0] || !["startup", "resume"].includes(payload.source)) {
+      return unbound(`boot_not_single_owned_launch (${boots.length})`);
+    }
+    const ownedProcess = await this.pmAgentProcess(paneId);
+    const replacementProcess = await this.relay.exitProcessIdentity(0, paneId);
+    const ownedAgain = await this.pmAgentProcess(paneId);
+    if (!ProcessHealthChecker.ownedAgent(ownedProcess) || ownedAgain !== ownedProcess || !replacementProcess
+        || latestSessionStartEventId(this.db, 0) !== boot.id) {
+      return unbound("replacement_process_not_owned");
+    }
+    const attempt = this.db.getExitAttempt(0);
+    const epoch = this.db.getSlot(0)?.assignment_epoch ?? 0;
+    if (!attempt || attempt.episode !== episode || attempt.assignmentEpoch !== epoch || this.db.getExitStatus().episode !== episode
+        || replacementProcess === attempt.originalProcess) {
+      return unbound("attempt_moved");
+    }
+    this.db.logEvent(0, "exit_replacement_bound", null, null, {
+      episode, submittedAt: attempt.submittedAt, assignmentEpoch: epoch, launchEventId,
+      bootEventId: boot.id, bootSession: payload.session_id, ownedProcess, replacementProcess,
+    });
   }
 
   /**
