@@ -33,6 +33,7 @@ import {
   ensurePmExitHandoffObligation,
   exitHandoffRequestKey,
   selectPmStopMaintenance,
+  PM_EXIT_CONSUMED_EPISODE_KEY,
   PM_EXIT_HANDOFF_OBLIGATION_KEY,
   PM_EXIT_HANDOFF_OBLIGATION_STATE_KEY,
   PM_HANDOFF_EXIT_VARIANT,
@@ -157,7 +158,7 @@ function harness() {
     await armPmClearAfterSavedHandoff(db, { sessionId, ops: clearOps, files,
       isCurrent: () => !!authority && pins.isCurrent(authority),
       requestClear: () => requestPmClearOnce({
-        db, source: "pm_handoff_saved_stop", nowMs: Date.now(), staleAfterMs: 0, recentSuppressMs: 0,
+        db, source: "pm_handoff_saved_stop", nowMs: Date.now(), staleAfterMs: 0, recentSuppressMs: 10 * 60_000,
         hasRecentClearEvent: false, laterLifecycleEvent: null, deferUntilStop: true, isPMBusy: () => false,
         send: async () => { throw new Error("arm must never send"); } }) });
   }, pins, (sessionId, workPin) => selectPmStopMaintenance(db, { sessionId, workPin, ops: exitOps, files }));
@@ -646,5 +647,59 @@ test("obligation custody: accepted upsert with lost ACK, then unknown lookup -> 
     // The adopted completed row is this request's explicit-resolve save evidence.
     await h.hook("Stop");
     assert.equal(h.exits(), 1);
+  } finally { h.close(); }
+});
+
+
+test("clear intent survives exit custody and runs once after authoritative terminal on a same-session Stop", async () => {
+  const h = harness();
+  try {
+    await boot(h);
+    const clear = await requestPmHandoffClear(h.db, { source: "op", sessionId: "pm", nowMs: Date.now() - 60_000, automatic: false, ops: h.clearOps });
+    assert.equal(clear.kind, "awaiting_handoff");
+    if (clear.kind !== "awaiting_handoff") throw new Error("missing request");
+    // Older failed-open delivery metadata belongs to a different clear.
+    h.db.setConfig("pm_clear_requested_at", new Date(Date.now() - 3_600_000).toISOString());
+    h.db.setConfig("pm_clear_delivery_state", "failed_open");
+    h.db.setExitPending(true, false, true, "resume", false);
+    const episode = h.status().episode!;
+    h.db.setConfig(PM_EXIT_CONSUMED_EPISODE_KEY, episode);
+    h.db.setConfig("exit_attempt_0", JSON.stringify({ episode, phase: "unknown", attemptCount: 1, blockedReason: "replacement_not_owned_by_restart" }));
+    assert.equal(h.status().attempts[0]?.phase, "unknown");
+    h.saveAll();
+    await h.hook("Stop"); await h.settle();
+    assert.equal(h.pasted.length, 0); assert.equal(h.enters(), 0);
+    assert.equal(h.db.getConfig(PM_HANDOFF_REQUESTED_AT_KEY), clear.requestedAt);
+    let log = JSON.parse(h.db.getEvents(0, 1, "pm_clear_stop_decision")[0]!.payload);
+    assert.deepEqual(log, { requested_at: clear.requestedAt, decision: "defer", reason: "exit_custody" });
+    // This fixture represents a separately verified terminal, not a resolution of the live uncertain exit.
+    h.db.completePMOnlyExitEpisode(episode, "fixture", "authoritative terminal evidence");
+    await h.hook("Stop"); await h.settle();
+    assert.equal(h.clears(), 1); assert.equal(h.enters(), 1);
+    log = JSON.parse(h.db.getEvents(0, 1, "pm_clear_stop_decision")[0]!.payload);
+    assert.deepEqual(log, { requested_at: clear.requestedAt, decision: "handoff", reason: "guarded_send_handoff" });
+    await h.hook("Stop"); await h.settle();
+    assert.equal(h.clears(), 1); assert.equal(h.enters(), 1);
+    log = JSON.parse(h.db.getEvents(0, 1, "pm_clear_stop_decision")[0]!.payload);
+    assert.equal(log.reason, "awaiting_ack");
+    await h.hook("Stop", { session_id: "other" }); await h.settle();
+    assert.equal(h.clears(), 1); assert.equal(h.enters(), 1);
+    log = JSON.parse(h.db.getEvents(0, 1, "pm_clear_stop_decision")[0]!.payload);
+    assert.equal(log.reason, "stale_authority");
+  } finally { h.close(); }
+});
+
+test("missing handoff row and unsaved files defer without pane writes", async () => {
+  const h = harness();
+  try {
+    await boot(h);
+    const clear = await requestPmHandoffClear(h.db, { source: "op", sessionId: "pm", nowMs: Date.now() - 60_000, automatic: false, ops: h.clearOps });
+    assert.equal(clear.kind, "awaiting_handoff");
+    h.clearOps.lookup = () => ({ status: "absent" });
+    await h.hook("Stop"); await h.settle();
+    assert.equal(h.pasted.length, 0); assert.equal(h.enters(), 0);
+    const log = JSON.parse(h.db.getEvents(0, 1, "pm_clear_stop_decision")[0]!.payload);
+    assert.equal(log.reason, "handoff_not_ready");
+    assert.equal(h.db.getConfig(PM_HANDOFF_REQUESTED_AT_KEY), clear.requestedAt);
   } finally { h.close(); }
 });
