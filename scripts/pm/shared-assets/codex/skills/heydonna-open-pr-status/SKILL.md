@@ -77,6 +77,20 @@ For admin authority without a CI/E2E waiver, obtain the ordinary helper's
 read-only `READY_TO_MERGE` proof first; only the native-protection override
 differs. Admin authority never converts running or red checks to green.
 
+S173 merge-only re-admit (Rajiv D0AMF0XE6TS ts 1795791089.117779): when the
+current head has NO CI run at all (`WORKFLOW_MISSING`), the helper checks if
+the head came only from rule-62 main integration(s). It needs all three:
+(a) an earlier head of the same PR had exact-head CI success AND executed
+green E2E; (b) every commit since that head is a two-parent main merge whose
+tree equals `git merge-tree --write-tree` of its parents (no PR-side hunk);
+(c) an OWNER/MEMBER/COLLABORATOR PR comment carries the line
+`S173_BOX_RECEIPT head=<full current head> overlap_tests=green owning_tests=green typecheck=green e2e_specs=green|none`.
+Then the read-only result is `READY_TO_MERGE` with `merge_path: S167_admin`,
+and the CTO runs the S167 head-pinned admin merge below. `--apply` refuses
+with `S173_USE_S167_ADMIN_MERGE`. Any other case behaves exactly as before.
+(b) reads git objects from `HEYDONNA_APP_REPO` (default the local app clone),
+after fetching the head and main SHAs.
+
 Before any merge command, reconcile previously issued, merged or uncertain
 effects for the exact tuple through existing receipts and one bounded PR
 readback. An issued/uncertain attempt is not permission to resend. An already

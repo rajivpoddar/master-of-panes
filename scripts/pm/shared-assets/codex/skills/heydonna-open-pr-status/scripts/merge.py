@@ -5,6 +5,7 @@ import argparse
 import datetime
 import fnmatch
 import json
+import os
 import re
 import subprocess
 import sys
@@ -2105,6 +2106,109 @@ def control_plane_classifier_exemption(pr):
     return ci_exemption_proof(pr, "control_plane_only")
 
 
+# ---------- S173 merge-only re-admit (rule-62 main integration) ----------
+# Rajiv D0AMF0XE6TS thread 1795760160.752879, ts 1795791089.117779: "one ci/e2e round is mandatory,
+# the rest can be on remote boxes". A head produced ONLY by rule-62 main integration(s) is ready for
+# the CTO's S167 head-pinned admin merge when (a) an earlier head of the same PR had exact-head CI
+# success AND executed-green E2E, (b) every commit since that head is a clean main merge (commit
+# tree == git merge-tree of its parents; one parent is on main), and (c) a PR comment carries a
+# remote-box receipt bound to the full current head with every test family green. Otherwise the
+# ordinary exact-head proof decides, unchanged.
+S173_RECEIPT = re.compile(r"^\s*S173_BOX_RECEIPT\s+(.+?)\s*$", re.M)
+S173_GREEN_FIELDS = ("overlap_tests", "owning_tests", "typecheck")
+S173_TRUSTED_AUTHORS = {"OWNER", "MEMBER", "COLLABORATOR"}
+S173_MAX_INTEGRATIONS = 5
+LOCAL_APP_REPO = os.environ.get("HEYDONNA_APP_REPO", "/Users/rajiv/Downloads/projects/heydonna-app")
+
+
+def local_git(*args, check=True):
+    result = subprocess.run(("git", "-C", LOCAL_APP_REPO, *args), text=True,
+                            capture_output=True, timeout=120)
+    if check and result.returncode:
+        raise Refusal(f"S173_GIT_FAILED {' '.join(args[:2])}: {(result.stderr or result.stdout).strip()[:200]}")
+    return result
+
+
+def main_integration_parent(commit, main_sha):
+    """PR-side parent of `commit` when it is a clean main merge (tree == merge-tree(parents)), else None."""
+    parents = local_git("rev-list", "--parents", "-n", "1", commit).stdout.split()[1:]
+    if len(parents) != 2:
+        return None
+    on_main = [p for p in parents
+               if local_git("merge-base", "--is-ancestor", p, main_sha, check=False).returncode == 0]
+    if len(on_main) != 1:
+        return None
+    merged = local_git("merge-tree", "--write-tree", parents[0], parents[1], check=False)
+    if merged.returncode != 0:
+        return None
+    tree = local_git("rev-parse", f"{commit}^{{tree}}").stdout.strip()
+    if merged.stdout.split("\n", 1)[0].strip() != tree:
+        return None
+    return next(p for p in parents if p not in on_main)
+
+
+def head_ci_e2e_green(pr, sha):
+    """Exact-head CI success AND executed-green E2E for an earlier head of this PR, else None."""
+    earlier = {**pr, "head": {**pr["head"], "sha": sha}}
+    try:
+        ci = workflow_proof(earlier, "ci.yml", WORKFLOWS["ci.yml"])
+        e2e = workflow_proof(earlier, "e2e.yml", WORKFLOWS["e2e.yml"])
+    except (Refusal, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
+        return None
+    for proof in (ci, e2e):
+        if (not isinstance(proof, dict) or proof.get("head") != sha or not proof.get("run")
+                or proof.get("exempt") or proof.get("skipped") or proof.get("paid_ci_exempt")):
+            return None
+    if e2e.get("app_test_only") or e2e.get("classifier_required_set"):
+        return None
+    return {"head": sha, "ci.yml": ci, "e2e.yml": e2e}
+
+
+def s173_box_receipt(pr, head):
+    """The newest trusted remote-box receipt for this exact head; refused unless every family is green."""
+    pages_json = json.loads(command("gh", "api", "--paginate", "--slurp",
+                                    f"repos/{REPO}/issues/{pr['number']}/comments?per_page=100"))
+    found = None
+    for page in pages_json:
+        for comment in page:
+            if comment.get("author_association") not in S173_TRUSTED_AUTHORS:
+                continue
+            for match in S173_RECEIPT.finditer(comment.get("body") or ""):
+                fields = dict(item.split("=", 1) for item in match.group(1).split() if "=" in item)
+                if fields.get("head") == head:
+                    found = {"comment": comment.get("id"), "url": comment.get("html_url"), **fields}
+    if found is None:
+        raise Refusal(f"S173_BOX_RECEIPT_MISSING head={head}")
+    red = [key for key in S173_GREEN_FIELDS if found.get(key) != "green"]
+    if found.get("e2e_specs") not in ("green", "none"):
+        red.append("e2e_specs")
+    if red:
+        raise Refusal(f"S173_BOX_RECEIPT_NOT_GREEN head={head} fields={','.join(red)}")
+    return found
+
+
+def merge_only_readmit_proof(pr):
+    """S173 proof for a head reached from an exact-head dual-green head only through clean main merges."""
+    head = pr["head"]["sha"]
+    main_sha = api("git/ref/heads/main")["object"]["sha"]
+    local_git("fetch", "--no-tags", "--quiet", "origin", head, main_sha)
+    integrations = []
+    commit = head
+    for _ in range(S173_MAX_INTEGRATIONS):
+        previous = main_integration_parent(commit, main_sha)
+        if previous is None:
+            raise Refusal(f"S173_NOT_MAIN_MERGE_ONLY commit={commit}")
+        integrations.append(commit)
+        green = head_ci_e2e_green(pr, previous)
+        if green is not None:
+            receipt = s173_box_receipt(pr, head)
+            return {"head": head, "merge_only_readmit": True, "green_head": green,
+                    "main_integrations": integrations, "box_receipt": receipt,
+                    "merge_path": "S167_admin"}
+        commit = previous
+    raise Refusal(f"S173_NO_EARLIER_DUAL_GREEN_HEAD head={head}")
+
+
 def merge(number, head, apply=False, unrelated_main=None):
     pr = pr_at(number, head)
     if pr.get("merged"):
@@ -2119,10 +2223,21 @@ def merge(number, head, apply=False, unrelated_main=None):
     except (Refusal, OSError, ValueError, KeyError, subprocess.TimeoutExpired):
         control_plane_exempt = None
     exemption = site_exempt or control_plane_exempt
+    readmit = None
     if exemption is not None:
         proof = {workflow: dict(exemption) for workflow in WORKFLOWS}
     else:
-        ci_proof = workflow_proof(pr, "ci.yml", WORKFLOWS["ci.yml"])
+        try:
+            ci_proof = workflow_proof(pr, "ci.yml", WORKFLOWS["ci.yml"])
+        except Refusal as exc:
+            # S173: no CI at this head at all; only a proven merge-only re-admit continues.
+            if not str(exc).startswith("WORKFLOW_MISSING"):
+                raise
+            readmit = merge_only_readmit_proof(pr)
+            ci_proof = None
+    if readmit is not None:
+        proof = {workflow: dict(readmit) for workflow in WORKFLOWS}
+    elif exemption is None:
         required_set = ci_proof.get("classifier_required_set")
         test_only = ci_proof.get("app_test_only")
         e2e_proof = app_test_only_e2e_proof(pr, test_only) if test_only else None
@@ -2148,6 +2263,8 @@ def merge(number, head, apply=False, unrelated_main=None):
     later = comparison["merge_base_commit"]["sha"] != main
     result = {"status": "READY_TO_MERGE", "pr": number, "head": head, "main": main,
               "workflows": proof}
+    if readmit is not None:
+        result["merge_path"] = "S167_admin"
     if later:
         result["main_delta"] = {"base": comparison["merge_base_commit"]["sha"],
             "head": main, "url": comparison["html_url"],
@@ -2159,6 +2276,9 @@ def merge(number, head, apply=False, unrelated_main=None):
                 raise Refusal(f"MAIN_DELTA_REVIEW_REQUIRED main={main}")
     if not apply:
         return result
+    if readmit is not None:
+        # This helper has no admin flag: the CTO runs the S167 head-pinned admin merge with this proof.
+        raise Refusal(f"S173_USE_S167_ADMIN_MERGE head={head}")
     pr_at(number, head)
     if api("git/ref/heads/main")["object"]["sha"] != main:
         raise Refusal("MAIN_CHANGED_DURING_CHECK")
