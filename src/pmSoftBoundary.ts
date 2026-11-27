@@ -281,7 +281,8 @@ export function registerPMSoftBoundary(app: Hono, db: MoPDatabase, relay: TmuxRe
     // command per Stop holds: exit/exit_custody always skip the clear below.
     const maintenance: PmStopMaintenance = currentStop && selectStop ? selectStop(raw.session_id as string, entryWork) : "clear";
     if (raw.hook_event_name === "Stop") {
-      const pin: PmExitStopPin = { work: entryWork, boot: entryBoot, selected: currentStop && maintenance === "exit" };
+      const pin: PmExitStopPin = { work: entryWork, boot: entryBoot,
+        selectedEpisode: currentStop && maintenance === "exit" ? db.getExitStatus().episode : null };
       (c as unknown as { set(key: string, value: unknown): void }).set("pmExitStopPin", pin);
       if (maintenance !== "clear") {
         db.logEvent(0, "pm_stop_maintenance_selected", "Stop", null, {

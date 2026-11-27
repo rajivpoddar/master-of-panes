@@ -2829,10 +2829,10 @@ export class MoPDatabase {
     })();
   }
 
-  /** Start the no-attempt clock only when the PM's obligation drain permits an actual Stop. */
-  recordPmExitStop(episode: string, now: number): void {
-    if (this.getConfig("pm_exit_allowed_stop")?.startsWith(`${episode}:`)) return;
-    this.setConfig("pm_exit_allowed_stop", `${episode}:${now}`);
+  /** Record the first Stop that selected this saved exit but had no owner to dispatch it. */
+  recordPmExitStopNoEffect(episode: string, now: number): void {
+    if (this.getConfig("pm_exit_selected_stop_no_effect")?.startsWith(`${episode}:`)) return;
+    this.setConfig("pm_exit_selected_stop_no_effect", `${episode}:${now}`);
   }
 
   /**

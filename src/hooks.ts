@@ -20,7 +20,7 @@ import {
 } from "./pmHandoffExit.js";
 
 /** Stop authority pinned by the PM soft-boundary middleware before its first await. */
-export type PmExitStopPin = { work: number; boot: number; selected: boolean };
+export type PmExitStopPin = { work: number; boot: number; selectedEpisode: string | null };
 import { verifyPMCadenceDelivery } from "./pmCadence.js";
 import { isPmClearUndelivered } from "./pmClearLatch.js";
 import { execFile } from "node:child_process";
@@ -1504,7 +1504,8 @@ export class HookProcessor {
       // selected never blocks: this Stop falls through to normal handling (rule 50).
       const pin = stopPin ?? {
         work: latestPmWork(this.db), boot: latestPmBoot(this.db).id,
-        selected: selectPmStopMaintenance(this.db, { ops: this.pmExitHandoffOps, files: this.pmExitHandoffFiles }) === "exit",
+        selectedEpisode: selectPmStopMaintenance(this.db, { ops: this.pmExitHandoffOps, files: this.pmExitHandoffFiles }) === "exit"
+          ? exitStatus.episode : null,
       };
       const handoffRequired = !!this.db.getConfig(PM_EXIT_HANDOFF_EPISODE_KEY);
       const readiness = handoffRequired ? pmExitHandoffReadiness(this.db, {
@@ -1513,16 +1514,24 @@ export class HookProcessor {
       const previousAttempt = this.db.getExitAttempt(0);
       const retryAtThisStop = previousAttempt?.phase === "blocked" && previousAttempt.blockedReason === "background_agents"
         && previousAttempt.attemptCount < 2 && previousAttempt.sessionId === currentSession;
-      const fire = (!exitStatus.pm_only || pin.selected || retryAtThisStop) && !this.db.hasPendingClear(0) && (!readiness || readiness.kind === "ready");
+      const selected = !!exitStatus.episode && pin.selectedEpisode === exitStatus.episode;
+      const fire = (!exitStatus.pm_only || selected || retryAtThisStop) && !this.db.hasPendingClear(0) && (!readiness || readiness.kind === "ready");
       if (!fire) {
         if (handoffRequired && this.pmExitHandoffOps && !this.db.getConfig(PM_EXIT_HANDOFF_OBLIGATION_KEY)) {
           void ensurePmExitHandoffObligation(this.db, this.pmExitHandoffOps).catch(() => null);
         }
       } else {
+        const exitOwnerPin = exitStopOwner && { ...exitStopOwner, savedPmHandoff: readiness?.kind === "ready" };
+        if (!exitOwnerPin) {
+          // This Stop selected its own saved exit, but no relay call was made.
+          // Leave custody unconsumed. A later eligible Stop can still dispatch.
+          if (selected && exitStatus.episode && readiness?.kind === "ready") {
+            this.db.recordPmExitStopNoEffect(exitStatus.episode, Date.now());
+          }
+          return {};
+        }
         if (readiness?.kind === "ready") consumePmExitHandoff(this.db, this.pmExitHandoffOps, readiness.requestedAt, readiness.via);
         this.db.setConfig(PM_EXIT_CONSUMED_EPISODE_KEY, exitStatus.episode ?? "");
-        const exitOwnerPin = exitStopOwner && { ...exitStopOwner, savedPmHandoff: readiness?.kind === "ready" };
-        if (!exitOwnerPin) return {};
         // The consumed Stop and PM session own both effects; a saved handoff
         // remains valid despite new input. Dev-slot ownership is independent.
         // Never clear a foreign composer or interrupt a busy PM turn.

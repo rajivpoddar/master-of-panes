@@ -220,25 +220,25 @@ export function pmExitInCustody(db: Pick<MoPDatabase, "getConfig" | "getExitStat
 
 const PM_EXIT_NO_ATTEMPT_MS = 5 * 60_000;
 
-/** A blocked attempt is not completion. A Stop denied by the obligation drain never starts the clock. */
+/** Recover only a selected Stop that is proven not to have issued an effect. */
 export function pmExitStallReason(db: Pick<MoPDatabase, "getConfig" | "getExitStatus">, now: number): string | null {
   const status = db.getExitStatus();
   if (!status.pending || !status.pm_only || status.with_devs || !status.episode
       || status.continuation_delivery === "delivered") return null;
-  const attempt = status.attempts[0];
-  if (attempt) return attempt.phase === "verified" ? null : attempt.blockedReason ?? null;
-  const [episode, at] = (db.getConfig("pm_exit_allowed_stop") ?? "").split(":");
+  // An observed blockage (including the original process still running) does
+  // not cancel a queued /exit. Proven dispatch refusals have their own terminal.
+  if (status.attempts[0] || pmExitInCustody(db)) return null;
+  const [episode, at] = (db.getConfig("pm_exit_selected_stop_no_effect") ?? "").split(":");
   return episode === status.episode && Number(at) > 0 && now - Number(at) >= PM_EXIT_NO_ATTEMPT_MS
     ? "no_pm_attempt_after_stop" : null;
 }
 
 /** Result for the installed PM Stop obligation drain, never for UserPromptSubmit or tools. */
 export function drainPmExitStop(
-  db: Db & Pick<MoPDatabase, "recordPmExitStop" | "latestSessionId">,
+  db: Db & Pick<MoPDatabase, "latestSessionId">,
   ops: HandoffObligationOps,
   session: unknown,
   handoffFresh: () => Promise<boolean>,
-  now = Date.now,
   files = PM_HANDOFF_FILES,
 ): { pending: boolean; block_obligation_id: string | null } {
   const result = (pending: boolean, block_obligation_id: string | null = null) => ({ pending, block_obligation_id });
@@ -261,9 +261,6 @@ export function drainPmExitStop(
     }
   }
   const current = db.getExitStatus();
-  if (current.pending && current.pm_only && current.episode === status.episode && db.latestSessionId(0) === session) {
-    db.recordPmExitStop(status.episode, now());
-  }
   return result(current.pending && current.pm_only);
 }
 

@@ -475,7 +475,7 @@ test("a refused episode never blocks a fresh pm_only request with continuation_p
       await h2.arm();
       h2.saveAll();
       const { latestPmWork, latestPmBoot } = await import("../src/pmHandoffExit.js");
-      const oldPin: PmExitStopPin = { work: latestPmWork(h2.db), boot: latestPmBoot(h2.db).id, selected: true };
+      const oldPin: PmExitStopPin = { work: latestPmWork(h2.db), boot: latestPmBoot(h2.db).id, selectedEpisode: h2.db.getExitStatus().episode };
       await h2.hook("UserPromptSubmit", { prompt: "newer work" });
       await h2.processor.process(0, { type: "Stop", session_id: "pm" }, oldPin);
       assert.equal(h2.exits(), 1);
