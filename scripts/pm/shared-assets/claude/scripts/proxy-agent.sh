@@ -761,7 +761,7 @@ model = os.environ.get("PROXY_AGENT_CLAUDE_PROBE_MODEL", "")
 # Both local Spark aliases must be probe-able: without it an id that is not in this list returns "fail" and is
 # recorded as probe_failed, so the lane is cooled and falls through to a PAID model even though the Spark is healthy and the
 # gate above already proved the checkpoint is served. /v1/messages through CLIProxyAPI answers it 200 (verified 22 Nov).
-if model not in ("claude-opus-5-5-high", "claude-sonnet-5-5-high", "gemini-4-argon-high", "gemini-3.8-flash-high", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-high", "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "grok-4.7", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-sol(xhigh)", "gpt-6.2-sol(high)", "gpt-6-astra", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-fable-5-2", "ultra/claude-opus-5-5", "ultra/claude-sonnet-5-5", "ultra/claude-haiku-5-5", "deepseek-direct/deepseek-flash", "deepseek-direct/deepseek-v4-pro", "hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor", "inkling-2-mini", "ornith-1.5-35b-a3b", "qwen3.8-flash-next", "sarvam-glm-5.3", "sarvam-deepseek-v4.1-flash", "sarvam-105b", "sarvam-gemma4", "sarvam-kimi-k3"):
+if model not in ("claude-opus-5-5-high", "claude-sonnet-5-5-high", "gemini-4-argon-high", "gemini-3.8-flash-high", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-high", "claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5", "grok-4.7", "gpt-6-luna", "gpt-6.1-terra", "gpt-6.1-sol", "gpt-6.2-sol", "gpt-6.2-sol(xhigh)", "gpt-6.2-sol(high)", "gpt-6-astra", "claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-fable-5-2", "ultra/claude-opus-5-5", "ultra/claude-sonnet-5-5", "ultra/claude-haiku-5-5", "ultra/claude-fable-5-2", "deepseek-direct/deepseek-flash", "deepseek-direct/deepseek-v4-pro", "hy4-flash-free", "deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor", "inkling-2-mini", "ornith-1.5-35b-a3b", "qwen3.8-flash-next", "sarvam-glm-5.3", "sarvam-deepseek-v4.1-flash", "sarvam-105b", "sarvam-gemma4", "sarvam-kimi-k3"):
     finish("fail", 0)
 
 state_dir = os.environ.get("PROXY_AGENT_STATE_DIR") or os.path.expanduser("~/.cache/proxy-agent")
@@ -1539,13 +1539,13 @@ PY
 # Inkling pool health (Rajiv C0ALZJHGE49 thread 1795597777.761599, ts 1795741969.632649: "Lets put it into service"): the LAN relay's
 # GET /v1/models must list the exact id inkling-2-mini. rc 0 = served, 1 = host_down (no answer in 3 s, twice), 2 = model_not_served.
 proxy_agent_inkling_served() {
-  local url="${INKLING_HEALTH_URL:-http://192.168.68.114:18120/v1/models}" body
+  local url="${INKLING_HEALTH_URL:-http://192.168.68.114:18120/v1/models}" body want="${1:-inkling-2-mini}"
   body="$(curl -s -m 3 --fail "$url" 2>/dev/null)" || { sleep 0.4; body="$(curl -s -m 3 --fail "$url" 2>/dev/null)"; } || true
   [[ -n "$body" ]] || return 1
   printf '%s' "$body" | python3 -I -c 'import json, sys
 try: d = json.load(sys.stdin)
 except Exception: sys.exit(1)
-sys.exit(0 if any(isinstance(m, dict) and m.get("id") == "inkling-2-mini" for m in (d.get("data") or [])) else 1)' 2>/dev/null || return 2
+sys.exit(0 if any(isinstance(m, dict) and m.get("id") == sys.argv[1] for m in (d.get("data") or [])) else 1)' "$want" 2>/dev/null || return 2
   return 0
 }
 proxy_agent_sub_usable() {
@@ -1557,7 +1557,7 @@ proxy_agent_sub_usable() {
   [[ "$until" -le "$now" ]] || return 1
   # Inkling (local Spark vLLM, --max-num-seqs 2): the /v1/models gate (proxy_agent_inkling_served) proves it is
   # served; a /v1/messages probe would take one of the two sequences, so skip it (Rajiv ts 1795741969.632649).
-  [[ "$id" == inkling-2-mini ]] && return 0
+  [[ "$id" == inkling-2-mini || "$id" == pi/inkling-2-mini ]] && return 0
   mkdir -p "$(proxy_agent_state_dir)" 2>/dev/null || return 1
   probe="$(PROXY_AGENT_CLAUDE_PROBE_MODEL="$id" proxy_agent_probe_claude_messages 2>/dev/null || printf 'fail\n0\n')"
   status="${probe%%$'\n'*}"
@@ -1672,7 +1672,7 @@ proxy_agent_is_opencode_id() {
   local id
   id="$(proxy_agent_router_identity "$1")"
   # Local Spark ids share this unmetered-route guard, not the OpenCode Go pool cap.
-  case "$id" in hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor|ornith-1.5-35b-a3b|qwen3.8-flash-next|inkling-2-mini) return 0;; *) return 1;; esac
+  case "$id" in hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor|ornith-1.5-35b-a3b|qwen3.8-flash-next|inkling-2-mini|pi/inkling-2-mini) return 0;; *) return 1;; esac
 }
 # Sarvam Token Factory pool (CLIProxyAPI openai-compat provider "sarvam-tf"): the five aliases below share ONE cap (SARVAM_PROXY_CAP, default 4).
 # Paid credits, not a free/trial id: PROXY_AGENT_FREE_TRIAL_IDS is deliberately untouched, so the free-model guard never refuses them.
@@ -1881,6 +1881,7 @@ proxy_agent_unfenced_eligible() {
   case "$1" in
     gpt-*|claude-*|ultra/claude-*) return 0;;
     hy4-flash-free) case "$TYPE" in hd-builder|hd-proof-qa) return 0;; esac;;
+    pi/inkling-2-mini) case "$TYPE" in hd-builder|hd-proof-qa) return 0;; esac;;  # pi harness: heavy types run unfenced (fence_policy refuses them fenced)
     inkling-2-mini) return 0;;  # local Spark; Rajiv ts 1795784407.240529 "yes to unfenced allow" (type gate in proxy_agent_inkling_eligible)
   esac
   return 1
@@ -2223,7 +2224,8 @@ proxy_agent_cap_exempt() {
   if [[ -r "${ROLE_BRIEF:-}" ]]; then
     local first=""
     IFS= read -r first < "$ROLE_BRIEF" || true
-    if [[ "$1" == claude && "$first" =~ ^MODE:[[:space:]]*(heartbeat|digest)($|[[:space:]]) ]]; then
+    # MODE: admission = a pm-admit-ci.sh run; cap-exempt (Rajiv D0AMF0XE6TS thread 1795825164.773929, ts 1795829108.371699: "the ci admission should be exempt from the cap").
+    if [[ "$1" == claude && "$first" =~ ^MODE:[[:space:]]*(heartbeat|digest|admission)($|[[:space:]]) ]]; then
       return 0
     fi
   fi
@@ -2256,7 +2258,7 @@ for line in out.splitlines():
     # Same cut as proxy_agent_router_identity: lowercase, drop the first '(' or '[' suffix, trim.
     # A decorated OpenCode primary must count toward OPENCODE_PROXY_CAP (CTO REVISE ts 1795010788.320629).
     model = re.split(r"[(\[]", raw.lower(), 1)[0].strip()
-    kind = "ultra" if model.startswith("ultra/") else "deepseek_direct" if model.startswith("deepseek-direct/") else "claude" if model.startswith("claude-") else "codex" if model.startswith("gpt-") else "grok" if model.startswith("grok") else "spark" if model in ("ornith-1.5-35b-a3b", "qwen3.8-flash-next") else "inkling" if model == "inkling-2-mini" else "hy4" if model == "hy4-flash-free" else "opencode" if model in ("deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor") else "sarvam" if model in ("sarvam-glm-5.3", "sarvam-deepseek-v4.1-flash", "sarvam-105b", "sarvam-gemma4", "sarvam-kimi-k3") else ""
+    kind = "ultra" if model.startswith("ultra/") else "deepseek_direct" if model.startswith("deepseek-direct/") else "claude" if model.startswith("claude-") else "codex" if model.startswith("gpt-") else "grok" if model.startswith("grok") else "spark" if model in ("ornith-1.5-35b-a3b", "qwen3.8-flash-next") else "inkling" if model in ("inkling-2-mini", "pi/inkling-2-mini") else "hy4" if model == "hy4-flash-free" else "opencode" if model in ("deepseek-v4.1-flash", "glm-5.3", "muse-spark-1.3-contributor") else "sarvam" if model in ("sarvam-glm-5.3", "sarvam-deepseek-v4.1-flash", "sarvam-105b", "sarvam-gemma4", "sarvam-kimi-k3") else ""
     if kind == pool:
         n += 1
 print(n)
@@ -2292,7 +2294,7 @@ proxy_agent_pool_blocked() {
     sarvam-glm-5.3|sarvam-deepseek-v4.1-flash|sarvam-105b|sarvam-gemma4|sarvam-kimi-k3) pool=sarvam; cap="${SARVAM_PROXY_CAP:-4}";;
     # Both names point at the same vLLM server. Spark proxy cap defaults to 6; keep the legacy env fallback while jobs roll over.
     ornith-1.5-35b-a3b|qwen3.8-flash-next) pool=spark; cap="${SPARK_PROXY_CAP:-${QWEN_PROXY_CAP:-6}}";;
-    inkling-2-mini) pool=inkling; cap="${INKLING_PROXY_CAP:-2}";;  # cap 2 = vLLM --max-num-seqs 2 (Rajiv C0ALZJHGE49 thread 1795597777.761599, ts 1795741969.632649); dial pins it (floor = ceiling = 2)
+    inkling-2-mini|pi/inkling-2-mini) pool=inkling; cap="${INKLING_PROXY_CAP:-2}";;  # cap 2 = vLLM --max-num-seqs 2 (Rajiv C0ALZJHGE49 thread 1795597777.761599, ts 1795741969.632649); dial pins it (floor = ceiling = 2)
     *) return 1;;
   esac
   if [[ "$pool" == claude ]] && declare -F proxy_agent_is_capped >/dev/null && proxy_agent_is_capped "$TYPE" && [[ "$cap" =~ ^[0-9]+$ && "${PROXY_AGENT_CLAUDE_CAP:-5}" =~ ^[0-9]+$ && "${PROXY_AGENT_CLAUDE_CAP:-5}" -lt "$cap" ]]; then
@@ -2388,6 +2390,19 @@ proxy_agent_primary_pool_guard() {
   fi
   # The explicitly approved, bench-only DeepSeek path has a separate admission boundary below.
   if proxy_agent_is_deepseek_direct_id "$id"; then return 0; fi
+  # pi harness (Rajiv D0AMF0XE6TS thread 1795795143.508019, ts 1795809124.963459): opt-in by exact --model only; pi has no Agent/Task/Skill
+  # tools, so only the two conveyor types that run their companion scripts directly may use it.
+  if [[ "$id" == pi/inkling-2-mini ]]; then
+    if [[ "${MODEL_EXPLICIT:-0}" != 1 || "$model" != "$id" ]]; then
+      printf 'PROXY_AGENT_FAILED reason=pi_harness_requires_explicit_model model=%s type=%s (pass --model pi/inkling-2-mini exactly)\n' "$model" "$TYPE" >&2
+      return 2
+    fi
+    case "$TYPE" in
+      hd-builder|hd-proof-qa) ;;
+      *) printf 'PROXY_AGENT_FAILED reason=pi_harness_type_unsupported model=pi/inkling-2-mini type=%s (pi has no Agent/Task/Skill subagents; only hd-builder and hd-proof-qa, which run companion scripts directly)\n' "$TYPE" >&2
+         return 2;;
+    esac
+  fi
   if ! proxy_agent_unfenced_eligible "$id"; then
     printf 'PROXY_AGENT_FAILED reason=unfenced_model_ineligible model=%s type=%s\n' "$model" "$TYPE" >&2
     return 2
@@ -2406,6 +2421,10 @@ proxy_agent_primary_pool_guard() {
   fi
   if [[ "$id" == inkling-2-mini ]] && ! proxy_agent_inkling_served; then
     printf 'proxy-agent: REFUSED primary %s (inkling relay not serving model)\n' "$model" >&2
+    return 75
+  fi
+  if [[ "$id" == pi/inkling-2-mini ]] && ! proxy_agent_inkling_served "${PROXY_PI_SERVED_MODEL:-inkling-2-mini}"; then
+    printf 'proxy-agent: REFUSED primary %s (inkling relay not serving %s)\n' "$model" "${PROXY_PI_SERVED_MODEL:-inkling-2-mini}" >&2
     return 75
   fi
   if [[ "$id" == sarvam-kimi-k3 ]] && proxy_agent_sarvam_kimi_gated; then
@@ -2524,7 +2543,7 @@ proxy_agent_select() {
   done
   # Primary burn decision first (covers RAW primaries too): a refused primary returns before any alias usability POST.
   proxy_agent_primary_burn_check || return 75
-  if [[ "$MODEL" == inkling-2-mini ]]; then
+  if [[ "$MODEL" == inkling-2-mini || "$MODEL" == pi/inkling-2-mini ]]; then
     HAIKU_MODEL="$MODEL"; SONNET_MODEL="$MODEL"; OPUS_MODEL="$MODEL"
     return 0
   fi
@@ -2648,6 +2667,7 @@ resolve_model() {
     # (The OpenCode Go entry deepseek-v4.1-flash is a different id and a MID tier entry: see proxy_agent_pick_tier.)
     deepseek|deepseek-flash-4.1) echo "deepseek-flash-4.1 128000 8192";;
     inkling-2-mini) echo "inkling-2-mini 262144 32000";;  # vLLM max_model_len 262144 (served 21 Nov 22:53 IST)
+    pi/inkling-2-mini) echo "pi/inkling-2-mini 262144 32000";;  # pi harness on the same served Inkling (Rajiv D0AMF0XE6TS ts 1795809124.963459)
     # Sarvam Token Factory (CLIProxyAPI openai-compat "sarvam-tf"); context windows from the Sarvam /v2/models listing (23 Nov). Reasoning tokens bill as output.
     sarvam-glm-5.3|sarvam-deepseek-v4.1-flash|sarvam-kimi-k3) echo "$1 1048576 32000";;
     sarvam-105b)  echo "sarvam-105b 128000 16000";;
@@ -2696,6 +2716,10 @@ proxy_agent_print_selection() {
 proxy_agent_print_metering() {
   local id _w _m
   read -r id _w _m < <(resolve_model "$MODEL")
+  if [[ "$id" == pi/inkling-2-mini ]]; then
+    printf 'proxy-agent: metering model=pi/inkling-2-mini pool=inkling cost_usd=0.00 route=local-spark harness=pi served_model=%s relay=%s (unmetered local GPU)\n' "${PROXY_PI_SERVED_MODEL:-inkling-2-mini}" "${INKLING_BASE_URL:-http://192.168.68.114:18120}"
+    return 0
+  fi
   [[ "$id" == inkling-2-mini ]] || return 0
   printf 'proxy-agent: metering model=inkling-2-mini pool=inkling cost_usd=0.00 route=local-spark relay=%s (unmetered local GPU)\n' "${INKLING_BASE_URL:-http://192.168.68.114:18120}"
 }
@@ -2828,6 +2852,9 @@ if [[ "${PROXY_AGENT_DRY_RUN:-}" == "1" ]]; then
   proxy_agent_review_cap preview || exit $?
   proxy_agent_print_selection
   proxy_agent_print_metering >&2
+  if [[ "$(proxy_agent_router_identity "$MODEL")" == pi/inkling-2-mini ]]; then
+    printf 'PROXY_AGENT_PI_HARNESS bin=%s pi=%s served_model=%s relay=%s\n' "$HOME/.claude/scripts/pi-lane/claude" "${PROXY_PI_BIN:-/opt/homebrew/bin/pi}" "${PROXY_PI_SERVED_MODEL:-inkling-2-mini}" "${INKLING_BASE_URL:-http://192.168.68.114:18120}" >&2
+  fi
   if [[ "$PM_ROLE" == "1" ]]; then
     printf 'PROXY_AGENT_ROUTING role=pm cwd=/Users/rajiv/Downloads/projects/heydonna-app\n' >&2
   else
@@ -2897,6 +2924,7 @@ case "$MODEL" in
   ag-opus|ag-sonnet|luna|terra|sol|astra|grok|hydrogen|ernie|gemini-pro|gemini-flash|gpt-6-luna|gpt-6.1-terra|gpt-6.1-sol|gpt-6.2-sol|gpt-6.2-sol\(*\)|gpt-6-astra|grok-4.7|gemini-4-argon-high|gemini-3.8-flash-high|gemini-4-hydrogen-xhigh|claude-opus-5-5-high|claude-sonnet-5-5-high|haiku|sonnet|opus|fable|claude-haiku-5-5|claude-sonnet-5-5|claude-opus-5-5|claude-fable-5-2) ;;
   ultra/claude-opus-5-5|ultra/claude-sonnet-5-5|ultra/claude-haiku-5-5) ;;  # dev@scribie ULTRA credential via the CLIProxyAPI `ultra` prefix route
   deepseek-direct/deepseek-flash|deepseek-direct/deepseek-v4-pro) ;;  # direct DeepSeek via the CLIProxyAPI openai-compat provider "deepseek-direct" (prefix route); window from resolve_model
+  pi/inkling-2-mini) ;;  # pi harness on local Inkling (opt-in, explicit --model only, never a tier entry; Rajiv D0AMF0XE6TS ts 1795809124.963459)
   inkling-2-mini) ;;  # local Inkling 2 Mini (DGX Spark vLLM, native Anthropic API via LAN relay :18120; Rajiv ts 1795741969.632649), 262144-token window
   ornith-1.5-35b-a3b|qwen3.8-flash-next) ;; # same local Spark vLLM service via CLIProxyAPI
   hy4-flash-free|deepseek-v4.1-flash|glm-5.3|muse-spark-1.3-contributor) ;;  # OpenCode Go via CLIProxyAPI; conservative 200000/32000 window until a source is added
@@ -2954,6 +2982,13 @@ if [[ "$MODEL_ID" == inkling-2-mini ]]; then
   export ANTHROPIC_DEFAULT_HAIKU_MODEL=inkling-2-mini ANTHROPIC_DEFAULT_SONNET_MODEL=inkling-2-mini ANTHROPIC_DEFAULT_OPUS_MODEL=inkling-2-mini
   export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 DISABLE_AUTOUPDATER=1
   export CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000
+fi
+# pi harness: the CLIProxyAPI key never reaches the pi child (local relay only). PROXY_PI_* names survive the run.sh env transfer.
+if [[ "$MODEL_ID" == pi/inkling-2-mini ]]; then
+  export ANTHROPIC_BASE_URL="${INKLING_BASE_URL:-http://192.168.68.114:18120}"
+  export ANTHROPIC_AUTH_TOKEN=local-only
+  export PROXY_PI_BASE_URL="${INKLING_BASE_URL:-http://192.168.68.114:18120}" PROXY_PI_BIN="${PROXY_PI_BIN:-/opt/homebrew/bin/pi}"
+  export PROXY_PI_SERVED_MODEL="${PROXY_PI_SERVED_MODEL:-inkling-2-mini}"
 fi
 # -p mode kills background subagents 10m after the last turn; proxy runs own their own bg work (13056 bisect lost 11-08).
 export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS="${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-0}"
@@ -3162,6 +3197,13 @@ about: it does not apply here. You may write any path the brief needs (including
 use the network, run ssh (remote boxes, dgx-spark) and start the Codex review companion. A real permission error is reported with
 the exact command and EPERM text; never assume a block without trying."
 fi
+if [[ "$MODEL_ID" == pi/inkling-2-mini ]]; then
+  ARGS[${#ARGS[@]}-1]="${ARGS[${#ARGS[@]}-1]}
+
+HARNESS (authoritative, set by the launcher): this lane runs on the pi harness, not Claude Code. Tools are read, bash, edit and write
+only. There is no Agent, Task or Skill tool: run companion review scripts directly with bash, and read SKILL.md files instead of loading
+skills. End with the RESULT block the brief asks for."
+fi
 if [[ -n "$TOOLS" && "$TOOLS" != "*" && "$TOOLS" != "All tools" ]]; then
   ARGS+=(--allowedTools "$TOOLS")
 fi
@@ -3240,6 +3282,8 @@ JOB_DIR="$(mktemp -d "${TMPDIR:-/tmp}/proxy-agent-job.XXXXXX")"
 CHANNEL="proxy-agent-$$-$STAMP"
 NAME="${PROXY_AGENT_NAME:-proxy-$TYPE-$STAMP}"
 CLAUDE_BIN="$(command -v claude)"
+# pi harness: Claude-CLI-shaped wrapper named `claude`, so liveness (pgrep "claude -p --name") and pool counting match unchanged.
+if [[ "$MODEL_ID" == pi/inkling-2-mini ]]; then CLAUDE_BIN="$HOME/.claude/scripts/pi-lane/claude"; fi
 [[ "$OUT" = /* ]] || OUT="$PWD/$OUT"
 [[ "$LOG" = /* ]] || LOG="$PWD/$LOG"
 REVIEW_ROUND_TOKEN="$(proxy_agent_review_cap reserve)" || exit $?
@@ -3515,7 +3559,7 @@ WINDOW_NAME="$(tmux list-windows -a -F '#{window_name}' 2>/dev/null \
   | python3 -I "$HOME/.claude/scripts/proxy-window-label.py" --type "$TYPE" --brief "$PROMPT_FILE" --pid "$$" 2>/dev/null || true)"
 [[ "$WINDOW_NAME" =~ ^px-[a-z0-9]+-[0-9]+(-[0-9]+)?$ ]] || WINDOW_NAME="px-${NAME#proxy-}"
 proxy_agent_print_selection
-if [[ "$MODEL_ID" == inkling-2-mini ]]; then proxy_agent_print_metering | tee -a "$LOG" >&2; fi
+if [[ "$MODEL_ID" == inkling-2-mini || "$MODEL_ID" == pi/inkling-2-mini ]]; then proxy_agent_print_metering | tee -a "$LOG" >&2; fi
 python3 -I "$STATE_HELPER" start --name "$PROXY_AGENT_RUN_NAME" --token "$PROXY_AGENT_RUN_TOKEN" \
   --type "$TYPE" --brief "$PROMPT_FILE" --cwd "$CWD" --out "$OUT" --model "$MODEL_ID" --pm-role "$PM_ROLE" \
   --role "$TYPE" --rung "${SELECT_RUNG:-}" --lane-started-at "${PROXY_LANE_STARTED_AT:-}" \

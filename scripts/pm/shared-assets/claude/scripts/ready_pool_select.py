@@ -1684,7 +1684,11 @@ def mark_unowned_open_pr_rework(issues: list[dict[str, Any]], prs: list[dict[str
             ci_failed = any(
                 str((c or {}).get("conclusion") or (c or {}).get("state") or "").upper()
                 in ("FAILURE", "TIMED_OUT", "CANCELLED", "ERROR", "STARTUP_FAILURE")
-                for c in (pr.get("statusCheckRollup") or []) if isinstance(c, dict))
+                for c in (pr.get("statusCheckRollup") or []) if isinstance(c, dict)
+                # The "CI Exemption" stand-in test/e2e checks are red on every new head until a
+                # real CI run or an exemption lands; they are not a failed admitted run
+                # (2026-11-28 #13766: admitted P0 in CI was picked as unowned rework).
+                and not str((c or {}).get("workflowName") or "").startswith("CI Exemption"))
             if ("pm-state:qa-passed-awaiting-ci" in pr_labels and not ci_failed) or (
                     ci_heads and (not head or head in ci_heads) and not ci_failed):
                 continue
