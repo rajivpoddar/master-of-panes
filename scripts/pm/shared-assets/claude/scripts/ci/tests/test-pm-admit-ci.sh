@@ -12,6 +12,8 @@ export STUB_FRESH_SHA=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 export STUB_MOVED_SHA=9999999999999999999999999999999999999999   # main after it moved on GitHub
 export STUB_LAG_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa      # the older main a lagging test merge was built on (an ancestor of STUB_MAIN_SHA)
 export STUB_LAGBASE_SHA=7777777777777777777777777777777777777777  # merge-base of that older main and the PR head
+export STUB_DESC_SHA=1111111111111111111111111111111111111111     # an unverified descendant of the probed main (carry case N2)
+export STUB_TREE_SHA=2222222222222222222222222222222222222222     # stubbed clean merge-tree result and merged-head tree (equal unless TREE_CASE=differs)
 PASS=0; FAIL=0
 T=$(mktemp -d "${TMPDIR:-/tmp}/pm-admit-test.XXXXXX")
 T=$(cd "$T" && pwd)   # normalize: a TMPDIR ending in "/" (macOS) leaves "//" in $T, and the python3 stub's PATH-strip of its own dir (for the real-helper cases) then never matched
@@ -24,9 +26,11 @@ printf 'git %s\n' "$*" >> "$STUB_LOG"
 # CARRY_REAL_REPO (merge-only carry cases): the two reads that decide the carry (the merged head's parents and the authored-hunks diff) run REAL git on a real temp repo,
 # so byte-level whitespace is really compared. The fixture shas are translated to the real commits on the way in and back on the way out; every other call stays stubbed.
 if [ -n "${CARRY_REAL_REPO:-}" ]; then
-  case "$*" in *'rev-list --parents -n 1 '*|*'diff --no-ext-diff '*)
-    a=(); for x in "${@:3}"; do x=${x//$STUB_SHA/$R_PRE}; x=${x//$STUB_MERGED_SHA/$R_MERGED}; x=${x//$STUB_MAIN_SHA/$R_MAINP}; x=${x//$STUB_BASE_SHA/$R_BASE}; a+=("$x"); done
-    "$REAL_GIT" -C "$CARRY_REAL_REPO" "${a[@]}" | sed -e "s/$R_PRE/$STUB_SHA/g" -e "s/$R_MERGED/$STUB_MERGED_SHA/g" -e "s/$R_MAINP/$STUB_MAIN_SHA/g" -e "s/$R_BASE/$STUB_BASE_SHA/g"
+  # Also real: the merged head's tree and the clean merge-tree of the pinned head and the probed main (the carry's second condition). R_DESC (optional) is an unverified descendant of main.
+  case "$*" in *'rev-list --parents -n 1 '*|*'diff --no-ext-diff '*|*'merge-tree --write-tree '*|*'^{tree}'*)
+    a=(); for x in "${@:3}"; do x=${x//$STUB_SHA/$R_PRE}; x=${x//$STUB_MERGED_SHA/$R_MERGED}; x=${x//$STUB_MAIN_SHA/$R_MAINP}; x=${x//$STUB_BASE_SHA/$R_BASE}; [ -z "${R_DESC:-}" ] || x=${x//$STUB_DESC_SHA/$R_DESC}; a+=("$x"); done
+    se=(-e "s/$R_PRE/$STUB_SHA/g" -e "s/$R_MERGED/$STUB_MERGED_SHA/g" -e "s/$R_MAINP/$STUB_MAIN_SHA/g" -e "s/$R_BASE/$STUB_BASE_SHA/g"); [ -z "${R_DESC:-}" ] || se+=(-e "s/$R_DESC/$STUB_DESC_SHA/g")
+    "$REAL_GIT" -C "$CARRY_REAL_REPO" "${a[@]}" | sed "${se[@]}"
     exit "${PIPESTATUS[0]}" ;;
   esac
 fi
@@ -58,7 +62,8 @@ case "$*" in
   *'diff --no-ext-diff '*)   # authored-hunks input (MERGED_MAIN check): the PR's own change; PID_CASE=changed makes the diff against the merged head differ from the pre-merge one
     if [ "${PID_CASE:-same}" = changed ] && [[ "$*" = *" $STUB_MERGED_SHA --" ]]; then printf 'diff: the merge altered the PR diff\n'; else printf 'diff: the PR own change\n'; fi ;;
   *'rev-list --parents -n 1 '*) all="$*"; printf '%s %s %s\n' "${all##* }" "$STUB_SHA" "$STUB_MAIN_SHA" ;;   # the merged head: parents = the pinned pre-merge head, then main
-  *'merge-tree --write-tree '*) [ -n "${S166_CASE:-}" ] ;;
+  *'merge-tree --write-tree '*) [ -n "${S166_CASE:-}" ] && printf '%s\n' "$STUB_TREE_SHA" ;;   # the probe discards this; the carry compares it with the merged head's tree below
+  *'rev-parse --verify '*'^{tree}') if [ "${TREE_CASE:-same}" = differs ]; then printf '%s\n' 3333333333333333333333333333333333333333; else printf '%s\n' "$STUB_TREE_SHA"; fi ;;
   *) exit 1 ;;
 esac
 EOF
@@ -1281,9 +1286,9 @@ mk_carry_repo() { # <name> <clean|evil_ws>: base, PR head (adds "a b"), main par
   rgit checkout -q pr
   rgit merge -q --no-ff --no-commit "$R_MAINP" >/dev/null 2>&1 || true
   if [ "$2" = evil_ws ]; then perl -pi -e 's/^a b$/ab/' "$REAL_REPO/f.txt"; fi
-  R_MERGED=$(real_commit 'merge main into pr')
+  R_MERGED=$(real_commit 'merge main into pr'); R_DESC=""
 }
-run_carry() { local name="$1"; shift; S166_CASE=overlap GATE_MODE=none CARRY_REAL_REPO="$REAL_REPO" R_BASE="$R_BASE" R_PRE="$R_PRE" R_MAINP="$R_MAINP" R_MERGED="$R_MERGED" run_script "$name" --merge-only 11173; }
+run_carry() { local name="$1"; shift; S166_CASE=overlap GATE_MODE=none CARRY_REAL_REPO="$REAL_REPO" R_BASE="$R_BASE" R_PRE="$R_PRE" R_MAINP="$R_MAINP" R_MERGED="$R_MERGED" R_DESC="${R_DESC:-}" run_script "$name" --merge-only 11173; }
 
 echo "case: --merge-only carry (real git) - a clean merge of main carries; main edited another region of the same file"
 mk_carry_repo clean clean
@@ -1302,5 +1307,55 @@ echo "case: --merge-only carry (real git) - the merged head is not a merge of th
 mk_carry_repo wrongparent clean
 R_PRE="$R_BASE"; run_carry carry_real_wrongparent
 check 'carry_real_wrongparent: patch_id_same=no and main_parent=none (the pinned head is not a parent of the merged head)' '[ "$RC" = 0 ] && grep -qx "MERGED_MAIN pr=11173 head=$STUB_MERGED_SHA pre_head=$SHA main_parent=none patch_id_same=no" <<<"$OUT"'
+
+# ---- CTO REVISE of MoP a9ad5d5d (C0ALZJHGE49 thread 1795830648.379839, ts 1795831628.752089): the carry also needs (a) the merge's main parent to be EXACTLY the probed main (not a
+# descendant) with the pinned PR head as the other parent, and (b) the merged tree to equal a successful `git merge-tree --write-tree <pinned head> <probed main>`. ----
+# Fixtures: a code file where the PR adds checkLease() to directSave(); main edits a far region. clean = the merge nobody touched; moved = the merge puts the same added line in preview().
+mk_carry_repo_lease() { # <name> <clean|moved|desc>
+  REAL_REPO="$T/carry-$1"; mkdir -p "$REAL_REPO"
+  "$REAL_GIT" -C "$REAL_REPO" init -q -b main
+  printf '%s\n' 'function directSave() {' '  write();' '}' 'function preview() {' '  render();' '}' '// tail' 'tail 1' > "$REAL_REPO/code.ts"
+  R_BASE=$(real_commit base)
+  rgit checkout -q -b pr
+  perl -pi -e 's/^  write\(\);$/  checkLease();\n  write();/' "$REAL_REPO/code.ts"
+  R_PRE=$(real_commit 'pr change: directSave() checks the lease')
+  rgit checkout -q main
+  perl -pi -e 's/^tail 1$/tail 1 changed on main/' "$REAL_REPO/code.ts"
+  R_MAINP=$(real_commit 'main change: tail region')
+  R_DESC=""
+  if [ "$2" = desc ]; then R_DESC=$(real_commit 'main descendant (empty): not the probed main'); fi
+  rgit checkout -q pr
+  rgit merge -q --no-ff --no-commit "${R_DESC:-$R_MAINP}" >/dev/null 2>&1 || true
+  if [ "$2" = moved ]; then   # evil merge: checkLease() leaves directSave() and lands in preview(); the zero-context hunk text is unchanged
+    perl -0pi -e 's/  checkLease\(\);\n//; s/(  render\(\);\n)/  checkLease();\n$1/' "$REAL_REPO/code.ts"
+  fi
+  R_MERGED=$(real_commit 'merge main into pr')
+}
+
+echo "case: --merge-only carry (real git) - control: the same code fixture merged cleanly carries"
+mk_carry_repo_lease lease_clean clean
+run_carry carry_lease_clean
+check 'carry_lease_clean: parents are {pinned head, probed main}, the tree equals the clean merge-tree, hunks identical -> patch_id_same=yes, no CARRY_REFUSED' '[ "$RC" = 0 ] && grep -qx "MERGED_MAIN pr=11173 head=$STUB_MERGED_SHA pre_head=$SHA main_parent=$STUB_MAIN_SHA patch_id_same=yes" <<<"$OUT" && ! grep -q "^CARRY_REFUSED" <<<"$OUT"'
+
+echo "case: --merge-only carry (real git) - N1: a merge that moves checkLease() from directSave() to preview() and leaves the same zero-context hunk must REFUSE carry"
+mk_carry_repo_lease lease_moved moved
+HB=$(rgit diff --no-ext-diff --no-textconv --no-renames --binary -U0 --no-color "$R_BASE" "$R_PRE" -- | grep -v -e '^index ' -e '^@@ '); HA=$(rgit diff --no-ext-diff --no-textconv --no-renames --binary -U0 --no-color "$R_MAINP" "$R_MERGED" -- | grep -v -e '^index ' -e '^@@ ')
+check 'carry_lease_moved: fixture proves the literal-hunk check alone is blind (authored hunks byte-identical, parents exact) while the merged tree differs from the clean merge-tree' '[ -n "$HB" ] && [ "$HB" = "$HA" ] && [ "$(rgit rev-list --parents -n 1 "$R_MERGED" | cut -d" " -f2-)" = "$R_PRE $R_MAINP" ] && [ "$(rgit merge-tree --write-tree "$R_PRE" "$R_MAINP" | head -1)" != "$(rgit rev-parse "$R_MERGED^{tree}")" ] && rgit show "$R_MERGED:code.ts" | awk "/^function preview/{f=1} f&&/checkLease/{found=1} END{exit !found}"'
+run_carry carry_lease_moved
+check 'carry_lease_moved: REFUSED (patch_id_same=no) with a CARRY_REFUSED line naming the merge-tree mismatch, exit 0, no dispatch' '[ "$RC" = 0 ] && grep -qx "MERGED_MAIN pr=11173 head=$STUB_MERGED_SHA pre_head=$SHA main_parent=$STUB_MAIN_SHA patch_id_same=no" <<<"$OUT" && grep -q "^CARRY_REFUSED pr=11173 head=$STUB_MERGED_SHA reason=the merged tree .* differs from the clean merge-tree " <<<"$OUT" && ! grep -qE "workflow run|run rerun|--add-label|pr edit" "$STUB_LOG"'
+check 'carry_lease_moved: the carry ran the real merge-tree of the pinned head and the probed main' 'grep -q "merge-tree --write-tree $SHA $STUB_MAIN_SHA" "$STUB_LOG"'
+
+echo "case: --merge-only carry (real git) - N2: the pinned PR plus an unverified descendant of main as the second parent must REFUSE"
+mk_carry_repo_lease lease_desc desc
+check 'carry_lease_desc: fixture proves ONLY the exact-parent condition is violated (descendant of main, same tree as the clean merge, identical hunks)' '[ -n "$R_DESC" ] && [ "$(rgit rev-list --parents -n 1 "$R_MERGED" | cut -d" " -f2-)" = "$R_PRE $R_DESC" ] && rgit merge-base --is-ancestor "$R_MAINP" "$R_DESC" && [ "$R_DESC" != "$R_MAINP" ] && [ "$(rgit merge-tree --write-tree "$R_PRE" "$R_MAINP" | head -1)" = "$(rgit rev-parse "$R_MERGED^{tree}")" ]'
+run_carry carry_lease_desc
+check 'carry_lease_desc: REFUSED (patch_id_same=no, main_parent=none), CARRY_REFUSED names the main parent that is not the probed main, exit 0, no dispatch' '[ "$RC" = 0 ] && grep -qx "MERGED_MAIN pr=11173 head=$STUB_MERGED_SHA pre_head=$SHA main_parent=none patch_id_same=no" <<<"$OUT" && grep -qx "CARRY_REFUSED pr=11173 head=$STUB_MERGED_SHA reason=the main parent $STUB_DESC_SHA is not exactly the probed main $STUB_MAIN_SHA" <<<"$OUT" && ! grep -qE "workflow run|run rerun|--add-label|pr edit" "$STUB_LOG"'
+
+echo "case: --merge-only carry (stubbed git) - an unreadable or unequal merge-tree never carries"
+TREE_CASE=differs S166_CASE=overlap GATE_MODE=none run_script carry_tree_differs --merge-only 11173
+check 'carry_tree_differs: merged tree != clean merge-tree -> patch_id_same=no with the CARRY_REFUSED line, even though the stubbed parents and hunks match' '[ "$RC" = 0 ] && grep -qx "MERGED_MAIN pr=11173 head=$STUB_MERGED_SHA pre_head=$SHA main_parent=$STUB_MAIN_SHA patch_id_same=no" <<<"$OUT" && grep -q "^CARRY_REFUSED .*differs from the clean merge-tree" <<<"$OUT"'
+
+echo "case: static - the carry decision is documented and wired to both conditions"
+check 'pm-admit-ci.sh: the carry requires the exact probed main parent and the clean merge-tree tree, and keeps the literal hunk check' 'grep -q "\"\$MAIN_PARENT\" != \"\$MAIN_SHA\"" "$SCRIPT" && grep -q "merge-tree --write-tree \"\$PRE_MERGE_HEAD\" \"\$MAIN_SHA\"" "$SCRIPT" && grep -q "rev-parse --verify \"\$HEAD^{tree}\"" "$SCRIPT" && grep -q "authored_hunks_of" "$SCRIPT" && ! grep -qE "merge-base --is-ancestor \"\$MAIN_PARENT\"" "$SCRIPT"'
 
 finish

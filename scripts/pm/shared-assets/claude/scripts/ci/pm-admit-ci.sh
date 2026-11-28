@@ -12,7 +12,7 @@
 #  - A plain `pm-admit-ci.sh <PR>` NEVER merges main. When rule 62 says a merge is needed (conflict, file overlap, or a changed trusted CI input) it stops BEFORE any dispatch, label or PR write
 #    with ONE line `NEEDS_MAIN_MERGE pr=<n> reason=<conflict|overlap|ci_input_changed> files=<n>` and exits 20. With no merge needed it admits exactly as before.
 #  - The merge is the separate command `pm-admit-ci.sh --merge-only <PR>`: non-force update-branch pinned to the reviewed head, dispatches NO CI/E2E, verifies the PR's own diff is byte-identical
-#    (literal `git diff --no-ext-diff` hunks, before vs after, byte-compared; no whitespace normalization) and prints `MERGED_MAIN pr=<n> head=<sha> pre_head=<sha> main_parent=<sha> patch_id_same=<yes|no>`, binding the receipt to the pinned PR head and the verified main parent. Re-run plain admission on the resulting head afterwards.
+#    (literal `git diff --no-ext-diff` hunks, before vs after, byte-compared; no whitespace normalization), requires the merged head's parents to be EXACTLY the pinned PR head and the probed origin/main sha (a descendant of it never carries) and its tree to equal `git merge-tree --write-tree <pinned head> <probed main>` (else one `CARRY_REFUSED` line and patch_id_same=no), and prints `MERGED_MAIN pr=<n> head=<sha> pre_head=<sha> main_parent=<sha> patch_id_same=<yes|no>`, binding the receipt to the pinned PR head and the verified main parent. Re-run plain admission on the resulting head afterwards.
 #  - Every other gate (12b, admission round breaker, cap override, MERGE_REF_VERIFIED) is unchanged. Exit 20 = needs main merge.
 # 12b: --check-12b-only <PR> is read-only; --no-12b-gate --reason "<text>" audits an explicit override.
 # Main-red gate REMOVED (Rajiv C0ALZJHGE49 thread 1793958692.281499, ts 1793960417.571149: "remove it outright. note main red flakes have to be rerun. ... the skip pr has to be immediately merged with a followup issue. for affected pr's, merge main and re-admit."). Supersedes DM ts 1791877690.725089. --allow-main-red is still accepted (no-op) for compatibility.
@@ -790,23 +790,47 @@ if [ "$MERGE_ONLY" = 1 ]; then
     out=$(git -C "$MAIN_REPO" diff --no-ext-diff --no-textconv --no-renames --binary -U0 --no-color "$1" "$2" --) || return 1
     printf '%s\n' "$out" | grep -v -e '^index ' -e '^@@ '
   }
-  PATCH_ID_SAME=no   # historical receipt key: now "the PR's authored hunks are byte-identical before and after the merge"
-  CARRY_PRE_HEAD="$PRE_MERGE_HEAD"; CARRY_MAIN_PARENT=none
+  # The carry is allowed ONLY when ALL of these hold (CTO REVISE C0ALZJHGE49 thread 1795830648.379839, ts 1795831628.752089; the literal-hunk check alone is blind to a merge that
+  # moves an authored line to another function and leaves the same zero-context hunk):
+  #   (a) the merged head has exactly two parents: the pinned PR head and EXACTLY the origin/main sha this merge step probed and recorded (MAIN_SHA). A later commit on top of it, or
+  #       any other commit, is not verified and never carries;
+  #   (b) the merged head's tree equals the tree of a successful `git merge-tree --write-tree <pinned PR head> <probed main>` (the merge nobody edited);
+  #   (c) the literal-byte authored-hunk comparison below (no whitespace option) is identical before and after.
+  # Any unreadable state or failed check reports "no" with one CARRY_REFUSED line naming the first failing condition.
+  PATCH_ID_SAME=no   # historical receipt key: now "the carry conditions (a)+(b)+(c) all hold"
+  CARRY_PRE_HEAD="$PRE_MERGE_HEAD"; CARRY_MAIN_PARENT=none; CARRY_REFUSED=""
   MERGE_PARENTS=$(git -C "$MAIN_REPO" rev-list --parents -n 1 "$HEAD" 2>/dev/null | cut -d' ' -f2- || true)
   set -- $MERGE_PARENTS
-  if [ "$#" -eq 2 ]; then
-    MAIN_PARENT=""
+  MAIN_PARENT=""
+  if [ "$#" -ne 2 ]; then
+    CARRY_REFUSED="the merged head is not a two-parent merge"
+  else
     if [ "$1" = "$PRE_MERGE_HEAD" ]; then MAIN_PARENT="$2"; elif [ "$2" = "$PRE_MERGE_HEAD" ]; then MAIN_PARENT="$1"; fi
-    if [ -n "$MAIN_PARENT" ]; then
+    if [ -z "$MAIN_PARENT" ]; then
+      CARRY_REFUSED="the pinned PR head is not a parent of the merged head"
+    elif [ "$MAIN_PARENT" != "$MAIN_SHA" ]; then
+      CARRY_REFUSED="the main parent $MAIN_PARENT is not exactly the probed main $MAIN_SHA"
+    else
       CARRY_MAIN_PARENT="$MAIN_PARENT"
-      OLD_BASE=$(git -C "$MAIN_REPO" merge-base "$MAIN_PARENT" "$PRE_MERGE_HEAD" 2>/dev/null) || OLD_BASE=""
-      if [ -n "$OLD_BASE" ]; then
-        HUNKS_BEFORE=$(authored_hunks_of "$OLD_BASE" "$PRE_MERGE_HEAD" 2>/dev/null) || HUNKS_BEFORE=""
-        HUNKS_AFTER=$(authored_hunks_of "$MAIN_PARENT" "$HEAD" 2>/dev/null) || HUNKS_AFTER=""
-        [ -n "$HUNKS_BEFORE" ] && [ "$HUNKS_BEFORE" = "$HUNKS_AFTER" ] && PATCH_ID_SAME=yes
+      EXPECT_OUT=$(git -C "$MAIN_REPO" merge-tree --write-tree "$PRE_MERGE_HEAD" "$MAIN_SHA" 2>/dev/null) || EXPECT_OUT=""
+      EXPECT_TREE="${EXPECT_OUT%%$'\n'*}"
+      ACTUAL_TREE=$(git -C "$MAIN_REPO" rev-parse --verify "$HEAD^{tree}" 2>/dev/null) || ACTUAL_TREE=""
+      if ! printf '%s' "$EXPECT_TREE" | grep -Eq "$SHA_RE" || ! printf '%s' "$ACTUAL_TREE" | grep -Eq "$SHA_RE"; then
+        CARRY_REFUSED="the clean merge-tree of the pinned head and the probed main is unreadable"
+      elif [ "$EXPECT_TREE" != "$ACTUAL_TREE" ]; then
+        CARRY_REFUSED="the merged tree $ACTUAL_TREE differs from the clean merge-tree $EXPECT_TREE of the pinned head and the probed main"
+      else
+        OLD_BASE=$(git -C "$MAIN_REPO" merge-base "$MAIN_PARENT" "$PRE_MERGE_HEAD" 2>/dev/null) || OLD_BASE=""
+        if [ -n "$OLD_BASE" ]; then
+          HUNKS_BEFORE=$(authored_hunks_of "$OLD_BASE" "$PRE_MERGE_HEAD" 2>/dev/null) || HUNKS_BEFORE=""
+          HUNKS_AFTER=$(authored_hunks_of "$MAIN_PARENT" "$HEAD" 2>/dev/null) || HUNKS_AFTER=""
+          [ -n "$HUNKS_BEFORE" ] && [ "$HUNKS_BEFORE" = "$HUNKS_AFTER" ] && PATCH_ID_SAME=yes
+        fi
+        [ "$PATCH_ID_SAME" = yes ] || CARRY_REFUSED="the PR's authored hunks are not byte-identical before and after the merge"
       fi
     fi
   fi
+  [ -z "$CARRY_REFUSED" ] || echo "CARRY_REFUSED pr=$PR head=$HEAD reason=$CARRY_REFUSED"
   # No CI/E2E is dispatched here: the merged head gets its own admission afterwards (S173: merge-only work needs no CI round).
   echo "MERGED_MAIN pr=$PR head=$HEAD pre_head=$CARRY_PRE_HEAD main_parent=$CARRY_MAIN_PARENT patch_id_same=$PATCH_ID_SAME"
   exit 0
