@@ -1017,7 +1017,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-proxy-launcher",
-      "sha256": "50d86e1fa743980cbf1f4b55ffbd225ac1c1fe717e0fb69224e9569c3c18def2",
+      "sha256": "c4ef22264898268867d17fe3806a3b3baebddfae4ec24df0c9932da7c5aba243",
       "source_path": "claude/scripts/proxy-agent.sh"
     },
     {
@@ -1505,7 +1505,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-claude-codex-app-review-prompts",
-      "sha256": "6215a1138f9f5a03d3c2a5fd4b6125dafd5cf6a81a5dfe434dc7591901e23db0",
+      "sha256": "fbace01f55f8ae2049e86404d330d555054bdf7dd366c3990331a3a647644cb6",
       "source_path": "claude/skills/codex-app-plan-review/templates/prompt.txt"
     },
     {

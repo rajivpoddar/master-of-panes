@@ -1870,6 +1870,8 @@ proxy_agent_tier_models() {
 }
 # Single eligibility predicate for both tier and raw Inkling selections.
 proxy_agent_inkling_eligible() {
+  # Rajiv-approved per-lane override (C0ALZJHGE49 thread 1795708051.426209, ts 1795849435.386649 "can we put it on tess?"): any type may run on Inkling/Tess.
+  [[ "${PROXY_AGENT_INKLING_TYPE_OK:-}" =~ ^rajiv:[0-9]+\.[0-9]+$ ]] && { printf 'proxy-agent: INKLING_TYPE_OVERRIDE %s type=%s\n' "$PROXY_AGENT_INKLING_TYPE_OK" "$TYPE" >&2; return 0; }
   # Unfenced allowed (Rajiv D0AMF0XE6TS thread 1795778423.893189, ts 1795784407.240529 "yes to unfenced allow"): MID builder/QA too; pool cap stays 2.
   proxy_agent_is_judgment_lane && return 1
   [[ "$(proxy_agent_type_level "$TYPE")" == LOW ]] && return 0
