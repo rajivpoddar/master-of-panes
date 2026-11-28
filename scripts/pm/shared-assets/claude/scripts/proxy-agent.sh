@@ -2741,7 +2741,7 @@ proxy_agent_review_cap() {
     pm-admission-reviewer|hd-proof-qa)
       local rc=0
       if [[ -r "$REVIEW_CAP_HELPER" ]]; then
-        python3 -I "$REVIEW_CAP_HELPER" "$1" "$TYPE" "$ROLE_BRIEF" || rc=$?
+        PROXY_REVIEW_CAP_CALLER=proxy-agent python3 -I "$REVIEW_CAP_HELPER" "$1" "$TYPE" "$ROLE_BRIEF" || rc=$?
         [[ "$rc" != 76 ]] || return 76
         [[ "$rc" != 0 ]] || return 0
       fi

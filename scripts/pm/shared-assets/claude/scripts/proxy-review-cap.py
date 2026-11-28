@@ -138,8 +138,21 @@ def check(conn, stage, pr, reserve, debug=False):
     return rc, note, token
 
 
+def reserve_allowed(environ):
+    """A reservation is made only by a launch path: proxy-agent.sh's own launch, or the in-process 12b path.
+
+    A bare manual `reserve` before a proxy launch double-counts the round (phantom round on #15208, 28 Nov).
+    """
+    return environ.get("PROXY_REVIEW_CAP_CALLER") == "proxy-agent" or environ.get("PROXY_REVIEW_CAP_INPROCESS") == "1"
+
+
 def main(mode, agent_type, brief_path):
     stage = STAGES[agent_type]
+    if mode == "reserve" and not reserve_allowed(os.environ):
+        print(f"proxy-agent: MANUAL_RESERVE_FOR_PROXY_LAUNCH stage={stage}; refusing a bare reserve "
+              "(proxy-agent.sh reserves itself at launch; the in-process 12b path sets PROXY_REVIEW_CAP_INPROCESS=1)",
+              file=sys.stderr)
+        return 76
     if "PROXY_AGENT_REVIEW_CAP_OVERRIDE" in os.environ:
         print(f"proxy-agent: REVIEW_CAP_OVERRIDE_DISABLED stage={stage}; "
               "independent approval custody is not available; unset PROXY_AGENT_REVIEW_CAP_OVERRIDE",
