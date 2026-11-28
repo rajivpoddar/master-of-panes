@@ -955,6 +955,13 @@ merge_ref_guard
 # ONE paid round per PR: a later head with a paid round already behind it dispatches NOTHING (exit 21, BOX_ROUND_REQUIRED + the box test list). After the
 # main-integration checks (rule 62 NEEDS_MAIN_MERGE stays first) and before every GitHub write.
 paid_round_gate "$HEAD" || exit "$?"
+# The helper reports this head's own activation still running (rc 0, paid_round_same_head=in_flight): that is ALREADY_ADMITTED whether or not the ci-head label
+# is present. Return BEFORE any label, body or priority write; otherwise an absent label with a live activation falls through to the ci-head label add below
+# and re-arms a second activation (CTO REVISE on MoP 6a6f9f1e, fix 3).
+if [ "$PAID_SAME_HEAD" = in_flight ]; then
+  echo "ALREADY_ADMITTED #$PR at $HEAD (paid-round gate: same-head activation in flight; no label or other write made)"
+  exit 0
+fi
 # Both main-integration checks passed: only now is the closing-reference body write allowed (it is still before every other admission write).
 add_closing_reference
 # Even malformed-label cleanup is a write; don't do it on a refused head.

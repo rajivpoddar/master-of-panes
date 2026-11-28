@@ -215,6 +215,10 @@ if [[ "$*" = *pm-admit-ci-inputs.py* ]]; then   # the trusted-CI-input helper: c
   printf '%b' "${LAG_CI_INPUTS_CHANGED:-}"
   exit 0
 fi
+if [[ "$*" = *pm-admit-paid-round.py* && -n "${PAID_STUB:-}" ]]; then   # PAID_STUB=<none|in_flight|...>: stubs the paid-round helper's answer (its decision logic has its own python test file)
+  printf 'paid-round-stub %s\n' "$PAID_STUB" >> "$STUB_LOG"
+  echo "paid_round: stubbed same-head state"; echo "paid_round_same_head=$PAID_STUB"; exit 0
+fi
 exec "$REAL_PYTHON" "$@"
 EOF
   # --merge-only waits 8s for GitHub's asynchronous update-branch; skip exactly that wait. Every other sleep (the gh stub's hung/late modes) stays real.
@@ -1354,6 +1358,16 @@ check 'carry_lease_desc: REFUSED (patch_id_same=no, main_parent=none), CARRY_REF
 echo "case: --merge-only carry (stubbed git) - an unreadable or unequal merge-tree never carries"
 TREE_CASE=differs S166_CASE=overlap GATE_MODE=none run_script carry_tree_differs --merge-only 11173
 check 'carry_tree_differs: merged tree != clean merge-tree -> patch_id_same=no with the CARRY_REFUSED line, even though the stubbed parents and hunks match' '[ "$RC" = 0 ] && grep -qx "MERGED_MAIN pr=11173 head=$STUB_MERGED_SHA pre_head=$SHA main_parent=$STUB_MAIN_SHA patch_id_same=no" <<<"$OUT" && grep -q "^CARRY_REFUSED .*differs from the clean merge-tree" <<<"$OUT"'
+
+echo "case: paid-round in-flight with the ci-head label ABSENT - ALREADY_ADMITTED before any GitHub write (CTO REVISE on MoP 6a6f9f1e, fix 3)"
+PAID_STUB=in_flight S166_CASE=no_overlap GATE_MODE=exempt run_script paid_inflight_nolabel 11173
+check 'paid_inflight_nolabel: exit 0 with ALREADY_ADMITTED naming the head and the paid-round gate, never a fresh ADMITTED' '[ "$RC" = 0 ] && grep -qx "ALREADY_ADMITTED #11173 at $SHA (paid-round gate: same-head activation in flight; no label or other write made)" <<<"$OUT" && ! grep -q "^ADMITTED" <<<"$OUT"'
+check 'paid_inflight_nolabel: ZERO writes - no label add or create, no pr edit (closing-reference body write), no dispatch or rerun' '! grep -qE "add-label|remove-label|label create|pr edit|workflow run|run rerun|--body-file" "$STUB_LOG"'
+check 'paid_inflight_nolabel: the helper was consulted and reported in_flight' 'grep -qx "paid-round-stub in_flight" "$STUB_LOG"'
+PAID_STUB=none S166_CASE=no_overlap GATE_MODE=exempt run_script paid_none_control 11173
+check 'paid_none_control: with no in-flight activation the same fixture still admits and writes the ci-head label (the early exit is only for in_flight)' '[ "$RC" = 0 ] && grep -q "^ADMITTED" <<<"$OUT" && grep -q -- "--add-label ci-head:$SHA" "$STUB_LOG"'
+GL=$(grep -n 'paid_round_gate "\$HEAD" || exit' "$SCRIPT" | head -1 | cut -d: -f1); FL=$(grep -n 'PAID_SAME_HEAD" = in_flight \]; then$' "$SCRIPT" | head -1 | cut -d: -f1); CL=$(grep -n '^add_closing_reference$' "$SCRIPT" | head -1 | cut -d: -f1)
+check 'pm-admit-ci.sh: the in-flight return sits after paid_round_gate and BEFORE add_closing_reference (the first write)' '[ -n "$GL" ] && [ -n "$FL" ] && [ -n "$CL" ] && [ "$GL" -lt "$FL" ] && [ "$FL" -lt "$CL" ]'
 
 echo "case: static - the carry decision is documented and wired to both conditions"
 check 'pm-admit-ci.sh: the carry requires the exact probed main parent and the clean merge-tree tree, and keeps the literal hunk check' 'grep -q "\"\$MAIN_PARENT\" != \"\$MAIN_SHA\"" "$SCRIPT" && grep -q "merge-tree --write-tree \"\$PRE_MERGE_HEAD\" \"\$MAIN_SHA\"" "$SCRIPT" && grep -q "rev-parse --verify \"\$HEAD^{tree}\"" "$SCRIPT" && grep -q "authored_hunks_of" "$SCRIPT" && ! grep -qE "merge-base --is-ancestor \"\$MAIN_PARENT\"" "$SCRIPT"'

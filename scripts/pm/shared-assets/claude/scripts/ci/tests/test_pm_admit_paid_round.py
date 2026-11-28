@@ -252,7 +252,9 @@ class Selector(unittest.TestCase):
             def fake(cmd, **kw):
                 out = {"clone": "", "checkout": "", "rev-parse": B + "\n", "status": ""}
                 key = next((k for k in ("clone", "checkout", "rev-parse", "status") if k in cmd), None)
-                if "scripts/ci/change_scope.py" in cmd:
+                if "show" in cmd:  # trusted classifier files, read from the pinned origin/main commit (bytes, like the real capture)
+                    return subprocess.CompletedProcess(cmd, 0, b"{}", b"")
+                if "--select-e2e-specs" in cmd:
                     return subprocess.CompletedProcess(cmd, 0, json.dumps({"mode": "none", "reason": "unmapped_path", "specs": []}), "")
                 return subprocess.CompletedProcess(cmd, 0, out.get(key, ""), "")
             run_.side_effect = fake
@@ -355,6 +357,80 @@ class Cli(unittest.TestCase):
         with Stubs([A], {A: one(PAID_JOBS)}, bad_jobs=[A]):
             rc, out = self.main(["gate", "--repo", "o/r", "--pr", str(PR), "--head", B])
         self.assertEqual(rc, 11)
+
+
+class TrustedClassifier(unittest.TestCase):
+    """CTO REVISE on MoP 6a6f9f1e (fix 2): PR-authored classifier code and rules must never execute on the PM host.
+    The selector runs the origin/main copy (git show into a temp dir, isolated, scrubbed env) against the head checkout as data only."""
+
+    TRUSTED = (
+        "import json, os, sys\n"
+        "root = sys.argv[sys.argv.index('--repo-root') + 1]\n"
+        "print(json.dumps({'mode': 'selected', 'reason': 'area', 'specs': [\n"
+        "    'ran_from=trusted-copy',\n"
+        "    'secret=' + ('LEAK' if os.environ.get('MOP_TEST_SECRET') else 'scrubbed'),\n"
+        "    'rules_beside_script=' + str(os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'change-scope-rules.json'))),\n"
+        "    'root_is_checkout_with_pr_file=' + str(os.path.exists(os.path.join(root, 'src/widget.ts'))),\n"
+        "]}))\n"
+    )
+
+    def repo_with_malicious_pr(self, tmp, marker):
+        repo = Path(tmp, "repo")
+        repo.mkdir()
+        sh(repo, "init", "-q", "-b", "main")
+        files = {"README.md": "x", "src/widget.ts": "a0", "scripts/ci/change_scope.py": self.TRUSTED,
+                 "scripts/ci/e2e-functional-areas.json": '{"trusted": true}', "scripts/ci/change-scope-rules.json": '{"trusted": true}'}
+        m = commit(repo, files, "main")
+        sh(repo, "update-ref", "refs/remotes/origin/main", m)
+        sh(repo, "checkout", "-q", "-b", "pr")
+        evil = f"import pathlib\npathlib.Path({str(marker)!r}).write_text('executed from the PR checkout')\nprint('{{\"mode\": \"none\", \"reason\": \"no_area\", \"specs\": []}}')\n"
+        p = commit(repo, {"src/widget.ts": "a1", "scripts/ci/change_scope.py": evil, "scripts/ci/change-scope-rules.json": '{"trusted": false}'}, "pr: evil classifier + rules")
+        return repo, m, p
+
+    def test_pr_authored_classifier_never_runs_and_trusted_main_copy_does(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp, "pr-code-ran")
+            repo, m, p = self.repo_with_malicious_pr(tmp, marker)
+            with mock.patch.dict(os.environ, {"MOP_TEST_SECRET": "s3cret"}):
+                sel = ppr.select_e2e_specs(str(repo), m, p)
+            self.assertFalse(marker.exists(), "the PR checkout's change_scope.py executed on the host")
+        self.assertEqual(sel["status"], "selected")
+        self.assertEqual(sel["specs"], ["ran_from=trusted-copy", "secret=scrubbed", "rules_beside_script=True", "root_is_checkout_with_pr_file=True"])
+
+    def test_selection_reports_trusted_main_sha_and_classifier_hashes(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, m, p = self.repo_with_malicious_pr(tmp, Path(tmp, "never"))
+            sel = ppr.select_e2e_specs(str(repo), m, p)
+        tr = sel["trusted"]
+        self.assertEqual(tr["main_sha"], m)
+        self.assertEqual(tr["classifier"], "origin/main:scripts/ci/change_scope.py")
+        self.assertEqual(tr["sha256"]["change_scope.py"], hashlib.sha256(self.TRUSTED.encode()).hexdigest())
+        self.assertEqual(tr["sha256"]["change-scope-rules.json"], hashlib.sha256(b'{"trusted": true}').hexdigest())  # main's rules, not the PR's
+        text = "\n".join(ppr.e2e_lines(sel, m, p))
+        self.assertIn(f"classifier: trusted origin/main:scripts/ci/change_scope.py @ {m[:12]}", text)
+        self.assertIn("change_scope.py=" + tr["sha256"]["change_scope.py"][:12], text)
+
+    def test_unreadable_trusted_main_is_unresolved_never_falls_back_to_the_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp, "pr-code-ran")
+            repo, m, p = self.repo_with_malicious_pr(tmp, marker)
+            sh(repo, "update-ref", "-d", "refs/remotes/origin/main")
+            sel = ppr.select_e2e_specs(str(repo), m, p)
+            self.assertFalse(marker.exists())
+        self.assertEqual((sel["status"], sel["reason"]), ("unresolved", "trusted_classifier_unavailable"))
+        self.assertIn("SELECT_ON_BOX", "\n".join(ppr.e2e_lines(sel, m, p)))
+
+    def test_gh_token_is_forwarded_only_when_already_set_and_nothing_else_inherits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"GH_TOKEN": "t0ken", "AWS_SECRET_ACCESS_KEY": "x", "PYTHONPATH": "/evil"}, clear=False):
+                env = ppr._trusted_env(tmp)
+            self.assertEqual(env["GH_TOKEN"], "t0ken")
+            self.assertNotIn("AWS_SECRET_ACCESS_KEY", env)
+            self.assertNotIn("PYTHONPATH", env)
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("GH_TOKEN", None)
+                self.assertNotIn("GH_TOKEN", ppr._trusted_env(tmp))
 
 
 if __name__ == "__main__":

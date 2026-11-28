@@ -31,7 +31,10 @@ Override (logged), the ONLY way past a block: PM_ADMIT_PAID_ROUND_OVERRIDE=cto:<
 A PR-authored CI-input change (`.github/workflows/**`, non-test `scripts/ci/**`) is NOT an automatic exception: a second paid pair for it needs that pinned
 authority.  Rule 62's CI-input merge of main (a remote-box step) is decided by the admission integration check, not here.
 
-E2E coverage in the box packet comes from the app repo's change_scope --select-e2e-specs run in a VERIFIED detached checkout of the exact head.
+E2E coverage in the box packet comes from change_scope --select-e2e-specs, run with the TRUSTED classifier (change_scope.py + e2e-functional-areas.json +
+change-scope-rules.json read with `git show` from the pinned app-repo origin/main commit into a fresh temp dir, run isolated with a scrubbed env) against a VERIFIED
+detached checkout of the exact head.  The PR checkout is DATA ONLY: PR-authored classifier code or rules never execute on the PM host (CTO REVISE on MoP 6a6f9f1e).
+The packet names the trusted main sha and the sha256 of the classifier and its rules.
 Only mode=none reason=no_area is a verified "none"; a failure, mode=failed, any other none reason, or an unverified checkout leaves coverage UNRESOLVED
 (SELECT_ON_BOX), never "none selected".  For selected specs the receipt lists each spec's MP4 for Slack review.
 """
@@ -287,12 +290,44 @@ def failing_tests(repo: str, pr: int, paid):
     return tests, jobs_failed
 
 
-def _selection(status: str, mode=None, reason=None, specs=None, detail: str = "") -> dict:
-    return {"status": status, "mode": mode, "reason": reason, "specs": list(specs or []), "detail": detail}
+def _selection(status: str, mode=None, reason=None, specs=None, detail: str = "", trusted=None) -> dict:
+    return {"status": status, "mode": mode, "reason": reason, "specs": list(specs or []), "detail": detail, "trusted": trusted}
+
+
+# The classifier files read from the pinned origin/main commit (all SCRIPT_DIR-relative inside change_scope.py's --select-e2e-specs path).
+TRUSTED_CLASSIFIER_FILES = ("scripts/ci/change_scope.py", "scripts/ci/e2e-functional-areas.json", "scripts/ci/change-scope-rules.json")
+
+
+def _trusted_env(tmp: str) -> dict:
+    """Scrubbed env for the classifier: no inherited secrets or PYTHON*/GIT_* overrides. GH_TOKEN is forwarded ONLY if already set (the selector's read-only capture lookup)."""
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": tmp, "LANG": "C.UTF-8",
+           "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"}
+    if os.environ.get("GH_TOKEN"):
+        env["GH_TOKEN"] = os.environ["GH_TOKEN"]
+    return env
+
+
+def _materialize_trusted_classifier(repo_dir: str, tmp: str) -> dict:
+    """git show the classifier + rules from the pinned origin/main commit into tmp/trusted. -> {sha, dir, script, files: {path: sha256}}. Raises OSError/SubprocessError on any failure."""
+    import hashlib
+    sha = subprocess.run(["git", "-C", str(repo_dir), "rev-parse", "--verify", "origin/main^{commit}"], capture_output=True, text=True, timeout=60)
+    sha_out = sha.stdout.strip()
+    if sha.returncode or not re.fullmatch(r"[0-9a-f]{40}", sha_out):
+        raise OSError("trusted origin/main unresolved")
+    tdir = Path(tmp, "trusted")
+    tdir.mkdir()
+    files = {}
+    for rel in TRUSTED_CLASSIFIER_FILES:
+        shown = subprocess.run(["git", "-C", str(repo_dir), "show", f"{sha_out}:{rel}"], capture_output=True, timeout=60)
+        if shown.returncode or not shown.stdout:
+            raise OSError(f"trusted file unreadable at origin/main {sha_out[:12]}: {rel}")
+        Path(tdir, Path(rel).name).write_bytes(shown.stdout)
+        files[rel] = hashlib.sha256(shown.stdout).hexdigest()
+    return {"sha": sha_out, "dir": str(tdir), "script": str(Path(tdir, "change_scope.py")), "files": files}
 
 
 def select_e2e_specs(repo_dir: str | None, prev: str, head: str, pr: int | None = None) -> dict:
-    """Run the app repo's change_scope --select-e2e-specs in a VERIFIED detached checkout of exactly `head`.
+    """Run the TRUSTED (pinned origin/main) change_scope --select-e2e-specs against a VERIFIED detached checkout of exactly `head` (data only, never executed).
 
     -> {status: selected | verified_none | unresolved, mode, reason, specs, detail}.  Only mode=none reason=no_area is a verified none.
     Any failure (checkout not verified, selector error, mode=failed, any other mode/reason) is `unresolved`, never "none selected"."""
@@ -307,39 +342,52 @@ def select_e2e_specs(repo_dir: str | None, prev: str, head: str, pr: int | None 
                     return _selection("unresolved", reason="checkout_failed", detail=(step.stderr or "").strip()[:200])
             got = subprocess.run(["git", "-C", co, "rev-parse", "HEAD"], capture_output=True, text=True, timeout=30).stdout.strip()
             dirty = subprocess.run(["git", "-C", co, "status", "--porcelain"], capture_output=True, text=True, timeout=60).stdout.strip()
-            if got != head or dirty or not Path(co, "scripts/ci/change_scope.py").exists():
+            if got != head or dirty:
                 return _selection("unresolved", reason="checkout_not_verified", detail=f"head={got[:12]} dirty={bool(dirty)}")
-            cmd = [sys.executable, "-I", "scripts/ci/change_scope.py", "--select-e2e-specs", "--event", "push", "--base", prev, "--head", head,
+            try:
+                trusted = _materialize_trusted_classifier(str(repo_dir), tmp)
+            except (OSError, subprocess.SubprocessError) as exc:
+                return _selection("unresolved", reason="trusted_classifier_unavailable", detail=str(exc)[:200])
+            proof = {"main_sha": trusted["sha"], "classifier": "origin/main:scripts/ci/change_scope.py",
+                     "sha256": {Path(k).name: v for k, v in trusted["files"].items()}}
+            cmd = [sys.executable, "-I", trusted["script"], "--select-e2e-specs", "--event", "push", "--base", prev, "--head", head,
                    "--unit-execution-sha", head, "--unit-workflow-sha", head, "--unit-expected-workflow-sha", head, "--repo-root", co]
             if pr:
                 cmd += ["--pr", str(pr)]
-            proc = subprocess.run(cmd, cwd=co, capture_output=True, text=True, timeout=180)
+            # cwd = the trusted dir, never the PR checkout: the checkout is only read as data via --repo-root.
+            proc = subprocess.run(cmd, cwd=trusted["dir"], env=_trusted_env(tmp), capture_output=True, text=True, timeout=180)
             if proc.returncode:
-                return _selection("unresolved", reason="selector_failed", detail=f"rc={proc.returncode} {(proc.stderr or '').strip()[:200]}")
+                return _selection("unresolved", reason="selector_failed", detail=f"rc={proc.returncode} {(proc.stderr or '').strip()[:200]}", trusted=proof)
             data = json.loads(proc.stdout)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return _selection("unresolved", reason="selector_error", detail=f"{type(exc).__name__}: {exc}"[:200])
     mode, reason, specs = data.get("mode"), data.get("reason"), data.get("specs")
     if mode == "selected" and isinstance(specs, list) and specs:
-        return _selection("selected", mode, reason, [str(s) for s in specs])
+        return _selection("selected", mode, reason, [str(s) for s in specs], trusted=proof)
     if mode == "none" and reason == VERIFIED_NONE_REASON:
-        return _selection("verified_none", mode, reason)
-    return _selection("unresolved", mode, reason, [str(s) for s in specs] if isinstance(specs, list) else [], str(data.get("detail") or ""))
+        return _selection("verified_none", mode, reason, trusted=proof)
+    return _selection("unresolved", mode, reason, [str(s) for s in specs] if isinstance(specs, list) else [], str(data.get("detail") or ""), trusted=proof)
 
 
 def e2e_lines(sel: dict, prev: str, head: str):
-    cmd = f"scripts/ci/change_scope.py --select-e2e-specs --event push --base {prev} --head {head} (run at the head checkout on the box)"
+    cmd = (f"scripts/ci/change_scope.py --select-e2e-specs --event push --base {prev} --head {head} "
+           "(run the TRUSTED origin/main copy of the classifier against the head checkout on the box, never the PR's own copy)")
     status = sel.get("status")
+    tr = sel.get("trusted")
+    proof = []
+    if tr:
+        hashes = " ".join(f"{k}={v[:12]}" for k, v in sorted((tr.get("sha256") or {}).items()))
+        proof = [f"    classifier: trusted {tr.get('classifier')} @ {str(tr.get('main_sha'))[:12]} (PR checkout read as data only; scrubbed env) sha256 {hashes}"]
     if status == "selected":
         out = [f"    specs ({len(sel['specs'])}): " + "; ".join(sel["specs"][:MAX_LIST]) + (f" (+{len(sel['specs']) - MAX_LIST} more)" if len(sel["specs"]) > MAX_LIST else ""),
                "    videos for Slack (one MP4 per spec; the receipt links or lists each path):"]
         out += [f"      {s} -> <mp4 path or artifact link>" for s in sel["specs"][:MAX_LIST]]
-        return out
+        return out + proof
     if status == "verified_none":
-        return [f"    specs: none (verified: mode={sel.get('mode')} reason={sel.get('reason')})"]
+        return [f"    specs: none (verified: mode={sel.get('mode')} reason={sel.get('reason')})"] + proof
     return [f"    specs: UNRESOLVED (mode={sel.get('mode')} reason={sel.get('reason')}"
             + (f" detail={sel['detail']}" if sel.get("detail") else "") + "): coverage is NOT 'none selected'; "
-            + "SELECT_ON_BOX: " + cmd]
+            + "SELECT_ON_BOX: " + cmd] + proof
 
 
 def box_packet(pr: int, head: str, blockers, same, repo: str, repo_dir: str | None, selector=select_e2e_specs):
