@@ -2224,8 +2224,9 @@ proxy_agent_cap_exempt() {
   if [[ -r "${ROLE_BRIEF:-}" ]]; then
     local first=""
     IFS= read -r first < "$ROLE_BRIEF" || true
+    # MODE: ladder = an escalation-ladder run, cap-exempt (Rajiv D0AMF0XE6TS thread 1795825164.773929, ts 1795829620.648699: "A").
     # MODE: admission = a pm-admit-ci.sh run; cap-exempt (Rajiv D0AMF0XE6TS thread 1795825164.773929, ts 1795829108.371699: "the ci admission should be exempt from the cap").
-    if [[ "$1" == claude && "$first" =~ ^MODE:[[:space:]]*(heartbeat|digest|admission)($|[[:space:]]) ]]; then
+    if [[ "$1" == claude && "$first" =~ ^MODE:[[:space:]]*(heartbeat|digest|admission|ladder)($|[[:space:]]) ]]; then
       return 0
     fi
   fi
@@ -2543,6 +2544,12 @@ proxy_agent_select() {
   done
   # Primary burn decision first (covers RAW primaries too): a refused primary returns before any alias usability POST.
   proxy_agent_primary_burn_check || return 75
+  # Rajiv D0AMF0XE6TS thread 1795816379.294849, ts 1795828139.744679 ("B" = use pi for any builder/QA lane under the Inkling cap), with the pi
+  # wrapper command guard in place (option C, pi-lane/claude.bak-20261128-piguard). A tier-picked inkling-2-mini builder/QA lane runs under pi.
+  # PROXY_AGENT_PI_DEFAULT=0 opts out.
+  if [[ "$MODEL" == inkling-2-mini && "${PROXY_AGENT_PI_DEFAULT:-1}" != 0 ]]; then
+    case "$TYPE" in hd-builder|hd-proof-qa) MODEL=pi/inkling-2-mini; MODEL_EXPLICIT=1; SELECT_REASON="${SELECT_REASON}:pi_default";; esac
+  fi
   if [[ "$MODEL" == inkling-2-mini || "$MODEL" == pi/inkling-2-mini ]]; then
     HAIKU_MODEL="$MODEL"; SONNET_MODEL="$MODEL"; OPUS_MODEL="$MODEL"
     return 0
