@@ -468,7 +468,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-ci-admission",
-      "sha256": "cb1cebb39842eab4f53c6a5fd4f684795ca46a4ebef4d6ef2a80fe5b536c1135",
+      "sha256": "d902e23e1f26a62299e05f859f609bdaeb9b8340d68d5e9999fdd1ed7ab98634",
       "source_path": "claude/scripts/ci/pm-admit-ci.sh"
     },
     {
@@ -495,7 +495,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-ci-admission",
-      "sha256": "9cb9f664f068dd18a0a6bba1d09e61ea699dd784d4660b00b804ec4450eac9bb",
+      "sha256": "3d7b4f030f6e7968c292a756be902413b60285c364018dcefcf79c4a249a619a",
       "source_path": "claude/scripts/ci/tests/test-pm-admit-ci.sh"
     },
     {
