@@ -2756,7 +2756,8 @@ proxy_agent_review_cap() {
 proxy_agent_fence_policy() {
   local sb="${PROXY_AGENT_SANDBOX:-}"
   # Inkling is fenced-only until Rajiv approves it for unfenced lanes (ts 1795072640.767149: unfenced = GPT/Claude only). A raw --model skips the tier loop's guard, so refuse here.
-  if [[ "$sb" == 0 && "$(proxy_agent_router_identity "$MODEL")" == inkling-2-mini ]]; then
+  # Stale since Rajiv ts 1795784407.240529 ("yes to unfenced allow"): only refuse types outside proxy_agent_inkling_eligible (Rajiv ts 1795843752.211929: test unfenced Claude Code lanes with real work).
+  if [[ "$sb" == 0 && "$(proxy_agent_router_identity "$MODEL")" == inkling-2-mini ]] && ! proxy_agent_inkling_eligible; then
     printf 'PROXY_AGENT_FAILED reason=unfenced_model_ineligible model=inkling-2-mini type=%s (PROXY_AGENT_SANDBOX=0 allows only GPT/Claude, Rajiv ts 1795072640.767149; Inkling needs Rajiv approval for unfenced lanes)\n' "$TYPE" >&2
     return 2
   fi
