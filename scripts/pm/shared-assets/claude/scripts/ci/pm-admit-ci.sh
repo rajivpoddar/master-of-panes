@@ -12,7 +12,7 @@
 #  - A plain `pm-admit-ci.sh <PR>` NEVER merges main. When rule 62 says a merge is needed (conflict, file overlap, or a changed trusted CI input) it stops BEFORE any dispatch, label or PR write
 #    with ONE line `NEEDS_MAIN_MERGE pr=<n> reason=<conflict|overlap|ci_input_changed> files=<n>` and exits 20. With no merge needed it admits exactly as before.
 #  - The merge is the separate command `pm-admit-ci.sh --merge-only <PR>`: non-force update-branch pinned to the reviewed head, dispatches NO CI/E2E, verifies the PR's own diff is byte-identical
-#    (git patch-id --stable, before vs after) and prints `MERGED_MAIN pr=<n> head=<sha> patch_id_same=<yes|no>`. Re-run plain admission on the resulting head afterwards.
+#    (literal `git diff --no-ext-diff` hunks, before vs after, byte-compared; no whitespace normalization) and prints `MERGED_MAIN pr=<n> head=<sha> pre_head=<sha> main_parent=<sha> patch_id_same=<yes|no>`, binding the receipt to the pinned PR head and the verified main parent. Re-run plain admission on the resulting head afterwards.
 #  - Every other gate (12b, admission round breaker, cap override, MERGE_REF_VERIFIED) is unchanged. Exit 20 = needs main merge.
 # 12b: --check-12b-only <PR> is read-only; --no-12b-gate --reason "<text>" audits an explicit override.
 # Main-red gate REMOVED (Rajiv C0ALZJHGE49 thread 1793958692.281499, ts 1793960417.571149: "remove it outright. note main red flakes have to be rerun. ... the skip pr has to be immediately merged with a followup issue. for affected pr's, merge main and re-admit."). Supersedes DM ts 1791877690.725089. --allow-main-red is still accepted (no-op) for compatibility.
@@ -780,26 +780,35 @@ if [ "$MERGE_ONLY" = 1 ]; then
     echo 'REFUSE: required main merge not confirmed; retry --merge-only or route to slot'; exit 2
   fi
   echo "MAIN_MERGE: performed head=$HEAD reason=$MERGE_REASON files=$MERGE_FILES"
-  # Verify the merge did not change the PR's OWN diff (git patch-id --stable). The head must be a two-parent merge of the pinned pre-merge head and
-  # main; before = the PR's diff against its old merge-base, after = the PR's diff against the merged-in main parent. Any unreadable state reports "no".
-  patch_id_of() { git -C "$MAIN_REPO" diff --no-renames "$1" "$2" -- | git -C "$MAIN_REPO" patch-id --stable | awk '{print $1}'; }
-  PATCH_ID_SAME=no
+  # Verify the merge did not change the PR's OWN change, byte for byte (CTO REVISE C0ALZJHGE49 thread 1795830648.379839, ts 1795830757.685749: `git patch-id --stable`
+  # ignores whitespace, so patches adding "a b" and "ab" got equal ids). The head must be a two-parent merge of the pinned pre-merge head and main; before = the
+  # PR's change against its old merge-base, after = the PR's change against the merged-in main parent. Both are `git diff --no-ext-diff` text with NO whitespace
+  # option, compared as literal bytes. Only the lines that legitimately move when main lands in the same file are dropped: the `index <blob>..<blob>` line and the
+  # `@@ -a,b +c,d @@` hunk headers (-U0 leaves no context lines). Every file header and every +/- line stays exact. Any unreadable state reports "no".
+  authored_hunks_of() {
+    local out
+    out=$(git -C "$MAIN_REPO" diff --no-ext-diff --no-textconv --no-renames --binary -U0 --no-color "$1" "$2" --) || return 1
+    printf '%s\n' "$out" | grep -v -e '^index ' -e '^@@ '
+  }
+  PATCH_ID_SAME=no   # historical receipt key: now "the PR's authored hunks are byte-identical before and after the merge"
+  CARRY_PRE_HEAD="$PRE_MERGE_HEAD"; CARRY_MAIN_PARENT=none
   MERGE_PARENTS=$(git -C "$MAIN_REPO" rev-list --parents -n 1 "$HEAD" 2>/dev/null | cut -d' ' -f2- || true)
   set -- $MERGE_PARENTS
   if [ "$#" -eq 2 ]; then
     MAIN_PARENT=""
     if [ "$1" = "$PRE_MERGE_HEAD" ]; then MAIN_PARENT="$2"; elif [ "$2" = "$PRE_MERGE_HEAD" ]; then MAIN_PARENT="$1"; fi
     if [ -n "$MAIN_PARENT" ]; then
+      CARRY_MAIN_PARENT="$MAIN_PARENT"
       OLD_BASE=$(git -C "$MAIN_REPO" merge-base "$MAIN_PARENT" "$PRE_MERGE_HEAD" 2>/dev/null) || OLD_BASE=""
       if [ -n "$OLD_BASE" ]; then
-        PID_BEFORE=$(patch_id_of "$OLD_BASE" "$PRE_MERGE_HEAD" 2>/dev/null) || PID_BEFORE=""
-        PID_AFTER=$(patch_id_of "$MAIN_PARENT" "$HEAD" 2>/dev/null) || PID_AFTER=""
-        [ -n "$PID_BEFORE" ] && [ "$PID_BEFORE" = "$PID_AFTER" ] && PATCH_ID_SAME=yes
+        HUNKS_BEFORE=$(authored_hunks_of "$OLD_BASE" "$PRE_MERGE_HEAD" 2>/dev/null) || HUNKS_BEFORE=""
+        HUNKS_AFTER=$(authored_hunks_of "$MAIN_PARENT" "$HEAD" 2>/dev/null) || HUNKS_AFTER=""
+        [ -n "$HUNKS_BEFORE" ] && [ "$HUNKS_BEFORE" = "$HUNKS_AFTER" ] && PATCH_ID_SAME=yes
       fi
     fi
   fi
   # No CI/E2E is dispatched here: the merged head gets its own admission afterwards (S173: merge-only work needs no CI round).
-  echo "MERGED_MAIN pr=$PR head=$HEAD patch_id_same=$PATCH_ID_SAME"
+  echo "MERGED_MAIN pr=$PR head=$HEAD pre_head=$CARRY_PRE_HEAD main_parent=$CARRY_MAIN_PARENT patch_id_same=$PATCH_ID_SAME"
   exit 0
 fi
 
@@ -827,8 +836,11 @@ fi
 # Every admitted PR must close its own issue. If closingIssuesReferences is empty, derive exactly one issue number
 # (body "Part of #N" > branch "<type>/<N>-..." > title "(#N)"), add "Closes #N" to the PR body, and read it back.
 # Refuse only when no single issue number can be derived or the readback still shows no closing reference.
+# CTO REVISE (C0ALZJHGE49 thread 1795830648.379839, ts 1795830757.685749): the derivation and its refusals stay here (read-only), but the body WRITE runs only
+# after BOTH main-integration checks (plan_main_merge and merge_ref_guard) pass. A PR that needs a main merge exits 20 before any GitHub write, closing reference included.
 closes_of() { gh_get pr_closes ok gh pr view "$PR" --repo "$REPO" --json closingIssuesReferences --jq '[.closingIssuesReferences[].number]|map(tostring)|join(",")'; }
 CLOSES=$(closes_of) || api_fail pr_closes
+CLOSES_PENDING=""
 if [ -z "$CLOSES" ]; then
   PRMETA=$(gh_get pr_meta ok gh pr view "$PR" --repo "$REPO" --json body,headRefName,title) || api_fail pr_meta
   # A body saying "Part of #N" declares a partial slice: never rewrite it into "Closes #N" (CTO C0ALZJHGE49
@@ -849,6 +861,12 @@ if not c:
     c=set(re.findall(r"\(#(\d+)\)",t))
 print(next(iter(c)) if len(c)==1 else "")')
   [ -n "$CAND" ] || { echo "REFUSE: PR #$PR has no closing issue reference and no single issue number could be derived (add Closes #N; Rajiv ts 1793971953.982729); nothing admitted"; exit 9; }
+  CLOSES_PENDING="$CAND"   # written by add_closing_reference after the main-integration checks
+fi
+# The deferred closing-reference write (see the CTO REVISE note above): the only GitHub write of the gate, called once after plan_main_merge and merge_ref_guard.
+add_closing_reference() {
+  [ -n "$CLOSES_PENDING" ] || return 0
+  local CAND="$CLOSES_PENDING"
   if [ "$DRY" = 1 ]; then echo "DRY RUN: would add 'Closes #$CAND' to PR #$PR body"; else
     NEWBODY=$(printf '%s' "$PRMETA" | CAND="$CAND" python3 -c '
 import json,os,re,sys
@@ -861,8 +879,9 @@ print(b2 if b2!=b else "Closes #"+n+"\n\n"+b)')
     [ -n "$CLOSES" ] || { echo "REFUSE: added 'Closes #$CAND' to PR #$PR but closingIssuesReferences readback is still empty; nothing admitted"; exit 9; }
     echo "closing-reference gate: ADDED 'Closes #$CAND' to PR #$PR body (readback closes #$CLOSES)"
   fi
-fi
-echo "closing-reference gate: closes #${CLOSES:-$CAND}"
+}
+if [ -n "$CLOSES_PENDING" ]; then echo "closing-reference gate: no closing reference; will add 'Closes #$CLOSES_PENDING' after the main-integration checks"
+else echo "closing-reference gate: closes #$CLOSES"; fi
 scope_gate "$H0" || exit 5
 related_tests_gate "$H0" || exit 4
 
@@ -877,6 +896,8 @@ echo "PR #$PR head=$HEAD mergeable=$MERGEABLE"
 # Stale test-merge guard + lagging-ref rule: see merge_ref_guard above. It runs before every admission write (label create, label cleanup,
 # priority mirror, activation label) and exits 3 (stale_merge_ref) on anything it cannot verify.
 merge_ref_guard
+# Both main-integration checks passed: only now is the closing-reference body write allowed (it is still before every other admission write).
+add_closing_reference
 # Even malformed-label cleanup is a write; don't do it on a refused head.
 clean_bad_ci_head_labels
 overlap_start "$HEAD"

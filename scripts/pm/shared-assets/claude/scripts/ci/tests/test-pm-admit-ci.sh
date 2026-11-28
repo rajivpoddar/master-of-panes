@@ -21,6 +21,15 @@ mkstubs() {
   cat > "$T/bin/git" <<'EOF'
 #!/usr/bin/env bash
 printf 'git %s\n' "$*" >> "$STUB_LOG"
+# CARRY_REAL_REPO (merge-only carry cases): the two reads that decide the carry (the merged head's parents and the authored-hunks diff) run REAL git on a real temp repo,
+# so byte-level whitespace is really compared. The fixture shas are translated to the real commits on the way in and back on the way out; every other call stays stubbed.
+if [ -n "${CARRY_REAL_REPO:-}" ]; then
+  case "$*" in *'rev-list --parents -n 1 '*|*'diff --no-ext-diff '*)
+    a=(); for x in "${@:3}"; do x=${x//$STUB_SHA/$R_PRE}; x=${x//$STUB_MERGED_SHA/$R_MERGED}; x=${x//$STUB_MAIN_SHA/$R_MAINP}; x=${x//$STUB_BASE_SHA/$R_BASE}; a+=("$x"); done
+    "$REAL_GIT" -C "$CARRY_REAL_REPO" "${a[@]}" | sed -e "s/$R_PRE/$STUB_SHA/g" -e "s/$R_MERGED/$STUB_MERGED_SHA/g" -e "s/$R_MAINP/$STUB_MAIN_SHA/g" -e "s/$R_BASE/$STUB_BASE_SHA/g"
+    exit "${PIPESTATUS[0]}" ;;
+  esac
+fi
 case "$*" in
   *'fetch -q --no-tags origin +refs/heads/main:'*) [ -z "${FETCH_FAIL:-}" ] ;;   # FETCH_FAIL=1: the inherited-override fetch fails (no inheritance)
   *'fetch -q --no-tags origin refs/pull/'*) [ -f "$STUB_DIR/updated" ] ;;
@@ -46,9 +55,8 @@ case "$*" in
     fi
     [ -n "${S166_CASE:-}" ] || exit 0
     if [[ "$*" = *" $STUB_SHA --" ]] || [ "$S166_CASE" = overlap ]; then printf 'lib/pr.ts\n'; else printf 'lib/main.ts\n'; fi ;;
-  *'diff --no-renames '*)   # patch-id input (MERGED_MAIN check): the PR's own diff; PID_CASE=changed makes the diff against the merged head differ from the pre-merge one
+  *'diff --no-ext-diff '*)   # authored-hunks input (MERGED_MAIN check): the PR's own change; PID_CASE=changed makes the diff against the merged head differ from the pre-merge one
     if [ "${PID_CASE:-same}" = changed ] && [[ "$*" = *" $STUB_MERGED_SHA --" ]]; then printf 'diff: the merge altered the PR diff\n'; else printf 'diff: the PR own change\n'; fi ;;
-  *'patch-id --stable'*) h=$(cksum | cut -d' ' -f1); printf '%s %s\n' "$h" "$STUB_MERGED_SHA" ;;
   *'rev-list --parents -n 1 '*) all="$*"; printf '%s %s %s\n' "${all##* }" "$STUB_SHA" "$STUB_MAIN_SHA" ;;   # the merged head: parents = the pinned pre-merge head, then main
   *'merge-tree --write-tree '*) [ -n "${S166_CASE:-}" ] ;;
   *) exit 1 ;;
@@ -142,7 +150,12 @@ case "$args" in
     printf '{"content":"%s"}\n' "$content" ;;
   "pr view"*"--json state"*) printf 'OPEN\n' ;;
   "pr view"*"--json baseRefName"*) printf 'main\n' ;;
-  "pr view"*"--json closingIssuesReferences"*) printf '11173\n' ;;
+  # CLOSES_CASE=missing: no closing reference until the script edits the PR body (the edit drops $STUB_DIR/closes_added); missing_noderive: the PR also names no issue to derive
+  "pr view"*"--json body,headRefName,title"*)
+    if [ "${CLOSES_CASE:-}" = missing_noderive ]; then printf '{"body":"no issue here","headRefName":"content/2026-11-06-x","title":"plain title"}\n'
+    else printf '{"body":"Fixes the thing.","headRefName":"fix/11173-thing","title":"fix: thing"}\n'; fi ;;
+  "pr view"*"--json closingIssuesReferences"*)
+    if [ -n "${CLOSES_CASE:-}" ] && [ ! -f "$STUB_DIR/closes_added" ]; then printf '\n'; else printf '11173\n'; fi ;;
   "api -X PUT repos/"*"/update-branch -f expected_head_sha=$STUB_SHA")
     [ "${S166_CASE:-}" = overlap ] || [ "${UPDATE_OK:-}" = 1 ] || exit 1   # UPDATE_OK=1: GitHub accepts the update (merge-only CI-input and conflict cases)
     : > "$STUB_DIR/updated" ;;
@@ -164,6 +177,7 @@ case "$args" in
   "pr edit"*|"label create"*)
     # Ordering probe: how many override-consumed records the audit log already held when the ci-head label add (the admission) was issued.
     case "$args" in *"--add-label ci-head:"*) grep -c 'admission-cap-override-consumed=' "$HOME/.claude/logs/pm-admit-skip.log" > "$STUB_DIR/consumed_at_label_add" 2>/dev/null || echo 0 > "$STUB_DIR/consumed_at_label_add" ;; esac
+    case "$args" in *--body-file*) : > "$STUB_DIR/closes_added" ;; esac
     [ "${MODE_WRITE:-ok}" = fail ] && exit 1; exit 0 ;;
   *) exit 1 ;;     # includes any "pr close" / "pr reopen": the script must never call them (it is also logged above, and asserted absent)
 esac
@@ -230,6 +244,7 @@ finish() {
   [ "$FAIL" -eq 0 ]; exit "$?"
 }
 
+REAL_GIT=$(command -v git); export REAL_GIT
 mkstubs; mkdir -p "$T/home/.claude/logs"
 OKLABELS='{"labels":[]}'
 export HM_VALUE="$SHA MERGEABLE" LABELS_JSON="$OKLABELS" MODE_LABELS=ok MODE_HM=ok MODE_WRITE=ok MODE_HEAD=ok
@@ -243,7 +258,7 @@ for fixture in no_overlap overlap; do
     check 'merge-only/no overlap: no update-branch call' '! grep -q update-branch "$STUB_LOG"'
   else
     check 'merge-only/overlap: performed with merged head' '[ "$RC" = 0 ] && grep -qx "MAIN_MERGE: performed head=$STUB_MERGED_SHA reason=overlap files=1" <<<"$OUT"'
-    check 'merge-only/overlap: MERGED_MAIN with the merged head and an unchanged PR diff (patch-id), exit 0, no CI/E2E dispatch' 'grep -qx "MERGED_MAIN pr=11173 head=$STUB_MERGED_SHA patch_id_same=yes" <<<"$OUT" && ! grep -qE "workflow run|run rerun|--add-label|pr edit" "$STUB_LOG"'
+    check 'merge-only/overlap: MERGED_MAIN with the merged head and an unchanged PR diff (authored hunks), exit 0, no CI/E2E dispatch' 'grep -qx "MERGED_MAIN pr=11173 head=$STUB_MERGED_SHA pre_head=$SHA main_parent=$STUB_MAIN_SHA patch_id_same=yes" <<<"$OUT" && ! grep -qE "workflow run|run rerun|--add-label|pr edit" "$STUB_LOG"'
     check 'merge-only/overlap: one update-branch pinned to original head' '[ "$(grep -c update-branch "$STUB_LOG")" = 1 ] && grep -q "update-branch -f expected_head_sha=$SHA$" "$STUB_LOG"'
   fi
   # Fix 2 (Rajiv ts 1795761962.862319): every merge-only outcome prints one MAIN_MERGE_REASON line (rule 62 decision + reason) BEFORE the legacy MAIN_MERGE: line.
@@ -267,9 +282,9 @@ check 'admission/overlap: no merge or dispatch' '! grep -qE "update-branch|pr ed
 S166_CASE=no_overlap GATE_MODE=exempt run_script admission_no_overlap 11173
 check 'rule 62 decision: no conflict and no overlap -> admits (exit 0, ADMITTED, no NEEDS_MAIN_MERGE), and no merge was made' '[ "$RC" = 0 ] && grep -q "^ADMITTED" <<<"$OUT" && ! grep -q NEEDS_MAIN_MERGE <<<"$OUT" && ! grep -q update-branch "$STUB_LOG"'
 check 'rule 62 decision: the three triggers share one stop line shape (conflict/overlap/ci_input_changed) and the exit code 20' 'grep -c "NEEDS_MAIN_MERGE pr=\$PR reason=\$MERGE_REASON files=\$MERGE_FILES\|NEEDS_MAIN_MERGE pr=\$PR reason=ci_input_changed files=" "$SCRIPT" | grep -qx 2 && [ "$(grep -c "exit 20" "$SCRIPT")" -ge 2 ]'
-# The merge command: merges, never dispatches CI/E2E, and reports when the merge altered the PR's own diff (patch-id) so the caller does not trust it blindly.
+# The merge command: merges, never dispatches CI/E2E, and reports when the merge altered the PR's own diff (literal authored hunks) so the caller does not trust it blindly.
 S166_CASE=overlap GATE_MODE=none PID_CASE=changed run_script merge_only_pid_changed --merge-only 11173
-check 'merge command: when the merge changed the PR diff it prints MERGED_MAIN ... patch_id_same=no, exit 0, still no dispatch' '[ "$RC" = 0 ] && grep -qx "MERGED_MAIN pr=11173 head=$STUB_MERGED_SHA patch_id_same=no" <<<"$OUT" && ! grep -qE "workflow run|run rerun|--add-label|pr edit" "$STUB_LOG"'
+check 'merge command: when the merge changed the PR diff it prints MERGED_MAIN ... patch_id_same=no, exit 0, still no dispatch' '[ "$RC" = 0 ] && grep -qx "MERGED_MAIN pr=11173 head=$STUB_MERGED_SHA pre_head=$SHA main_parent=$STUB_MAIN_SHA patch_id_same=no" <<<"$OUT" && ! grep -qE "workflow run|run rerun|--add-label|pr edit" "$STUB_LOG"'
 
 # ---- --merge-only and a changed trusted CI input (PM brief 2026-11-26, ladder pel-mwx1mo05-a904f753) ----
 # Deadlock: a lagging refs/pull/N/merge whose main parent M lacks a changed shared CI input (scripts/ci/change-scope-rules.json, scripts/ci/e2e-functional-areas.json,
@@ -1220,5 +1235,72 @@ check 'pm-admit-ci.sh: no parked refusal remains, and the receipt is stale_merge
 echo "case: static - the script never contains a PR close or reopen"
 check 'pm-admit-ci.sh has no gh pr close/reopen call and no refresh_stale_merge_ref' '! grep -qE "gh pr (close|reopen)|refresh_stale_merge_ref|STALE_MERGE_REF_REFRESHED" "$SCRIPT"'
 check 'pm-admit-ci.sh has no stale-ref polling loop, poll sleep or fail-open WARN, and no compare read' '! grep -qE "STALE_POLL_SLEEP|STALE_REFRESH_WAIT|verify_fresh_merge_ref|STALE_MERGE_REF_RECOMPUTED|stale-merge check unavailable|/compare/.*--jq .status" "$SCRIPT"'
+
+# ---- CTO REVISE of MoP 5332496a (C0ALZJHGE49 thread 1795830648.379839, ts 1795830757.685749) ----
+# Fix 1: the "Closes #N" PR-body write sits BEHIND both main-integration checks. A PR with no closing reference that needs a main merge exits 20 with ZERO GitHub writes.
+echo "case: closing reference missing + overlap -> exit 20, zero GitHub writes (no pr edit, no comment, no label), reference not added"
+S166_CASE=overlap GATE_MODE=exempt CLOSES_CASE=missing run_script closes_missing_overlap 11173
+check 'closes_missing_overlap: exit 20 NEEDS_MAIN_MERGE reason=overlap, nothing admitted' '[ "$RC" = 20 ] && grep -qx "NEEDS_MAIN_MERGE pr=11173 reason=overlap files=1" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT"'
+check 'closes_missing_overlap: the early line says the reference will be added later, and nothing was added' 'grep -q "closing-reference gate: no closing reference; will add" <<<"$OUT" && ! grep -q "closing-reference gate: ADDED" <<<"$OUT" && [ ! -f "$STUB_DIR/closes_added" ]'
+check 'closes_missing_overlap: ZERO GitHub writes (no pr edit, no pr comment, no label write, no merge, no dispatch)' '! grep -qE -- "pr edit|pr comment|issue comment|--add-label|--remove-label|label create|update-branch|workflow run|run rerun|-X (POST|PUT|PATCH|DELETE)" "$STUB_LOG"'
+
+echo "case: closing reference missing + changed trusted CI input (ci_input_changed) -> exit 20, zero GitHub writes"
+LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' LAG_MAIN_FILES='scripts/ci/change_scope.py\n' LAG_CI_INPUTS_CHANGED='scripts/ci/change_scope.py\n' CLOSES_CASE=missing \
+  run_lag closes_missing_ciinput --no-12b-gate --reason 'lagging ref test'
+assert_needs_merge closes_missing_ciinput
+check 'closes_missing_ciinput: the reference was not added and no comment, label or PR write happened' '[ ! -f "$STUB_DIR/closes_added" ] && ! grep -q "closing-reference gate: ADDED" <<<"$OUT" && ! grep -qE -- "pr edit|pr comment|issue comment|--add-label|--remove-label|label create|-X (POST|PUT|PATCH|DELETE)" "$STUB_LOG"'
+
+echo "case: closing reference missing + conflicting merge ref -> exit 20, zero GitHub writes"
+HM_VALUE="$SHA CONFLICTING"; export HM_VALUE
+LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' LAG_MAIN_FILES='lib/main.ts\n' CLOSES_CASE=missing run_lag closes_missing_conflict --no-12b-gate --reason 'lagging ref test'
+HM_VALUE="$SHA MERGEABLE"; export HM_VALUE
+check 'closes_missing_conflict: exit 20 with the reference untouched and zero GitHub writes' '[ "$RC" = 20 ] && [ ! -f "$STUB_DIR/closes_added" ] && ! grep -qE -- "pr edit|pr comment|issue comment|--add-label|--remove-label|label create" "$STUB_LOG"'
+
+echo "case: closing reference missing, no main-integration trigger -> the reference IS added, after both checks, and the PR is admitted"
+S166_CASE=no_overlap GATE_MODE=exempt CLOSES_CASE=missing run_script closes_missing_admit 11173
+check 'closes_missing_admit: exit 0, ADDED line, exactly one body edit, ADMITTED' '[ "$RC" = 0 ] && grep -q "closing-reference gate: ADDED .Closes #11173. to PR #11173 body" <<<"$OUT" && [ "$(grep -c "^gh pr edit .*--body-file" "$STUB_LOG")" = 1 ] && grep -q "^ADMITTED" <<<"$OUT" && [ -f "$STUB_DIR/closes_added" ]'
+check 'closes_missing_admit: the PR-body edit comes after the main-merge decision and the merge-ref guard (output order)' 'a=$(grep -n "^MAIN_MERGE: skipped" <<<"$OUT" | head -1 | cut -d: -f1); g=$(grep -n "^MERGE_REF_VERIFIED" <<<"$OUT" | head -1 | cut -d: -f1); b=$(grep -n "closing-reference gate: ADDED" <<<"$OUT" | head -1 | cut -d: -f1); [ -n "$a" ] && [ -n "$g" ] && [ -n "$b" ] && [ "$a" -lt "$b" ] && [ "$g" -lt "$b" ]'
+
+echo "case: closing reference missing and not derivable -> exit 9, nothing written"
+S166_CASE=overlap GATE_MODE=exempt CLOSES_CASE=missing_noderive run_script closes_noderive 11173
+check 'closes_noderive: exit 9 REFUSE, nothing admitted, zero GitHub writes' '[ "$RC" = 9 ] && grep -q "^REFUSE" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && ! grep -qE -- "pr edit|pr comment|--add-label|label create|update-branch" "$STUB_LOG"'
+
+# Fix 2: the --merge-only carry compares the PR's authored hunks as literal bytes (git diff --no-ext-diff before vs after) and binds the receipt to the pinned head plus the verified main parent.
+# These cases run REAL git (CARRY_REAL_REPO) for the parents lookup and the two diffs; everything else stays stubbed.
+mk_carry_repo() { # <name> <clean|evil_ws>: base, PR head (adds "a b"), main parent (edits another region), merged head (parents: PR head, main)
+  REAL_REPO="$T/carry-$1"; mkdir -p "$REAL_REPO"
+  "$REAL_GIT" -C "$REAL_REPO" init -q -b main
+  seq 1 12 | sed 's/^/line /' > "$REAL_REPO/f.txt"
+  R_BASE=$(real_commit base)
+  rgit checkout -q -b pr
+  perl -pi -e 's/^line 2$/line 2\na b/' "$REAL_REPO/f.txt"
+  R_PRE=$(real_commit 'pr change: add "a b"')
+  rgit checkout -q main
+  perl -pi -e 's/^line 11$/line 11 changed on main/' "$REAL_REPO/f.txt"
+  R_MAINP=$(real_commit 'main change: another region')
+  rgit checkout -q pr
+  rgit merge -q --no-ff --no-commit "$R_MAINP" >/dev/null 2>&1 || true
+  if [ "$2" = evil_ws ]; then perl -pi -e 's/^a b$/ab/' "$REAL_REPO/f.txt"; fi
+  R_MERGED=$(real_commit 'merge main into pr')
+}
+run_carry() { local name="$1"; shift; S166_CASE=overlap GATE_MODE=none CARRY_REAL_REPO="$REAL_REPO" R_BASE="$R_BASE" R_PRE="$R_PRE" R_MAINP="$R_MAINP" R_MERGED="$R_MERGED" run_script "$name" --merge-only 11173; }
+
+echo "case: --merge-only carry (real git) - a clean merge of main carries; main edited another region of the same file"
+mk_carry_repo clean clean
+run_carry carry_real_clean
+check 'carry_real_clean: MERGED_MAIN carries (patch_id_same=yes) bound to the pinned pre-merge head and the verified main parent, exit 0' '[ "$RC" = 0 ] && grep -qx "MERGED_MAIN pr=11173 head=$STUB_MERGED_SHA pre_head=$SHA main_parent=$STUB_MAIN_SHA patch_id_same=yes" <<<"$OUT"'
+check 'carry_real_clean: literal-byte diffs (git diff --no-ext-diff, no whitespace option), no patch-id, no CI dispatch' 'grep -q "diff --no-ext-diff --no-textconv --no-renames --binary -U0" "$STUB_LOG" && ! grep -qE "patch-id|ignore-(all-)?space|ignore-space-change" "$STUB_LOG" && ! grep -qE "workflow run|run rerun|--add-label|pr edit" "$STUB_LOG"'
+
+echo "case: --merge-only carry (real git) - counterexample: the merge turned the PR's added \"a b\" into \"ab\" (equal git patch-id --stable): REFUSED to carry"
+mk_carry_repo evil evil_ws
+PIDB=$(rgit diff "$R_BASE" "$R_PRE" -- | "$REAL_GIT" patch-id --stable | cut -d' ' -f1); PIDA=$(rgit diff "$R_MAINP" "$R_MERGED" -- | "$REAL_GIT" patch-id --stable | cut -d' ' -f1)
+check 'carry_real_evil: fixture proves the old check was blind (git patch-id --stable gives EQUAL ids for "a b" vs "ab")' '[ -n "$PIDB" ] && [ "$PIDB" = "$PIDA" ]'
+run_carry carry_real_evil
+check 'carry_real_evil: MERGED_MAIN reports patch_id_same=no (no carry) with the same binding, exit 0, no dispatch' '[ "$RC" = 0 ] && grep -qx "MERGED_MAIN pr=11173 head=$STUB_MERGED_SHA pre_head=$SHA main_parent=$STUB_MAIN_SHA patch_id_same=no" <<<"$OUT" && ! grep -qE "workflow run|run rerun|--add-label|pr edit" "$STUB_LOG"'
+
+echo "case: --merge-only carry (real git) - the merged head is not a merge of the pinned pre-merge head: no carry, main parent unbound"
+mk_carry_repo wrongparent clean
+R_PRE="$R_BASE"; run_carry carry_real_wrongparent
+check 'carry_real_wrongparent: patch_id_same=no and main_parent=none (the pinned head is not a parent of the merged head)' '[ "$RC" = 0 ] && grep -qx "MERGED_MAIN pr=11173 head=$STUB_MERGED_SHA pre_head=$SHA main_parent=none patch_id_same=no" <<<"$OUT"'
 
 finish
