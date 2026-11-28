@@ -1,4 +1,6 @@
-"""Exercise both admission CLIs against a local Git remote, with no GitHub writes."""
+"""Exercise the PM admission CLI and the CTO main-integration helper against a local Git remote, with no GitHub writes.
+
+CI/E2E admission is PM-owned (Rajiv ts 1795848120.047269): admit.py must refuse to dispatch and only integrates main."""
 
 import json
 import os
@@ -83,7 +85,7 @@ def stub_gh(args):
         elif "/compare/" in path:
             base = git("-C", origin, "merge-base", main, head)
             print(json.dumps({"merge_base_commit": {"sha": base}}))
-        elif "/actions/workflows/" in path:
+        elif "/actions/workflows/" in path or "/actions/runs?" in path:
             print('[{"workflow_runs":[]}]')
         elif path.endswith(f"/issues/{PR}/events?per_page=100"):
             rounds = int(os.environ["ADMISSION_ROUNDS"])
@@ -106,7 +108,7 @@ def stub_gh(args):
 
 class AdmissionMainIntegrationTests(unittest.TestCase):
     def run_cli(self, lane, scenario, no_update, *, rounds=0, override=None, wrong_head=False,
-                audit_available=True, apply=True):
+                audit_available=True, apply=True, integrate_only=False):
         with tempfile.TemporaryDirectory(prefix="mop-admission-fixture-") as directory:
             root = Path(directory)
             origin, checkout, bin_dir = (root / name for name in ("origin", "checkout", "bin"))
@@ -160,11 +162,14 @@ class AdmissionMainIntegrationTests(unittest.TestCase):
             if lane == "pm":
                 # Stub only the independent 12b check; execute the unmodified admission CLI bytes.
                 shutil.copyfile(PM, root / PM.name)
-                shutil.copyfile(PM.with_name("pm-admit-cap.py"), root / "pm-admit-cap.py")
+                for helper in ("pm-admit-cap.py", "pm-admit-paid-round.py", "pm-admit-verdict.py"):
+                    shutil.copyfile(PM.with_name(helper), root / helper)
                 (root / "pm-admit-12b.py").write_text("print('12B_GATE: PASS fixture')\n")
                 cmd = ["bash", str(root / PM.name), PR]
             else:
                 cmd = [sys.executable, "-I", str(CTO), "--pr", PR, "--head", old]
+                if integrate_only:
+                    cmd += ["--integrate-only"]
                 if apply:
                     cmd += ["--apply"]
                 if override is not None:
@@ -179,82 +184,80 @@ class AdmissionMainIntegrationTests(unittest.TestCase):
                 local_git("-C", str(origin), "merge-base", "--is-ancestor", main, final)
             return result, old, final, effects
 
-    def test_cto_cap_refusals_do_not_write(self):
+    def test_cto_helper_refuses_to_dispatch_ci(self):
+        """admit.py never labels or caps: every non-integrate-only invocation is refused before any read or write."""
         approval = "cto:1700000000.000001"
         cases = [
-            ("disjoint", "cap_reached", {"rounds": 2}),
-            ("overlap", "cap_reached", {"rounds": 2}),  # Refuse before a branch push too.
-            ("disjoint", "cap_reached", {"rounds": 2, "apply": False}),
-            ("disjoint", "ADMISSION_CAP_OVERRIDE_HEAD_MISMATCH",
-             {"rounds": 2, "override": approval, "wrong_head": True}),
-            ("disjoint", "UNAVAILABLE", {"rounds": -1}),
-            ("disjoint", "UNAVAILABLE", {"rounds": -1, "override": approval}),
-            ("disjoint", "ADMISSION_CAP_OVERRIDE_AUDIT_UNAVAILABLE",
-             {"rounds": 2, "override": approval, "audit_available": False}),
+            ("disjoint", {}),
+            ("overlap", {}),
+            ("disjoint", {"apply": False}),
+            ("overlap", {"apply": False}),
+            ("disjoint", {"rounds": 2}),
+            ("disjoint", {"override": approval}),
+            ("disjoint", {"override": approval, "wrong_head": True}),
+            ("disjoint", {"rounds": -1}),
         ]
-        for scenario, reason, kwargs in cases:
-            with self.subTest(scenario=scenario, reason=reason, options=kwargs):
-                result, old, final, effects = self.run_cli("cto", scenario, False, **kwargs)
-                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-                receipt = json.loads(result.stdout)
-                self.assertEqual(receipt["status"], "REFUSED")
-                self.assertIn(reason, receipt["reason"])
-                if reason == "cap_reached":
-                    self.assertIn("rounds=2 cap=2", receipt["reason"])
-                self.assertEqual(final, old)
-                self.assertEqual(effects, [])
+        for scenario, kwargs in cases:
+            for no_update in (False, True):
+                with self.subTest(scenario=scenario, options=kwargs, no_update=no_update):
+                    result, old, final, effects = self.run_cli("cto", scenario, no_update, **kwargs)
+                    self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                    receipt = json.loads(result.stdout)
+                    self.assertEqual(receipt["status"], "REFUSED")
+                    self.assertIn("CI_ADMISSION_OWNED_BY_PM", receipt["reason"])
+                    self.assertIn("pm-admit-ci.sh", receipt["reason"])
+                    self.assertEqual(final, old)
+                    self.assertEqual(effects, [])
 
-    def test_cto_pinned_override_is_audited_before_writing(self):
-        approval = "rajiv:1700000000.000002"
-        result, old, final, effects = self.run_cli("cto", "disjoint", False, rounds=2, override=approval)
+    def test_cto_integrate_only_never_writes_a_label(self):
+        """Merge-only functions stay intact: integrate-only integrates an overlapping head and labels nothing."""
+        result, old, final, effects = self.run_cli("cto", "overlap", False, integrate_only=True)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(json.loads(result.stdout)["status"], "ADMISSION_REQUESTED")
+        self.assertEqual(json.loads(result.stdout)["status"], "MAIN_INTEGRATED")
+        self.assertNotEqual(final, old)
+        self.assertEqual(effects, [["integration", final]])
+        result, old, final, effects = self.run_cli("cto", "disjoint", False, integrate_only=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["status"], "MAIN_INTEGRATION_NOT_REQUIRED")
         self.assertEqual(final, old)
-        self.assertEqual(len(effects), 3, effects)
-        name, audit = effects[0]
-        self.assertEqual(name, "audit-before-label")
-        self.assertEqual({k: v for k, v in audit.items() if k != "ts"},
-                         {"repo": REPO, "pr": int(PR), "head": old,
-                          "admission-cap-override": approval, "rounds": 2})
-        self.assertEqual(effects[1][:3], ["label", "create", f"ci-head:{old}"])
-        self.assertEqual(effects[2], ["add-ci-label", f"ci-head:{old}"])
+        self.assertEqual(effects, [])
+        result, old, final, effects = self.run_cli("cto", "disjoint", False, integrate_only=True, apply=False)
+        self.assertEqual(json.loads(result.stdout)["status"], "READY_TO_ADMIT")
+        self.assertEqual(effects, [])
 
-    def test_admission_only_labels_a_head_with_a_clean_or_confirmed_plan(self):
-        for lane in ("pm", "cto"):
-            for scenario in ("disjoint", "overlap", "conflict", "reported_conflict", "probe_error", "unconfirmed"):
-                if lane == "cto" and scenario == "unconfirmed":
-                    continue  # Only the GitHub update endpoint accepts asynchronously.
-                for no_update in (False, True):
-                    with self.subTest(lane=lane, scenario=scenario, no_update=no_update):
-                        result, old, final, effects = self.run_cli(lane, scenario, no_update)
-                        output = result.stdout + result.stderr
-                        labels = [e for e in effects if e[:2] in (["label", "create"], ["pr", "edit"])
-                                  or e[0] == "add-ci-label"]
-                        if scenario == "disjoint" or (scenario == "overlap" and not no_update):
-                            self.assertEqual(result.returncode, 0, output)
-                            added = [e[-1] if e[0] == "add-ci-label" else e[e.index("--add-label") + 1]
-                                     for e in labels if e[0] == "add-ci-label" or "--add-label" in e]
-                            self.assertEqual(added, [f"ci-head:{final}"], effects)
-                            if scenario == "disjoint":
-                                self.assertEqual(final, old, effects)
-                                self.assertEqual(effects, labels)  # No integration attempt.
-                            else:
-                                self.assertNotEqual(final, old, effects)
-                                self.assertIn(["integration", final], effects)
-                                self.assertLess(effects.index(["integration", final]), effects.index(labels[0]))
-                        else:
-                            self.assertEqual(result.returncode, 2, output)
-                            self.assertRegex(output, {
-                                "overlap": "--no-update",
-                                "conflict": "conflict|CONFLICT",
-                                "reported_conflict": "conflict|CONFLICT",
-                                "probe_error": "probe failed|MAIN_MERGE_PROBE_FAILED",
-                                "unconfirmed": "merge not confirmed|--no-update",
-                            }[scenario])
+    def test_pm_admission_only_labels_a_head_with_a_clean_or_confirmed_plan(self):
+        for scenario in ("disjoint", "overlap", "conflict", "reported_conflict", "probe_error", "unconfirmed"):
+            for no_update in (False, True):
+                with self.subTest(scenario=scenario, no_update=no_update):
+                    result, old, final, effects = self.run_cli("pm", scenario, no_update)
+                    output = result.stdout + result.stderr
+                    labels = [e for e in effects if e[:2] in (["label", "create"], ["pr", "edit"])
+                              or e[0] == "add-ci-label"]
+                    if scenario == "disjoint" or (scenario == "overlap" and not no_update):
+                        self.assertEqual(result.returncode, 0, output)
+                        added = [e[-1] if e[0] == "add-ci-label" else e[e.index("--add-label") + 1]
+                                 for e in labels if e[0] == "add-ci-label" or "--add-label" in e]
+                        self.assertEqual(added, [f"ci-head:{final}"], effects)
+                        if scenario == "disjoint":
                             self.assertEqual(final, old, effects)
-                            self.assertEqual(labels, [], effects)
-                            if no_update:
-                                self.assertEqual(effects, [])
+                            self.assertEqual(effects, labels)  # No integration attempt.
+                        else:
+                            self.assertNotEqual(final, old, effects)
+                            self.assertIn(["integration", final], effects)
+                            self.assertLess(effects.index(["integration", final]), effects.index(labels[0]))
+                    else:
+                        self.assertEqual(result.returncode, 2, output)
+                        self.assertRegex(output, {
+                            "overlap": "--no-update",
+                            "conflict": "conflict|CONFLICT",
+                            "reported_conflict": "conflict|CONFLICT",
+                            "probe_error": "probe failed|MAIN_MERGE_PROBE_FAILED",
+                            "unconfirmed": "merge not confirmed|--no-update",
+                        }[scenario])
+                        self.assertEqual(final, old, effects)
+                        self.assertEqual(labels, [], effects)
+                        if no_update:
+                            self.assertEqual(effects, [])
 
 
 if __name__ == "__main__":

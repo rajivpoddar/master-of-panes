@@ -497,7 +497,7 @@ def resolve_pr_issue_from_metadata(pr: dict[str, Any], *, pr_number: int = 0) ->
     raise RuntimeError("cannot resolve implementation issue from read-only PR metadata")
 
 
-EXPECTED_CHANGE_SCOPE_RULES_SHA256 = "dfd770c1b30706d3d7701ee6ed98a41bfba878458784b9b4026ea397c0be2c2c"
+CHANGE_SCOPE_RULES_RELPATH = "scripts/ci/change-scope-rules.json"
 ALLOWED_CHANGE_SCOPE_SCOPES = {
     "control_plane_only",
     "mixed",
@@ -506,13 +506,33 @@ ALLOWED_CHANGE_SCOPE_SCOPES = {
 }
 
 
-def validate_change_scope(scope: Any, *, expected_head: str) -> dict[str, Any]:
+def change_scope_rules_sha256(repo_root: Path | None = None) -> str:
+    """Return the sha256 of the rules file the classifier loads from this checkout.
+
+    ``scripts/ci/change_scope.py`` defaults its rules to the sibling
+    ``change-scope-rules.json`` and reports the sha256 of the raw bytes it
+    loaded. The gate runs that same classifier from ``REPO_ROOT``, so hashing the
+    same file structurally detects a classifier/rules mismatch without a
+    hand-kept pin that every rules edit would have to bump. Unreadable rules
+    fail closed.
+    """
+    path = (repo_root if repo_root is not None else REPO_ROOT) / CHANGE_SCOPE_RULES_RELPATH
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        raise RuntimeError(f"change_scope rules file unreadable: {path}") from exc
+
+
+def validate_change_scope(
+    scope: Any, *, expected_head: str, rules_sha256: str | None = None
+) -> dict[str, Any]:
     """Validate the co-deployed exact-head classifier before any issue lookup.
 
     The classifier is an authority boundary, not a hint. A missing, stale,
     malformed, empty, or rules-drifted result cannot grant the non-UI
-    exemption. The rules digest is pinned to the authoritative app-origin
-    classifier release that supplies this gate.
+    exemption. The reported rules digest must equal the digest of the rules
+    file in the same checkout the classifier ran from (``rules_sha256``,
+    computed from ``REPO_ROOT`` when omitted).
     """
     if not isinstance(scope, dict):
         raise RuntimeError("change_scope returned a non-object result")
@@ -526,7 +546,10 @@ def validate_change_scope(scope: Any, *, expected_head: str) -> dict[str, Any]:
             f"change_scope head mismatch expected={expected_head} "
             f"actual={observed_head or 'missing'}"
         )
-    if scope.get("rules_sha256") != EXPECTED_CHANGE_SCOPE_RULES_SHA256:
+    loaded_rules_sha256 = (
+        rules_sha256 if rules_sha256 is not None else change_scope_rules_sha256()
+    )
+    if scope.get("rules_sha256") != loaded_rules_sha256:
         raise RuntimeError("change_scope rules digest mismatch")
     changed_files = scope.get("changed_files")
     if (
@@ -979,7 +1002,7 @@ def live_evaluate(args: argparse.Namespace) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pr", type=int, required=True)
-    parser.add_argument("--repo", default="Scribie/heydonna-app")
+    parser.add_argument("--repo", default="heydonna-app/heydonna-app")
     parser.add_argument("--expect-head", default="")
     parser.add_argument("--skip-artifact-availability", action="store_true")
     parser.add_argument("--json", action="store_true")

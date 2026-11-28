@@ -468,7 +468,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-ci-admission",
-      "sha256": "8d75bdeb95fca9e4059c1636aef3e02a1f7ea81a107813ca2918d92080c43778",
+      "sha256": "74240aee3972fccdd03467e45654540af337e2213d5ded1a31f20a420dba263d",
       "source_path": "claude/scripts/ci/pm-admit-ci.sh"
     },
     {
@@ -477,7 +477,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-ci-admission",
-      "sha256": "78f358111a53bf02291dbef8d07ca762f11c77f9966d96d311f1e86358374d1d",
+      "sha256": "8c737a71f9c0a2390f843f720196f46a24c25795f7a758dc864fb6a16fff34dc",
       "source_path": "claude/scripts/ci/pm-admit-paid-round.py"
     },
     {
@@ -522,7 +522,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-ci-admission",
-      "sha256": "def75454a1a70397e59c93d517e06b2aa0e90f7901797a1fa784e0eb8857b255",
+      "sha256": "0365afe4031ec3d020429987b7a2e7d8c3459496dbbff33f802f2ceec72ad9df",
       "source_path": "claude/scripts/ci/tests/test_pm_admit_paid_round.py"
     },
     {
@@ -900,7 +900,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-hourly-heartbeat",
-      "sha256": "4500e6cfcc2d25b73dace9479a439a63feab272767d87e525d2b61fe6da0458e",
+      "sha256": "0db2f4e0f281f7a38b8a4cc62edbc0c4593851f0f5988d71187497dab3a2dd45",
       "source_path": "claude/scripts/pm/heartbeat/heartbeat-compose.py"
     },
     {
@@ -1119,7 +1119,7 @@
       "dependency_status": "closed",
       "mode": 493,
       "ownership_class": "shared-claude-qa-visual-proof-gate",
-      "sha256": "0d4629a55ff9f980d376820c31058c759ab7c93ab660c0b53e4c25f6b0a88657",
+      "sha256": "c2d085324a3d120a325c4160f23522027b07e600ca18abf7384e93858d35ac41",
       "source_authority": {
         "blob_sha": "fd3604644ad9bb48c4cf06f6eb99e4abcf508693",
         "commit": "26c592065a1584bfdd6bc7ba0272149c5ed88612",
@@ -2214,7 +2214,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill",
-      "sha256": "87d551f9daaa4afb238a7185e08f4fc5635c6bef221d95119ed583640a999fab",
+      "sha256": "12c367afe8c3f44bc67bfdbfa5351c43569f343d9e5d83870c0fd294693f35f2",
       "source_path": "codex/skills/heydonna-cto-label-gated-ci/SKILL.md"
     },
     {
@@ -2223,7 +2223,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill-executable",
-      "sha256": "7603496365a50d65c0ddd60ac683991379472d3649e5d5f8138a192584f6a8ee",
+      "sha256": "dd1dada7d91c57cd128c8aed3f3afdaf4bcc6f849316dab4627c184a4f3f9762",
       "source_path": "codex/skills/heydonna-cto-label-gated-ci/scripts/admit.py"
     },
     {
@@ -2232,7 +2232,7 @@
       "dependency_status": "closed",
       "mode": 420,
       "ownership_class": "shared-codex-skill-test",
-      "sha256": "cac4ba9573e185d941ddc8234cfacaa2d8b026b828807505caae0cd23b714bcb",
+      "sha256": "294adb5d6b56e605e77dcc063ed3e9c61f246f669e62bb2c4e3817ea922b8170",
       "source_path": "codex/skills/heydonna-cto-label-gated-ci/scripts/test_admit_fetch_timeout.py"
     },
     {

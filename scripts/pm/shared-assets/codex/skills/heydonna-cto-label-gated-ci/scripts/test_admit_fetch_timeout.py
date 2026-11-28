@@ -275,8 +275,22 @@ def t8_duplicate_semantics_unchanged(mod):
         raise AssertionError(argv)
 
     mod.command = fake
-    out = mod.admit(7941, HEAD, apply=True)
+    # CI admission is PM-owned (Rajiv ts 1795848120.047269); the CTO helper only integrates main, so duplicate detection runs in --integrate-only.
+    out = mod.admit(7941, HEAD, apply=True, integrate_only=True)
     assert out["status"] == "ALREADY_ADMITTED" and out["head"] == HEAD, out
+
+
+def t9_admission_is_refused_for_the_cto_helper(mod):
+    calls = []
+    mod.command = lambda *a, **k: calls.append(a) or ""
+    for kwargs in ({}, {"apply": True}, {"no_update": True}):
+        try:
+            mod.admit(7941, HEAD, **kwargs)
+        except mod.Refusal as exc:
+            assert "CI_ADMISSION_OWNED_BY_PM" in str(exc), exc
+        else:
+            raise AssertionError(f"admit({kwargs}) dispatched instead of refusing")
+    assert calls == [], calls  # refused before any GitHub read or write
 
 
 def with_env(fn):

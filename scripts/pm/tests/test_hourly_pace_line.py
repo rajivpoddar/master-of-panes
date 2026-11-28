@@ -973,3 +973,37 @@ def test_compact_report_never_folds_bullets_onto_a_pipe_table_row():
     assert [l for l in folded.splitlines() if l.startswith('|')] == ['| A | B |', '|---|---|', '| x | y |']
     assert '• stray one' in folded and '• stray two' in folded           # skipped, never merged into the table row
     assert '*Next:* (2 items): • keep one; +1 more' in folded            # other runs still fold as before
+
+
+# --- Ultra "Runs out at" uses a recent window (PM addendum heydonna-app-79, 28 Nov) -------------------------------------
+ULTRA = 'claude:ultra-dev:weekly'
+ULTRA_OTHER = 'claude:ultra-other:weekly'
+
+
+def _ultra(tmp_path, rows, now):
+    return composer._ultra_pace_read(_at(now), snapshot=_write_log(tmp_path / 'ultra.jsonl', rows),
+                                     caps_file=tmp_path / 'caps.env')
+
+
+def test_ultra_burn_uses_trailing_3h_not_weekly_average(tmp_path):
+    now = BASE + 71 * H
+    rows = [(BASE, ULTRA, 0.0), (now - 3 * H, ULTRA, 40.0), (now, ULTRA, 50.0)]   # slow week, fast last 3h
+    data = _ultra(tmp_path, rows, now)
+    assert data['hours'] == 3.0 and abs(data['rate'] - 10 / 3) < 1e-9             # not 50/71
+    assert data['t']['verdict'] == 'ABOVE' and 'runs out' in data['t']['detail']
+
+
+def test_ultra_short_history_uses_oldest_row_and_flags_thin(tmp_path):
+    now = BASE + 2 * H
+    data = _ultra(tmp_path, [(BASE, ULTRA, 10.0), (now, ULTRA, 12.0)], now)
+    assert data['hours'] == 2.0 and data['thin'] is True
+
+
+def test_ultra_recent_window_never_mixes_accounts_or_weekly_windows(tmp_path):
+    now = BASE + 10 * H
+    rows = [(now - 3 * H, ULTRA_OTHER, 90.0),                         # other account at the baseline instant
+            (now - 3 * H - 60, ULTRA, 20.0),                          # same account, same window: the baseline
+            (now - 3 * H + 60, ULTRA, 21.0, WINDOW - 7 * 86400),      # same account, an old weekly window
+            (now, ULTRA, 23.0)]
+    data = _ultra(tmp_path, rows, now)
+    assert abs(data['hours'] - (3 * H + 60) / H) < 1e-9 and abs(data['rate'] - 3 / ((3 * H + 60) / H)) < 1e-9

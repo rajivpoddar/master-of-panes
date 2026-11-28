@@ -844,13 +844,19 @@ fi
 
 # ONE paid CI/E2E round per PR (Rajiv C0ALZJHGE49 thread 1795841629.732639, ts 1795845160.422969 + ts 1795845739.605399:
 # "yes, admin merge after testing with remote box. the qa videos should be posted to slack for review"). Decision + box list: pm-admit-paid-round.py.
-# rc 0 dispatch (first paid round, same head, CI-input delta, or logged PM_ADMIT_PAID_ROUND_OVERRIDE); rc 21 BOX_ROUND_REQUIRED (nothing dispatched or written).
+# rc 0 dispatch (no earlier paid, queued or unresolved activation; this head's own activation still in flight; or logged PM_ADMIT_PAID_ROUND_OVERRIDE);
+# rc 21 BOX_ROUND_REQUIRED / PAID_ROUND_UNRESOLVED (nothing dispatched or written; a COMPLETED same-head activation is blocked too, so the re-arm below
+# can never start a second paid pair without the pinned override). This is the ONLY CI/E2E dispatch path: admit.py refuses (PM owns admission).
+# Sets PAID_SAME_HEAD (none|idle|in_flight|completed_paid|unresolved) from the helper's last line for the same-head block below.
+PAID_SAME_HEAD=none
 paid_round_gate() {
-  local head="$1" out rc=0 dry=""
+  local head="$1" out rc=0 dry="" state
   [ "$DRY" = 1 ] && dry="--dry-run"
   git -C "$MAIN_REPO" fetch -q --no-tags origin "refs/pull/$PR/head" main >/dev/null 2>&1 || true
   out=$(python3 -I "$SCRIPT_DIR/pm-admit-paid-round.py" gate --repo "$REPO" --pr "$PR" --head "$head" --repo-dir "$MAIN_REPO" $dry) || rc=$?
   [ -z "$out" ] || printf '%s\n' "$out"
+  state=$(printf '%s\n' "$out" | sed -n 's/^paid_round_same_head=//p' | tail -n 1)
+  [ -z "$state" ] || PAID_SAME_HEAD="$state"
   case "$rc" in
     0) return 0 ;;
     21) return 21 ;;
@@ -995,6 +1001,8 @@ done
 if printf '%s' "$LJ" | jq -e --arg l "$L" '.labels[].name|select(.==$l)' >/dev/null 2>&1; then
   INFLIGHT=$(gh run list --repo "$REPO" --commit "$HEAD" --limit 30 --json databaseId,workflowName,status \
     --jq '[.[]|select((.workflowName=="CI" or .workflowName=="E2E Smoke Tests") and (.status=="queued" or .status=="in_progress"))|"\(.workflowName):\(.databaseId)"]|join(",")' 2>/dev/null || echo "")
+  # The paid-round gate reads every run and job of this head; its in_flight verdict also holds when the run list above is empty or unreadable.
+  if [ -z "$INFLIGHT" ] && [ "$PAID_SAME_HEAD" = in_flight ]; then INFLIGHT="paid_round_gate"; fi
   if [ -n "$INFLIGHT" ]; then
     overlap_finish
     echo "ALREADY_ADMITTED #$PR at $HEAD (runs in flight: $INFLIGHT); no new runs started"

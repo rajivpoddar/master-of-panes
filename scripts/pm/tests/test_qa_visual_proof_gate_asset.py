@@ -17,7 +17,11 @@ SHARED = ROOT / "scripts" / "pm" / "shared-assets"
 SOURCE = SHARED / "claude" / "scripts" / "qa-visual-proof-gate.py"
 MANIFEST = SHARED / "manifest.json"
 HEAD = "f026a0094573fc10e9613d3dde1351d7724c103b"
-RULES_SHA256 = "dfd770c1b30706d3d7701ee6ed98a41bfba878458784b9b4026ea397c0be2c2c"
+# The gate now hashes the checkout's scripts/ci/change-scope-rules.json structurally (app #15211), so the fixture repo carries a rules file and
+# the expected digest is derived from it, never a hand-kept pin.
+FIXTURE_RULES = b'{"fixture": "change-scope-rules"}\n'
+RULES_SHA256 = hashlib.sha256(FIXTURE_RULES).hexdigest()
+FROZEN_7589_RULES_SHA256 = "dfd770c1b30706d3d7701ee6ed98a41bfba878458784b9b4026ea397c0be2c2c"
 APP_ORIGIN_COMMIT = "26c592065a1584bfdd6bc7ba0272149c5ed88612"
 APP_ORIGIN_BLOB = "fd3604644ad9bb48c4cf06f6eb99e4abcf508693"
 APP_ORIGIN_PREIMAGE_SHA256 = "3d3b58a625a8a15b5c1336c5fb9791f173ae16ab48cce888635a7a9ea206904a"
@@ -29,6 +33,7 @@ def _load_gate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     repo = tmp_path / "fixture-repo"
     (repo / "scripts" / "ci").mkdir(parents=True)
     (repo / "scripts" / "ci" / "change_scope.py").write_text("# fixture classifier\n", encoding="utf-8")
+    (repo / "scripts" / "ci" / "change-scope-rules.json").write_bytes(FIXTURE_RULES)
     monkeypatch.chdir(repo)
     spec = importlib.util.spec_from_file_location("qa_visual_proof_gate_asset", SOURCE)
     assert spec and spec.loader
@@ -134,9 +139,9 @@ def test_frozen_classifier_output_for_exact_7589_head_is_consumable(
     # Never import an installed app checkout or silently skip on rule drift.
     scope = json.loads((ROOT / "test/fixtures/classifier-7589.json").read_text())
     assert scope["head"] == HEAD
-    assert scope["rules_sha256"] == RULES_SHA256
+    assert scope["rules_sha256"] == FROZEN_7589_RULES_SHA256
     gate = _load_gate(monkeypatch, tmp_path)
-    validated = gate.validate_change_scope(scope, expected_head=HEAD)
+    validated = gate.validate_change_scope(scope, expected_head=HEAD, rules_sha256=FROZEN_7589_RULES_SHA256)
     assert validated["ui_changed"] is False
 
 

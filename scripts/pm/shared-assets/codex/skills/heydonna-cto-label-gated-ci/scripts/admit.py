@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Integrate main and request CI/E2E once using Git and GitHub directly."""
+"""Integrate main into an overlapping PR head (merge-only helper). It NEVER dispatches CI/E2E.
+
+CI/E2E admission is PM-owned (Rajiv ts 1795848120.047269: "cto is not supposed to admit ci at all, only do merges"):
+run ~/.claude/scripts/ci/pm-admit-ci.sh <PR>, the only path that dispatches CI/E2E (one paid round per PR).
+"""
 
 import argparse
 import json
 import os
 import re
-import runpy
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 
 CODEX_ROOT = Path(__file__).resolve().parents[3]
@@ -25,6 +27,11 @@ WORKFLOWS = ("ci.yml", "e2e.yml")
 
 class Refusal(RuntimeError):
     pass
+
+
+PM_OWNS_ADMISSION = ("CI_ADMISSION_OWNED_BY_PM: this helper no longer dispatches CI/E2E; PM owns admission "
+                     "(one paid round per PR). Run ~/.claude/scripts/ci/pm-admit-ci.sh <PR>. "
+                     "CTO lane: merge-only; use --integrate-only for rule-62 main integration")
 
 
 DEFAULT_COMMAND_TIMEOUT = 120
@@ -347,44 +354,10 @@ def integrate(pr, main, checkout):
     return new_head
 
 
-def admission_cap(number, head, override):
-    # Installed by the shared manifest from the same source as the live PM counter.
-    helper = CODEX_ROOT / "scripts" / "admission_rounds.py"
-    if CODEX_ROOT.parent.name == "shared-assets":  # Source checkout / staged release.
-        helper = CODEX_ROOT.parent / "claude" / "scripts" / "ci" / "pm-admit-cap.py"
-    try:
-        counter = runpy.run_path(str(helper))
-    except (OSError, ImportError, SyntaxError) as exc:
-        raise Refusal(f"ADMISSION_ROUND_BREAKER: UNAVAILABLE counter={type(exc).__name__}") from exc
-    try:
-        rounds = counter["fetch_rounds"](REPO, number)
-    except counter["Unavailable"] as exc:
-        raise Refusal(f"ADMISSION_ROUND_BREAKER: UNAVAILABLE reason={exc}") from exc
-    cap = counter["CAP"]
-    if rounds >= cap and not override:
-        raise Refusal(f"ADMISSION_ROUND_BREAKER: cap_reached pr={number} head={head} rounds={rounds} cap={cap}")
-    return rounds, rounds >= cap
-
-
-def audit_cap_override(number, head, override, rounds):
-    record = {"ts": datetime.now(timezone.utc).isoformat(), "repo": REPO, "pr": number,
-              "head": head, "admission-cap-override": override, "rounds": rounds}
-    try:
-        with (Path.home() / ".codex" / "admission-cap-overrides.jsonl").open("a", encoding="utf-8") as log:
-            log.write(json.dumps(record, sort_keys=True) + "\n")
-            log.flush()
-            os.fsync(log.fileno())
-    except OSError as exc:
-        raise Refusal("ADMISSION_CAP_OVERRIDE_AUDIT_UNAVAILABLE") from exc
-
-
 def admit(number, head, apply=False, integrate_only=False, no_update=False, *,
-          cap_override=None, cap_override_head=None):
-    if cap_override is not None or cap_override_head is not None:
-        if integrate_only or not re.fullmatch(r"(?:cto|rajiv):[0-9]{10}\.[0-9]{6}", cap_override or ""):
-            raise Refusal("ADMISSION_CAP_OVERRIDE_INVALID: pass an approval for admission as cto:<ts> or rajiv:<ts>")
-        if cap_override_head != head:
-            raise Refusal("ADMISSION_CAP_OVERRIDE_HEAD_MISMATCH: --cap-override-head must match --head")
+          cap_override=None, cap_override_head=None):  # cap_override* kept for CLI compatibility; admission is refused
+    if not integrate_only:
+        raise Refusal(PM_OWNS_ADMISSION)
     pr = pr_at(number, head)
     if pr.get("mergeable") is False:
         raise Refusal("CONFLICT_WITH_MAIN: route to PR owner")
@@ -403,11 +376,6 @@ def admit(number, head, apply=False, integrate_only=False, no_update=False, *,
                 prior = existing(pr)
                 if prior and prior.get("runs"):
                     return {"status": "ALREADY_ADMITTED", "head": head, **prior}
-                if not integrate_only:
-                    # Admission must not push an integration commit after a cap refusal.
-                    admission_cap(number, head, cap_override)
-                    if cap_override is not None:
-                        raise Refusal("ADMISSION_CAP_OVERRIDE_HEAD_MISMATCH: integrate only, then seek approval at the new head")
                 if not apply:
                     return {"status": "MAIN_INTEGRATION_REQUIRED", "head": head, "main": main}
                 head = integrate(pr, main, checkout)
@@ -415,45 +383,15 @@ def admit(number, head, apply=False, integrate_only=False, no_update=False, *,
                     if api("git/ref/heads/main")["object"]["sha"] != main:
                         raise Refusal(f"MAIN_MOVED_AFTER_INTEGRATION head={head}")
                     return {"status": "MAIN_INTEGRATED", "head": head, "main": main}
-    if apply and not integrate_only:
-        pr = pr_at(number, head)
-        if pr.get("mergeable") is False:
-            raise Refusal("CONFLICT_WITH_MAIN: route to PR owner")
     prior = existing(pr)
     if prior:
         return {"status": "ALREADY_ADMITTED", "head": head, **prior}
-    if integrate_only:
-        if apply:
-            pr_at(number, head)
-            if api("git/ref/heads/main")["object"]["sha"] != main:
-                raise Refusal(f"MAIN_MOVED_AFTER_INTEGRATION head={head}")
-            return {"status": "MAIN_INTEGRATION_NOT_REQUIRED", "head": head, "main": main}
-        return {"status": "READY_TO_ADMIT", "head": head, "main": main}
-    rounds, needs_override = admission_cap(number, head, cap_override)
-    if not apply:
-        return {"status": "READY_TO_ADMIT", "head": head, "main": main,
-                "admission_rounds": rounds, "cap_override_required": needs_override}
-    if api("git/ref/heads/main")["object"]["sha"] != main:
-        raise Refusal(f"MAIN_MOVED_BEFORE_ADMISSION head={head}")
-    pr_at(number, head)
-    if needs_override:
-        audit_cap_override(number, head, cap_override, rounds)
-    label = f"ci-head:{head}"
-    command("gh", "label", "create", label, "--repo", REPO, "--color", "0e8a16",
-            "--description", "CI and E2E for this PR head", "--force")
-    pr_at(number, head)
-    if api("git/ref/heads/main")["object"]["sha"] != main:
-        raise Refusal(f"MAIN_MOVED_BEFORE_ADMISSION head={head}")
-    try:
-        # Adding a label preserves unrelated labels and never toggles an existing request.
-        labels = api(f"issues/{number}/labels", {"labels": [label]})
-        stored = api(f"pulls/{number}")
-        if label not in {item["name"] for item in labels} or stored["head"]["sha"] != head:
-            raise Refusal("LABEL_OR_HEAD_READBACK_MISMATCH")
-    except (Refusal, OSError, ValueError, subprocess.TimeoutExpired) as exc:
-        raise Refusal(f"ADMISSION_UNCERTAIN head={head}: {exc}") from exc
-    return {"status": "ADMISSION_REQUESTED", "pr": number, "head": head,
-            "main": main, "label": label, "jobs_started": False}
+    if apply:
+        pr_at(number, head)
+        if api("git/ref/heads/main")["object"]["sha"] != main:
+            raise Refusal(f"MAIN_MOVED_AFTER_INTEGRATION head={head}")
+        return {"status": "MAIN_INTEGRATION_NOT_REQUIRED", "head": head, "main": main}
+    return {"status": "READY_TO_ADMIT", "head": head, "main": main}
 
 
 def main():

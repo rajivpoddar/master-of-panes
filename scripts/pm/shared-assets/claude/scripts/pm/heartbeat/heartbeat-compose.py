@@ -3622,6 +3622,8 @@ ULTRA_PACE_ROW = re.compile(r"^claude:ultra-[^\s:]+:(?P<window>session|weekly)$"
 # and ETA use the Pace rows' method (observation-time basis, weekly reset as the horizon). Whole-percent steps dominate a short
 # baseline, so the Ultra line flags the rate "thin data" under 3h (the team Pace rows keep PACE_THIN_HOURS).
 ULTRA_THIN_HOURS = 3.0
+# The Ultra burn (and the runs-out time derived from it) is measured over this trailing window, not since the weekly start.
+ULTRA_RECENT_HOURS = 3.0
 
 
 def _ultra_cap_text(caps_file: Path) -> str:
@@ -3691,8 +3693,10 @@ def _ultra_pace_read(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, caps_file:
                 window = match.group("window")
                 if window not in latest or ts >= latest[window][0]:
                     latest[window] = sample
+                    if window == "weekly":
+                        weekly_key = row["key"]
                 if window == "weekly":
-                    weekly_rows.append(sample)
+                    weekly_rows.append(sample + (row["key"],))
         weekly = latest.get("weekly")
         if weekly is None or not 0 <= ts_now - weekly[0] <= USAGE_SAMPLE_MAX_AGE:
             return {"head": head, "unavailable": f"no Ultra usage sample in the last {USAGE_SAMPLE_MAX_AGE // 3600}h"}
@@ -3703,8 +3707,15 @@ def _ultra_pace_read(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, caps_file:
         else:
             five_hour = f"5h {session[1]:g}% used" + (f" (resets {_ist(session[2], '%H:%M')})" if session[2] is not None else "")
         weekly_part = f"weekly {used:g}% used" + (f" (resets {_ist(reset, '%a %d %b %H:%M')})" if reset is not None and reset > sampled else "")
-        same = [r for r in weekly_rows if reset is not None and _pace_same_window(r[2], reset) and r[0] <= sampled]
-        base = min(same, key=lambda r: r[0]) if same else None
+        # Recent window (PM addendum, 28 Nov): the burn behind "Runs out at" is the trailing ULTRA_RECENT_HOURS rate, not the
+        # average since the start of the week (a 71h average hid a burst). Same-account baseline rule: only rows of the SAME
+        # credential key as the sample and the SAME weekly window count, so an account swap or a weekly roll never mixes in.
+        # The baseline is the newest such row at or before sampled - ULTRA_RECENT_HOURS; with less history than that it is the
+        # oldest row (the existing thin-data flag then applies).
+        same = [r for r in weekly_rows if reset is not None and r[3] == weekly_key and _pace_same_window(r[2], reset)
+                and r[0] <= sampled]
+        aged = [r for r in same if r[0] <= sampled - ULTRA_RECENT_HOURS * 3600]
+        base = (max(aged, key=lambda r: r[0]) if aged else min(same, key=lambda r: r[0])) if same else None
         hours = (sampled - base[0]) / 3600 if base else 0.0
         rate = None
         if base is None:
@@ -3729,8 +3740,8 @@ def ultra_pace_line(now: datetime, snapshot: Path = USAGE_SNAPSHOTS, caps_file: 
     "lasts to reset"), sample age. Never raises. The 1h report renders the same read as a table row plus a short note
     (_ultra_pace_row, _ultra_pace_note); this full line stays as the single-line form.
 
-    Burn is the rolling rate since the first sample of the CURRENT weekly window (same rule as the Pace rows: whole-percent
-    steps make last-hour deltas flip), UNKNOWN until the baseline is PACE_MIN_WINDOW_HOURS old, flagged "thin data" under
+    Burn is the rate over the trailing ULTRA_RECENT_HOURS (same credential key and weekly window only; 28 Nov, replacing the
+    average since the weekly start; whole-percent steps still make last-hour deltas flip), UNKNOWN until the baseline is PACE_MIN_WINDOW_HOURS old, flagged "thin data" under
     ULTRA_THIN_HOURS, and never zero-filled. Target/ABOVE/BELOW/runs-out derive from that burn (see _ultra_target).
     A missing or stale sample, or a missing 5h window (the Ultra usage endpoint can omit it), reads n/a/UNAVAILABLE with the
     reason, never a number."""

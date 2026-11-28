@@ -3,6 +3,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 import os
 import subprocess
 import sys
@@ -24,28 +25,50 @@ GIT_ENV = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAM
            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
 
 
-def job(name, conclusion, start, end, status="completed"):
-    return {"name": name, "conclusion": conclusion, "status": status, "started_at": f"2026-11-27T10:{start // 60:02}:{start % 60:02}Z",
-            "completed_at": f"2026-11-27T10:{end // 60:02}:{end % 60:02}Z" if end is not None else None}
+def job(name, conclusion, status="completed", started=True, steps=None):
+    j = {"name": name, "conclusion": conclusion, "status": status, "started_at": "2026-11-27T10:00:00Z" if started else None}
+    if steps is not None:
+        j["steps"] = steps
+    return j
 
 
-PAID_JOBS = [job("classify-change-scope", "success", 0, 10), job("test", "failure", 10, 1500)]
-GATE_ONLY_JOBS = [job("classify-change-scope", "success", 0, 12), job("test", "failure", 12, 20), job("lane", "skipped", 0, 0)]
-RUN = {"workflow": "ci", "id": 7, "attempt": 1, "conclusion": "failure", "url": ""}
+# A lane job that FAILS in two seconds still executed: there is no elapsed-time proxy.
+PAID_JOBS = [job("classify-change-scope", "success"), job("unit-shard-1", "failure"), job("test", "failure")]
+GATE_ONLY_JOBS = [job("classify-change-scope", "success"), job("test", "failure"), job("unit-shard-1", "skipped", started=False)]
+QUEUED_JOBS = [job("classify-change-scope", "success"), job("unit-shard-1", None, status="queued", started=False)]
+RUNNING_JOBS = [job("classify-change-scope", "success"), job("unit-shard-1", None, status="in_progress")]
+WRAPPER_STEPS = [{"name": "Require exemption or exact-head real CI/E2E success", "conclusion": "success"}]
+WRAPPER_JOBS = [job("gate", "success", steps=WRAPPER_STEPS)]
+
+
+def run(rid, conclusion="failure", status="completed", ts="10:00"):
+    return {"id": rid, "status": status, "conclusion": conclusion, "event": "pull_request", "name": "CI",
+            "path": ".github/workflows/ci.yml", "run_attempt": 1, "run_started_at": f"2026-11-27T{ts}:00Z"}
 
 
 class Stubs:
-    """Stub the GitHub reads: admitted heads, the substantive run per head, its jobs and the ci-verdict comments."""
+    """Stub the GitHub reads: admitted heads, EVERY run per head with its jobs, and the ci-verdict comments.
 
-    def __init__(self, admitted, jobs_by_head, verdict_tests=None):
-        self.admitted, self.jobs_by_head, self.verdict_tests = admitted, jobs_by_head, verdict_tests or {}
+    runs_by_head: head -> list of (run, jobs).  A head in `bad_jobs` raises Unavailable on its jobs read."""
+
+    def __init__(self, admitted, runs_by_head, verdict_tests=None, bad_jobs=()):
+        self.admitted, self.runs_by_head, self.verdict_tests, self.bad_jobs = admitted, runs_by_head, verdict_tests or {}, set(bad_jobs)
 
     def __enter__(self):
-        run_for = lambda repo, head: ([dict(RUN, id=int(head[0], 16) + 100)], []) if head in self.jobs_by_head else ([], [])
-        jobs_of = lambda repo, rid: next(j for h, j in self.jobs_by_head.items() if int(h[0], 16) + 100 == rid)
+        runs_of = lambda repo, head: [r for r, _ in self.runs_by_head.get(head, [])]
+
+        def jobs_of(repo, rid):
+            for head, items in self.runs_by_head.items():
+                for r, jobs in items:
+                    if r["id"] == rid:
+                        if head in self.bad_jobs:
+                            raise ppr.Unavailable(f"jobs {rid}: gh_rc_1")
+                        return jobs
+            raise AssertionError(rid)
+
         verdicts = lambda repo, pr, head: ([{"raw": {"failing_tests": self.verdict_tests[head]}}] if head in self.verdict_tests else [], 0)
         self.patches = [mock.patch.object(ppr.pav, "admitted_heads", lambda repo, pr: [(h, i) for i, h in enumerate(self.admitted, 1)]),
-                        mock.patch.object(ppr.pav, "substantive_runs", run_for),
+                        mock.patch.object(ppr, "runs_of", runs_of),
                         mock.patch.object(ppr, "jobs_of", jobs_of),
                         mock.patch.object(ppr.pav, "verdicts_for_head", verdicts)]
         for p in self.patches:
@@ -55,6 +78,13 @@ class Stubs:
     def __exit__(self, *exc):
         for p in self.patches:
             p.stop()
+
+
+def one(jobs, rid=7, **kw):
+    return [(run(rid, **kw), jobs)]
+
+
+SELECTED = lambda *a: ppr._selection("selected", "selected", "area", ["tests/e2e/specs/qa-tests/x.spec.ts"])
 
 
 def sh(repo, *args):
@@ -83,44 +113,86 @@ def fixture(tmp):
 
 
 class Decision(unittest.TestCase):
-    def evaluate(self, head, repo_dir=None, env=None, dry=False):
-        sel = lambda *a: ["tests/e2e/specs/qa-tests/x.spec.ts"]
-        return ppr.evaluate("o/r", PR, head, repo_dir, env=env if env is not None else {}, dry=dry, selector=sel)
+    def evaluate(self, head, repo_dir=None, env=None, dry=False, selector=SELECTED):
+        return ppr.evaluate("o/r", PR, head, repo_dir, env=env if env is not None else {}, dry=dry, selector=selector)
 
     def test_first_round_dispatches(self):
         with Stubs([], {}):
             rc, lines = self.evaluate(A)
         self.assertEqual(rc, 0)
-        self.assertIn("no earlier paid round", lines[0])
+        self.assertIn("no earlier paid", lines[0])
+        self.assertEqual(lines[-1], "paid_round_same_head=none")
 
-    def test_same_head_readmission_is_not_a_second_round(self):
-        with Stubs([A], {A: PAID_JOBS}):
-            rc, _ = self.evaluate(A)
-        self.assertEqual(rc, 0)
+    def test_same_head_rearm_after_a_completed_paid_pair_is_blocked(self):
+        """pm-admit-ci.sh could re-arm an already completed head: that would be a second paid pair."""
+        with Stubs([A], {A: one(PAID_JOBS)}):
+            rc, lines = self.evaluate(A)
+        self.assertEqual(rc, ppr.EXIT_BOX)
+        self.assertEqual(lines[0], f"BOX_ROUND_REQUIRED pr={PR} head={A}")
+        self.assertEqual(lines[-1], "paid_round_same_head=completed_paid")
+
+    def test_same_head_activation_still_in_flight_keeps_already_admitted(self):
+        for jobs in (RUNNING_JOBS, QUEUED_JOBS):
+            with self.subTest(jobs=jobs[-1]["status"]), Stubs([A], {A: one(jobs, conclusion=None, status="in_progress")}):
+                rc, lines = self.evaluate(A)
+            self.assertEqual(rc, 0)
+            self.assertEqual(lines[-1], "paid_round_same_head=in_flight")
+
+    def test_admitted_same_head_with_no_visible_run_is_unresolved_not_free(self):
+        with Stubs([A], {}):
+            rc, lines = self.evaluate(A)
+        self.assertEqual(rc, ppr.EXIT_BOX)
+        self.assertEqual(lines[0], f"PAID_ROUND_UNRESOLVED pr={PR} head={A}")
+        self.assertEqual(lines[-1], "paid_round_same_head=unresolved")
 
     def test_gate_only_earlier_head_is_not_a_paid_round(self):
-        with Stubs([A], {A: GATE_ONLY_JOBS}):
+        with Stubs([A], {A: one(GATE_ONLY_JOBS, conclusion="success")}):
             rc, _ = self.evaluate(B)
         self.assertEqual(rc, 0)
 
     def test_second_head_after_a_paid_round_requires_the_box(self):
-        with Stubs([A], {A: PAID_JOBS}, {A: ["test/foo.test.ts > bar"]}):
+        with Stubs([A], {A: one(PAID_JOBS)}, {A: ["test/foo.test.ts > bar"]}):
             rc, lines = self.evaluate(B)
         self.assertEqual(rc, ppr.EXIT_BOX)
         self.assertEqual(lines[0], f"BOX_ROUND_REQUIRED pr={PR} head={B}")
         text = "\n".join(lines)
-        for needle in ("test/foo.test.ts > bar", "failed_jobs: test", "typecheck: app tsc AND tests tsc", "MP4 paths", "remote-qa-runner",
-                       "SELECT_ON_BOX", "n/a (main not merged"):
+        for needle in ("test/foo.test.ts > bar", "failed_jobs: unit-shard-1; test", "typecheck: app tsc AND tests tsc", "MP4", "remote-qa-runner",
+                       "specs (1): tests/e2e/specs/qa-tests/x.spec.ts", "n/a (main not merged"):
             self.assertIn(needle, text)
 
-    def test_in_flight_job_counts_as_paid(self):
-        running = [job("classify-change-scope", "success", 0, 10), job("test", None, 10, None, status="in_progress")]
-        with Stubs([A], {A: running}):
+    def test_prior_queued_head_blocks_a_new_paid_write(self):
+        """An admitted head whose jobs are still queued (or whose run is not visible yet) is not free."""
+        with Stubs([A], {A: one(QUEUED_JOBS, conclusion=None, status="queued")}):
+            rc, lines = self.evaluate(B)
+        self.assertEqual(rc, ppr.EXIT_BOX)
+        self.assertEqual(lines[0], f"PAID_ROUND_UNRESOLVED pr={PR} head={B}")
+        self.assertIn(f"{A[:12]}[queued", "\n".join(lines))
+        with Stubs([A], {}):
+            rc, lines = self.evaluate(B)
+        self.assertEqual(rc, ppr.EXIT_BOX)
+        self.assertIn(f"{A[:12]}[unresolved", "\n".join(lines))
+
+    def test_older_executed_attempt_is_not_hidden_by_a_later_noop_or_wrapper(self):
+        later_noop = run(9, conclusion="success", ts="11:00")
+        later_wrapper = run(10, conclusion="success", ts="12:00")
+        runs = [(later_wrapper, WRAPPER_JOBS), (later_noop, GATE_ONLY_JOBS), (run(7, ts="10:00"), PAID_JOBS)]
+        with Stubs([A], {A: runs}):
+            rc, lines = self.evaluate(B)
+        self.assertEqual(rc, ppr.EXIT_BOX)
+        self.assertIn(f"{A[:12]}[executed", "\n".join(lines))
+
+    def test_a_two_second_failing_lane_job_still_counts_as_executed(self):
+        with Stubs([A], {A: one([job("classify-change-scope", "success"), job("e2e-shard-1", "failure")])}):
             rc, _ = self.evaluate(B)
         self.assertEqual(rc, ppr.EXIT_BOX)
 
+    def test_unreadable_jobs_are_unavailable_not_free(self):
+        with Stubs([A], {A: one(PAID_JOBS)}, bad_jobs=[A]):
+            with self.assertRaises(ppr.Unavailable):
+                self.evaluate(B)
+
     def test_override_dispatches_and_is_logged(self):
-        with tempfile.TemporaryDirectory() as d, mock.patch.object(ppr, "LOG", Path(d, "skip.log")), Stubs([A], {A: PAID_JOBS}):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(ppr, "LOG", Path(d, "skip.log")), Stubs([A], {A: one(PAID_JOBS)}):
             rc, lines = self.evaluate(B, env={ppr.OVERRIDE_ENV: f"cto:1795850000.000100@{PR}:{B}"})
             self.assertEqual(rc, 0)
             self.assertIn("OVERRIDE cto:1795850000.000100", lines[0])
@@ -128,41 +200,102 @@ class Decision(unittest.TestCase):
             rc, _ = self.evaluate(B, env={ppr.OVERRIDE_ENV: f"rajiv:1795850000.000100@{PR}:{B}"})
             self.assertEqual(rc, 0)
 
+    def test_override_lifts_a_same_head_rearm_block_too(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(ppr, "LOG", Path(d, "skip.log")), Stubs([A], {A: one(PAID_JOBS)}):
+            rc, lines = self.evaluate(A, env={ppr.OVERRIDE_ENV: f"cto:1795850000.000100@{PR}:{A}"})
+        self.assertEqual(rc, 0)
+        self.assertEqual(lines[-1], "paid_round_same_head=completed_paid")
+
     def test_override_for_another_pr_head_or_shape_is_ignored(self):
-        with Stubs([A], {A: PAID_JOBS}):
+        with Stubs([A], {A: one(PAID_JOBS)}):
             for bad in (f"cto:1795850000.000100@{PR}:{A}", f"cto:1795850000.000100@999:{B}", "cto:1795850000.000100", f"bot:1.1@{PR}:{B}", ""):
                 with self.subTest(bad=bad):
                     rc, _ = self.evaluate(B, env={ppr.OVERRIDE_ENV: bad})
                     self.assertEqual(rc, ppr.EXIT_BOX)
 
     def test_cap_override_does_not_lift_the_gate(self):
-        with Stubs([A], {A: PAID_JOBS}):
+        with Stubs([A], {A: one(PAID_JOBS)}):
             rc, _ = self.evaluate(B, env={"PM_ADMIT_CAP_OVERRIDE": f"cto:1795850000.000100@{PR}:{B}"})
         self.assertEqual(rc, ppr.EXIT_BOX)
 
     def test_dry_run_override_writes_no_log(self):
-        with tempfile.TemporaryDirectory() as d, mock.patch.object(ppr, "LOG", Path(d, "skip.log")), Stubs([A], {A: PAID_JOBS}):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(ppr, "LOG", Path(d, "skip.log")), Stubs([A], {A: one(PAID_JOBS)}):
             rc, lines = self.evaluate(B, env={ppr.OVERRIDE_ENV: f"cto:1.1@{PR}:{B}"}, dry=True)
             self.assertEqual(rc, 0)
             self.assertTrue(lines[0].startswith("[dry-run]"))
             self.assertFalse(Path(d, "skip.log").exists())
 
 
+class Selector(unittest.TestCase):
+    """A selector failure is UNRESOLVED coverage, never 'none selected'; only mode=none reason=no_area is a verified none."""
+
+    def packet(self, sel):
+        with Stubs([A], {A: one(PAID_JOBS)}):
+            rc, lines = ppr.evaluate("o/r", PR, B, None, env={}, selector=lambda *a: sel)
+        self.assertEqual(rc, ppr.EXIT_BOX)
+        return "\n".join(lines)
+
+    def test_failure_with_empty_specs_is_unresolved(self):
+        text = self.packet(ppr._selection("unresolved", "failed", "selector_failed", [], "rc=1"))
+        self.assertIn("specs: UNRESOLVED", text)
+        self.assertIn("SELECT_ON_BOX", text)
+        self.assertIn("mode=failed reason=selector_failed", text)
+        self.assertNotIn("specs: none", text)
+
+    def test_verified_no_area_is_a_verified_none(self):
+        text = self.packet(ppr._selection("verified_none", "none", "no_area"))
+        self.assertIn("specs: none (verified: mode=none reason=no_area)", text)
+        self.assertNotIn("UNRESOLVED", text)
+
+    def test_other_none_reason_is_unresolved(self):
+        with mock.patch.object(ppr.subprocess, "run") as run_, mock.patch.object(ppr.Path, "exists", return_value=True):
+            def fake(cmd, **kw):
+                out = {"clone": "", "checkout": "", "rev-parse": B + "\n", "status": ""}
+                key = next((k for k in ("clone", "checkout", "rev-parse", "status") if k in cmd), None)
+                if "scripts/ci/change_scope.py" in cmd:
+                    return subprocess.CompletedProcess(cmd, 0, json.dumps({"mode": "none", "reason": "unmapped_path", "specs": []}), "")
+                return subprocess.CompletedProcess(cmd, 0, out.get(key, ""), "")
+            run_.side_effect = fake
+            sel = ppr.select_e2e_specs("/repo", A, B, PR)
+        self.assertEqual(sel["status"], "unresolved")
+        self.assertEqual((sel["mode"], sel["reason"]), ("none", "unmapped_path"))
+
+    def test_missing_repo_dir_or_unverified_checkout_is_unresolved(self):
+        self.assertEqual(ppr.select_e2e_specs(None, A, B)["status"], "unresolved")
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, p = fixture(tmp)
+            sel = ppr.select_e2e_specs(str(repo), p, "d" * 40)  # head not in the repo: checkout fails
+        self.assertEqual((sel["status"], sel["reason"]), ("unresolved", "checkout_failed"))
+
+    def test_selected_specs_list_the_videos_for_slack(self):
+        text = self.packet(ppr._selection("selected", "selected", "area", ["a.spec.ts", "b.spec.ts"]))
+        self.assertIn("specs (2): a.spec.ts; b.spec.ts", text)
+        self.assertIn("a.spec.ts -> <mp4 path or artifact link>", text)
+
+
 class GitDelta(unittest.TestCase):
     def run_gate(self, repo, prev, head, **kw):
-        with Stubs([prev], {prev: PAID_JOBS}):
-            return ppr.evaluate("o/r", PR, head, str(repo), env={}, selector=lambda *a: ["s.spec.ts"], **kw)
+        with Stubs([prev], {prev: one(PAID_JOBS)}):
+            return ppr.evaluate("o/r", PR, head, str(repo), env={}, selector=lambda *a: ppr._selection("selected", "selected", "area", ["s.spec.ts"]), **kw)
 
-    def test_ci_input_delta_dispatches_a_fresh_round(self):
+    def test_ci_input_delta_gets_no_automatic_second_paid_pair(self):
         for rel in (".github/workflows/ci.yml", "scripts/ci/change_scope.py"):
-            with self.subTest(rel=rel), tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as logdir, \
-                    mock.patch.object(ppr, "LOG", Path(logdir, "skip.log")):
+            with self.subTest(rel=rel), tempfile.TemporaryDirectory() as tmp:
                 repo, _, p = fixture(tmp)
                 head = commit(repo, {rel: "changed"}, "touch ci input")
                 rc, lines = self.run_gate(repo, p, head)
-                self.assertEqual(rc, 0)
-                self.assertIn("CI-input delta", lines[0])
-                self.assertIn("ci_input_delta", Path(logdir, "skip.log").read_text())
+                self.assertEqual(rc, ppr.EXIT_BOX)
+                self.assertIn("ci_input_delta:", "\n".join(lines))
+                self.assertIn("pinned authority", "\n".join(lines))
+
+    def test_ci_input_delta_needs_the_pinned_override(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as logdir, mock.patch.object(ppr, "LOG", Path(logdir, "skip.log")):
+            repo, _, p = fixture(tmp)
+            head = commit(repo, {".github/workflows/ci.yml": "changed"}, "touch ci input")
+            with Stubs([p], {p: one(PAID_JOBS)}):
+                rc, lines = ppr.evaluate("o/r", PR, head, str(repo), env={ppr.OVERRIDE_ENV: f"cto:1795850000.000100@{PR}:{head}"}, selector=SELECTED)
+            self.assertEqual(rc, 0)
+            self.assertIn("OVERRIDE cto:1795850000.000100", lines[0])
 
     def test_ci_test_files_are_not_ci_inputs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -170,7 +303,9 @@ class GitDelta(unittest.TestCase):
             head = commit(repo, {"scripts/ci/tests/test_x.py": "t", "src/widget.ts": "a2"}, "test-only ci delta")
             rc, lines = self.run_gate(repo, p, head)
         self.assertEqual(rc, ppr.EXIT_BOX)
-        self.assertIn("specs: s.spec.ts", "\n".join(lines))
+        text = "\n".join(lines)
+        self.assertIn("specs (1): s.spec.ts", text)
+        self.assertNotIn("ci_input_delta: scripts/ci/tests", text)
 
     def test_main_merge_ci_input_changes_do_not_count_and_overlap_tests_are_listed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -186,6 +321,7 @@ class GitDelta(unittest.TestCase):
         self.assertEqual(rc, ppr.EXIT_BOX)
         text = "\n".join(lines)
         self.assertIn("rule62_overlap_nearest_owner_tests: tests/widget.test.ts", text)
+        self.assertNotIn("ci_input_delta: scripts/ci/new_guard.py", text)
 
     def test_unreadable_git_is_unavailable_not_dispatch(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -207,14 +343,18 @@ class Cli(unittest.TestCase):
         self.assertEqual(self.main(["bogus"])[0], 64)
 
     def test_exit_codes_and_unavailable(self):
-        with Stubs([A], {A: PAID_JOBS}), mock.patch.dict(os.environ, {ppr.OVERRIDE_ENV: ""}):
-            with mock.patch.object(ppr, "select_e2e_specs", lambda *a: None):
-                rc, out = self.main(["gate", "--repo", "o/r", "--pr", str(PR), "--head", B])
+        with Stubs([A], {A: one(PAID_JOBS)}), mock.patch.dict(os.environ, {ppr.OVERRIDE_ENV: ""}):
+            rc, out = self.main(["gate", "--repo", "o/r", "--pr", str(PR), "--head", B])
         self.assertEqual(rc, 21)
         self.assertTrue(out.startswith(f"BOX_ROUND_REQUIRED pr={PR} head={B}"))
+        self.assertIn("specs: UNRESOLVED", out)  # no --repo-dir: coverage unresolved, never "none selected"
+        self.assertTrue(out.rstrip().endswith("paid_round_same_head=none"))
         with mock.patch.object(ppr.pav, "admitted_heads", side_effect=ppr.Unavailable("gh_rc_4")):
             rc, out = self.main(["gate", "--repo", "o/r", "--pr", str(PR), "--head", B])
         self.assertEqual((rc, out.strip()), (11, "paid_round: UNAVAILABLE reason=gh_rc_4"))
+        with Stubs([A], {A: one(PAID_JOBS)}, bad_jobs=[A]):
+            rc, out = self.main(["gate", "--repo", "o/r", "--pr", str(PR), "--head", B])
+        self.assertEqual(rc, 11)
 
 
 if __name__ == "__main__":
