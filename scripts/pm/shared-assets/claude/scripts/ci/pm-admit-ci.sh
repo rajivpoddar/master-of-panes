@@ -8,6 +8,12 @@
 #   The <PR>:<sha> tuple is the PR and FULL head named in the CTO/Rajiv approval handoff, copied from it, never from the live PR. A bare cto:<slack ts> is refused (exit 64); a tuple that differs
 #   from the live PR or head is refused (exit 10) before any ledger row, claim or label is written. The grant id stays cto:<slack ts> (ledger and claim file unchanged).
 # Pre-review: pm-admit-ci.sh --merge-only <PR> integrates main if S166 requires it; never admits CI/E2E.
+# Main merge is SEPARATE from CI admission (MoP S97; Rajiv D0AMF0XE6TS thread 1795811809.236479, ts 1795829276.231109: "merge main should be separated out from ci admit"; S173):
+#  - A plain `pm-admit-ci.sh <PR>` NEVER merges main. When rule 62 says a merge is needed (conflict, file overlap, or a changed trusted CI input) it stops BEFORE any dispatch, label or PR write
+#    with ONE line `NEEDS_MAIN_MERGE pr=<n> reason=<conflict|overlap|ci_input_changed> files=<n>` and exits 20. With no merge needed it admits exactly as before.
+#  - The merge is the separate command `pm-admit-ci.sh --merge-only <PR>`: non-force update-branch pinned to the reviewed head, dispatches NO CI/E2E, verifies the PR's own diff is byte-identical
+#    (git patch-id --stable, before vs after) and prints `MERGED_MAIN pr=<n> head=<sha> patch_id_same=<yes|no>`. Re-run plain admission on the resulting head afterwards.
+#  - Every other gate (12b, admission round breaker, cap override, MERGE_REF_VERIFIED) is unchanged. Exit 20 = needs main merge.
 # 12b: --check-12b-only <PR> is read-only; --no-12b-gate --reason "<text>" audits an explicit override.
 # Main-red gate REMOVED (Rajiv C0ALZJHGE49 thread 1793958692.281499, ts 1793960417.571149: "remove it outright. note main red flakes have to be rerun. ... the skip pr has to be immediately merged with a followup issue. for affected pr's, merge main and re-admit."). Supersedes DM ts 1791877690.725089. --allow-main-red is still accepted (no-op) for compatibility.
 # Scope gate (Rajiv 2026-10-08, DM thread 1791461793.117869): site/docs-only PRs are refused (no CI/E2E); PM may override with --force-ci.
@@ -547,12 +553,11 @@ plan_main_merge() {
   plan=$(main_merge_probe "$HEAD" "$MERGEABLE") || { echo 'REFUSE: main merge probe failed; retry admission'; exit 2; }
   read -r MERGE_REASON MERGE_FILES MAIN_SHA <<<"$plan"
   if [ "$MERGE_ONLY" = 0 ] && [ "$MERGE_REASON" != no_conflict_no_overlap ]; then
-    if [ "$NO_UPDATE" = 1 ]; then
-      echo "REFUSE: --no-update cannot admit this head; main integration required reason=$MERGE_REASON files=$MERGE_FILES"
-    else
-      echo "REFUSE: main integration required reason=$MERGE_REASON files=$MERGE_FILES; run pm-admit-ci.sh --merge-only $PR and review its resulting head before admission"
-    fi
-    exit 2
+    # Admission never merges main (Rajiv D0AMF0XE6TS thread 1795811809.236479, ts 1795829276.231109: "merge main should be separated out from ci admit";
+    # S173: a merge-only re-admit runs on a remote box, not CI/E2E). Stop before ANY dispatch, label or PR write with ONE machine-readable line and exit 20.
+    # The caller runs the separate main-merge command (`pm-admit-ci.sh --merge-only <PR>`, which prints MERGED_MAIN) and re-admits the resulting head.
+    echo "NEEDS_MAIN_MERGE pr=$PR reason=$MERGE_REASON files=$MERGE_FILES"
+    exit 20
   fi
 }
 
@@ -647,6 +652,12 @@ lagging_ref_verify() {
     if [ "$STALE_PROBE_CI" = 1 ]; then
       echo "STALE_REF_PROBE ci_inputs_changed n=$n_ci main_parent=$lagp main=$OVERLAP_MAIN_SHA files=$list"
       exit 4
+    fi
+    # Plain admission never merges main: a changed trusted CI input needs a main merge (rule 62), so stop before any dispatch with the same line and exit as
+    # plan_main_merge. Nothing was written (the guard runs before every admission write).
+    if [ "$MERGE_ONLY" = 0 ] && [ "$DRY" != 1 ]; then
+      echo "NEEDS_MAIN_MERGE pr=$PR reason=ci_input_changed files=$n_ci"
+      exit 20
     fi
     lag_refuse "trusted CI input changed: main changed $n_ci shared CI input file(s) that decide what runs since that parent $lagp, so CI ran the older selection even though no PR file overlaps: $list"
   fi
@@ -769,6 +780,26 @@ if [ "$MERGE_ONLY" = 1 ]; then
     echo 'REFUSE: required main merge not confirmed; retry --merge-only or route to slot'; exit 2
   fi
   echo "MAIN_MERGE: performed head=$HEAD reason=$MERGE_REASON files=$MERGE_FILES"
+  # Verify the merge did not change the PR's OWN diff (git patch-id --stable). The head must be a two-parent merge of the pinned pre-merge head and
+  # main; before = the PR's diff against its old merge-base, after = the PR's diff against the merged-in main parent. Any unreadable state reports "no".
+  patch_id_of() { git -C "$MAIN_REPO" diff --no-renames "$1" "$2" -- | git -C "$MAIN_REPO" patch-id --stable | awk '{print $1}'; }
+  PATCH_ID_SAME=no
+  MERGE_PARENTS=$(git -C "$MAIN_REPO" rev-list --parents -n 1 "$HEAD" 2>/dev/null | cut -d' ' -f2- || true)
+  set -- $MERGE_PARENTS
+  if [ "$#" -eq 2 ]; then
+    MAIN_PARENT=""
+    if [ "$1" = "$PRE_MERGE_HEAD" ]; then MAIN_PARENT="$2"; elif [ "$2" = "$PRE_MERGE_HEAD" ]; then MAIN_PARENT="$1"; fi
+    if [ -n "$MAIN_PARENT" ]; then
+      OLD_BASE=$(git -C "$MAIN_REPO" merge-base "$MAIN_PARENT" "$PRE_MERGE_HEAD" 2>/dev/null) || OLD_BASE=""
+      if [ -n "$OLD_BASE" ]; then
+        PID_BEFORE=$(patch_id_of "$OLD_BASE" "$PRE_MERGE_HEAD" 2>/dev/null) || PID_BEFORE=""
+        PID_AFTER=$(patch_id_of "$MAIN_PARENT" "$HEAD" 2>/dev/null) || PID_AFTER=""
+        [ -n "$PID_BEFORE" ] && [ "$PID_BEFORE" = "$PID_AFTER" ] && PATCH_ID_SAME=yes
+      fi
+    fi
+  fi
+  # No CI/E2E is dispatched here: the merged head gets its own admission afterwards (S173: merge-only work needs no CI round).
+  echo "MERGED_MAIN pr=$PR head=$HEAD patch_id_same=$PATCH_ID_SAME"
   exit 0
 fi
 

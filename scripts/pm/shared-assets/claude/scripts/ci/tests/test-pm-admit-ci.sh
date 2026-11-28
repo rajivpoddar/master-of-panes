@@ -25,6 +25,7 @@ case "$*" in
   *'fetch -q --no-tags origin +refs/heads/main:'*) [ -z "${FETCH_FAIL:-}" ] ;;   # FETCH_FAIL=1: the inherited-override fetch fails (no inheritance)
   *'fetch -q --no-tags origin refs/pull/'*) [ -f "$STUB_DIR/updated" ] ;;
   *'rev-parse --verify origin/main^{commit}') printf '%s\n' "$STUB_MAIN_SHA" ;;   # the main that passes the overlap check; the stale-ref guard binds to it
+  *'rev-parse --verify '*'^{commit}') v="${*##*--verify }"; printf '%s\n' "${v%\^\{commit\}}" ;;   # pm-admit-12b.py resolve_commit: every sha the fixtures use resolves to itself
   *'merge-base --is-ancestor '*)
     # Lagging-ref guard: "is the test merge's main parent an ancestor of the overlap-checked main?" (the call ends with STUB_MAIN_SHA). Default = NOT an ancestor.
     if [[ "$*" = *" $STUB_MAIN_SHA" ]]; then [ "${LAG_ANCESTOR:-no}" = yes ]; exit $?; fi
@@ -45,6 +46,10 @@ case "$*" in
     fi
     [ -n "${S166_CASE:-}" ] || exit 0
     if [[ "$*" = *" $STUB_SHA --" ]] || [ "$S166_CASE" = overlap ]; then printf 'lib/pr.ts\n'; else printf 'lib/main.ts\n'; fi ;;
+  *'diff --no-renames '*)   # patch-id input (MERGED_MAIN check): the PR's own diff; PID_CASE=changed makes the diff against the merged head differ from the pre-merge one
+    if [ "${PID_CASE:-same}" = changed ] && [[ "$*" = *" $STUB_MERGED_SHA --" ]]; then printf 'diff: the merge altered the PR diff\n'; else printf 'diff: the PR own change\n'; fi ;;
+  *'patch-id --stable'*) h=$(cksum | cut -d' ' -f1); printf '%s %s\n' "$h" "$STUB_MERGED_SHA" ;;
+  *'rev-list --parents -n 1 '*) all="$*"; printf '%s %s %s\n' "${all##* }" "$STUB_SHA" "$STUB_MAIN_SHA" ;;   # the merged head: parents = the pinned pre-merge head, then main
   *'merge-tree --write-tree '*) [ -n "${S166_CASE:-}" ] ;;
   *) exit 1 ;;
 esac
@@ -238,6 +243,7 @@ for fixture in no_overlap overlap; do
     check 'merge-only/no overlap: no update-branch call' '! grep -q update-branch "$STUB_LOG"'
   else
     check 'merge-only/overlap: performed with merged head' '[ "$RC" = 0 ] && grep -qx "MAIN_MERGE: performed head=$STUB_MERGED_SHA reason=overlap files=1" <<<"$OUT"'
+    check 'merge-only/overlap: MERGED_MAIN with the merged head and an unchanged PR diff (patch-id), exit 0, no CI/E2E dispatch' 'grep -qx "MERGED_MAIN pr=11173 head=$STUB_MERGED_SHA patch_id_same=yes" <<<"$OUT" && ! grep -qE "workflow run|run rerun|--add-label|pr edit" "$STUB_LOG"'
     check 'merge-only/overlap: one update-branch pinned to original head' '[ "$(grep -c update-branch "$STUB_LOG")" = 1 ] && grep -q "update-branch -f expected_head_sha=$SHA$" "$STUB_LOG"'
   fi
   # Fix 2 (Rajiv ts 1795761962.862319): every merge-only outcome prints one MAIN_MERGE_REASON line (rule 62 decision + reason) BEFORE the legacy MAIN_MERGE: line.
@@ -252,8 +258,18 @@ done
 
 # If main moved again after review, admission must not do the preflight's write itself.
 S166_CASE=overlap GATE_MODE=exempt run_script admission_overlap 11173
-check 'admission/overlap: requires a fresh preflight' '[ "$RC" = 2 ] && grep -q "REFUSE: main integration required reason=overlap .*--merge-only 11173" <<<"$OUT"'
+check 'admission/overlap: stops with NEEDS_MAIN_MERGE reason=overlap (exit 20), the merge is the separate --merge-only command' '[ "$RC" = 20 ] && grep -qx "NEEDS_MAIN_MERGE pr=11173 reason=overlap files=1" <<<"$OUT"'
 check 'admission/overlap: no merge or dispatch' '! grep -qE "update-branch|pr edit|label create|workflow run|run rerun" "$STUB_LOG" && ! grep -q ADMITTED <<<"$OUT"'
+
+# Rule 62 decision tests (MoP S97, Rajiv ts 1795829276.231109 "merge main should be separated out from ci admit"; ts 1795830085.589869 keeps ci_input_changed as a third trigger).
+# Plain admission never merges main: conflict, overlap and ci_input_changed each stop with NEEDS_MAIN_MERGE (exit 20, nothing written); only no-conflict/no-overlap admits.
+# conflict -> lag_conflicting, overlap -> admission_overlap (above), ci_input_changed -> the lag_* cases (assert_needs_merge); below: the "none" side and the merge command.
+S166_CASE=no_overlap GATE_MODE=exempt run_script admission_no_overlap 11173
+check 'rule 62 decision: no conflict and no overlap -> admits (exit 0, ADMITTED, no NEEDS_MAIN_MERGE), and no merge was made' '[ "$RC" = 0 ] && grep -q "^ADMITTED" <<<"$OUT" && ! grep -q NEEDS_MAIN_MERGE <<<"$OUT" && ! grep -q update-branch "$STUB_LOG"'
+check 'rule 62 decision: the three triggers share one stop line shape (conflict/overlap/ci_input_changed) and the exit code 20' 'grep -c "NEEDS_MAIN_MERGE pr=\$PR reason=\$MERGE_REASON files=\$MERGE_FILES\|NEEDS_MAIN_MERGE pr=\$PR reason=ci_input_changed files=" "$SCRIPT" | grep -qx 2 && [ "$(grep -c "exit 20" "$SCRIPT")" -ge 2 ]'
+# The merge command: merges, never dispatches CI/E2E, and reports when the merge altered the PR's own diff (patch-id) so the caller does not trust it blindly.
+S166_CASE=overlap GATE_MODE=none PID_CASE=changed run_script merge_only_pid_changed --merge-only 11173
+check 'merge command: when the merge changed the PR diff it prints MERGED_MAIN ... patch_id_same=no, exit 0, still no dispatch' '[ "$RC" = 0 ] && grep -qx "MERGED_MAIN pr=11173 head=$STUB_MERGED_SHA patch_id_same=no" <<<"$OUT" && ! grep -qE "workflow run|run rerun|--add-label|pr edit" "$STUB_LOG"'
 
 # ---- --merge-only and a changed trusted CI input (PM brief 2026-11-26, ladder pel-mwx1mo05-a904f753) ----
 # Deadlock: a lagging refs/pull/N/merge whose main parent M lacks a changed shared CI input (scripts/ci/change-scope-rules.json, scripts/ci/e2e-functional-areas.json,
@@ -874,6 +890,10 @@ unset CAP_EVENTS_JSON
 # commit's parents are exactly {head, that main}, and a confirming read agrees. Anything else, including any unreadable, hung or late read, refuses
 # stale_merge_ref (exit 3). No polling, no sleeps, no close/reopen, no main merge, no push.
 GATE_MODE=none; export GATE_MODE
+assert_needs_merge() { # name: plain admission stops at a changed trusted CI input (rule 62): exit 20 with ONE NEEDS_MAIN_MERGE line, nothing written, no merge
+  check "$1: exit 20, one NEEDS_MAIN_MERGE reason=ci_input_changed line, nothing admitted" '[ "$RC" = 20 ] && grep -Eq "^NEEDS_MAIN_MERGE pr=11173 reason=ci_input_changed files=[0-9]+$" <<<"$OUT" && [ "$(grep -c "^NEEDS_MAIN_MERGE" <<<"$OUT")" = 1 ] && ! grep -q ADMITTED <<<"$OUT" && ! grep -q MERGE_REF_VERIFIED <<<"$OUT"'
+  check "$1: stopped before the activation label, every admission write, any dispatch and any main merge" '! grep -qE -- "--add-label|--remove-label|label create|pr edit|workflow run|run rerun|update-branch" "$STUB_LOG" && ! grep -qE "^gh pr (close|reopen)|^git (merge|push|reset|rebase)|--force" "$STUB_LOG"'
+}
 assert_stale_refused() { # name: exit 3, REFUSE stale_merge_ref BEFORE any admission write, no state change, no close/reopen advice
   check "$1: exit 3 REFUSE stale_merge_ref, nothing admitted" '[ "$RC" = 3 ] && grep -q "^REFUSE stale_merge_ref #11173:" <<<"$OUT" && ! grep -q ADMITTED <<<"$OUT" && ! grep -q MERGE_REF_VERIFIED <<<"$OUT"'
   check "$1: refused before the activation label and before every admission write" '! grep -qE -- "--add-label|--remove-label|label create|pr edit" "$STUB_LOG"'
@@ -1020,22 +1040,22 @@ check 'lag_diff_unreadable: REFUSE says the files main changed since the older p
 echo "case: lagging merge ref - no PR file overlaps but main changed the shared selector since the older parent (73499dfb..6ee67558 touched scripts/ci/change_scope.py): REFUSED naming the path"
 LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' LAG_MAIN_FILES='scripts/ci/change_scope.py\nlib/main.ts\n' LAG_CI_INPUTS_CHANGED='scripts/ci/change_scope.py\n' \
   run_lag lag_selector --no-12b-gate --reason 'lagging ref test'
-assert_stale_refused lag_selector
-check 'lag_selector: REFUSE says the lagging-ref rule is not met because a trusted CI input changed, names the older parent, the count and exactly scripts/ci/change_scope.py' 'grep -q "lagging-ref rule not met: trusted CI input changed: main changed 1 shared CI input file(s) that decide what runs since that parent $STUB_LAG_SHA, so CI ran the older selection even though no PR file overlaps: scripts/ci/change_scope.py\. Admission needs" <<<"$OUT"'
+assert_needs_merge lag_selector
+check 'lag_selector: NEEDS_MAIN_MERGE counts the 1 changed shared CI input (scripts/ci/change_scope.py)' 'grep -qx "NEEDS_MAIN_MERGE pr=11173 reason=ci_input_changed files=1" <<<"$OUT"'
 check 'lag_selector: the overlap check passed first (no overlap message), nothing admitted, no label or PR write, no lagging rule line or audit entry' '! grep -q "overlap: the PR changes" <<<"$OUT" && ! grep -q "^MERGE_REF_RULE" <<<"$OUT" && ! grep -q "^ADMITTED" <<<"$OUT" && ! grep -qE -- "--add-label|--remove-label|label create|pr edit" "$STUB_LOG"'
 check 'lag_selector: the helper was asked for the range older parent..overlap-checked main' 'grep -q "^ci-inputs -I .*--base $STUB_LAG_SHA --main $STUB_MAIN_SHA" "$STUB_LOG"'
 
 echo "case: lagging merge ref - several shared CI inputs changed: all counted, listed capped at 20 paths with the remainder counted"
 MANYCI=$(for i in $(seq -w 1 25); do printf '.github/workflows/w%s.yml\\n' "$i"; done)
 LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' LAG_MAIN_FILES='lib/main.ts\n' LAG_CI_INPUTS_CHANGED="$MANYCI" run_lag lag_selector_many --no-12b-gate --reason 'lagging ref test'
-assert_stale_refused lag_selector_many
-check 'lag_selector_many: 25 changed inputs reported as the first 20 plus (+5 more)' 'grep -q "main changed 25 shared CI input file(s)" <<<"$OUT" && grep -q "w01.yml " <<<"$OUT" && grep -q "w20.yml \.\.\. (+5 more)" <<<"$OUT" && ! grep -q "w21.yml" <<<"$OUT"'
+assert_needs_merge lag_selector_many
+check 'lag_selector_many: NEEDS_MAIN_MERGE counts all 25 changed inputs' 'grep -qx "NEEDS_MAIN_MERGE pr=11173 reason=ci_input_changed files=25" <<<"$OUT"'
 
 echo "case: lagging merge ref - no PR file overlaps but main changed ONLY scripts/ci/unit-shards/durations.json, a data file ci.yml reads from the workflow commit in a subdirectory (CTO REVISE #2 of MoP 494a207e, ts 1795587520.404159): REFUSED naming the path"
 LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' LAG_MAIN_FILES='scripts/ci/unit-shards/durations.json\n' LAG_CI_INPUTS_CHANGED='scripts/ci/unit-shards/durations.json\n' \
   run_lag lag_durations --no-12b-gate --reason 'lagging ref test'
-assert_stale_refused lag_durations
-check 'lag_durations: REFUSE says the lagging-ref rule is not met because a trusted CI input changed, names the older parent, the count and exactly scripts/ci/unit-shards/durations.json' 'grep -q "lagging-ref rule not met: trusted CI input changed: main changed 1 shared CI input file(s) that decide what runs since that parent $STUB_LAG_SHA, so CI ran the older selection even though no PR file overlaps: scripts/ci/unit-shards/durations.json\. Admission needs" <<<"$OUT"'
+assert_needs_merge lag_durations
+check 'lag_durations: NEEDS_MAIN_MERGE counts the 1 changed shared CI input (scripts/ci/unit-shards/durations.json)' 'grep -qx "NEEDS_MAIN_MERGE pr=11173 reason=ci_input_changed files=1" <<<"$OUT"'
 check 'lag_durations: the overlap check passed first, nothing admitted, no label or PR write, no lagging rule line or audit entry' '! grep -q "overlap: the PR changes" <<<"$OUT" && ! grep -q "^MERGE_REF_RULE" <<<"$OUT" && ! grep -q "^ADMITTED" <<<"$OUT" && ! grep -qE -- "--add-label|--remove-label|label create|pr edit" "$STUB_LOG"'
 
 echo "case: lagging merge ref - main drifted only in unrelated files (no changed CI input): ADMITTED"
@@ -1073,8 +1093,8 @@ mk_real_repo indirect_durations "$INDIRECT_RUN"
 printf '{"a": 2}\n' > "$REAL_REPO/scripts/ci/unit-shards/durations.json"; REAL_MAIN=$(real_commit 'durations only')
 LAG_REAL_REPO="$REAL_REPO" LAG_REAL_BASE="$REAL_BASE" LAG_REAL_MAIN="$REAL_MAIN" LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' LAG_MAIN_FILES='scripts/ci/unit-shards/durations.json\n' \
   run_lag lag_real_indirect_durations --no-12b-gate --reason 'lagging ref test'
-assert_stale_refused lag_real_indirect_durations
-check 'lag_real_indirect_durations: REFUSE says a trusted CI input changed and names exactly scripts/ci/unit-shards/durations.json (the real helper followed the variable)' 'grep -q "lagging-ref rule not met: trusted CI input changed: main changed 1 shared CI input file(s) that decide what runs since that parent $STUB_LAG_SHA, so CI ran the older selection even though no PR file overlaps: scripts/ci/unit-shards/durations.json\. Admission needs" <<<"$OUT"'
+assert_needs_merge lag_real_indirect_durations
+check 'lag_real_indirect_durations: NEEDS_MAIN_MERGE counts the 1 changed input (the real helper followed the variable to durations.json)' 'grep -qx "NEEDS_MAIN_MERGE pr=11173 reason=ci_input_changed files=1" <<<"$OUT"'
 check 'lag_real_indirect_durations: the real helper ran once, nothing admitted, no lagging rule line or audit entry' '[ "$(grep -c "^ci-inputs " "$STUB_LOG")" = 1 ] && ! grep -q "^MERGE_REF_RULE" <<<"$OUT" && ! grep -q "^ADMITTED" <<<"$OUT"'
 
 echo "case: lagging merge ref (real helper, real repo) - the same workflow, main drifted only in an unrelated file: ADMITTED"
@@ -1119,7 +1139,7 @@ echo "case: lagging merge ref - a CONFLICTING PR is never waived: refused (rc 2,
 HM_VALUE="$SHA CONFLICTING"; export HM_VALUE
 LAG_ANCESTOR=yes LAG_PR_FILES='lib/pr.ts\n' LAG_PR_FILES_LAGBASE='lib/pr.ts\n' LAG_MAIN_FILES='lib/main.ts\n' run_lag lag_conflicting --no-12b-gate --reason 'lagging ref test'
 HM_VALUE="$SHA MERGEABLE"; export HM_VALUE
-check 'lag_conflicting: exit 2 with main integration required reason=conflict, no waiver receipt, nothing admitted' '[ "$RC" = 2 ] && grep -q "main integration required reason=conflict" <<<"$OUT" && ! grep -q "stale_merge_ref_waived" <<<"$OUT" && ! grep -q "^ADMITTED" <<<"$OUT"'
+check 'lag_conflicting: exit 20 with NEEDS_MAIN_MERGE reason=conflict, no waiver receipt, nothing admitted' '[ "$RC" = 20 ] && grep -qx "NEEDS_MAIN_MERGE pr=11173 reason=conflict files=0" <<<"$OUT" && ! grep -q "stale_merge_ref_waived" <<<"$OUT" && ! grep -q "^ADMITTED" <<<"$OUT"'
 check 'lag_conflicting: the stale-ref guard never ran (no merge-commit, ancestry or CI-input read) and nothing was written' '! grep -qE "^gh api repos/.*/commits/$STUB_FRESH_SHA|merge-base --is-ancestor $STUB_LAG_SHA|^ci-inputs " "$STUB_LOG" && ! grep -qE -- "--add-label|--remove-label|label create|pr edit|update-branch" "$STUB_LOG"'
 
 # ---- Fix 2 (Rajiv ts 1795761962.862319; rule 62 wins over the CI-input guard): trusted CI inputs = only what ci.yml/e2e.yml execute for a PR run ----
@@ -1158,15 +1178,15 @@ for f in .github/workflows/ci.yml scripts/ci/pr-entry.sh; do
   tag=$(printf '%s' "$f" | tr -c 'a-zA-Z0-9\n' '_')
   mk_pr_inputs_repo "refuse$tag"; real_main_change "$f"
   real_lag "lag_real_refuse$tag" "$f\\n"
-  assert_stale_refused "lag_real_refuse$tag"
-  check "lag_real_refuse$tag: REFUSE names $f as the one changed trusted CI input; nothing admitted, no waiver receipt" 'grep -q "trusted CI input changed: main changed 1 shared CI input file(s) that decide what runs since that parent $STUB_LAG_SHA, so CI ran the older selection even though no PR file overlaps: $f\. Admission needs" <<<"$OUT" && ! grep -q "^ADMITTED" <<<"$OUT" && ! grep -q "stale_merge_ref_waived" <<<"$OUT"'
+  assert_needs_merge "lag_real_refuse$tag"
+  check "lag_real_refuse$tag: NEEDS_MAIN_MERGE counts the 1 changed trusted CI input ($f); nothing admitted, no waiver receipt" 'grep -qx "NEEDS_MAIN_MERGE pr=11173 reason=ci_input_changed files=1" <<<"$OUT" && ! grep -q "^ADMITTED" <<<"$OUT" && ! grep -q "stale_merge_ref_waived" <<<"$OUT"'
 done
 
 echo "case: CI-input guard (real helper) - a mixed delta (perf.yml + the entrypoint) refuses naming ONLY the entrypoint, never the unrelated workflow"
 mk_pr_inputs_repo mixed; real_main_change .github/workflows/perf.yml scripts/ci/pr-entry.sh
 real_lag lag_real_mixed '.github/workflows/perf.yml\nscripts/ci/pr-entry.sh\n'
-assert_stale_refused lag_real_mixed
-check 'lag_real_mixed: exactly 1 changed input (scripts/ci/pr-entry.sh), perf.yml is not in the REFUSE' 'grep -q "main changed 1 shared CI input file(s) .*: scripts/ci/pr-entry.sh\. Admission needs" <<<"$OUT" && ! grep -q "perf.yml" <<<"$OUT"'
+assert_needs_merge lag_real_mixed
+check 'lag_real_mixed: exactly 1 changed input (the entrypoint); perf.yml is not counted' 'grep -qx "NEEDS_MAIN_MERGE pr=11173 reason=ci_input_changed files=1" <<<"$OUT" && ! grep -q "perf.yml" <<<"$OUT"'
 
 echo "case: CI-input guard (real helper) - the PR overlapping a main file still refuses first (rule 62 overlap), the helper is not consulted"
 mk_pr_inputs_repo overlap; real_main_change .github/workflows/perf.yml lib/other.ts
