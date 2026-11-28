@@ -52,6 +52,12 @@
 #     presents. PM_ADMIT_CAP_OVERRIDE must carry that tuple (<cto|rajiv>:<slack ts>@<PR>:<full sha>); a bare id is refused (64), and a live PR/head that differs from the tuple is refused (10) with NOTHING
 #     written (no granted/consumed ledger row, no claim file, no label), so a head that moved after approval can neither take the grant nor burn it: the same tuple admits once when the live head is the approved one.
 # New exit codes: 11 ci_verdict_required (classify first), 12 admin-ask packet (S171); 10 now also carries the packet for a classified-flaky red.
+# ONE paid CI/E2E round per PR (Rajiv C0ALZJHGE49 thread 1795841629.732639, ts 1795845160.422969 + ts 1795845739.605399: "yes, admin merge after testing with remote box. the qa videos
+# should be posted to slack for review"; PM brief 2026-11-28). When an EARLIER admitted head already had a paid round (a substantive ci.yml/e2e.yml run whose jobs did real work, not a gate-only
+# or classifier-skipped run) and this head differs, admission dispatches NOTHING: it prints `BOX_ROUND_REQUIRED pr=<n> head=<sha>` plus the box test list (round-1 failing tests, rule 62
+# overlap nearest-owner tests when main was merged, typecheck, the E2E specs for the delta on remote-qa-runner with video ON and the MP4 paths in the receipt) and exits 21. The head is then
+# proved on the box and merged by a head-pinned S167 admin merge. Still dispatches a fresh paid round when the PR-authored delta touches CI inputs (.github/workflows/**, non-test scripts/ci/**)
+# or PM_ADMIT_PAID_ROUND_OVERRIDE=<cto|rajiv>:<slack ts>@<PR>:<full head sha> is set (logged to pm-admit-skip.log). PM_ADMIT_CAP_OVERRIDE does NOT lift this gate. Exit 21 = box round required.
 set -euo pipefail
 CHECK_12B_ONLY=0; MERGE_ONLY=0
 case "${1:-}" in
@@ -836,6 +842,24 @@ if [ "$MERGE_ONLY" = 1 ]; then
   exit 0
 fi
 
+# ONE paid CI/E2E round per PR (Rajiv C0ALZJHGE49 thread 1795841629.732639, ts 1795845160.422969 + ts 1795845739.605399:
+# "yes, admin merge after testing with remote box. the qa videos should be posted to slack for review"). Decision + box list: pm-admit-paid-round.py.
+# rc 0 dispatch (first paid round, same head, CI-input delta, or logged PM_ADMIT_PAID_ROUND_OVERRIDE); rc 21 BOX_ROUND_REQUIRED (nothing dispatched or written).
+paid_round_gate() {
+  local head="$1" out rc=0 dry=""
+  [ "$DRY" = 1 ] && dry="--dry-run"
+  git -C "$MAIN_REPO" fetch -q --no-tags origin "refs/pull/$PR/head" main >/dev/null 2>&1 || true
+  out=$(python3 -I "$SCRIPT_DIR/pm-admit-paid-round.py" gate --repo "$REPO" --pr "$PR" --head "$head" --repo-dir "$MAIN_REPO" $dry) || rc=$?
+  [ -z "$out" ] || printf '%s\n' "$out"
+  case "$rc" in
+    0) return 0 ;;
+    21) return 21 ;;
+    64) return 64 ;;
+    11) echo 'REFUSE: github_api_error paid_round'; exit 7 ;;
+    *) api_fail paid_round ;;
+  esac
+}
+
 if [ "$DRY" = 1 ]; then
   if [ "$NO_UPDATE" = 1 ]; then
     read_pr_head
@@ -850,6 +874,8 @@ if [ "$DRY" = 1 ]; then
   dry_merge_ref_verdict || true
   rc=0; scope_gate "$H" || rc=$?
   [ $rc -ne 0 ] && { echo "DRY RUN done (scope gate rc=$rc); nothing admitted"; exit $rc; }
+  rc=0; paid_round_gate "$H" || rc=$?
+  [ $rc -ne 0 ] && { echo "DRY RUN done (paid-round gate rc=$rc); nothing admitted"; exit $rc; }
   rc=0; related_tests_gate "$H" || rc=$?
   echo "DRY RUN done (gate rc=$rc); nothing admitted"; exit $rc
 fi
@@ -920,6 +946,9 @@ echo "PR #$PR head=$HEAD mergeable=$MERGEABLE"
 # Stale test-merge guard + lagging-ref rule: see merge_ref_guard above. It runs before every admission write (label create, label cleanup,
 # priority mirror, activation label) and exits 3 (stale_merge_ref) on anything it cannot verify.
 merge_ref_guard
+# ONE paid round per PR: a later head with a paid round already behind it dispatches NOTHING (exit 21, BOX_ROUND_REQUIRED + the box test list). After the
+# main-integration checks (rule 62 NEEDS_MAIN_MERGE stays first) and before every GitHub write.
+paid_round_gate "$HEAD" || exit "$?"
 # Both main-integration checks passed: only now is the closing-reference body write allowed (it is still before every other admission write).
 add_closing_reference
 # Even malformed-label cleanup is a write; don't do it on a refused head.
